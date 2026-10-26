@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trellis · 六套主题 Design Tokens &amp; Components</title>
+<style>
+:root{
+  --paper:#f2f0ea;--paper-2:#eae7de;--card:#fbfaf6;--ink:#23251f;--muted:#6b6e64;--quiet:#8d9085;
+  --line:#d8d5ca;--line-2:#e7e4da;--accent:#3c5843;--accent-soft:#e7ede5;--signal:#b5522d;
+  --font-ui:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --font-serif:"Songti SC","STSong","Noto Serif SC","Source Han Serif SC",Georgia,serif;
+  --font-mono:"SFMono-Regular",Menlo,"JetBrains Mono","Roboto Mono",monospace;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--paper);color:var(--ink);font-family:var(--font-ui);-webkit-font-smoothing:antialiased;font-size:12px;line-height:1.5}
+a{color:inherit}
+button{font:inherit}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.wrap{max-width:1400px;margin:0 auto;padding:0 36px}
+.hero{position:relative;border-bottom:1px solid var(--line);overflow:hidden}
+.hero::before{content:"";position:absolute;inset:0;background-image:linear-gradient(var(--line-2) 1px,transparent 1px),linear-gradient(90deg,var(--line-2) 1px,transparent 1px);background-size:34px 34px;opacity:.5;-webkit-mask-image:linear-gradient(180deg,#000,transparent 82%);mask-image:linear-gradient(180deg,#000,transparent 82%);pointer-events:none}
+.hero-inner{position:relative;padding-top:34px;padding-bottom:30px}
+.hero-top{display:flex;align-items:center;justify-content:space-between;gap:18px;font-family:var(--font-mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.brandline{display:flex;align-items:center;gap:8px}
+.brandmark{width:20px;height:20px;display:grid;place-items:center;background:var(--ink);color:var(--paper);border-radius:4px;font-family:var(--font-mono);font-size:9px}
+.hero h1{max-width:980px;margin:26px 0 14px;font-size:44px;line-height:1.04;letter-spacing:-1.8px;font-weight:650}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero p{max-width:720px;margin:0;font-size:13px;line-height:1.8;color:var(--muted)}
+.hero-meta{display:flex;flex-wrap:wrap;gap:7px;margin-top:20px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;background:var(--card);font-size:9.5px;color:var(--muted)}
+.pill b{color:var(--ink);font-weight:600}
+.scope{max-width:920px;margin-top:22px;padding:11px 14px;border-left:2px solid var(--accent);background:var(--accent-soft);font-size:11px;line-height:1.8;color:#4a5248}
+.scope b{color:#2f3a31}
+.tabs{position:sticky;top:0;z-index:40;background:rgba(242,240,234,.94);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.tabs-inner{max-width:1400px;margin:0 auto;padding:0 36px;display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+.tabs-inner::-webkit-scrollbar{display:none}
+.tabs a{flex:none;padding:11px 9px;font-size:9.5px;letter-spacing:.03em;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
+.tabs a:hover{color:var(--ink)}
+.tabs a:first-child{color:var(--ink);border-bottom-color:var(--accent)}
+.section{padding:38px 0 42px;scroll-margin-top:52px}
+.section + .section{border-top:1px solid var(--line)}
+.section-head{display:grid;grid-template-columns:46px minmax(0,1fr);gap:14px;align-items:start;margin-bottom:16px}
+.section-no{font-family:var(--font-mono);font-size:9px;letter-spacing:.1em;color:var(--accent);padding-top:7px}
+.section-head h2{margin:0;font-size:23px;line-height:1.25;letter-spacing:-.6px;font-weight:650}
+.section-head p{max-width:760px;margin:7px 0 0;font-size:11px;line-height:1.8;color:var(--muted)}
+h3{font-size:13px;font-weight:650;letter-spacing:-.1px;margin:0 0 7px}
+.subhead{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin:22px 0 4px}
+.subhead h3{margin:0}
+.subhead span{font-family:var(--font-mono);font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:var(--quiet)}
+.lead{font-size:11px;line-height:1.8;color:var(--muted);margin:0 0 6px}
+.note{font-size:9.5px;line-height:1.7;color:var(--quiet);margin-top:8px}
+.themes{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-top:16px}
+.tcard{display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);text-decoration:none;transition:transform .15s ease,border-color .15s ease}
+.tcard:hover{transform:translateY(-1px);border-color:#b8b5a7}
+.strip{display:flex;height:5px;border-radius:2px;overflow:hidden}
+.strip i{flex:1}
+.tc-top{display:flex;align-items:baseline;gap:5px;flex-wrap:wrap}
+.tc-top strong{font-size:12px;font-weight:650}
+.tc-top em{font-style:normal;font-family:var(--font-mono);font-size:7.5px;letter-spacing:.05em;color:var(--quiet)}
+.tc-desc{font-size:9px;line-height:1.5;color:var(--muted);min-height:27px}
+.tc-meta{display:flex;justify-content:space-between;gap:5px;padding-top:6px;border-top:1px solid var(--line-2);font-family:var(--font-mono);font-size:7.5px;color:var(--quiet);white-space:nowrap}
+.badge{align-self:flex-start;padding:1px 5px;border-radius:999px;font-size:7.5px;line-height:14px;color:var(--muted);background:#eeece4;border:1px solid var(--line)}
+.badge.default{background:var(--accent-soft);border-color:#c8d5c8;color:#37513e}
+.table-wrap{margin-top:14px;border:1px solid var(--line);border-radius:9px;background:var(--card);overflow:auto;box-shadow:0 1px 0 rgba(255,255,255,.6) inset}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:9.5px}
+.tokens{min-width:1140px}
+table th,table td{padding:7px 9px;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line-2)}
+table thead th{background:#f6f4ed;font-weight:600;color:var(--ink);white-space:nowrap;vertical-align:bottom}
+table tbody tr:last-child td{border-bottom:0}
+table tbody tr:hover td{background:#faf8f2}
+table th:first-child,table td:first-child{position:sticky;left:0;z-index:2;background:var(--card);border-right:1px solid var(--line-2)}
+table thead th:first-child{background:#f6f4ed}
+table tbody tr:hover td:first-child{background:#faf8f2}
+.th-name{display:block;font-size:9.5px;font-weight:650}
+.th-sub{display:block;margin-top:2px;font-family:var(--font-mono);font-size:7px;font-weight:400;letter-spacing:.03em;color:var(--quiet)}
+.tok{font-family:var(--font-mono);font-size:8.5px;color:#3d4b40;white-space:nowrap}
+.role{font-size:8.5px;line-height:1.5;color:var(--muted);min-width:138px}
+.row-label{font-size:9.5px;font-weight:600;color:var(--ink);white-space:nowrap}
+.cc{display:flex;align-items:center;gap:5px;min-width:0}
+.chip{width:13px;height:13px;flex:none;border-radius:3px;border:1px solid rgba(0,0,0,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.chip.transparent{background:conic-gradient(#dcd9d0 25%,#fff 0 50%,#dcd9d0 0 75%,#fff 0);background-size:8px 8px}
+.hex{font-family:var(--font-mono);font-size:8px;color:#474b42;white-space:nowrap}
+.group td{background:#f2f0e9 !important;padding:5px 9px;font-family:var(--font-mono);font-size:7.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.types{min-width:1100px}
+.guide{min-width:720px}
+.tokens,.types{table-layout:fixed}
+.tokens th:first-child{width:124px}
+.tokens th:nth-child(2){width:150px}
+.types th:first-child{width:132px}
+.types th:nth-child(2){width:140px}
+.type-val{font-size:8.5px;line-height:1.45;color:#3f423a;min-width:96px}
+.fonts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.fontcard{padding:9px 10px;border:1px solid var(--line);border-radius:7px;background:var(--card)}
+.fontcard b{display:block;font-size:9px;margin-bottom:4px}
+.fontcard code{display:block;font-family:var(--font-mono);font-size:8px;line-height:1.6;color:var(--muted);word-break:break-word}
+.shadows{margin-top:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);overflow:hidden}
+.shadow-row{display:grid;grid-template-columns:54px minmax(0,1fr);gap:10px;padding:7px 10px;border-bottom:1px solid var(--line-2);align-items:baseline}
+.shadow-row:last-child{border-bottom:0}
+.shadow-row span{font-size:9px;font-weight:600}
+.shadow-row code{font-family:var(--font-mono);font-size:7.5px;line-height:1.6;color:var(--muted);word-break:break-word}
+.components{min-width:900px}
+.components td{padding:8px 9px}
+.comp-base,.comp-diff{font-size:8.5px;line-height:1.6;color:var(--muted)}
+.comp-base{min-width:250px}
+.components code{font-family:var(--font-mono);font-size:7.5px;background:#f1efe7;padding:1px 3px;border-radius:2px;color:#475046}
+.states{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}
+.state{padding:10px 11px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+.state h4{margin:0 0 4px;font-size:9.5px;font-weight:650}
+.state p{margin:0;font-size:8.5px;line-height:1.65;color:var(--muted)}
+.state code{font-family:var(--font-mono);font-size:7.5px;background:#f1efe7;padding:0 2px;border-radius:2px}
+.specimens{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
+.spec{border:1px solid var(--line);border-radius:9px;background:var(--card);overflow:hidden;break-inside:avoid}
+.spec-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line-2)}
+.spec-name{display:flex;align-items:baseline;gap:6px;font-size:12px;font-weight:650}
+.spec-name span{font-family:var(--font-mono);font-size:7.5px;font-weight:400;letter-spacing:.06em;color:var(--quiet)}
+.spec-role{margin-top:3px;font-size:8.5px;color:var(--muted)}
+.spec-swatches{display:flex;gap:3px;flex:none}
+.spec-swatches i{width:15px;height:15px;border-radius:50%;border:1px solid rgba(0,0,0,.12)}
+.spec-stage{padding:12px;background:#efede6;overflow-x:auto}
+.spec-foot{display:flex;gap:6px;align-items:baseline;padding:8px 12px;border-top:1px solid var(--line-2);font-size:8.5px;line-height:1.6;color:var(--muted)}
+.spec-foot b{flex:none;color:var(--accent);font-weight:600}
+.mini{min-width:560px;overflow:hidden;background:var(--bg);color:var(--fg);border:var(--border-w) solid var(--window-border);border-radius:var(--radius);font-family:var(--font-ui);font-size:8px;line-height:1.4}
+.mini-bar{height:26px;display:flex;align-items:center;gap:7px;padding:0 8px;background:var(--chrome);border-bottom:1px solid var(--line);white-space:nowrap}
+.mini-dots{display:flex;gap:3px;flex:none}
+.mini-dots i{width:5px;height:5px;border-radius:50%;background:#ff5f57;border:1px solid rgba(0,0,0,.08)}
+.mini-dots i:nth-child(2){background:#febc2e}
+.mini-dots i:nth-child(3){background:#28c840}
+.mini-app{font-size:7.5px;font-weight:650;letter-spacing:-.1px}
+.mini-title{margin-left:auto;font-size:6.5px;color:var(--quiet);overflow:hidden;text-overflow:ellipsis}
+.mini-icons{display:flex;gap:3px;flex:none}
+.mini-icons i{width:6px;height:6px;border:1px solid var(--line-strong);border-radius:2px}
+.mini-body{display:flex;height:238px}
+.mini-side{width:29%;flex:none;padding:7px 5px;background:var(--sidebar);border-right:1px solid var(--line);overflow:hidden}
+.mini-brand{display:flex;align-items:center;gap:4px;margin-bottom:6px;padding:0 2px;font-size:7.5px;font-weight:650}
+.mini-mark{width:10px;height:10px;display:grid;place-items:center;background:var(--accent);color:var(--accent-ink);border-radius:2px;font-size:6px;font-weight:700;flex:none}
+.mini-row{display:flex;align-items:center;gap:3px;min-height:16px;padding:2px 4px;border-radius:calc(var(--radius-xs) / 2);color:var(--muted);font-size:6.8px;white-space:nowrap;overflow:hidden}
+.mini-row.active{background:var(--sel);color:var(--sel-fg);font-weight:500}
+.mini-dot{width:3px;height:3px;border-radius:50%;background:var(--line-strong);flex:none}
+.mini-row.active .mini-dot{background:var(--accent)}
+.mini-count{margin-left:auto;font-family:var(--font-mono);font-size:5.5px;opacity:.7}
+.mini-label{margin:6px 4px 2px;font-size:5.5px;letter-spacing:.08em;color:var(--quiet)}
+.mini-main{flex:1;min-width:0;padding:9px 10px;display:flex;flex-direction:column;gap:4px;overflow:hidden}
+.mini-view{display:flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:5.5px;letter-spacing:.08em;color:var(--quiet);white-space:nowrap}
+.mini-line{flex:1;height:1px;background:var(--line)}
+.mini-h{font-family:var(--spec-title-font);font-size:16px;line-height:1.2;letter-spacing:-.4px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini-meta{display:flex;align-items:center;gap:4px;font-size:6px;color:var(--quiet);white-space:nowrap;overflow:hidden}
+.mini-tag{display:inline-flex;align-items:center;padding:1px 3px;border:1px solid var(--line);border-radius:var(--tag-radius);font-size:5.5px;line-height:1.4;color:var(--muted);white-space:nowrap}
+.mini-lead{margin:1px 0;font-family:var(--spec-read-font);font-size:8px;line-height:1.6;color:var(--muted)}
+.mini-callout{padding:4px 5px;border-left:var(--callout-border) solid var(--accent);border-radius:var(--callout-radius);background:var(--accent-soft);font-size:6.5px;line-height:1.5;color:var(--muted)}
+.mini-actions{display:flex;align-items:center;gap:4px;margin-top:auto}
+.mini-btn{padding:2px 5px;border:1px solid transparent;border-radius:var(--btn-radius);font-size:6px;line-height:1.4;white-space:nowrap}
+.mini-btn.primary{background:var(--accent);color:var(--accent-ink)}
+.mini-btn.ghost{border-color:var(--line);color:var(--muted)}
+.mini-actions .mini-tag{margin-left:auto}
+.mini-input{padding:3px 5px;border:1px solid var(--line);border-radius:var(--radius-xs);font-size:6px;color:var(--quiet);background:var(--bg)}
+.mini-agent{width:25%;flex:none;padding:7px 6px;background:var(--panel);border-left:1px solid var(--line);overflow:hidden}
+.mini-agent-head{display:flex;align-items:center;gap:3px;font-size:6.5px;font-weight:600;color:var(--fg)}
+.mini-spark{width:5px;height:5px;background:var(--accent);border-radius:1px;transform:rotate(45deg);flex:none}
+.mini-msg{margin-top:5px;padding:4px;border:1px solid var(--line);border-radius:calc(var(--radius-sm) / 1.5);background:var(--block);font-size:5.8px;line-height:1.5;color:var(--muted)}
+.mini-approval{margin-top:5px;padding:4px;border-left:2px solid var(--warn);background:var(--warn-bg);font-size:5.6px;line-height:1.5;color:var(--warn);display:flex;flex-direction:column;gap:2px}
+.mini[data-t="midnight"] .mini-bar{background:linear-gradient(180deg,#20252b,#1b1f24)}
+.mini[data-t="dusk"] .mini-bar{background:linear-gradient(180deg,#2e3436,#292f31)}
+.mini[data-t="paper"] .mini-meta{padding-bottom:3px;border-bottom:1px solid var(--line-strong)}
+.mini[data-t="moss"] .mini-callout{border-left:0}
+.mini[data-t="blueprint"] .mini-dots i{border-radius:0;border:1px solid #101214}
+.mini[data-t="blueprint"] .mini-bar{border-bottom-width:1.5px}
+.mini[data-t="blueprint"] .mini-tag{font-family:var(--font-mono);font-size:5px;text-transform:uppercase;letter-spacing:.04em;border-color:#101214;color:var(--fg)}
+.mini[data-t="blueprint"] .mini-btn{font-family:var(--font-mono);font-size:5px;text-transform:uppercase;letter-spacing:.04em}
+.mini[data-t="blueprint"] .mini-h{font-weight:700;letter-spacing:-.7px}
+.mini[data-t="moss"] .mini-btn.primary{border-radius:999px}
+.mini[data-t="moss"] .mini-tag{border-radius:999px}
+.defaults{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.default-card{display:flex;align-items:center;gap:11px;padding:12px 13px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+.default-card .sys{font-family:var(--font-mono);font-size:7.5px;letter-spacing:.06em;color:var(--quiet);min-width:76px}
+.default-card .arrow{color:var(--quiet);font-size:12px}
+.default-card strong{font-size:11px;font-weight:650}
+.default-card small{display:block;font-size:8px;color:var(--muted);margin-top:1px}
+.rules{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.dodont{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:11px 12px}
+.dodont h4{margin:0 0 6px;font-size:10px;font-weight:650;display:flex;align-items:center;gap:5px}
+.dodont h4::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--accent)}
+.dodont.no h4::before{background:var(--signal)}
+.dodont ul{margin:0;padding-left:14px;font-size:8.5px;line-height:1.75;color:var(--muted)}
+.code-card{margin-top:14px;border:1px solid #303329;border-radius:9px;overflow:hidden;background:#24261f}
+.code-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;border-bottom:1px solid #36392e;font-family:var(--font-mono);font-size:7.5px;letter-spacing:.06em;color:#a9ad9b}
+.code-head span:last-child{color:#777d6b}
+pre{margin:0;padding:12px 14px;overflow:auto;color:#e7e4d8;font-family:var(--font-mono);font-size:8px;line-height:1.75;tab-size:2}
+code{font-family:var(--font-mono)}
+.checklist{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px;margin-top:12px}
+.check{display:flex;gap:7px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line-2);font-size:8.8px;line-height:1.6;color:var(--muted)}
+.cb{width:10px;height:10px;flex:none;margin-top:2px;border:1px solid #bfbcae;border-radius:2px;background:var(--card)}
+.foot{border-top:1px solid var(--line);padding:20px 0 30px}
+.foot-inner{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;font-size:8.5px;line-height:1.7;color:var(--quiet)}
+.foot-inner code{font-size:8px;color:var(--muted)}
+.anchor-list{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+.anchor-list a{font-size:8.5px;color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:1px}
+.anchor-list a:hover{color:var(--ink);border-color:var(--ink)}
+.en{font-family:var(--font-mono);font-size:7px;letter-spacing:.04em;color:var(--quiet);margin-left:4px}
+@media (max-width:1180px){
+  .themes{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .specimens{grid-template-columns:1fr}
+  .states{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:820px){
+  .wrap{padding:0 22px}.tabs-inner{padding:0 22px}
+  .hero h1{font-size:34px;letter-spacing:-1.2px}
+  .section-head{grid-template-columns:1fr;gap:4px}
+  .section-no{padding-top:0}
+  .fonts{grid-template-columns:1fr}
+  .rules{grid-template-columns:1fr}
+  .defaults{grid-template-columns:1fr}
+}
+@media (max-width:640px){
+  .wrap{padding:0 15px}.tabs-inner{padding:0 15px}
+  .hero-inner{padding-top:24px;padding-bottom:22px}
+  .hero h1{font-size:29px;letter-spacing:-.9px;margin-top:18px}
+  .tabs-inner{flex-wrap:wrap;overflow:visible;padding-top:2px;padding-bottom:2px}
+  .tabs a{padding:7px 7px}
+  .section{scroll-margin-top:84px}
+  .hero-top{font-size:8px;gap:10px}
+  .hero-top .brandline span:last-child{display:none}
+  .themes{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .states{grid-template-columns:1fr}
+  .checklist{grid-template-columns:1fr}
+  .spec-stage{padding:9px}
+  .section{padding:30px 0 32px}
+  .section-head h2{font-size:20px}
+  .shadow-row{grid-template-columns:46px minmax(0,1fr)}
+}
+@media print{
+  body{background:#fff}
+  .hero::before,.tabs{display:none}
+  .hero-inner{padding-top:0;padding-bottom:14px}
+  .section{padding:18px 0;break-inside:avoid}
+  .spec,.state,.dodont,.default-card{break-inside:avoid}
+  .table-wrap{overflow:visible}
+  .tokens{min-width:0}
+  .themes{grid-template-columns:repeat(3,1fr)}
+  .specimens{grid-template-columns:1fr 1fr}
+  .mini{min-width:0}
+  .spec-stage{padding:6px}
+  .tcard:hover{transform:none}
+}
+
+/* ===== theme variables for specimens ===== */
+.mini[data-t="graphite"]{
+ --bg:#ffffff;--chrome:#f3f3f1;--sidebar:#ededeb;--panel:#fafaf9;--block:#f5f5f3;
+ --fg:#23262a;--muted:#62686e;--quiet:#8c9298;
+ --line:#dedfdb;--line-strong:#c8cac5;--hover:#e5e6e2;--sel:#e2e8ea;--sel-fg:#2e4d5e;
+ --accent:#35617d;--accent-soft:#eaf1f5;--accent-ink:#ffffff;
+ --warn:#8a6432;--warn-bg:#f7efe1;--live:#4f8a66;
+ --radius:9px;--radius-sm:6px;--radius-xs:4px;
+ --border-w:1px;--window-border:#dedfdb;
+ --spec-title-font:var(--font-ui);--spec-read-font:var(--font-ui);
+ --tag-radius:3px;--btn-radius:var(--radius-xs);--callout-radius:0;--callout-border:2px;
+ color-scheme:light;
+}
+.mini[data-t="paper"]{
+ --bg:#fbf8f0;--chrome:#f3ecdd;--sidebar:#eee6d4;--panel:#f8f2e5;--block:#f2e8d6;
+ --fg:#33302a;--muted:#6b6154;--quiet:#988c79;
+ --line:#e1d7c2;--line-strong:#cdbfa5;--hover:#e8dfcc;--sel:#e9dcc3;--sel-fg:#6b4a2a;
+ --accent:#a1502c;--accent-soft:#f5e6d9;--accent-ink:#fffaf2;
+ --warn:#8d5f22;--warn-bg:#f6ecd8;--live:#6f7d42;
+ --radius:5px;--radius-sm:3px;--radius-xs:2px;
+ --border-w:1px;--window-border:#d8cbae;
+ --spec-title-font:var(--font-serif);--spec-read-font:var(--font-serif);
+ --tag-radius:3px;--btn-radius:var(--radius-xs);--callout-radius:0;--callout-border:2px;
+ color-scheme:light;
+}
+.mini[data-t="midnight"]{
+ --bg:#171a1e;--chrome:#1c2025;--sidebar:#191d21;--panel:#1b1f24;--block:#222930;
+ --fg:#e4e8ec;--muted:#a1aab3;--quiet:#727d88;
+ --line:#2b3239;--line-strong:#3c454f;--hover:#242b33;--sel:#233647;--sel-fg:#bad7f2;
+ --accent:#7fb0f0;--accent-soft:#1d2c3c;--accent-ink:#0d1116;
+ --warn:#d8b176;--warn-bg:#2b271f;--live:#6fce9a;
+ --radius:10px;--radius-sm:7px;--radius-xs:5px;
+ --border-w:1px;--window-border:#2f363e;
+ --spec-title-font:var(--font-ui);--spec-read-font:var(--font-ui);
+ --tag-radius:3px;--btn-radius:var(--radius-xs);--callout-radius:0;--callout-border:2px;
+ color-scheme:dark;
+}
+.mini[data-t="dusk"]{
+ --bg:#23282a;--chrome:#2b3133;--sidebar:#262c2e;--panel:#282e31;--block:#303739;
+ --fg:#dfe5e2;--muted:#a7b2ae;--quiet:#828e8a;
+ --line:#3a4446;--line-strong:#4d585a;--hover:#333b3d;--sel:#3a4a45;--sel-fg:#d3e6dc;
+ --accent:#9ec7b2;--accent-soft:#2f3d39;--accent-ink:#18201d;
+ --warn:#d7b483;--warn-bg:#393228;--live:#7fc9a2;
+ --radius:11px;--radius-sm:8px;--radius-xs:5px;
+ --border-w:1px;--window-border:#3c4547;
+ --spec-title-font:var(--font-ui);--spec-read-font:var(--font-ui);
+ --tag-radius:3px;--btn-radius:var(--radius-xs);--callout-radius:0;--callout-border:2px;
+ color-scheme:dark;
+}
+.mini[data-t="moss"]{
+ --bg:#f7f9f3;--chrome:#eef2e8;--sidebar:#e8eee1;--panel:#f5f8f0;--block:#eef3e8;
+ --fg:#2c362e;--muted:#626f5f;--quiet:#879483;
+ --line:#dbe3d4;--line-strong:#c4d0bc;--hover:#dfe8d7;--sel:#dce8d3;--sel-fg:#38543b;
+ --accent:#4c7150;--accent-soft:#e5efe0;--accent-ink:#fbfdf8;
+ --warn:#886a35;--warn-bg:#f4eddd;--live:#5f8a52;
+ --radius:14px;--radius-sm:10px;--radius-xs:7px;
+ --border-w:1px;--window-border:#d5dfcd;
+ --spec-title-font:var(--font-ui);--spec-read-font:var(--font-ui);
+ --tag-radius:999px;--btn-radius:999px;--callout-radius:8px;--callout-border:0;
+ color-scheme:light;
+}
+.mini[data-t="blueprint"]{
+ --bg:#ffffff;--chrome:#f2f2ee;--sidebar:#f7f7f3;--panel:#fbfbf8;--block:#f5f5f1;
+ --fg:#101214;--muted:#4d5359;--quiet:#7c838a;
+ --line:#d8d9d3;--line-strong:#101214;--hover:#ecece7;--sel:#eaeefe;--sel-fg:#1b34c8;
+ --accent:#1f3cff;--accent-soft:#eef1ff;--accent-ink:#ffffff;
+ --warn:#c2410c;--warn-bg:#fff2e9;--live:#1f3cff;
+ --radius:0px;--radius-sm:0px;--radius-xs:0px;
+ --border-w:1.5px;--window-border:#101214;
+ --spec-title-font:var(--font-ui);--spec-read-font:var(--font-ui);
+ --tag-radius:0;--btn-radius:0;--callout-radius:0;--callout-border:3px;
+ color-scheme:light;
+}</style>
+</head>
+<body>
+<header class="hero"><div class="wrap hero-inner">
+  <div class="hero-top">
+    <div class="brandline"><span class="brandmark">TR</span><span>Trellis · Design Reference</span></div>
+    <span>v1.0 / 2026-10 / Internal</span>
+  </div>
+  <h1>六套主题<br><em>Design Tokens</em> &amp; Components</h1>
+  <p>用于正式实现时对照取值的单页规范。颜色、字体、尺寸与组件状态都来自已确认的六套风格；这里只定义视觉契约，不提供生产代码。</p>
+  <div class="hero-meta">
+    <span class="pill"><b>6</b> themes</span>
+    <span class="pill"><b>22</b> color tokens</span>
+    <span class="pill"><b>15</b> component rules</span>
+    <span class="pill">Layout A · 三栏</span>
+    <span class="pill">Scope · visual reference</span>
+  </div>
+  <div class="scope"><b>范围说明：</b>这不是正式前端，也不是组件库。实现时请用你的技术栈重建组件，只把本页的 token、尺寸与状态作为对照基准；不要复制原型的 DOM 或状态逻辑。</div>
+</div></header>
+
+<nav class="tabs" aria-label="规范目录"><div class="tabs-inner">
+  <a href="#overview">01 概览</a>
+  <a href="#tokens">02 颜色 Token</a>
+  <a href="#type">03 字体与几何</a>
+  <a href="#components">04 组件契约</a>
+  <a href="#specimens">05 主题样本</a>
+  <a href="#rules">06 实现约定</a>
+</div></nav>
+<main>
+<section class="section" id="overview"><div class="wrap">
+  <div class="section-head"><div class="section-no">01</div><div><h2>六套主题一览</h2><p>六个方向共用同一套三栏布局与 token 命名。默认跟随系统：浅色用石墨，深色用暮色；其余四套作为可选主题保留。</p></div></div><div class="themes"><a class="tcard" href="#spec-graphite">
+  <span class="strip" aria-hidden="true"><i style="background:#ffffff"></i><i style="background:#ededeb"></i><i style="background:#35617d"></i><i style="background:#23262a"></i></span>
+  <span class="tc-top"><strong>石墨</strong><em>GRAPHITE</em></span>
+  <span class="tc-desc">冷静、紧凑，接近原生桌面工具</span>
+  <span class="tc-meta"><span>圆角 9px</span><span>宽 640px</span></span>
+  <span class="badge default">日间默认</span>
+</a><a class="tcard" href="#spec-paper">
+  <span class="strip" aria-hidden="true"><i style="background:#fbf8f0"></i><i style="background:#eee6d4"></i><i style="background:#a1502c"></i><i style="background:#33302a"></i></span>
+  <span class="tc-top"><strong>暖纸</strong><em>PAPER</em></span>
+  <span class="tc-desc">米白纸面与宋体，像排版讲究的读物</span>
+  <span class="tc-meta"><span>圆角 5px</span><span>宽 618px</span></span>
+  <span class="badge optional">可选</span>
+</a><a class="tcard" href="#spec-midnight">
+  <span class="strip" aria-hidden="true"><i style="background:#171a1e"></i><i style="background:#191d21"></i><i style="background:#7fb0f0"></i><i style="background:#e4e8ec"></i></span>
+  <span class="tc-top"><strong>深夜</strong><em>MIDNIGHT</em></span>
+  <span class="tc-desc">深灰蓝底与冷光蓝，低光沉浸</span>
+  <span class="tc-meta"><span>圆角 10px</span><span>宽 640px</span></span>
+  <span class="badge optional">可选</span>
+</a><a class="tcard" href="#spec-dusk">
+  <span class="strip" aria-hidden="true"><i style="background:#23282a"></i><i style="background:#262c2e"></i><i style="background:#9ec7b2"></i><i style="background:#dfe5e2"></i></span>
+  <span class="tc-top"><strong>暮色</strong><em>DUSK</em></span>
+  <span class="tc-desc">更浅的炭灰，灰绿、低对比</span>
+  <span class="tc-meta"><span>圆角 11px</span><span>宽 640px</span></span>
+  <span class="badge default">夜间默认</span>
+</a><a class="tcard" href="#spec-moss">
+  <span class="strip" aria-hidden="true"><i style="background:#f7f9f3"></i><i style="background:#e8eee1"></i><i style="background:#4c7150"></i><i style="background:#2c362e"></i></span>
+  <span class="tc-top"><strong>苔原</strong><em>MOSS</em></span>
+  <span class="tc-desc">灰绿柔和，留白更松</span>
+  <span class="tc-meta"><span>圆角 14px</span><span>宽 660px</span></span>
+  <span class="badge optional">可选</span>
+</a><a class="tcard" href="#spec-blueprint">
+  <span class="strip" aria-hidden="true"><i style="background:#ffffff"></i><i style="background:#f7f7f3"></i><i style="background:#1f3cff"></i><i style="background:#101214"></i></span>
+  <span class="tc-top"><strong>蓝图</strong><em>BLUEPRINT</em></span>
+  <span class="tc-desc">直角、编号与钴蓝，工程图纸感</span>
+  <span class="tc-meta"><span>圆角 0px</span><span>宽 672px</span></span>
+  <span class="badge optional">可选</span>
+</a></div>  <div class="note">色条依次为：内容背景 / 侧栏 / 强调色 / 主文字。点击卡片跳到对应组件样本。</div>
+</div></section><section class="section" id="tokens"><div class="wrap">
+  <div class="section-head"><div class="section-no">02</div><div><h2>颜色 Token</h2><p>组件只引用语义 token，不按主题写死颜色。下表为六套主题的完整色值；透明值表示沿用父级表面。</p></div></div><div class="table-wrap"><table class="tokens"><caption class="sr-only">六套主题的颜色 token 对照</caption><thead><tr><th scope="col">Token</th><th scope="col">用途</th><th scope="col"><span class="th-name">石墨</span><span class="th-sub">GRAPHITE · 日间默认</span></th><th scope="col"><span class="th-name">暖纸</span><span class="th-sub">PAPER · 可选</span></th><th scope="col"><span class="th-name">深夜</span><span class="th-sub">MIDNIGHT · 可选</span></th><th scope="col"><span class="th-name">暮色</span><span class="th-sub">DUSK · 夜间默认</span></th><th scope="col"><span class="th-name">苔原</span><span class="th-sub">MOSS · 可选</span></th><th scope="col"><span class="th-name">蓝图</span><span class="th-sub">BLUEPRINT · 可选</span></th></tr></thead><tbody><tr class="group"><td colspan="8">表面与结构</td></tr><tr><td><code class="tok">--bg</code></td><td class="role">内容区 / 主画布</td><td><span class="cc"><span class="chip" style="background:#ffffff" aria-hidden="true"></span><span class="hex">#ffffff</span></span></td><td><span class="cc"><span class="chip" style="background:#fbf8f0" aria-hidden="true"></span><span class="hex">#fbf8f0</span></span></td><td><span class="cc"><span class="chip" style="background:#171a1e" aria-hidden="true"></span><span class="hex">#171a1e</span></span></td><td><span class="cc"><span class="chip" style="background:#23282a" aria-hidden="true"></span><span class="hex">#23282a</span></span></td><td><span class="cc"><span class="chip" style="background:#f7f9f3" aria-hidden="true"></span><span class="hex">#f7f9f3</span></span></td><td><span class="cc"><span class="chip" style="background:#ffffff" aria-hidden="true"></span><span class="hex">#ffffff</span></span></td></tr><tr><td><code class="tok">--chrome</code></td><td class="role">标题栏 / 状态栏</td><td><span class="cc"><span class="chip" style="background:#f3f3f1" aria-hidden="true"></span><span class="hex">#f3f3f1</span></span></td><td><span class="cc"><span class="chip" style="background:#f3ecdd" aria-hidden="true"></span><span class="hex">#f3ecdd</span></span></td><td><span class="cc"><span class="chip" style="background:#1c2025" aria-hidden="true"></span><span class="hex">#1c2025</span></span></td><td><span class="cc"><span class="chip" style="background:#2b3133" aria-hidden="true"></span><span class="hex">#2b3133</span></span></td><td><span class="cc"><span class="chip" style="background:#eef2e8" aria-hidden="true"></span><span class="hex">#eef2e8</span></span></td><td><span class="cc"><span class="chip" style="background:#f2f2ee" aria-hidden="true"></span><span class="hex">#f2f2ee</span></span></td></tr><tr><td><code class="tok">--sidebar</code></td><td class="role">任务列表</td><td><span class="cc"><span class="chip" style="background:#ededeb" aria-hidden="true"></span><span class="hex">#ededeb</span></span></td><td><span class="cc"><span class="chip" style="background:#eee6d4" aria-hidden="true"></span><span class="hex">#eee6d4</span></span></td><td><span class="cc"><span class="chip" style="background:#191d21" aria-hidden="true"></span><span class="hex">#191d21</span></span></td><td><span class="cc"><span class="chip" style="background:#262c2e" aria-hidden="true"></span><span class="hex">#262c2e</span></span></td><td><span class="cc"><span class="chip" style="background:#e8eee1" aria-hidden="true"></span><span class="hex">#e8eee1</span></span></td><td><span class="cc"><span class="chip" style="background:#f7f7f3" aria-hidden="true"></span><span class="hex">#f7f7f3</span></span></td></tr><tr><td><code class="tok">--panel</code></td><td class="role">Agent / 设置面板</td><td><span class="cc"><span class="chip" style="background:#fafaf9" aria-hidden="true"></span><span class="hex">#fafaf9</span></span></td><td><span class="cc"><span class="chip" style="background:#f8f2e5" aria-hidden="true"></span><span class="hex">#f8f2e5</span></span></td><td><span class="cc"><span class="chip" style="background:#1b1f24" aria-hidden="true"></span><span class="hex">#1b1f24</span></span></td><td><span class="cc"><span class="chip" style="background:#282e31" aria-hidden="true"></span><span class="hex">#282e31</span></span></td><td><span class="cc"><span class="chip" style="background:#f5f8f0" aria-hidden="true"></span><span class="hex">#f5f8f0</span></span></td><td><span class="cc"><span class="chip" style="background:#fbfbf8" aria-hidden="true"></span><span class="hex">#fbfbf8</span></span></td></tr><tr><td><code class="tok">--block</code></td><td class="role">用户气泡 / 内嵌块</td><td><span class="cc"><span class="chip" style="background:#f5f5f3" aria-hidden="true"></span><span class="hex">#f5f5f3</span></span></td><td><span class="cc"><span class="chip" style="background:#f2e8d6" aria-hidden="true"></span><span class="hex">#f2e8d6</span></span></td><td><span class="cc"><span class="chip" style="background:#222930" aria-hidden="true"></span><span class="hex">#222930</span></span></td><td><span class="cc"><span class="chip" style="background:#303739" aria-hidden="true"></span><span class="hex">#303739</span></span></td><td><span class="cc"><span class="chip" style="background:#eef3e8" aria-hidden="true"></span><span class="hex">#eef3e8</span></span></td><td><span class="cc"><span class="chip" style="background:#f5f5f1" aria-hidden="true"></span><span class="hex">#f5f5f1</span></span></td></tr><tr><td><code class="tok">--hover</code></td><td class="role">悬停背景</td><td><span class="cc"><span class="chip" style="background:#e5e6e2" aria-hidden="true"></span><span class="hex">#e5e6e2</span></span></td><td><span class="cc"><span class="chip" style="background:#e8dfcc" aria-hidden="true"></span><span class="hex">#e8dfcc</span></span></td><td><span class="cc"><span class="chip" style="background:#242b33" aria-hidden="true"></span><span class="hex">#242b33</span></span></td><td><span class="cc"><span class="chip" style="background:#333b3d" aria-hidden="true"></span><span class="hex">#333b3d</span></span></td><td><span class="cc"><span class="chip" style="background:#dfe8d7" aria-hidden="true"></span><span class="hex">#dfe8d7</span></span></td><td><span class="cc"><span class="chip" style="background:#ecece7" aria-hidden="true"></span><span class="hex">#ecece7</span></span></td></tr><tr><td><code class="tok">--line</code></td><td class="role">分隔线</td><td><span class="cc"><span class="chip" style="background:#dedfdb" aria-hidden="true"></span><span class="hex">#dedfdb</span></span></td><td><span class="cc"><span class="chip" style="background:#e1d7c2" aria-hidden="true"></span><span class="hex">#e1d7c2</span></span></td><td><span class="cc"><span class="chip" style="background:#2b3239" aria-hidden="true"></span><span class="hex">#2b3239</span></span></td><td><span class="cc"><span class="chip" style="background:#3a4446" aria-hidden="true"></span><span class="hex">#3a4446</span></span></td><td><span class="cc"><span class="chip" style="background:#dbe3d4" aria-hidden="true"></span><span class="hex">#dbe3d4</span></span></td><td><span class="cc"><span class="chip" style="background:#d8d9d3" aria-hidden="true"></span><span class="hex">#d8d9d3</span></span></td></tr><tr><td><code class="tok">--line-strong</code></td><td class="role">强分隔 / 边框</td><td><span class="cc"><span class="chip" style="background:#c8cac5" aria-hidden="true"></span><span class="hex">#c8cac5</span></span></td><td><span class="cc"><span class="chip" style="background:#cdbfa5" aria-hidden="true"></span><span class="hex">#cdbfa5</span></span></td><td><span class="cc"><span class="chip" style="background:#3c454f" aria-hidden="true"></span><span class="hex">#3c454f</span></span></td><td><span class="cc"><span class="chip" style="background:#4d585a" aria-hidden="true"></span><span class="hex">#4d585a</span></span></td><td><span class="cc"><span class="chip" style="background:#c4d0bc" aria-hidden="true"></span><span class="hex">#c4d0bc</span></span></td><td><span class="cc"><span class="chip" style="background:#101214" aria-hidden="true"></span><span class="hex">#101214</span></span></td></tr><tr><td><code class="tok">--window-border</code></td><td class="role">窗口外框</td><td><span class="cc"><span class="chip" style="background:#dedfdb" aria-hidden="true"></span><span class="hex">#dedfdb</span></span></td><td><span class="cc"><span class="chip" style="background:#d8cbae" aria-hidden="true"></span><span class="hex">#d8cbae</span></span></td><td><span class="cc"><span class="chip" style="background:#2f363e" aria-hidden="true"></span><span class="hex">#2f363e</span></span></td><td><span class="cc"><span class="chip" style="background:#3c4547" aria-hidden="true"></span><span class="hex">#3c4547</span></span></td><td><span class="cc"><span class="chip" style="background:#d5dfcd" aria-hidden="true"></span><span class="hex">#d5dfcd</span></span></td><td><span class="cc"><span class="chip" style="background:#101214" aria-hidden="true"></span><span class="hex">#101214</span></span></td></tr><tr class="group"><td colspan="8">文字与交互</td></tr><tr><td><code class="tok">--fg</code></td><td class="role">主文字</td><td><span class="cc"><span class="chip" style="background:#23262a" aria-hidden="true"></span><span class="hex">#23262a</span></span></td><td><span class="cc"><span class="chip" style="background:#33302a" aria-hidden="true"></span><span class="hex">#33302a</span></span></td><td><span class="cc"><span class="chip" style="background:#e4e8ec" aria-hidden="true"></span><span class="hex">#e4e8ec</span></span></td><td><span class="cc"><span class="chip" style="background:#dfe5e2" aria-hidden="true"></span><span class="hex">#dfe5e2</span></span></td><td><span class="cc"><span class="chip" style="background:#2c362e" aria-hidden="true"></span><span class="hex">#2c362e</span></span></td><td><span class="cc"><span class="chip" style="background:#101214" aria-hidden="true"></span><span class="hex">#101214</span></span></td></tr><tr><td><code class="tok">--muted</code></td><td class="role">次级文字</td><td><span class="cc"><span class="chip" style="background:#62686e" aria-hidden="true"></span><span class="hex">#62686e</span></span></td><td><span class="cc"><span class="chip" style="background:#6b6154" aria-hidden="true"></span><span class="hex">#6b6154</span></span></td><td><span class="cc"><span class="chip" style="background:#a1aab3" aria-hidden="true"></span><span class="hex">#a1aab3</span></span></td><td><span class="cc"><span class="chip" style="background:#a7b2ae" aria-hidden="true"></span><span class="hex">#a7b2ae</span></span></td><td><span class="cc"><span class="chip" style="background:#626f5f" aria-hidden="true"></span><span class="hex">#626f5f</span></span></td><td><span class="cc"><span class="chip" style="background:#4d5359" aria-hidden="true"></span><span class="hex">#4d5359</span></span></td></tr><tr><td><code class="tok">--quiet</code></td><td class="role">辅助说明 / 占位</td><td><span class="cc"><span class="chip" style="background:#8c9298" aria-hidden="true"></span><span class="hex">#8c9298</span></span></td><td><span class="cc"><span class="chip" style="background:#988c79" aria-hidden="true"></span><span class="hex">#988c79</span></span></td><td><span class="cc"><span class="chip" style="background:#727d88" aria-hidden="true"></span><span class="hex">#727d88</span></span></td><td><span class="cc"><span class="chip" style="background:#828e8a" aria-hidden="true"></span><span class="hex">#828e8a</span></span></td><td><span class="cc"><span class="chip" style="background:#879483" aria-hidden="true"></span><span class="hex">#879483</span></span></td><td><span class="cc"><span class="chip" style="background:#7c838a" aria-hidden="true"></span><span class="hex">#7c838a</span></span></td></tr><tr><td><code class="tok">--sel</code></td><td class="role">选中背景</td><td><span class="cc"><span class="chip" style="background:#e2e8ea" aria-hidden="true"></span><span class="hex">#e2e8ea</span></span></td><td><span class="cc"><span class="chip" style="background:#e9dcc3" aria-hidden="true"></span><span class="hex">#e9dcc3</span></span></td><td><span class="cc"><span class="chip" style="background:#233647" aria-hidden="true"></span><span class="hex">#233647</span></span></td><td><span class="cc"><span class="chip" style="background:#3a4a45" aria-hidden="true"></span><span class="hex">#3a4a45</span></span></td><td><span class="cc"><span class="chip" style="background:#dce8d3" aria-hidden="true"></span><span class="hex">#dce8d3</span></span></td><td><span class="cc"><span class="chip" style="background:#eaeefe" aria-hidden="true"></span><span class="hex">#eaeefe</span></span></td></tr><tr><td><code class="tok">--sel-fg</code></td><td class="role">选中文字</td><td><span class="cc"><span class="chip" style="background:#2e4d5e" aria-hidden="true"></span><span class="hex">#2e4d5e</span></span></td><td><span class="cc"><span class="chip" style="background:#6b4a2a" aria-hidden="true"></span><span class="hex">#6b4a2a</span></span></td><td><span class="cc"><span class="chip" style="background:#bad7f2" aria-hidden="true"></span><span class="hex">#bad7f2</span></span></td><td><span class="cc"><span class="chip" style="background:#d3e6dc" aria-hidden="true"></span><span class="hex">#d3e6dc</span></span></td><td><span class="cc"><span class="chip" style="background:#38543b" aria-hidden="true"></span><span class="hex">#38543b</span></span></td><td><span class="cc"><span class="chip" style="background:#1b34c8" aria-hidden="true"></span><span class="hex">#1b34c8</span></span></td></tr><tr><td><code class="tok">--accent</code></td><td class="role">操作 / 当前 / 曲线</td><td><span class="cc"><span class="chip" style="background:#35617d" aria-hidden="true"></span><span class="hex">#35617d</span></span></td><td><span class="cc"><span class="chip" style="background:#a1502c" aria-hidden="true"></span><span class="hex">#a1502c</span></span></td><td><span class="cc"><span class="chip" style="background:#7fb0f0" aria-hidden="true"></span><span class="hex">#7fb0f0</span></span></td><td><span class="cc"><span class="chip" style="background:#9ec7b2" aria-hidden="true"></span><span class="hex">#9ec7b2</span></span></td><td><span class="cc"><span class="chip" style="background:#4c7150" aria-hidden="true"></span><span class="hex">#4c7150</span></span></td><td><span class="cc"><span class="chip" style="background:#1f3cff" aria-hidden="true"></span><span class="hex">#1f3cff</span></span></td></tr><tr><td><code class="tok">--accent-soft</code></td><td class="role">强调浅底 / focus ring</td><td><span class="cc"><span class="chip" style="background:#eaf1f5" aria-hidden="true"></span><span class="hex">#eaf1f5</span></span></td><td><span class="cc"><span class="chip" style="background:#f5e6d9" aria-hidden="true"></span><span class="hex">#f5e6d9</span></span></td><td><span class="cc"><span class="chip" style="background:#1d2c3c" aria-hidden="true"></span><span class="hex">#1d2c3c</span></span></td><td><span class="cc"><span class="chip" style="background:#2f3d39" aria-hidden="true"></span><span class="hex">#2f3d39</span></span></td><td><span class="cc"><span class="chip" style="background:#e5efe0" aria-hidden="true"></span><span class="hex">#e5efe0</span></span></td><td><span class="cc"><span class="chip" style="background:#eef1ff" aria-hidden="true"></span><span class="hex">#eef1ff</span></span></td></tr><tr><td><code class="tok">--accent-ink</code></td><td class="role">强调色上的文字</td><td><span class="cc"><span class="chip" style="background:#ffffff" aria-hidden="true"></span><span class="hex">#ffffff</span></span></td><td><span class="cc"><span class="chip" style="background:#fffaf2" aria-hidden="true"></span><span class="hex">#fffaf2</span></span></td><td><span class="cc"><span class="chip" style="background:#0d1116" aria-hidden="true"></span><span class="hex">#0d1116</span></span></td><td><span class="cc"><span class="chip" style="background:#18201d" aria-hidden="true"></span><span class="hex">#18201d</span></span></td><td><span class="cc"><span class="chip" style="background:#fbfdf8" aria-hidden="true"></span><span class="hex">#fbfdf8</span></span></td><td><span class="cc"><span class="chip" style="background:#ffffff" aria-hidden="true"></span><span class="hex">#ffffff</span></span></td></tr><tr class="group"><td colspan="8">语义与图表</td></tr><tr><td><code class="tok">--warn</code></td><td class="role">审批 / 提醒</td><td><span class="cc"><span class="chip" style="background:#8a6432" aria-hidden="true"></span><span class="hex">#8a6432</span></span></td><td><span class="cc"><span class="chip" style="background:#8d5f22" aria-hidden="true"></span><span class="hex">#8d5f22</span></span></td><td><span class="cc"><span class="chip" style="background:#d8b176" aria-hidden="true"></span><span class="hex">#d8b176</span></span></td><td><span class="cc"><span class="chip" style="background:#d7b483" aria-hidden="true"></span><span class="hex">#d7b483</span></span></td><td><span class="cc"><span class="chip" style="background:#886a35" aria-hidden="true"></span><span class="hex">#886a35</span></span></td><td><span class="cc"><span class="chip" style="background:#c2410c" aria-hidden="true"></span><span class="hex">#c2410c</span></span></td></tr><tr><td><code class="tok">--warn-bg</code></td><td class="role">审批浅底</td><td><span class="cc"><span class="chip" style="background:#f7efe1" aria-hidden="true"></span><span class="hex">#f7efe1</span></span></td><td><span class="cc"><span class="chip" style="background:#f6ecd8" aria-hidden="true"></span><span class="hex">#f6ecd8</span></span></td><td><span class="cc"><span class="chip" style="background:#2b271f" aria-hidden="true"></span><span class="hex">#2b271f</span></span></td><td><span class="cc"><span class="chip" style="background:#393228" aria-hidden="true"></span><span class="hex">#393228</span></span></td><td><span class="cc"><span class="chip" style="background:#f4eddd" aria-hidden="true"></span><span class="hex">#f4eddd</span></span></td><td><span class="cc"><span class="chip" style="background:#fff2e9" aria-hidden="true"></span><span class="hex">#fff2e9</span></span></td></tr><tr><td><code class="tok">--live</code></td><td class="role">就绪 / 成功</td><td><span class="cc"><span class="chip" style="background:#4f8a66" aria-hidden="true"></span><span class="hex">#4f8a66</span></span></td><td><span class="cc"><span class="chip" style="background:#6f7d42" aria-hidden="true"></span><span class="hex">#6f7d42</span></span></td><td><span class="cc"><span class="chip" style="background:#6fce9a" aria-hidden="true"></span><span class="hex">#6fce9a</span></span></td><td><span class="cc"><span class="chip" style="background:#7fc9a2" aria-hidden="true"></span><span class="hex">#7fc9a2</span></span></td><td><span class="cc"><span class="chip" style="background:#5f8a52" aria-hidden="true"></span><span class="hex">#5f8a52</span></span></td><td><span class="cc"><span class="chip" style="background:#1f3cff" aria-hidden="true"></span><span class="hex">#1f3cff</span></span></td></tr><tr><td><code class="tok">--chart-bg</code></td><td class="role">图表底</td><td><span class="cc"><span class="chip" style="background:#fafaf9" aria-hidden="true"></span><span class="hex">#fafaf9</span></span></td><td><span class="cc"><span class="chip transparent" aria-hidden="true"></span><span class="hex">transparent</span></span></td><td><span class="cc"><span class="chip" style="background:#14171b" aria-hidden="true"></span><span class="hex">#14171b</span></span></td><td><span class="cc"><span class="chip" style="background:#1f2426" aria-hidden="true"></span><span class="hex">#1f2426</span></span></td><td><span class="cc"><span class="chip" style="background:#fbfcf8" aria-hidden="true"></span><span class="hex">#fbfcf8</span></span></td><td><span class="cc"><span class="chip" style="background:#ffffff" aria-hidden="true"></span><span class="hex">#ffffff</span></span></td></tr><tr><td><code class="tok">--chart-grid</code></td><td class="role">图表网格</td><td><span class="cc"><span class="chip" style="background:#96a0a8" aria-hidden="true"></span><span class="hex">#96a0a8</span></span></td><td><span class="cc"><span class="chip" style="background:#96a0a8" aria-hidden="true"></span><span class="hex">#96a0a8</span></span></td><td><span class="cc"><span class="chip" style="background:#3d4650" aria-hidden="true"></span><span class="hex">#3d4650</span></span></td><td><span class="cc"><span class="chip" style="background:#4a5652" aria-hidden="true"></span><span class="hex">#4a5652</span></span></td><td><span class="cc"><span class="chip" style="background:#96a0a8" aria-hidden="true"></span><span class="hex">#96a0a8</span></span></td><td><span class="cc"><span class="chip" style="background:#ccd2ee" aria-hidden="true"></span><span class="hex">#ccd2ee</span></span></td></tr></tbody></table></div>  <div class="note">命名与原型 CSS 一致（<code>--bg</code>、<code>--accent</code> …）。实现时可替换前缀，但请保持语义一一对应。深色主题需要额外设置 <code>color-scheme: dark</code>。窄屏下表格可横向滚动，第一列 Token 已固定。</div>
+</div></section><section class="section" id="type"><div class="wrap">
+  <div class="section-head"><div class="section-no">03</div><div><h2>字体与几何</h2><p>字体、字号、阅读宽度与圆角共同决定一套主题的性格。表中字号为桌面原型的基准值，实施时可按容器缩放，但层级比例保持不变。</p></div></div><div class="table-wrap"><table class="types"><caption class="sr-only">六套主题的字体与几何参数</caption><thead><tr><th scope="col">项目</th><th scope="col">用途</th><th scope="col"><span class="th-name">石墨</span><span class="th-sub">GRAPHITE · 日间默认</span></th><th scope="col"><span class="th-name">暖纸</span><span class="th-sub">PAPER · 可选</span></th><th scope="col"><span class="th-name">深夜</span><span class="th-sub">MIDNIGHT · 可选</span></th><th scope="col"><span class="th-name">暮色</span><span class="th-sub">DUSK · 夜间默认</span></th><th scope="col"><span class="th-name">苔原</span><span class="th-sub">MOSS · 可选</span></th><th scope="col"><span class="th-name">蓝图</span><span class="th-sub">BLUEPRINT · 可选</span></th></tr></thead><tbody><tr><td class="row-label">界面字体</td><td class="role">UI / 控件</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td></tr><tr><td class="row-label">标题字体</td><td class="role">任务 / 页面标题</td><td class="type-val">系统 UI</td><td class="type-val">宋体 / 衬线</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI + 等宽标签</td></tr><tr><td class="row-label">正文字体</td><td class="role">阅读内容</td><td class="type-val">系统 UI</td><td class="type-val">宋体 / 衬线</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td><td class="type-val">系统 UI</td></tr><tr><td class="row-label">界面基准字号</td><td class="role">按钮 / 行 / 标签</td><td class="type-val">12.5px</td><td class="type-val">12.5px</td><td class="type-val">12.5px</td><td class="type-val">12.5px</td><td class="type-val">12.5px</td><td class="type-val">12.5px</td></tr><tr><td class="row-label">文档标题</td><td class="role">字号 / 字重 / 字距</td><td class="type-val">27 / 600 / -0.7</td><td class="type-val">31 / 600 / -0.3</td><td class="type-val">26 / 600 / -0.7</td><td class="type-val">26 / 600 / -0.7</td><td class="type-val">28 / 600 / -0.4</td><td class="type-val">31 / 700 / -1.1</td></tr><tr><td class="row-label">文档导语</td><td class="role">字号 / 行高</td><td class="type-val">12.5 / 1.95</td><td class="type-val">13.5 / 2.05</td><td class="type-val">12.5 / 1.95</td><td class="type-val">12.5 / 1.95</td><td class="type-val">12.5 / 1.95</td><td class="type-val">12.5 / 1.95</td></tr><tr><td class="row-label">阅读宽度</td><td class="role">内容最大宽度</td><td class="type-val">640px</td><td class="type-val">618px</td><td class="type-val">640px</td><td class="type-val">640px</td><td class="type-val">660px</td><td class="type-val">672px</td></tr><tr><td class="row-label">侧栏 / Agent</td><td class="role">宽度</td><td class="type-val">214 / 300</td><td class="type-val">214 / 300</td><td class="type-val">214 / 300</td><td class="type-val">214 / 300</td><td class="type-val">214 / 300</td><td class="type-val">224 / 312</td></tr><tr><td class="row-label">标题栏 / 工具栏 / 状态栏</td><td class="role">高度</td><td class="type-val">48 / 42 / 26</td><td class="type-val">48 / 42 / 26</td><td class="type-val">48 / 42 / 26</td><td class="type-val">48 / 42 / 26</td><td class="type-val">48 / 42 / 26</td><td class="type-val">46 / 40 / 26</td></tr><tr><td class="row-label">圆角</td><td class="role">大 / 中 / 小</td><td class="type-val">9 / 6 / 4</td><td class="type-val">5 / 3 / 2</td><td class="type-val">10 / 7 / 5</td><td class="type-val">11 / 8 / 5</td><td class="type-val">14 / 10 / 7</td><td class="type-val">0 / 0 / 0</td></tr><tr><td class="row-label">边框</td><td class="role">窗口 / 分隔</td><td class="type-val">1px</td><td class="type-val">1px</td><td class="type-val">1px</td><td class="type-val">1px</td><td class="type-val">1px</td><td class="type-val">1.5px</td></tr><tr><td class="row-label">阴影</td><td class="role">窗口</td><td class="type-val">轻</td><td class="type-val">纸感</td><td class="type-val">深</td><td class="type-val">中</td><td class="type-val">柔</td><td class="type-val">无</td></tr><tr><td class="row-label">图表字体</td><td class="role">曲线 / 网格标注</td><td class="type-val">等宽</td><td class="type-val">宋体</td><td class="type-val">等宽</td><td class="type-val">等宽</td><td class="type-val">等宽</td><td class="type-val">等宽</td></tr><tr><td class="row-label">特殊手法</td><td class="role">主题差异</td><td class="type-val">原生紧凑</td><td class="type-val">衬线阅读</td><td class="type-val">冷光渐变</td><td class="type-val">浅炭灰绿</td><td class="type-val">胶囊圆角</td><td class="type-val">直角编号</td></tr></tbody></table></div>  <div class="subhead"><h3>字体栈</h3><span>Font stacks</span></div>
+  <div class="fonts">
+    <div class="fontcard"><b>UI / 控制</b><code>-apple-system,BlinkMacSystemFont,&quot;SF Pro Text&quot;,&quot;PingFang SC&quot;,&quot;Hiragino Sans GB&quot;,&quot;Microsoft YaHei&quot;,sans-serif</code></div>
+    <div class="fontcard"><b>阅读 / 宋体</b><code>&quot;Songti SC&quot;,&quot;STSong&quot;,&quot;Noto Serif SC&quot;,&quot;Source Han Serif SC&quot;,Georgia,serif</code></div>
+    <div class="fontcard"><b>等宽 / 标签</b><code>&quot;SFMono-Regular&quot;,Menlo,&quot;JetBrains Mono&quot;,&quot;Roboto Mono&quot;,monospace</code></div>
+  </div>
+  <div class="subhead"><h3>窗口阴影</h3><span>Elevation</span></div><div class="shadows"><div class="shadow-row"><span>石墨</span><code>0 1px 2px rgba(20,24,28,.06), 0 24px 60px rgba(20,24,28,.14)</code></div><div class="shadow-row"><span>暖纸</span><code>0 20px 55px rgba(74,58,35,.16)</code></div><div class="shadow-row"><span>深夜</span><code>0 30px 80px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35)</code></div><div class="shadow-row"><span>暮色</span><code>0 26px 70px rgba(0,0,0,.4), 0 2px 6px rgba(0,0,0,.25)</code></div><div class="shadow-row"><span>苔原</span><code>0 2px 4px rgba(40,60,40,.05), 0 26px 60px rgba(40,60,40,.14)</code></div><div class="shadow-row"><span>蓝图</span><code>none</code></div></div>  <div class="note">暖纸使用宋体作为标题与正文；蓝图额外使用等宽字体处理 view 标签、编号与元信息。</div>
+</div></section><section class="section" id="components"><div class="wrap">
+  <div class="section-head"><div class="section-no">04</div><div><h2>组件契约</h2><p>先实现结构与状态，再用主题 token 着色。下列尺寸来自桌面原型，主题差异列只列会改变实现的项。</p></div></div><div class="table-wrap"><table class="components"><caption class="sr-only">组件尺寸和主题差异</caption><thead><tr><th scope="col">组件</th><th scope="col">基准 / 尺寸</th><th scope="col">主题差异</th></tr></thead><tbody><tr><td class="row-label">窗口</td><td class="comp-base">高 812；<code>--border-w</code> + <code>--window-border</code>；圆角 <code>--radius</code>；阴影 <code>--shadow</code>。</td><td class="comp-diff">蓝图 1.5px / 无阴影；苔原 14px；暖纸 5px。</td></tr><tr><td class="row-label">标题栏</td><td class="comp-base">48px；红黄绿 12px；中心标题 11px；底边 1px。</td><td class="comp-diff">蓝图 46px、10px 方形控件、1.5px 底边；深夜/暮色用轻微渐变。</td></tr><tr><td class="row-label">工具栏</td><td class="comp-base">42px；面包屑 10.5px；右侧操作 10.5px；底边 1px。</td><td class="comp-diff">蓝图 40px，等宽 9px；窄屏只保留当前页标题。</td></tr><tr><td class="row-label">侧栏</td><td class="comp-base">214px；行高 31px，内边距 7/8；选中 <code>--sel</code>；左侧 2px <code>--accent</code>。</td><td class="comp-diff">蓝图 224px，改用 01/02 编号，去掉左侧标记。</td></tr><tr><td class="row-label">Agent</td><td class="comp-base">300px；头 42px；状态条 30px；消息 11 / 1.85；输入区 10/11。</td><td class="comp-diff">蓝图 312px，头 40px，等宽标题；窄屏为覆盖抽屉。</td></tr><tr><td class="row-label">文档</td><td class="comp-base">最大 <code>--doc-w</code>；左右 40px；标题/导语见上表；分节 28+26。</td><td class="comp-diff">蓝图标题 31/700，左缩进 40 放编号；暖纸元信息下加细线。</td></tr><tr><td class="row-label">主按钮</td><td class="comp-base"><code>--accent</code> 底 / <code>--accent-ink</code> 字；6×10；<code>--radius-xs</code>；10.5px；hover 亮度 1.07。</td><td class="comp-diff">苔原胶囊；蓝图直角 + 等宽大写；夜间主题 accent-ink 为深色。</td></tr><tr><td class="row-label">次按钮</td><td class="comp-base">透明底；1px <code>--line</code>；hover <code>--hover</code>。</td><td class="comp-diff">蓝图黑色 1px；其他跟随主题线色。</td></tr><tr><td class="row-label">标签</td><td class="comp-base">9px；2×7；圆角 3；行高 16。</td><td class="comp-diff">苔原 999px 胶囊；蓝图 0 + 等宽 8px 大写 + 1px 黑边。</td></tr><tr><td class="row-label">输入 / 文本域</td><td class="comp-base">1px <code>--line</code>；<code>--radius-xs</code>；8×9；11.5px；focus accent + 3px accent-soft ring。</td><td class="comp-diff">深色主题启用 <code>color-scheme: dark</code>；禁用态 45–55% 透明。</td></tr><tr><td class="row-label">提示条</td><td class="comp-base">11×13；左侧 2px accent；accent-soft 底；10.5 / 1.8。</td><td class="comp-diff">苔原无左边框、圆角 10；暖纸衬线 11.5px。</td></tr><tr><td class="row-label">审批</td><td class="comp-base">1px line；左侧 2px warn；warn-bg；pending / approved / denied。</td><td class="comp-diff">approved 用 live + accent-soft；denied 用 line + muted。</td></tr><tr><td class="row-label">弹层</td><td class="comp-base">最大 520；遮罩 rgba(12,14,16,.3)；圆角 <code>--radius</code>；头 43 / body 16 / actions 10×13。</td><td class="comp-diff">深色主题遮罩更深；一次只开一个。</td></tr><tr><td class="row-label">Toast</td><td class="comp-base">底部 42；<code>--fg</code> 底 / <code>--bg</code> 字；10px；<code>--radius-xs</code>。</td><td class="comp-diff">无主题差异。</td></tr><tr><td class="row-label">状态栏</td><td class="comp-base">26px；9px；<code>--chrome</code>；顶边 1px。</td><td class="comp-diff">蓝图底边 1.5px，等宽 8.5px。</td></tr></tbody></table></div>  <div class="subhead"><h3>状态清单</h3><span>States</span></div><div class="states"><div class="state"><h4>按钮</h4><p>default → hover（亮度 1.07）→ focus（2px accent，offset 2）→ disabled（45%）。</p></div><div class="state"><h4>输入</h4><p>rest 1px line；focus accent + 3px accent-soft；禁用 55%；错误态暂用 warn。</p></div><div class="state"><h4>列表行</h4><p>rest 透明；hover <code>--hover</code>；selected <code>--sel</code> + <code>--sel-fg</code>；当前项左侧标记仅限支持的主题。</p></div><div class="state"><h4>审批</h4><p>pending = warn；approved = live + accent-soft；denied = line + muted。</p></div><div class="state"><h4>弹层</h4><p>点击遮罩 / Esc 关闭；打开后聚焦第一个控件；同一时间只保留一个。</p></div><div class="state"><h4>深色</h4><p>设置 <code>color-scheme: dark</code>；检查原生 select / radio / 滚动条；避免 #000。</p></div></div>  <div class="note">所有 focus 状态必须可见；不要只用颜色区分选中与错误。深色主题需单独检查原生控件与滚动条。</div>
+</div></section><section class="section" id="specimens"><div class="wrap">
+  <div class="section-head"><div class="section-no">05</div><div><h2>六套主题样本</h2><p>同一段内容、同一组组件，只改变主题 token。样本为比例示意，实际尺寸以上表为准。</p></div></div><div class="specimens"><article class="spec" id="spec-graphite">
+  <header class="spec-head">
+    <div><div class="spec-name">石墨 <span>GRAPHITE</span></div><div class="spec-role">日间默认 · 冷静、紧凑，接近原生桌面工具</div></div>
+    <div class="spec-swatches" aria-hidden="true"><i style="background:#ffffff"></i><i style="background:#ededeb"></i><i style="background:#35617d"></i><i style="background:#23262a"></i></div>
+  </header>
+  <div class="spec-stage"><div class="mini" data-t="graphite">
+  <div class="mini-bar">
+    <span class="mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="mini-app">Trellis</span>
+    <span class="mini-title">变化与瞬时变化率</span>
+    <span class="mini-icons" aria-hidden="true"><i></i><i></i></span>
+  </div>
+  <div class="mini-body">
+    <div class="mini-side">
+      <div class="mini-brand"><span class="mini-mark">T</span><span>trellis</span></div>
+      <div class="mini-row active"><span class="mini-dot"></span><span>变化与瞬时变化率</span><span class="mini-count">3</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>理解链式法则</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>整理导数笔记</span></div>
+      <div class="mini-label">工作区</div>
+      <div class="mini-row"><span>插件与能力</span></div>
+    </div>
+    <div class="mini-main">
+      <div class="mini-view"><span>讲解</span><span class="mini-line"></span><span>VIEW 01</span></div>
+      <div class="mini-h">变化与瞬时变化率</div>
+      <div class="mini-meta"><span class="mini-tag">示例内容</span><span>微积分 · 14:32</span></div>
+      <p class="mini-lead">借助点 P 处的切线，描述这个瞬间的变化方向。</p>
+      <div class="mini-callout">任务生成内容的示例，不是固定模板。</div>
+      <div class="mini-actions"><span class="mini-btn primary">提交</span><span class="mini-btn ghost">导出</span><span class="mini-tag">待继续</span></div>
+      <div class="mini-input">补充一句自己的理解…</div>
+    </div>
+    <div class="mini-agent">
+      <div class="mini-agent-head"><span class="mini-spark"></span>Agent</div>
+      <div class="mini-msg">已根据材料建立当前任务界面。</div>
+      <div class="mini-approval">待确认操作<span>查看</span></div>
+    </div>
+  </div>
+</div></div>
+  <footer class="spec-foot"><b>关键做法</b><span>钢蓝只用于操作与当前项；1px 细线；阴影克制。</span></footer>
+</article><article class="spec" id="spec-paper">
+  <header class="spec-head">
+    <div><div class="spec-name">暖纸 <span>PAPER</span></div><div class="spec-role">可选 · 米白纸面与宋体，像排版讲究的读物</div></div>
+    <div class="spec-swatches" aria-hidden="true"><i style="background:#fbf8f0"></i><i style="background:#eee6d4"></i><i style="background:#a1502c"></i><i style="background:#33302a"></i></div>
+  </header>
+  <div class="spec-stage"><div class="mini" data-t="paper">
+  <div class="mini-bar">
+    <span class="mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="mini-app">Trellis</span>
+    <span class="mini-title">变化与瞬时变化率</span>
+    <span class="mini-icons" aria-hidden="true"><i></i><i></i></span>
+  </div>
+  <div class="mini-body">
+    <div class="mini-side">
+      <div class="mini-brand"><span class="mini-mark">T</span><span>trellis</span></div>
+      <div class="mini-row active"><span class="mini-dot"></span><span>变化与瞬时变化率</span><span class="mini-count">3</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>理解链式法则</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>整理导数笔记</span></div>
+      <div class="mini-label">工作区</div>
+      <div class="mini-row"><span>插件与能力</span></div>
+    </div>
+    <div class="mini-main">
+      <div class="mini-view"><span>讲解</span><span class="mini-line"></span><span>VIEW 01</span></div>
+      <div class="mini-h">变化与瞬时变化率</div>
+      <div class="mini-meta"><span class="mini-tag">示例内容</span><span>微积分 · 14:32</span></div>
+      <p class="mini-lead">借助点 P 处的切线，描述这个瞬间的变化方向。</p>
+      <div class="mini-callout">任务生成内容的示例，不是固定模板。</div>
+      <div class="mini-actions"><span class="mini-btn primary">提交</span><span class="mini-btn ghost">导出</span><span class="mini-tag">待继续</span></div>
+      <div class="mini-input">补充一句自己的理解…</div>
+    </div>
+    <div class="mini-agent">
+      <div class="mini-agent-head"><span class="mini-spark"></span>Agent</div>
+      <div class="mini-msg">已根据材料建立当前任务界面。</div>
+      <div class="mini-approval">待确认操作<span>查看</span></div>
+    </div>
+  </div>
+</div></div>
+  <footer class="spec-foot"><b>关键做法</b><span>宋体只用于标题与正文；元信息下加细线；陶土色不做大面积填充。</span></footer>
+</article><article class="spec" id="spec-midnight">
+  <header class="spec-head">
+    <div><div class="spec-name">深夜 <span>MIDNIGHT</span></div><div class="spec-role">可选 · 深灰蓝底与冷光蓝，低光沉浸</div></div>
+    <div class="spec-swatches" aria-hidden="true"><i style="background:#171a1e"></i><i style="background:#191d21"></i><i style="background:#7fb0f0"></i><i style="background:#e4e8ec"></i></div>
+  </header>
+  <div class="spec-stage"><div class="mini" data-t="midnight">
+  <div class="mini-bar">
+    <span class="mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="mini-app">Trellis</span>
+    <span class="mini-title">变化与瞬时变化率</span>
+    <span class="mini-icons" aria-hidden="true"><i></i><i></i></span>
+  </div>
+  <div class="mini-body">
+    <div class="mini-side">
+      <div class="mini-brand"><span class="mini-mark">T</span><span>trellis</span></div>
+      <div class="mini-row active"><span class="mini-dot"></span><span>变化与瞬时变化率</span><span class="mini-count">3</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>理解链式法则</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>整理导数笔记</span></div>
+      <div class="mini-label">工作区</div>
+      <div class="mini-row"><span>插件与能力</span></div>
+    </div>
+    <div class="mini-main">
+      <div class="mini-view"><span>讲解</span><span class="mini-line"></span><span>VIEW 01</span></div>
+      <div class="mini-h">变化与瞬时变化率</div>
+      <div class="mini-meta"><span class="mini-tag">示例内容</span><span>微积分 · 14:32</span></div>
+      <p class="mini-lead">借助点 P 处的切线，描述这个瞬间的变化方向。</p>
+      <div class="mini-callout">任务生成内容的示例，不是固定模板。</div>
+      <div class="mini-actions"><span class="mini-btn primary">提交</span><span class="mini-btn ghost">导出</span><span class="mini-tag">待继续</span></div>
+      <div class="mini-input">补充一句自己的理解…</div>
+    </div>
+    <div class="mini-agent">
+      <div class="mini-agent-head"><span class="mini-spark"></span>Agent</div>
+      <div class="mini-msg">已根据材料建立当前任务界面。</div>
+      <div class="mini-approval">待确认操作<span>查看</span></div>
+    </div>
+  </div>
+</div></div>
+  <footer class="spec-foot"><b>关键做法</b><span>启用 color-scheme: dark；标题栏用轻微渐变；避免纯黑。</span></footer>
+</article><article class="spec" id="spec-dusk">
+  <header class="spec-head">
+    <div><div class="spec-name">暮色 <span>DUSK</span></div><div class="spec-role">夜间默认 · 更浅的炭灰，灰绿、低对比</div></div>
+    <div class="spec-swatches" aria-hidden="true"><i style="background:#23282a"></i><i style="background:#262c2e"></i><i style="background:#9ec7b2"></i><i style="background:#dfe5e2"></i></div>
+  </header>
+  <div class="spec-stage"><div class="mini" data-t="dusk">
+  <div class="mini-bar">
+    <span class="mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="mini-app">Trellis</span>
+    <span class="mini-title">变化与瞬时变化率</span>
+    <span class="mini-icons" aria-hidden="true"><i></i><i></i></span>
+  </div>
+  <div class="mini-body">
+    <div class="mini-side">
+      <div class="mini-brand"><span class="mini-mark">T</span><span>trellis</span></div>
+      <div class="mini-row active"><span class="mini-dot"></span><span>变化与瞬时变化率</span><span class="mini-count">3</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>理解链式法则</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>整理导数笔记</span></div>
+      <div class="mini-label">工作区</div>
+      <div class="mini-row"><span>插件与能力</span></div>
+    </div>
+    <div class="mini-main">
+      <div class="mini-view"><span>讲解</span><span class="mini-line"></span><span>VIEW 01</span></div>
+      <div class="mini-h">变化与瞬时变化率</div>
+      <div class="mini-meta"><span class="mini-tag">示例内容</span><span>微积分 · 14:32</span></div>
+      <p class="mini-lead">借助点 P 处的切线，描述这个瞬间的变化方向。</p>
+      <div class="mini-callout">任务生成内容的示例，不是固定模板。</div>
+      <div class="mini-actions"><span class="mini-btn primary">提交</span><span class="mini-btn ghost">导出</span><span class="mini-tag">待继续</span></div>
+      <div class="mini-input">补充一句自己的理解…</div>
+    </div>
+    <div class="mini-agent">
+      <div class="mini-agent-head"><span class="mini-spark"></span>Agent</div>
+      <div class="mini-msg">已根据材料建立当前任务界面。</div>
+      <div class="mini-approval">待确认操作<span>查看</span></div>
+    </div>
+  </div>
+</div></div>
+  <footer class="spec-foot"><b>关键做法</b><span>比深夜更浅的炭灰；灰绿强调；与深夜二选一作为默认。</span></footer>
+</article><article class="spec" id="spec-moss">
+  <header class="spec-head">
+    <div><div class="spec-name">苔原 <span>MOSS</span></div><div class="spec-role">可选 · 灰绿柔和，留白更松</div></div>
+    <div class="spec-swatches" aria-hidden="true"><i style="background:#f7f9f3"></i><i style="background:#e8eee1"></i><i style="background:#4c7150"></i><i style="background:#2c362e"></i></div>
+  </header>
+  <div class="spec-stage"><div class="mini" data-t="moss">
+  <div class="mini-bar">
+    <span class="mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="mini-app">Trellis</span>
+    <span class="mini-title">变化与瞬时变化率</span>
+    <span class="mini-icons" aria-hidden="true"><i></i><i></i></span>
+  </div>
+  <div class="mini-body">
+    <div class="mini-side">
+      <div class="mini-brand"><span class="mini-mark">T</span><span>trellis</span></div>
+      <div class="mini-row active"><span class="mini-dot"></span><span>变化与瞬时变化率</span><span class="mini-count">3</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>理解链式法则</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>整理导数笔记</span></div>
+      <div class="mini-label">工作区</div>
+      <div class="mini-row"><span>插件与能力</span></div>
+    </div>
+    <div class="mini-main">
+      <div class="mini-view"><span>讲解</span><span class="mini-line"></span><span>VIEW 01</span></div>
+      <div class="mini-h">变化与瞬时变化率</div>
+      <div class="mini-meta"><span class="mini-tag">示例内容</span><span>微积分 · 14:32</span></div>
+      <p class="mini-lead">借助点 P 处的切线，描述这个瞬间的变化方向。</p>
+      <div class="mini-callout">任务生成内容的示例，不是固定模板。</div>
+      <div class="mini-actions"><span class="mini-btn primary">提交</span><span class="mini-btn ghost">导出</span><span class="mini-tag">待继续</span></div>
+      <div class="mini-input">补充一句自己的理解…</div>
+    </div>
+    <div class="mini-agent">
+      <div class="mini-agent-head"><span class="mini-spark"></span>Agent</div>
+      <div class="mini-msg">已根据材料建立当前任务界面。</div>
+      <div class="mini-approval">待确认操作<span>查看</span></div>
+    </div>
+  </div>
+</div></div>
+  <footer class="spec-foot"><b>关键做法</b><span>标签与主按钮用胶囊；圆角 14/10/7 统一；不要把边框加重。</span></footer>
+</article><article class="spec" id="spec-blueprint">
+  <header class="spec-head">
+    <div><div class="spec-name">蓝图 <span>BLUEPRINT</span></div><div class="spec-role">可选 · 直角、编号与钴蓝，工程图纸感</div></div>
+    <div class="spec-swatches" aria-hidden="true"><i style="background:#ffffff"></i><i style="background:#f7f7f3"></i><i style="background:#1f3cff"></i><i style="background:#101214"></i></div>
+  </header>
+  <div class="spec-stage"><div class="mini" data-t="blueprint">
+  <div class="mini-bar">
+    <span class="mini-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="mini-app">Trellis</span>
+    <span class="mini-title">变化与瞬时变化率</span>
+    <span class="mini-icons" aria-hidden="true"><i></i><i></i></span>
+  </div>
+  <div class="mini-body">
+    <div class="mini-side">
+      <div class="mini-brand"><span class="mini-mark">T</span><span>trellis</span></div>
+      <div class="mini-row active"><span class="mini-dot"></span><span>变化与瞬时变化率</span><span class="mini-count">3</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>理解链式法则</span></div>
+      <div class="mini-row"><span class="mini-dot"></span><span>整理导数笔记</span></div>
+      <div class="mini-label">工作区</div>
+      <div class="mini-row"><span>插件与能力</span></div>
+    </div>
+    <div class="mini-main">
+      <div class="mini-view"><span>讲解</span><span class="mini-line"></span><span>VIEW 01</span></div>
+      <div class="mini-h">变化与瞬时变化率</div>
+      <div class="mini-meta"><span class="mini-tag">示例内容</span><span>微积分 · 14:32</span></div>
+      <p class="mini-lead">借助点 P 处的切线，描述这个瞬间的变化方向。</p>
+      <div class="mini-callout">任务生成内容的示例，不是固定模板。</div>
+      <div class="mini-actions"><span class="mini-btn primary">提交</span><span class="mini-btn ghost">导出</span><span class="mini-tag">待继续</span></div>
+      <div class="mini-input">补充一句自己的理解…</div>
+    </div>
+    <div class="mini-agent">
+      <div class="mini-agent-head"><span class="mini-spark"></span>Agent</div>
+      <div class="mini-msg">已根据材料建立当前任务界面。</div>
+      <div class="mini-approval">待确认操作<span>查看</span></div>
+    </div>
+  </div>
+</div></div>
+  <footer class="spec-foot"><b>关键做法</b><span>1.5px 黑规则线；直角；等宽标签与编号；不要混软阴影。</span></footer>
+</article></div></div></section><section class="section" id="rules"><div class="wrap">
+  <div class="section-head"><div class="section-no">06</div><div><h2>实现约定</h2><p>默认策略、token 骨架、主题边界与交付检查。照此实现即可保持六套视觉方向，而不把原型代码带进正式前端。</p></div></div>  <div class="defaults">
+    <div class="default-card"><span class="sys">SYSTEM LIGHT</span><span class="arrow">→</span><span><strong>石墨 Graphite</strong><small>日间默认 · 系统 prefers-color-scheme: light</small></span></div>
+    <div class="default-card"><span class="sys">SYSTEM DARK</span><span class="arrow">→</span><span><strong>暮色 Dusk</strong><small>夜间默认 · 系统 prefers-color-scheme: dark</small></span></div>
+  </div>
+  <div class="note">手动选择六套主题时覆盖系统；提供“恢复跟随系统”。持久化用户选择，但不要持久化临时预览。</div>  <div class="subhead"><h3>主题建议</h3><span>When to use</span></div><div class="table-wrap"><table class="guide"><caption class="sr-only">主题使用建议</caption><thead><tr><th scope="col">主题</th><th scope="col">适合</th><th scope="col">避免</th><th scope="col">默认</th></tr></thead><tbody><tr><td class="row-label">石墨 <span class="en">Graphite</span></td><td>通用任务、高频操作、白天使用</td><td>加重阴影、放大圆角</td><td>日间默认</td></tr><tr><td class="row-label">暖纸 <span class="en">Paper</span></td><td>长文阅读、写作、编辑</td><td>密集表格、后台工具</td><td>可选</td></tr><tr><td class="row-label">深夜 <span class="en">Midnight</span></td><td>夜间、低光、沉浸式阅读</td><td>白天高亮环境、大面积纯黑</td><td>可选</td></tr><tr><td class="row-label">暮色 <span class="en">Dusk</span></td><td>夜间默认、长时间阅读</td><td>叠加高饱和色、再压暗底色</td><td>夜间默认</td></tr><tr><td class="row-label">苔原 <span class="en">Moss</span></td><td>学习、思考、低压力场景</td><td>混用直角元素、硬边框</td><td>可选</td></tr><tr><td class="row-label">蓝图 <span class="en">Blueprint</span></td><td>技术、结构、可追溯流程</td><td>软阴影、大圆角、装饰性渐变</td><td>可选</td></tr></tbody></table></div>  <div class="subhead"><h3>CSS 变量骨架</h3><span>以石墨为例</span></div>
+  <div class="code-card"><div class="code-head"><span>app.css · token contract</span><span>copy values, not code</span></div><pre><code>:root{
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+             "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-serif: "Songti SC", "STSong", "Noto Serif SC", Georgia, serif;
+  --font-mono: "SFMono-Regular", Menlo, "JetBrains Mono", monospace;
+}
+
+.app[data-theme="graphite"]{
+  --bg: #ffffff;
+  --chrome: #f3f3f1;
+  --sidebar: #ededeb;
+  --panel: #fafaf9;
+  --block: #f5f5f3;
+  --fg: #23262a;
+  --muted: #62686e;
+  --quiet: #8c9298;
+  --line: #dedfdb;
+  --line-strong: #c8cac5;
+  --hover: #e5e6e2;
+  --sel: #e2e8ea;
+  --sel-fg: #2e4d5e;
+  --accent: #35617d;
+  --accent-soft: #eaf1f5;
+  --accent-ink: #ffffff;
+  --warn: #8a6432;
+  --warn-bg: #f7efe1;
+  --live: #4f8a66;
+  --chart-bg: #fafaf9;
+  --chart-grid: #96a0a8;
+
+  /* 字号、圆角、密度 */
+  --title-font: var(--font-ui);
+  --read-font: var(--font-ui);
+  --read-size: 12.5px;
+  --read-lh: 1.95;
+  --radius: 9px;
+  --radius-sm: 6px;
+  --radius-xs: 4px;
+  --doc-w: 640px;
+  --sidebar-w: 214px;
+  --agent-w: 300px;
+  --titlebar-h: 48px;
+  --status-h: 26px;
+  --border-w: 1px;
+  --window-border: #dedfdb;
+  --chart-font: var(--font-mono);
+  --shadow: 0 1px 2px rgba(20,24,28,.06), 0 24px 60px rgba(20,24,28,.14);
+}
+
+/* 其余五套：替换为表中对应值。
+   深色主题额外设置 color-scheme: dark。
+   原型里用 data-style，这里建议统一为 data-theme。 */</code></pre>  </div>
+  <div class="rules">
+    <div class="dodont"><h4>建议</h4><ul>
+      <li>所有组件只读语义 token；主题只覆盖变量。</li>
+      <li>强调色只用于操作、当前项和图表曲线。</li>
+      <li>暖纸的宋体只进入标题与阅读内容。</li>
+      <li>蓝图用 1.5px 结构线、直角和等宽标签。</li>
+      <li>苔原的标签与主按钮保持胶囊圆角。</li>
+      <li>深色主题设置 <code>color-scheme: dark</code>。</li>
+    </ul></div>
+    <div class="dodont no"><h4>避免</h4><ul>
+      <li>在组件里写死颜色或单独覆盖主题。</li>
+      <li>用强调色写正文，或大面积铺强调色。</li>
+      <li>把宋体用在工具栏、状态栏和按钮上。</li>
+      <li>给蓝图加软阴影、大圆角或渐变。</li>
+      <li>在深色主题使用纯黑 #000 作为底色。</li>
+      <li>只靠颜色表达选中、错误或审批状态。</li>
+    </ul></div>
+  </div>
+  <div class="subhead"><h3>交付检查</h3><span>Handoff checklist</span></div><div class="checklist"><div class="check"><span class="cb" aria-hidden="true"></span><span>六套主题共用同一组 token 名，只覆盖值。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>系统外观映射：浅色 → 石墨，深色 → 暮色。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>手动选择可覆盖系统，并持久化；提供恢复“跟随系统”。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>按钮 / 输入 / 列表行的 hover、focus、selected、disabled 全部实现。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>深色主题启用 color-scheme: dark，检查原生控件。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>暖纸的宋体只作用于标题与阅读内容，不进入工具栏/状态栏。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>蓝图使用 1.5px 结构线、直角与等宽标签，不加软阴影。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>苔原的标签与主按钮保持胶囊圆角。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>在 390 / 720 / 1440 三档检查，无横向溢出。</span></div><div class="check"><span class="cb" aria-hidden="true"></span><span>组件内不写死颜色；所有色值来自 token。</span></div></div>
+  <div class="anchor-list">
+    <a href="#tokens">回到颜色 Token</a><a href="#components">回到组件契约</a><a href="#specimens">回到主题样本</a>
+  </div>
+</div></section>
+</main>
+
+<footer class="foot"><div class="wrap foot-inner">
+  <span>Trellis · Design Reference 01 · 2026-10</span>
+  <span>Token 值抽取自 <code>style-gallery.html</code>；尺寸与状态来自 <code>prototype-v3.html</code>。两者均为视觉参考，不是生产代码。</span>
+</div></footer>
+</body>
+</html>

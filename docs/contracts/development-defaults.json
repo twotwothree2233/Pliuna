@@ -1,0 +1,78 @@
+{
+  "version": "dev-0.1",
+  "status": "unvalidated-development-defaults",
+  "list": {
+    "default_items": 50,
+    "max_items": 200
+  },
+  "read": {
+    "text_bytes": 32768
+  },
+  "tool": {
+    "preview_bytes": 8192,
+    "execution_ms": 120000,
+    "declared_max_execution_ms": 600000,
+    "nested_max_depth": 4,
+    "output_resource_bytes": 268435456
+  },
+  "transport": {
+    "rpc_message_bytes": 1048576,
+    "upload_chunk_bytes": 262144,
+    "resource_bytes": 268435456
+  },
+  "surface": {
+    "inline_bundle_bytes": 262144,
+    "bundle_description_bytes": 2097152,
+    "view_elements": 10000,
+    "view_depth": 64
+  },
+  "data": {
+    "object_bytes": 262144,
+    "local_schema_bytes": 32768,
+    "local_schema_depth": 16
+  },
+  "queues": {
+    "model_active_app": 4,
+    "model_active_channel": 2,
+    "task_pending": 20,
+    "model_pending_app": 100,
+    "plugin_top_level_pending": 20
+  },
+  "run": {
+    "wall_ms": 3600000,
+    "model_requests": 40,
+    "tool_requests": 200,
+    "tokens": 200000
+  },
+  "approval": {
+    "ttl_ms": 900000
+  },
+  "cleanup": {
+    "cancel_grace_ms": 5000,
+    "retry_delays_ms": [
+      1000,
+      5000,
+      15000
+    ]
+  },
+  "runtime": {
+    "restart_max": 3,
+    "restart_window_ms": 300000
+  },
+  "sync": {
+    "buffer_events": 1000,
+    "buffer_bytes": 8388608
+  },
+  "draft": {
+    "debounce_ms": 500,
+    "max_wait_ms": 2000
+  },
+  "context": {
+    "recent_complete_groups": 4,
+    "output_reserve_tokens": 8192,
+    "safety_fraction": 0.1
+  },
+  "export": {
+    "file_bytes": 268435456
+  }
+}
