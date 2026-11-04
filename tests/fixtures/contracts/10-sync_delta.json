@@ -1,0 +1,15 @@
+{
+  "runtime_epoch": "epoch_1",
+  "task_id": "task_1",
+  "sequence": 1,
+  "changes": [
+    {
+      "type": "invalidate",
+      "target": {
+        "kind": "surface",
+        "id": "surface_1",
+        "expected_revision": 2
+      }
+    }
+  ]
+}

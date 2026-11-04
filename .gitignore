@@ -1,1 +1,29 @@
 .DS_Store
+node_modules/
+out/
+dist/
+playwright-report/
+test-results/
+coverage/
+*.tsbuildinfo
+*.log
+.cache/
+
+# Release artifacts stay outside the source repository.
+*.app/
+*.dmg
+*.zip
+
+# Local application profiles and credentials must never be versioned.
+.trellis/
+auth.json
+settings.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.env
+.env.*
+!.env.example

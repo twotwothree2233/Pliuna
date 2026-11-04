@@ -1,0 +1,19 @@
+{
+  "manifest_version": "0.1",
+  "protocol_version": "0.1",
+  "id": "trellis.pdf-text",
+  "version": "1.0.0",
+  "access_level": "task",
+  "contributes": [
+    {
+      "id": "extract",
+      "kind": "tool",
+      "entry": "extract.json",
+      "description": "Explicit, bounded pure-text PDF extraction; no OCR or document execution."
+    }
+  ],
+  "backend": {
+    "runtime": "app-node",
+    "entry": "backend.mjs"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "type": "call",
+  "input": {
+    "capability": "fixture/tool",
+    "arguments": {},
+    "references": [],
+    "idempotency_key": "no"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "text": "目标仍是完成测量练习。已获得第一次测量值，等待核对。",
+  "through_sequence": 8,
+  "latest_user_id": "message_1",
+  "retained_interactions": [
+    [
+      "response_1"
+    ],
+    [
+      "response_2"
+    ],
+    [
+      "response_3"
+    ]
+  ],
+  "template": "summary-v0.1",
+  "model_id": "model_1",
+  "model_revision": 1,
+  "installed_at": "2026-11-02T00:00:00Z"
+}

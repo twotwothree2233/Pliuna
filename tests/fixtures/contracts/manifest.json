@@ -1,0 +1,107 @@
+[
+  {
+    "file": "01-bundle.json",
+    "definition": "bundle",
+    "valid": true
+  },
+  {
+    "file": "02-model_request.json",
+    "definition": "model_request",
+    "valid": true
+  },
+  {
+    "file": "03-tool_result.json",
+    "definition": "tool_result",
+    "valid": true
+  },
+  {
+    "file": "04-ipc_request.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "05-model_request.json",
+    "definition": "model_request",
+    "valid": true
+  },
+  {
+    "file": "06-tool_result.json",
+    "definition": "tool_result",
+    "valid": true
+  },
+  {
+    "file": "07-approval_decision.json",
+    "definition": "approval_decision",
+    "valid": true
+  },
+  {
+    "file": "08-summary.json",
+    "definition": "summary",
+    "valid": true
+  },
+  {
+    "file": "09-manifest.json",
+    "definition": "manifest",
+    "valid": true
+  },
+  {
+    "file": "10-sync_delta.json",
+    "definition": "sync_delta",
+    "valid": true
+  },
+  {
+    "file": "11-wire_value.json",
+    "definition": "wire_value",
+    "valid": true
+  },
+  {
+    "file": "invalid-01.json",
+    "definition": "model_request",
+    "valid": false
+  },
+  {
+    "file": "invalid-02.json",
+    "definition": "approval_decision",
+    "valid": false
+  },
+  {
+    "file": "invalid-03.json",
+    "definition": "local_schema",
+    "valid": false
+  },
+  {
+    "file": "invalid-04.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "invalid-05.json",
+    "definition": "bundle",
+    "valid": false
+  },
+  {
+    "file": "invalid-06.json",
+    "definition": "model_request",
+    "valid": false
+  },
+  {
+    "file": "12-context-rejected.json",
+    "definition": "context_rejected",
+    "valid": true
+  },
+  {
+    "file": "invalid-07.json",
+    "definition": "context_rejected",
+    "valid": false
+  },
+  {
+    "file": "13-installed-summary.json",
+    "definition": "installed_summary",
+    "valid": true
+  },
+  {
+    "file": "invalid-08.json",
+    "definition": "installed_summary",
+    "valid": false
+  }
+]

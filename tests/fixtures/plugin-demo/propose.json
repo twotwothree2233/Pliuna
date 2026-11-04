@@ -1,0 +1,7 @@
+{
+  "id": "propose", "description": "Schedule a separate no-Run action after returning. Creates or replaces acceptance data/View only; approvals are independent and may be denied.",
+  "when_to_use": "Explicit plugin mutation acceptance request only. Scheduled is not committed.",
+  "input_schema": { "type": "object", "properties": { "operation": { "enum": ["create_data", "replace_data", "create_view", "preserve", "reset"] }, "text": { "type": "string", "maxLength": 1000 } }, "required": ["operation", "text"], "additionalProperties": false },
+  "output_schema": { "type": "object", "properties": { "scheduled": { "type": "boolean" }, "notice": { "type": "string" } }, "required": ["scheduled", "notice"], "additionalProperties": false },
+  "effect": "task-write", "timeout_ms": 15000, "errors": [], "examples": []
+}

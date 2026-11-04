@@ -1,0 +1,65 @@
+import { constants } from 'node:fs'
+import { lstat, open, rename, unlink, link } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { randomUUID, createHash } from 'node:crypto'
+
+type Identity = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }
+async function identity(file: string): Promise<Identity | null> {
+  try { const s = await lstat(file); if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1) throw Error('EXPORT_UNSAFE_TARGET'); return { dev: s.dev, ino: s.ino, size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs } }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+}
+const same = (a: Identity | null, b: Identity | null) => JSON.stringify(a) === JSON.stringify(b)
+export async function saveExport(target: string, expected: Identity | null, hooks: {
+  begin(temporary: string): Promise<{ html: string }>;
+  created?(identity: { dev: number; ino: number }): Promise<unknown>;
+  valid?(): Promise<unknown>;
+  finish(phase: 'saved' | 'failed' | 'unknown', reason: string | null): Promise<unknown>
+}): Promise<unknown> {
+  const temporary = join(dirname(target), `.trellis-export-${randomUUID()}.tmp`)
+  let created: Identity | null = null, published = false, uncertain = false, begun = false
+  try {
+    if (!same(await identity(target), expected)) throw Error('EXPORT_TARGET_CHANGED')
+    const { html } = await hooks.begin(temporary)
+    begun = true
+    const body = Buffer.from(html), file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+    try { const stat = await file.stat(); created = { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }; await hooks.created?.({ dev: stat.dev, ino: stat.ino }); await file.writeFile(body); await file.sync(); const end = await file.stat(); created = { dev: end.dev, ino: end.ino, size: end.size, mtimeMs: end.mtimeMs, ctimeMs: end.ctimeMs } } finally { await file.close() }
+    if (!same(await identity(temporary), created) || !same(await identity(target), expected)) throw Error('EXPORT_TARGET_CHANGED')
+    await hooks.valid?.()
+    if (!same(await identity(temporary), created) || !same(await identity(target), expected)) throw Error('EXPORT_TARGET_CHANGED')
+    if (expected) await rename(temporary, target)
+    else { await link(temporary, target); published = true; await unlink(temporary) }
+    published = true
+    const result = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    try { const stat = await result.stat(); if (stat.dev !== created!.dev || stat.ino !== created!.ino || stat.size !== body.length || createHash('sha256').update(await result.readFile()).digest('hex') !== createHash('sha256').update(body).digest('hex')) throw Error('EXPORT_PUBLISH_UNKNOWN') } finally { await result.close() }
+    if (process.platform !== 'win32') { const dir = await open(dirname(target), 'r'); try { await dir.sync() } finally { await dir.close() } }
+    return await hooks.finish('saved', null)
+  } catch (error) {
+    if (!begun) throw Error('EXPORT_NOT_STARTED')
+    uncertain = published
+    if (!published && created) {
+      try { if (!same(await identity(temporary), created)) uncertain = true; else await unlink(temporary) } catch { uncertain = true }
+    }
+    const message = (error as Error).message, reason = /^EXPORT_[A-Z_]+$/.test(message) ? message : 'EXPORT_SAVE_FAILED'
+    try { return await hooks.finish(uncertain ? 'unknown' : 'failed', reason) } catch { throw Error('EXPORT_SAVE_UNKNOWN') }
+  }
+}
+export { identity as exportTargetIdentity }
+
+export async function reconcileExport(job: { html: string | null; destination: { target: string; temporary: string; identity: { dev: number; ino: number } | null } }, acknowledge: boolean): Promise<'saved' | 'failed'> {
+  const { destination: d } = job
+  let verified = false
+  const target = await identity(d.target)
+  if (target && d.identity && target.dev === d.identity.dev && target.ino === d.identity.ino && job.html !== null && target.size === Buffer.byteLength(job.html)) {
+    const file = await open(d.target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    try { const s = await file.stat(); verified = s.dev === target.dev && s.ino === target.ino && createHash('sha256').update(await file.readFile()).digest('hex') === createHash('sha256').update(job.html).digest('hex') && same(target, await identity(d.target)) } finally { await file.close() }
+  }
+  const temporary = await identity(d.temporary)
+  if (temporary) {
+    if (!d.identity || temporary.dev !== d.identity.dev || temporary.ino !== d.identity.ino) throw Error('EXPORT_TEMP_IDENTITY_UNKNOWN')
+    if (!verified && !acknowledge) throw Error('EXPORT_ACKNOWLEDGEMENT_REQUIRED')
+    await unlink(d.temporary)
+    if (process.platform !== 'win32') { const dir = await open(dirname(d.temporary), 'r'); try { await dir.sync() } finally { await dir.close() } }
+  }
+  if (!verified && !acknowledge) throw Error('EXPORT_ACKNOWLEDGEMENT_REQUIRED')
+  return verified ? 'saved' : 'failed'
+}
