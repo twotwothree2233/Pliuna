@@ -1,0 +1,14 @@
+{
+  "type": "read",
+  "input": {
+    "target": {
+      "kind": "resource",
+      "id": "r_1"
+    },
+    "range": {
+      "start_line": 1,
+      "end_line": 2
+    },
+    "cursor": "old"
+  }
+}

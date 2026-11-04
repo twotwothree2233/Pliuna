@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "run_id": "example-run",
+  "model_id": "example-model",
+  "model_revision": 1,
+  "stage": "protected-input",
+  "code": "CONTEXT_MINIMUM_TOO_LARGE",
+  "measurement": "serialized-utf8-estimate",
+  "context_tokens": 240000,
+  "input_bytes": 250000,
+  "estimated_input": 250256,
+  "available_input": 240000,
+  "output_reserve": 128000,
+  "safety_reserve": 0,
+  "estimation_overhead": 256,
+  "components": {
+    "rules": 10000,
+    "tools": 15000,
+    "history": 20000,
+    "summary": 5000,
+    "current": 10000,
+    "tool_results": 189000,
+    "envelope": 1000
+  }
+}

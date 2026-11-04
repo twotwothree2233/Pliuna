@@ -1,0 +1,8 @@
+{
+  "type": "answer.submit",
+  "task_id": "task_1",
+  "view_id": "view_1",
+  "view_revision": 1,
+  "expected_state_revision": 2,
+  "form_id": "measurement-form"
+}
