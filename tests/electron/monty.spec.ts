@@ -38,7 +38,7 @@ test('native calculation discovers its contract, saves faithful values, cancels 
   const request = async (input: any): Promise<any> => { const response = await page.evaluate(r => window.trellis.request(r), input); if (!response.ok) throw Error(response.error.code); return response.data }
   const query = (task: string, kind: string, id?: string) => request({ type: 'task.query', task_id: task, query: id ? { type: 'read', input: { target: { kind, id } } } : { type: 'list', input: { kind } } })
   try {
-    await expect(page.getByText('首版基础候选 · 本地运行', { exact: true })).toBeVisible()
+    await expect(page.getByText('本地运行', { exact: true })).toBeVisible()
     expect(await app.evaluate(({ app }) => app.getPath('userData'))).toBe(root)
     if (process.env.TRELLIS_CANDIDATE_EXECUTABLE) expect(await app.evaluate(({ app }) => app.getAppPath())).toContain('Trellis.app/Contents/Resources/app')
     expect(await request({ type: 'host.tasks' })).toEqual([])

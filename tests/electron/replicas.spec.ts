@@ -1,3 +1,4 @@
+import { chooseModel, openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -22,8 +23,8 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
   }
   try {
     await page.getByRole('button', { name: '创建第一个任务' }).click(); await page.getByLabel('任务名称').fill('副本隔离验收'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    await page.getByLabel('本次模型', { exact: true }).selectOption('fixture'); await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
-    await expect(page.locator('.managed')).toHaveCount(1); await expect(page.getByLabel('最近 Run 结果')).toContainText('completed')
+    await chooseModel(page, 'fixture'); await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
     await page.getByLabel('你的想法').fill('不会丢失的草稿'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     await page.getByRole('button', { name: '提交答案', exact: true }).click(); await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
     const before = await inspect(), resources = await readdir(join(directory, 'resources')), resourceBytes = await Promise.all(resources.map(f => readFile(join(directory, 'resources', f))))
@@ -56,7 +57,7 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       ipcMain.removeHandler('trellis:request'); ipcMain.handle('trellis:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.replica.execute' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Isolated response loss' } } }; return result })
     })
     await page.getByLabel('想从哪里开始？').fill('保持未发送的消息')
-    await page.getByRole('button', { name: '存储检查', exact: true }).click(); const panel = page.getByRole('dialog', { name: '存储检查', exact: true }), section = panel.getByRole('region', { name: '副本退役与回收' })
+    await openSettings(page, '存储与恢复'); const panel = page.getByRole('dialog', { name: '应用设置', exact: true }), section = panel.getByRole('region', { name: '副本退役与回收' })
     // Choose an enabled candidate; protected current/fallback entries remain visibly disabled.
     const enabled = scenario === 'partial-retry' ? section.getByRole('button', { name: '重试原副本未完成项', exact: true }).first() : section.locator('button:not([disabled])').filter({ hasText: /^核验并退役此副本$/ }).first()
     await expect(enabled).toBeEnabled()
@@ -64,10 +65,10 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       await app.evaluate((_electron, root) => { const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(root + '/trellis.sqlite'); db.exec('UPDATE views SET state_revision=state_revision+1'); db.close() }, directory)
       await page.getByLabel('你的想法').evaluate(inputElement => { const input = inputElement as HTMLTextAreaElement; input.value = '冲突输入不能丢'; input.dispatchEvent(new Event('input', { bubbles: true })); Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent === '核验并退役此副本' && !b.disabled)!.click() })
       await expect(panel.getByRole('alert').last()).toContainText('VERSION_CONFLICT'); expect((await inspect()).journal.retirements).toHaveLength(0); await expect(page.getByLabel('你的想法')).toHaveValue('冲突输入不能丢')
-      await panel.getByRole('button', { name: '关闭', exact: true }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
+      await panel.getByRole('button', { name: /^返回工作区/ }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
     } else {
       let message = ''; page.once('dialog', async d => { message = d.message(); if (scenario === 'cancel') await d.dismiss(); else await d.accept() }); await enabled.click()
-      await expect(panel.getByRole('button', { name: '关闭', exact: true })).toBeEnabled(); expect(message).toContain('永远不可再选择或恢复'); expect(message).toContain('不删除正式资源')
+      await expect(panel.getByRole('button', { name: /^返回工作区/ })).toBeEnabled(); expect(message).toContain('永远不可再选择或恢复'); expect(message).toContain('不删除正式资源')
       if (scenario === 'cancel') { expect((await inspect()).journal.retirements.every((r: any) => r.phase === 'preview')).toBe(true); expect((await readdir(join(directory, 'recovery'))).some(f => f === old.id + '.sqlite')).toBe(true) }
       else { await expect(section).toContainText('PROTECTION_RELEASED'); const r = (await inspect()).journal.retirements.find((r: any) => r.phase === 'released'); expect(r).toBeTruthy(); expect((await call({ type: 'maintenance.status' })).active.id).toBe(active.id); await app.close(); app = await launch(); page = await app.firstWindow(); expect((await call({ type: 'maintenance.replica.status', operation_id: r.id })).phase).toBe('released') }
     }

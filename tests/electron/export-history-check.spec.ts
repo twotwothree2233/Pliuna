@@ -1,3 +1,4 @@
+import { openPending } from '../helpers/agent-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -34,8 +35,9 @@ test('keeps frozen original blockers after current correction and restores check
     const answer = (await snapshot()).answers[0]; expect(answer.raw).toEqual({ response: '12.5' }); expect(answer.value).toEqual({ response: 12.5 })
     source = await snapshot(); phase = 0; replace = true
     await call({ type: 'task.submit', task_id: task, text: 'Correct current synthetic question', model_config_id: 'history-check', attachments: [] })
+    await openPending(page)
     await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
-    await page.getByRole('button', { name: '保存输入并检查替换', exact: true }).click()
+    await openPending(page);await page.getByRole('button', { name: '保存输入并检查替换', exact: true }).click()
     await expect(page.getByText('CURRENT_CORRECTED', { exact: true })).toBeVisible()
     const before = await snapshot(), settings = await readFile(join(root, 'settings.json')), auth = await readFile(join(root, 'auth.json'))
     const inspect = async () => {

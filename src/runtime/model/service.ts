@@ -8,6 +8,7 @@ import { legacyMetadata, unknownCapabilities } from './metadata'
 import { modelProtocol } from './protocol'
 import { deadline } from './limits'
 import { requestAccounting, type RequestAccounting, type RequestPurpose } from './accounting'
+import type { ChannelEntry, SavedChannel } from './channels'
 import type { ModelPersistence, SavedConnection } from './persistence'
 import { requestEvidence, type RequestEvidence, type RequestLink } from './request-evidence'
 import { capacityPlan } from './capacity'
@@ -55,6 +56,8 @@ export class ModelScheduler {
 export interface ModelLease { id: string; revision: number; config: ModelConfiguration; release: () => void; accounting?: (event: RequestAccounting) => void; evidence?: (event: RequestEvidence) => string }
 export class ModelService {
   private configurations = new Map<string, Configuration>()
+  private channelConfigurations = new Map<string, ChannelEntry>()
+  private channelDiscoveries = new Map<string, number>()
   private allControllers = new Set<AbortController>()
   private lifetime = new AbortController()
   private operations = new Map<string, AbortController>()
@@ -68,6 +71,12 @@ export class ModelService {
       this.storage = { available: loaded.available, backend: loaded.backend, error: loaded.error ?? '' }
       if (loaded.error) return
       const restored = new Map<string, Configuration>()
+      for (const raw of loaded.channels ?? []) {
+        assertContract<HostModelRequest>('host_model_request', { type: 'model.channel.configure', channel: { id: raw.id, name: raw.name, base_url: raw.base_url, compatibility_profile: raw.compatibility_profile }, api_key: raw.key ?? '', confirm_memory_only: true })
+        endpoint(raw.base_url, 'chat/completions'); this.checkKey(raw.key ?? '')
+        if (this.channelConfigurations.has(raw.id) || !Number.isSafeInteger(raw.revision) || raw.revision < 1) throw new Error()
+        this.channelConfigurations.set(raw.id, { ...raw, remembered: true })
+      }
       for (const raw of loaded.records) {
         const saved = raw as SavedConnection
         if (!saved || !Number.isSafeInteger(saved.revision) || saved.revision < 1 || typeof saved.protocol !== 'string' || !Array.isArray(saved.roles) || saved.roles.some(role => role !== 'main' && role !== 'approval' && role !== 'compaction') || (saved.key !== null && typeof saved.key !== 'string')) throw new Error()
@@ -76,10 +85,73 @@ export class ModelService {
         entry.revision = saved.revision; entry.remembered = true; entry.credentialMissing = saved.key === null
         if (saved.protocol === this.protocol && !entry.credentialMissing) entry.roles = new Set(saved.roles)
         restored.set(entry.config.id, entry)
+        const channel = entry.config.channel_id ? this.channelConfigurations.get(entry.config.channel_id) : undefined
+        if (loaded.channels && (!channel || channel.base_url !== entry.config.base_url || channel.compatibility_profile !== entry.config.compatibility_profile || (saved.key !== null && channel.key !== saved.key))) throw new Error()
         // Validate shared channel invariants against the entries already restored.
         this.configurations = restored
       }
-    } catch { this.configurations.clear(); this.storage.error = this.storage.backend === 'plain-file' ? 'SETTINGS_READ_FAILED' : 'SECURE_STORAGE_READ_FAILED' }
+      this.deriveChannels()
+    } catch { this.configurations.clear(); this.channelConfigurations.clear(); this.storage.error = this.storage.backend === 'plain-file' ? 'SETTINGS_READ_FAILED' : 'SECURE_STORAGE_READ_FAILED' }
+  }
+  channelList() { return [...this.channelConfigurations.values()].map(({ key, ...channel }) => ({ ...channel, credential_missing: key === null, occupied: this.saving || this.channelDiscoveries.has(channel.id) || [...this.configurations.values()].some(e => e.config.channel_id === channel.id && e.locks > 0) })) }
+  private deriveChannels() {
+    for (const entry of this.configurations.values()) {
+      const id = entry.config.channel_id ?? 'legacy:' + entry.channel
+      entry.config.channel_id = id
+      if (!this.channelConfigurations.has(id)) this.channelConfigurations.set(id, { id, name: new URL(entry.config.base_url).host, base_url: entry.config.base_url, compatibility_profile: entry.config.compatibility_profile, key: entry.credentialMissing ? null : entry.key, revision: 1, remembered: !!entry.remembered })
+      else if (id.startsWith('legacy:')) {
+        const channel = this.channelConfigurations.get(id)!
+        if (channel.key === null && !entry.credentialMissing) channel.key = entry.key
+        channel.remembered ||= !!entry.remembered
+      }
+    }
+  }
+  async configureChannel(raw: unknown) {
+    assertContract<HostModelRequest>('host_model_request', raw)
+    if (raw.type !== 'model.channel.configure') throw new ContractError('INVALID_REQUEST', 'Expected channel configuration')
+    this.idle(); endpoint(raw.channel.base_url, 'chat/completions'); this.checkKey(raw.api_key)
+    const old = this.channelConfigurations.get(raw.channel.id)
+    if (raw.use_saved_credential && (!old || old.key === null || raw.api_key || old.base_url !== raw.channel.base_url)) throw new ContractError('CREDENTIAL_REQUIRED', 'Channel credential is unavailable')
+    if (raw.remember_connection && !(this.storage.backend === 'plain-file' ? raw.confirm_plaintext_storage : false)) throw new ContractError('CONFIRMATION_REQUIRED', 'Explicitly confirm plaintext credential storage')
+    const affected = [...this.configurations.values()].filter(e => e.config.channel_id === raw.channel.id)
+    if (affected.some(e => e.locks)) throw new ContractError('CONFIGURATION_BUSY', 'Channel is occupied')
+    const key = raw.use_saved_credential ? old!.key! : raw.api_key
+    if (this.channelDiscoveries.has(raw.channel.id)) throw new ContractError('CONFIGURATION_BUSY', 'Channel discovery is in progress')
+    const changed = !old || old.base_url !== raw.channel.base_url || old.compatibility_profile !== raw.channel.compatibility_profile || old.key !== key
+    const channel: ChannelEntry = { ...raw.channel, key, remembered: !!raw.remember_connection, revision: (old?.revision ?? 0) + 1 }
+    const channels = new Map(this.channelConfigurations).set(channel.id, channel), next = new Map(this.configurations)
+    for (const entry of affected) next.set(entry.config.id, { ...entry, config: { ...entry.config, base_url: channel.base_url, compatibility_profile: channel.compatibility_profile }, key, credentialMissing: false, channel: new URL(channel.base_url).origin, remembered: channel.remembered, roles: changed ? new Set() : new Set(entry.roles), revision: entry.revision + (changed ? 1 : 0) })
+    if (channel.remembered || old?.remembered || affected.some(e => e.remembered)) await this.persist(next, channels)
+    this.channelConfigurations = channels; this.configurations = next
+    return this.channelList()
+  }
+  async configureChannelModel(raw: unknown) {
+    assertContract<HostModelRequest>('host_model_request', raw)
+    if (raw.type !== 'model.channel.model') throw new ContractError('INVALID_REQUEST', 'Expected channel model')
+    this.idle()
+    const channel = this.channelConfigurations.get(raw.channel_id)
+    if (!channel || channel.key === null) throw new ContractError('CREDENTIAL_REQUIRED', 'Configure the channel first')
+    const previous = this.configurations.get(raw.configuration.id)
+    if (previous && previous.config.channel_id !== channel.id) throw new ContractError('INVALID_CONFIGURATION', 'A model cannot change channel identity')
+    if ([...this.configurations.values()].some(e => e.config.id !== raw.configuration.id && e.config.channel_id === channel.id && e.config.wire_model_id === raw.configuration.wire_model_id)) throw new ContractError('INVALID_CONFIGURATION', 'Model ID already exists in this channel')
+    return this.configureConnection({ type: 'model.configure', configuration: { ...raw.configuration, channel_id: channel.id, base_url: channel.base_url, compatibility_profile: channel.compatibility_profile }, api_key: channel.key, confirm_memory_only: true, remember_connection: channel.remembered, ...(channel.remembered ? { confirm_plaintext_storage: true } : {}), ...(raw.confirm_history_processing ? { confirm_history_processing: true } : {}) })
+  }
+  async discoverChannel(id: string, operationId: string) {
+    const channel = this.channelConfigurations.get(id)
+    if (!channel || channel.key === null) throw new ContractError('CREDENTIAL_REQUIRED', 'Configure the channel first')
+    this.idle()
+    this.channelDiscoveries.set(id, (this.channelDiscoveries.get(id) ?? 0) + 1)
+    try { return await this.probe({ type: 'model.probe', base_url: channel.base_url, api_key: channel.key, confirm_memory_only: true, operation_id: operationId, include_metadata: true }) }
+    finally { const remaining = this.channelDiscoveries.get(id)! - 1; if (remaining) this.channelDiscoveries.set(id, remaining); else this.channelDiscoveries.delete(id) }
+  }
+  async removeChannel(id: string) {
+    if (this.channelDiscoveries.has(id)) throw new ContractError('CONFIGURATION_BUSY', 'Channel discovery is in progress')
+    this.idle(); const channel = this.channelConfigurations.get(id)
+    if (!channel) throw new ContractError('MODEL_NOT_CONFIGURED', 'Channel absent')
+    if ([...this.configurations.values()].some(e => e.config.channel_id === id)) throw new ContractError('CONFIGURATION_BUSY', 'Remove channel models first')
+    const channels = new Map(this.channelConfigurations); channels.delete(id)
+    if (channel.remembered) await this.persist(this.configurations, channels)
+    this.channelConfigurations = channels
   }
   storageStatus(): unknown { return this.storage }
   recoverySettings(): ModelConfiguration[] { return [...this.configurations.values()].map(entry => structuredClone(entry.config)) }
@@ -97,7 +169,7 @@ export class ModelService {
     if (previous?.locks) throw new ContractError('CONFIGURATION_BUSY', 'Model configuration is occupied')
     for (const [id, entry] of this.configurations) {
       if (id === config.id) continue
-      if (entry.channel !== channel) continue
+      if (config.channel_id && entry.config.channel_id ? entry.config.channel_id !== config.channel_id : entry.channel !== channel) continue
       // One origin is one credential boundary; model-specific fields remain independent.
       const sharedChanged = entry.config.base_url !== config.base_url || (!entry.credentialMissing && !credentialMissing && entry.key !== input.api_key) || entry.config.compatibility_profile !== config.compatibility_profile
       if (sharedChanged) throw new ContractError(entry.locks ? 'CONFIGURATION_BUSY' : 'CHANNEL_CONFIGURATION_CONFLICT', 'Shared channel address, profile and credential must remain consistent')
@@ -108,15 +180,16 @@ export class ModelService {
   configure(input: unknown): unknown {
     const entry = this.prepare(input)
     this.configurations.set(entry.config.id, entry)
+    this.deriveChannels()
     return this.list()
   }
-  private async persist(next: Map<string, Configuration>): Promise<void> {
+  private async persist(next: Map<string, Configuration>, channels = this.channelConfigurations): Promise<void> {
     this.idle()
     if (this.storage.backend === 'plain-file' && (!this.storage.available || this.storage.error)) throw new ContractError(this.storage.error || 'SETTINGS_UNAVAILABLE', 'Settings files are unavailable; inspect files before saving again')
     if (!this.persistence || !this.storage.available || this.storage.error) throw new ContractError(this.storage.error || 'SECURE_STORAGE_UNAVAILABLE', 'Secure storage is unavailable; nothing was saved and no plaintext fallback is permitted')
     const records: SavedConnection[] = [...next.values()].filter(entry => entry.remembered).map(entry => ({ configuration: entry.config, key: entry.credentialMissing ? null : entry.key, revision: entry.revision, protocol: this.protocol, roles: [...entry.roles] }))
     this.saving = true
-    try { await this.persistence.save(records) }
+    try { await this.persistence.save(records, [...channels.values()].filter(c => c.remembered).map(({ remembered, ...c }): SavedChannel => c)) }
     catch (error) {
       if (this.storage.backend === 'plain-file') {
         const code = error instanceof Error && /^SETTINGS_[A-Z_]+$/.test(error.message) ? error.message : 'SETTINGS_WRITE_FAILED'
@@ -152,27 +225,38 @@ export class ModelService {
       const { compaction_target: _target, ...configuration } = input.configuration
       input = { ...input, configuration }
     }
+    if (!input.configuration.channel_id) input = { ...input, configuration: { ...input.configuration, channel_id: previous?.config.channel_id ?? 'legacy:' + new URL(input.configuration.base_url).origin } }
+    const declared = input.configuration.channel_id ? this.channelConfigurations.get(input.configuration.channel_id) : undefined
+    if (raw.configuration.channel_id && declared && (declared.base_url !== input.configuration.base_url || declared.compatibility_profile !== input.configuration.compatibility_profile || declared.key !== input.api_key)) throw new ContractError('CHANNEL_CONFIGURATION_CONFLICT', 'Edit shared connection through channel settings')
     const entry = this.prepare(input)
     entry.remembered = raw.remember_connection === true
     const next = new Map(this.configurations).set(entry.config.id, entry)
-    if (entry.remembered || previous?.remembered) await this.persist(next)
-    this.configurations = next
+    const channels = new Map(this.channelConfigurations), id = entry.config.channel_id!
+    const old = channels.get(id)
+    if (!old || !raw.configuration.channel_id) channels.set(id, { id, name: old?.name ?? new URL(entry.config.base_url).host, base_url: entry.config.base_url, compatibility_profile: entry.config.compatibility_profile, key: entry.key, revision: old?.revision ?? 1, remembered: [...next.values()].some(e => e.config.channel_id === id && e.remembered) })
+    if (entry.remembered || previous?.remembered) await this.persist(next, channels)
+    this.channelConfigurations = channels; this.configurations = next
     return this.list()
   }
   async remember(id: string): Promise<void> {
     this.idle(); const entry = this.entry(id)
     if (entry.locks) throw new ContractError('CONFIGURATION_BUSY', 'Model configuration is occupied')
     const next = new Map(this.configurations).set(id, { ...entry, remembered: true })
-    await this.persist(next); this.configurations = next
+    const channels = new Map(this.channelConfigurations), channel = channels.get(entry.config.channel_id!)
+    if (channel) channels.set(channel.id, { ...channel, remembered: true })
+    await this.persist(next, channels); this.channelConfigurations = channels; this.configurations = next
   }
   async deleteCredential(id: string): Promise<void> {
     this.idle(); const entry = this.entry(id)
-    const affected = [...this.configurations].filter(([, other]) => other.channel === entry.channel)
+    if (this.channelDiscoveries.has(entry.config.channel_id!)) throw new ContractError('CONFIGURATION_BUSY', 'Channel discovery is in progress')
+    const affected = [...this.configurations].filter(([, other]) => entry.config.channel_id && other.config.channel_id ? other.config.channel_id === entry.config.channel_id : other.channel === entry.channel)
     if (affected.some(([, other]) => other.locks)) throw new ContractError('CONFIGURATION_BUSY', 'Related channel is occupied')
     const next = new Map(this.configurations)
     for (const [modelId, other] of affected) next.set(modelId, { ...other, key: '', credentialMissing: true, roles: new Set(), revision: other.revision + 1 })
-    if (affected.some(([, other]) => other.remembered)) await this.persist(next)
-    this.configurations = next
+    const channels = new Map(this.channelConfigurations)
+    for (const [, other] of affected) { const c = channels.get(other.config.channel_id!); if (c) channels.set(c.id, { ...c, key: null, revision: c.revision + 1 }) }
+    if (affected.some(([, other]) => other.remembered)) await this.persist(next, channels)
+    this.channelConfigurations = channels; this.configurations = next
   }
   async removeConnection(id: string): Promise<void> {
     this.idle(); const entry = this.entry(id)
@@ -323,5 +407,5 @@ export class ModelService {
     } catch (e) { if (invalidated) entry.roles.delete(role); if (e instanceof ModelError || e instanceof ContractError) throw e; throw new ModelError('ROLE_FORMAT_TEST_FAILED') }
     finally { entry.locks-- }
   }
-  close(): void { this.lifetime.abort(); for (const c of this.allControllers) c.abort(); for (const e of this.configurations.values()) e.key = ''; this.configurations.clear() }
+  close(): void { this.lifetime.abort(); for (const c of this.allControllers) c.abort(); for (const e of this.configurations.values()) e.key = ''; this.configurations.clear(); for (const channel of this.channelConfigurations.values()) channel.key = null; this.channelConfigurations.clear() }
 }
