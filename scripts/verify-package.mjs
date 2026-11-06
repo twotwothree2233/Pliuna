@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fileManifest, assertCleanPayload, nativeHashes, sha256 } from './package-macos.mjs'
+import { fileManifest, assertCleanPayload, nativeHashes, packageTarget, sha256 } from './package-macos.mjs'
 
 export function verifyManifest(directory) {
   const expected = JSON.parse(readFileSync(join(directory, 'FILES.json'), 'utf8'))
@@ -17,7 +17,7 @@ export function verifyPackage(directory) {
   const root = join(app, 'Contents/Resources/app'), pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
   if (pkg.main !== 'out/main/index.js') throw Error('Candidate must use the ordinary entry')
   for (const [name, hash] of Object.entries(nativeHashes)) {
-    const file = join(root, 'node_modules/@pydantic/monty-darwin-arm64', name)
+    const file = join(root, 'node_modules', packageTarget.package, name)
     if (sha256(file) !== hash) throw Error('Native asset mismatch')
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', file], { stdio: 'inherit' })
   }

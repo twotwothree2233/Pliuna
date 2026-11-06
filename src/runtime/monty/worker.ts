@@ -1,6 +1,6 @@
 import type { Monty } from '@pydantic/monty'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { montyAssets } from './assets'
 import { encodedProgram } from './program'
 import { montyLimits, validateMontyInput } from './contract'
@@ -23,7 +23,7 @@ process.once('message', async (message: { binary: string; input: unknown; limits
   try {
     const assets = montyAssets(process.argv[1]!)
     if (assets.binary !== message.binary) throw Error('MONTY_RUNTIME_UNAVAILABLE')
-    const native = join(dirname(assets.binary), 'monty.darwin-arm64.node')
+    const native = assets.native
     createRequire(join(__dirname, 'monty-native.cjs'))(native)
     process.env.NAPI_RS_NATIVE_LIBRARY_PATH = native
     const { Monty, MontyRuntimeError, MontySyntaxError, MontyCrashedError } = await import('@pydantic/monty')

@@ -1,0 +1,76 @@
+name: Cross-platform baseline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS ARM64, os: macos-15, arch: arm64 }
+          - { name: macOS Intel, os: macos-15-intel, arch: x64 }
+          - { name: Windows x64, os: windows-2022, arch: x64 }
+          - { name: Linux glibc x64, os: ubuntu-24.04, arch: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: node -e "if(process.arch!==process.env.EXPECTED_ARCH)throw Error('Unexpected runner architecture');console.log(process.platform,process.arch,process.version)"
+      - name: Install pinned dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install contract validation dependency
+        run: python -m pip install -r scripts/requirements-dev.txt
+      - name: Build and check generated types
+        run: pnpm build
+      - name: Check generated contract drift
+        run: git diff --exit-code -- src/shared/contracts.generated.ts
+      - name: Validate contracts
+        run: pnpm verify:contracts
+      - name: Portable tests (Node ABI)
+        run: pnpm test:portable
+      - name: Probe installed Node bindings
+        run: node scripts/check-native.mjs
+      - name: Probe installed Electron bindings (switch ABI)
+        run: pnpm verify:native:electron
+      - name: Prepare Linux desktop
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgtk-3-0 libgbm1 libnss3 libasound2t64
+          # Ephemeral CI host: allow Chromium's user namespace sandbox.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Desktop startup and restart (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a pnpm exec playwright test platform-smoke.spec.ts
+      - name: Desktop startup and restart (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: pnpm exec playwright test platform-smoke.spec.ts
+      - name: Keep desktop failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: test-results/
+          if-no-files-found: ignore

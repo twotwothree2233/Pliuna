@@ -21,8 +21,9 @@ const record: SavedConnection = {
 }
 describe('hidden profile file settings', () => {
   it('resolves every normal platform to the same hidden directory without probing legacy paths', () => {
-    expect(applicationDirectory('/synthetic/home')).toBe('/synthetic/home/.trellis')
-    expect(applicationDirectory('/synthetic/home', '/isolated/.trellis')).toBe('/isolated/.trellis')
+    const home = join(tmpdir(), 'synthetic-home'), override = join(tmpdir(), 'isolated', '.trellis')
+    expect(applicationDirectory(home)).toBe(join(home, '.trellis'))
+    expect(applicationDirectory(home, override)).toBe(override)
   })
   it('stores configuration and plaintext credentials separately and restarts without networking', () => {
     const { root, store } = setup(); store.save([record])

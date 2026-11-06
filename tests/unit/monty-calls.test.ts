@@ -5,7 +5,6 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RuntimeStore } from '../../src/runtime/store'
 import { MontyCalls } from '../../src/runtime/monty/calls'
-import { montyAssets } from '../../src/runtime/monty/assets'
 import { MONTY_ID } from '../../src/runtime/monty/contract'
 import { ContractError } from '../../src/shared/validation'
 import type { MontyRunner,MontyOutput } from '../../src/runtime/monty/runner'
@@ -14,7 +13,7 @@ beforeEach(()=>{vi.useFakeTimers();manager=undefined as any;root=mkdtempSync(joi
 afterEach(async()=>{await manager?.shutdown();store.close();vi.useRealTimers()})
 function setup(output:MontyOutput,custom?:MontyRunner){
  const runner:MontyRunner=custom??((_a,_i,_s,_r,started)=>{started(123);return{result:Promise.resolve(output),stop:async()=>{}}})
- manager=new MontyCalls(db,root,(store as any).storage,()=>{const value=db.prepare('SELECT commit_valid,state FROM runs WHERE id=?').get(run) as any;if(!value.commit_valid||!['running','waiting'].includes(value.state))throw new ContractError('SOURCE_INVALID','source ended')},(t,refs)=>(store as any).validateDataReferences(t,refs),(t,k,v)=>(store as any).record(t,k,v),process.execPath,true,runner,()=>montyAssets(join(process.cwd(),'out/main/monty-worker.js')))
+ manager=new MontyCalls(db,root,(store as any).storage,()=>{const value=db.prepare('SELECT commit_valid,state FROM runs WHERE id=?').get(run) as any;if(!value.commit_valid||!['running','waiting'].includes(value.state))throw new ContractError('SOURCE_INVALID','source ended')},(t,refs)=>(store as any).validateDataReferences(t,refs),(t,k,v)=>(store as any).record(t,k,v),process.execPath,true,runner,()=>({binary:'fixture-binary',native:'fixture-native',binary_sha256:'0'.repeat(64),runner:'fixture-runner'}))
  return (signal=new AbortController().signal)=>manager.call(task,run,{code:'result=1',inputs:{}},[],signal) as Promise<any>
 }
 const ok:MontyOutput={ok:true,value:{type:'json',value:{answer:17}},stdout:'done\n',stderr:''}
