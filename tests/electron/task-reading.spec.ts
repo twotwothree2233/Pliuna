@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
-import { chooseModel, chooseTheme } from '../helpers/settings-ui'
+import { chooseModel, chooseTheme, configureModel } from '../helpers/settings-ui'
+import { hostToolStream, modelServer, synthetic, textStream } from '../helpers/model-server'
 const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('continuous task reading: inline records, saved drafts, history and safe resources', async () => {
@@ -113,4 +114,100 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     }
     expect(errors).toEqual([])
   } finally { await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {}); await app.close(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('windowed answer actions use the selected answer independently of segmented JSON', async () => {
+  test.setTimeout(90000)
+  const requests: string[] = [], pending: { response: Parameters<typeof textStream>[0] | null } = { response: null }
+  const server = await modelServer(({ body }, response) => {
+    if (synthetic(body, response)) return
+    const request = JSON.parse(body.messages.findLast((message: any) => message.role === 'user').content).request
+    requests.push(request)
+    if (request === '等待作答操作测试') { pending.response = response; return }
+    const last = body.messages.at(-1)
+    if (request !== '创建长作答练习') { textStream(response, '已收到所选作答的继续请求。'); return }
+    if (last.role !== 'tool') { hostToolStream(response, 'list', { kind: 'surface' }, '', 'find-surface'); return }
+    if (last.tool_call_id !== 'find-surface') { textStream(response, '长作答练习已创建。'); return }
+    const surface = JSON.parse(last.content).data.items[0]
+    hostToolStream(response, 'write', { type: 'surface.update', surface_id: surface.id, expected_revision: surface.revision, operations: [{ type: 'view.create', client_ref: 'long-answer', slot_id: 'main', bundle: { type: 'inline', bundle: {
+      profile: 'managed-v1', html: '<section><h2>长作答练习</h2><label for="response">长作答内容</label><textarea id="response"></textarea><button id="submit" type="button">保存正式作答</button></section>', css: '',
+      state: { schema: { type: 'object', properties: { response: { type: 'string', minLength: 1, maxLength: 200000 } }, required: ['response'], additionalProperties: false }, initial: { response: '' }, compatibility_version: 'long-answer-v1' },
+      forms: [{ id: 'exercise', fields: ['/response'] }], behaviors: [{ type: 'input', element_id: 'response', field: '/response', control: 'textarea' }, { type: 'submit', element_id: 'submit', form_id: 'exercise' }], references: [], export: []
+    } } }] })
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'trellis-windowed-answer-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: directory } })
+  try {
+    const page = await app.firstWindow(), errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    await page.setViewportSize({ width: 1440, height: 960 })
+    const call = async (request: any): Promise<any> => page.evaluate(async request => { const result = await window.trellis.request(request); if (!result.ok) throw Error(result.error.code); return result.data }, request)
+    await configureModel(page, { id: 'answer-main', url: server.url, key: 'isolated-answer-test-key', model: 'wire-model', context: 1000000, output: 4096 })
+    await call({ type: 'model.test', model_id: 'answer-main', role: 'main', confirm_cost: true })
+    await page.getByRole('button', { name: '创建第一个任务' }).click()
+    await page.getByLabel('任务名称').fill('分段作答操作')
+    await page.getByRole('button', { name: '创建任务', exact: true }).click()
+    const send = async (text: string) => { await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: '发送 · 新 Run', exact: true }).click() }
+    await send('创建长作答练习')
+    await expect(page.getByRole('heading', { name: '长作答练习', exact: true })).toBeVisible()
+    await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
+    for (const value of ['x'.repeat(140000), '最新的短作答']) {
+      await page.getByLabel('长作答内容', { exact: true }).fill(value)
+      await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
+      await page.getByRole('button', { name: '保存正式作答', exact: true }).click()
+      await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
+    }
+    const taskId = (await call({ type: 'host.tasks' }))[0].id
+    const snapshot = await call({ type: 'task.snapshot', task_id: taskId }), selectedId = snapshot.answers[0].id, latestId = snapshot.answers[1].id
+    await page.getByRole('tab', { name: /作答记录/ }).click()
+    const answers = page.getByRole('region', { name: '全部作答分页浏览', exact: true })
+    await expect(answers.locator('.record-row')).toHaveCount(2)
+    await answers.locator('.record-row').first().click()
+    const detail = answers.getByRole('article', { name: '全部作答全文', exact: true })
+    await expect(detail).toContainText('当前为 JSON 文本片段')
+    let pages = 1
+    const next = detail.getByRole('button', { name: '继续读取全文', exact: true })
+    while (await next.count()) {
+      const before = await detail.locator('pre').textContent()
+      await next.click()
+      await expect.poll(async () => (await detail.locator('pre').textContent()) !== before).toBe(true)
+      if (++pages > 64) throw Error('Answer pagination did not finish within its fixture bound')
+    }
+    expect(pages).toBeGreaterThan(1)
+    await expect(detail).toContainText('仅显示末尾 256K 字符')
+    await expect(detail.getByRole('status')).toHaveText('全文读取完成')
+    const continueAnswer = detail.getByRole('button', { name: '基于已保存作答继续', exact: true }), returnToContent = detail.getByRole('button', { name: '回到当前内容', exact: true })
+    await expect(continueAnswer).toBeEnabled()
+    await expect(returnToContent).toBeVisible()
+    let confirmation = ''
+    const beforeCancel = requests.length
+    page.once('dialog', async dialog => { confirmation = dialog.message(); await dialog.dismiss() })
+    await continueAnswer.click()
+    expect(confirmation).toContain(selectedId)
+    expect(confirmation).not.toContain(latestId)
+    expect(requests).toHaveLength(beforeCancel)
+    expect((await call({ type: 'task.snapshot', task_id: taskId })).runs).toHaveLength(1)
+    await continueAnswer.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: '/tmp/trellis-windowed-answer-actions.png' })
+    await returnToContent.click()
+    await expect(page.getByLabel('长作答内容', { exact: true })).toHaveValue('最新的短作答')
+    await page.getByRole('tab', { name: /作答记录/ }).click()
+    await answers.locator('.record-row').first().click()
+    await expect(detail).toContainText('当前为 JSON 文本片段')
+    await expect(continueAnswer).toBeEnabled()
+    await expect(returnToContent).toBeVisible()
+    await send('等待作答操作测试')
+    await expect.poll(() => Boolean(pending.response)).toBe(true)
+    await expect(continueAnswer).toBeDisabled()
+    await expect(returnToContent).toBeEnabled()
+    textStream(pending.response!, '等待已结束。'); pending.response = null
+    await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
+    await expect(continueAnswer).toBeEnabled()
+    page.once('dialog', dialog => dialog.accept())
+    await continueAnswer.click()
+    await expect.poll(() => requests.at(-1)).toContain(selectedId)
+    await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
+    expect((await call({ type: 'task.snapshot', task_id: taskId })).runs).toHaveLength(3)
+    expect(errors).toEqual([])
+  } finally { pending.response?.destroy(); await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })

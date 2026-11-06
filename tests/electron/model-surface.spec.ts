@@ -56,6 +56,7 @@ test('HTTP model publishes an interactive View, user submits, next Run reads imm
     await expect(page.locator('.history .record-values')).toContainText('事务全部成功或全部回滚。')
     await page.getByLabel('想从哪里开始？').fill('读取正式答案')
     await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('tab', { name: /^内容/ }).click()
     await expect(page.getByText('本机合成服务读取正式答案：事务全部成功或全部回滚。', { exact: true })).toBeVisible()
     await expect(page.locator('.agent-status')).toContainText('已完成')
     await page.getByRole('tab', { name: /执行记录/ }).click()
