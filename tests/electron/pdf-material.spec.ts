@@ -1,3 +1,4 @@
+import { openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, writeFile, readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -32,10 +33,10 @@ test('PDF bundled runtime with empty PATH, source navigation and isolated restar
     resourceId = (await call({ type: 'material.status', task_id: task, operation_id: imported.items[0].operation_id })).resource.id
     expect((await call({ type: 'task.query', task_id: task, query: { type: 'list', input: { kind: 'call' } } })).items).toHaveLength(0)
     await app.evaluate(({ dialog }, path) => { (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [path] }) }, plugin)
-    await page.getByRole('button', { name: '插件', exact: true }).click(); const panel = page.getByRole('dialog', { name: '插件与主流程' })
+    await openSettings(page, '插件与主流程'); const panel = page.getByRole('dialog', { name: '应用设置', exact: true })
     await panel.getByRole('button', { name: '从文件夹导入固定包' }).click(); await expect(panel).toContainText('trellis.pdf-text')
     await panel.getByRole('button', { name: '核对代码信任' }).click(); await panel.getByRole('checkbox', { name: /我已核对固定包代码/ }).check(); await panel.getByRole('button', { name: '确认代码信任', exact: true }).click()
-    await panel.getByRole('button', { name: '核对启用依赖' }).click(); await panel.getByRole('button', { name: '确认共同启用' }).click(); await expect(panel).toContainText('当前可用'); await panel.getByRole('button', { name: '关闭', exact: true }).click()
+    await panel.getByRole('button', { name: '核对启用依赖' }).click(); await panel.getByRole('button', { name: '确认共同启用' }).click(); await expect(panel).toContainText('当前可用'); await panel.getByRole('button', { name: /^返回工作区/ }).click()
     capability = (await call({ type: 'task.query', task_id: task, query: { type: 'list', input: { kind: 'capability' } } })).items.find((item: any) => !item.id.startsWith('builtin:')).id
     const request = await call({ type: 'request.submit', task_id: task, text: 'Explicitly extract the synthetic PDF as pure text.', model_config_id: 'pdf-fixture', resource_ids: [resourceId], import_ids: [] })
     await expect.poll(async () => (await call({ type: 'request.status', task_id: task, request_id: request.request_id })).run_state).toBe('completed')
@@ -56,6 +57,7 @@ test('PDF bundled runtime with empty PATH, source navigation and isolated restar
     await sourcePanel.getByText('各项来源字段在哪里', { exact: true }).click()
     await expect(sourcePanel).toContainText('原 Call 公开字段不包含原件身份')
     await expect(sourcePanel).toContainText('当前来源导航不返回参数，不表示参数为空')
+    await browser.locator('summary').filter({ hasText: /^正文分段读取$/ }).click()
     const reader = browser.getByRole('region', { name: '正文分段读取', exact: true })
     await reader.getByRole('checkbox', { name: '按工具报告的页索引选择' }).check()
     await reader.getByLabel('起始页', { exact: true }).fill('2'); await reader.getByLabel('结束页', { exact: true }).fill('2')

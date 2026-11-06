@@ -42,10 +42,10 @@ function startRuntime(): void {
   const child = utilityProcess.fork(join(__dirname, 'runtime.js'), [app.getPath('userData'), process.execPath], { serviceName: 'Trellis Runtime', stdio: 'pipe' })
   runtime = child
   const vault = new FileModelStore(app.getPath('userData'))
-  child.on('message', (message: { id: string; response: HostResponse; vault?: 'load' | 'save'; records?: import('../runtime/model/persistence').SavedConnection[] }) => {
+  child.on('message', (message: { id: string; response: HostResponse; vault?: 'load' | 'save'; records?: import('../runtime/model/persistence').SavedConnection[]; channels?: import('../runtime/model/channels').SavedChannel[] }) => {
     if (message.vault) {
       try {
-        const data = message.vault === 'load' ? vault.load() : vault.save(message.records!)
+        const data = message.vault === 'load' ? vault.load() : vault.save(message.records!, message.channels)
         child.postMessage({ vault_response: message.id, ok: true, data })
       } catch (error) { const code = (error as Error).message; child.postMessage({ vault_response: message.id, ok: false, error: /^SETTINGS_[A-Z_]+$/.test(code) ? code : 'SETTINGS_WRITE_FAILED' }) }
       return
@@ -156,7 +156,7 @@ app.whenReady().then(() => {
     return new Promise(resolve => {
       const id = randomUUID()
       // Model operations own request deadlines; queueing remains cancellable without an extra cap.
-      const modelOperation = ['model.test', 'model.probe', 'model.discover'].includes((request as any)?.type)
+      const modelOperation = ['model.test', 'model.probe', 'model.discover', 'model.channel.discover'].includes((request as any)?.type)
       const timer = modelOperation ? undefined : setTimeout(() => { pending.delete(id); resolve({ ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Response timeout. Query current state before deciding whether to submit again.' } }) }, defaults.tool.execution_ms)
       pending.set(id, { resolve, timer }); runtime!.postMessage({ id, request })
     })

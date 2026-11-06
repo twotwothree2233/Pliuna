@@ -29,6 +29,7 @@ for (const scenario of ['organize-restart', 'cancel-late', 'invalid-candidate'] 
   await call({type:'model.test',model_id:'context-main',role:'main',confirm_cost:true})
   await page.getByRole('button',{name:'创建第一个任务',exact:true}).click();await page.getByLabel('任务名称').fill('Context acceptance');await page.getByRole('button',{name:'创建任务',exact:true}).click()
   await expect(page.getByRole('button',{name:/Context acceptance/})).toBeVisible();const created={task:(await call({type:'host.tasks'}))[0]}
+  await page.getByRole('button',{name:'更多 Agent 操作'}).click();await page.getByRole('menuitem',{name:'工作摘要与上下文',exact:true}).click()
   if(scenario==='organize-restart'){
    const count=server.exchanges.length
    await page.getByRole('button',{name:'整理上下文',exact:true}).click();await page.getByRole('button',{name:'确认费用并整理',exact:true}).click()
@@ -38,14 +39,15 @@ for (const scenario of ['organize-restart', 'cancel-late', 'invalid-candidate'] 
 
   await call({type:'task.submit',task_id:created.task.id,text:'Retain corrected goal and unresolved request.',model_config_id:'context-main',attachments:[]})
   await expect.poll(async()=> (await call({type:'task.snapshot',task_id:created.task.id})).runs[0].state).toBe('completed')
-  const input=page.locator('textarea').filter({visible:true}).last();await input.fill('Unsent input must stay local')
+  await page.getByRole('button',{name:'关闭弹窗',exact:true}).click()
+  const input=page.locator('textarea').filter({visible:true}).last();await input.fill('Unsent input must stay local');await page.getByRole('button',{name:'更多 Agent 操作'}).click();await page.getByRole('menuitem',{name:'工作摘要与上下文',exact:true}).click()
   await page.getByRole('button',{name:'整理上下文',exact:true}).click();await expect(page.getByText('未发送输入不会发送。',{exact:false})).toBeVisible()
   const before=server.exchanges.length
   await page.getByRole('button',{name:'取消整理',exact:true}).click();expect(server.exchanges).toHaveLength(before)
   await page.getByRole('button',{name:'整理上下文',exact:true}).click();await page.getByRole('button',{name:'确认费用并整理',exact:true}).click()
   if(scenario==='cancel-late'){
    await expect.poll(()=>!!waiting).toBe(true);await expect(page.getByRole('status').filter({hasText:'正在整理上下文'})).toBeVisible()
-   await page.getByRole('button',{name:'取消 Run',exact:true}).click();textStream(waiting.res,waiting.result)
+   await page.getByRole('button',{name:'关闭弹窗',exact:true}).click();await page.getByRole('button',{name:'停止本次执行',exact:true}).click();await page.getByRole('dialog',{name:'停止当前执行？'}).getByRole('button',{name:'停止本次执行',exact:true}).click();textStream(waiting.res,waiting.result)
    await expect.poll(async()=> (await call({type:'task.snapshot',task_id:created.task.id})).runs[0].state).toBe('cancelled')
    expect((await call({type:'context.status',task_id:created.task.id})).current).toBeNull()
   }else if(scenario==='invalid-candidate'){
@@ -54,8 +56,8 @@ for (const scenario of ['organize-restart', 'cancel-late', 'invalid-candidate'] 
   }else{
    await expect.poll(async()=> (await call({type:'context.status',task_id:created.task.id})).current?.version).toBe(2)
    await expect(page.getByText(/工作摘要与保留记录 · 覆盖至/)).toBeVisible();await page.getByText(/工作摘要与保留记录 · 覆盖至/).click();await expect(page.getByText('Keep corrected goal; no old approval grants current authority.',{exact:false})).toBeVisible()
-   expect(JSON.parse(await readFile(join(root,'settings.json'),'utf8')).version).toBe(3)
-   await expect(input).toHaveValue('Unsent input must stay local');await input.fill('')
+   expect(JSON.parse(await readFile(join(root,'settings.json'),'utf8')).version).toBe(4)
+   await expect(input).toHaveValue('Unsent input must stay local');await page.getByRole('button',{name:'关闭弹窗',exact:true}).click();await input.fill('');await page.getByRole('button',{name:'更多 Agent 操作'}).click();await page.getByRole('menuitem',{name:'工作摘要与上下文',exact:true}).click()
    const unchanged=await call({type:'task.snapshot',task_id:created.task.id}),oldSummary=await call({type:'context.status',task_id:created.task.id}),noRequest=server.exchanges.length
    await page.getByRole('button',{name:'整理上下文',exact:true}).click();await page.getByRole('button',{name:'确认费用并整理',exact:true}).click()
    await expect(page.getByRole('status').filter({hasText:'没有新的可整理历史'})).toBeVisible()
@@ -67,7 +69,7 @@ for (const scenario of ['organize-restart', 'cancel-late', 'invalid-candidate'] 
    expect(summaryEvidence.kind).toBe('model.request.evidence');expect(summaryEvidence.payload.request_id).toBe(oldSummary.current.request_link.request_id)
    expect(oldSummary.current.latest_user_id).toBe(linkedRecords.find((r:any)=>r.kind==='message.user').id)
    expect(oldSummary.current.retained_interactions).toHaveLength(1)
-   const count=server.exchanges.length;await app.close();app=await launch();page=await app.firstWindow();await expect(page.getByRole('button',{name:/Context acceptance/})).toBeVisible();await page.getByRole('button',{name:/Context acceptance/}).click();await expect(page.getByText(/工作摘要与保留记录 · 覆盖至/)).toBeVisible();expect(server.exchanges).toHaveLength(count)
+   const count=server.exchanges.length;await app.close();app=await launch();page=await app.firstWindow();await expect(page.getByRole('button',{name:/Context acceptance/})).toBeVisible();await page.getByRole('button',{name:/Context acceptance/}).click();await page.getByRole('button',{name:'更多 Agent 操作'}).click();await page.getByRole('menuitem',{name:'工作摘要与上下文',exact:true}).click();await expect(page.getByText(/工作摘要与保留记录 · 覆盖至/)).toBeVisible();expect(server.exchanges).toHaveLength(count)
    expect((await call({type:'context.status',task_id:created.task.id})).current).toEqual(oldSummary.current)
    expect((await call({type:'task.snapshot',task_id:created.task.id})).records).toEqual(linkedRecords)
    expect(await call({type:'context.compact',task_id:created.task.id,model_config_id:'context-main',confirm_cost:true})).toMatchObject({status:'unchanged',reason:'no_new_history'});expect(server.exchanges).toHaveLength(count)

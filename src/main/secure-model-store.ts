@@ -9,7 +9,7 @@ export interface SecureStorageBackend {
   decryptString(value: Buffer): string
 }
 export interface VaultStatus { available: boolean; backend: string; error?: string }
-export interface VaultLoad extends VaultStatus { records: unknown[] }
+export interface VaultLoad extends VaultStatus { records: unknown[]; channels?: import('../runtime/model/channels').SavedChannel[] }
 const linuxBackends = new Set(['gnome_libsecret', 'kwallet', 'kwallet5', 'kwallet6'])
 const limit = 2 * 1024 * 1024
 

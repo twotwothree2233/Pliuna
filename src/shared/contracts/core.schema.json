@@ -3840,6 +3840,16 @@
             }
           },
           "additionalProperties": false
+        },
+        "channel_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         }
       },
       "required": [
@@ -4107,6 +4117,141 @@
             "type",
             "model_id",
             "confirm"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "model.channel.configure"
+            },
+            "channel": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "base_url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "compatibility_profile": {
+                  "enum": [
+                    "chat-max-tokens",
+                    "chat-max-completion-tokens"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "base_url",
+                "compatibility_profile"
+              ],
+              "additionalProperties": false
+            },
+            "api_key": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "use_saved_credential": {
+              "type": "boolean"
+            },
+            "remember_connection": {
+              "type": "boolean"
+            },
+            "confirm_plaintext_storage": {
+              "const": true
+            },
+            "confirm_memory_only": {
+              "const": true
+            }
+          },
+          "required": [
+            "type",
+            "channel",
+            "api_key",
+            "confirm_memory_only"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "model.channel.remove"
+            },
+            "channel_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "type",
+            "channel_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "model.channel.discover"
+            },
+            "channel_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "confirm_external_processing": {
+              "const": true
+            }
+          },
+          "required": [
+            "type",
+            "channel_id",
+            "operation_id",
+            "confirm_external_processing"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "model.channel.model"
+            },
+            "channel_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "configuration": {
+              "$ref": "#/$defs/model_configuration"
+            },
+            "confirm_history_processing": {
+              "const": true
+            }
+          },
+          "required": [
+            "type",
+            "channel_id",
+            "configuration"
           ],
           "additionalProperties": false
         }

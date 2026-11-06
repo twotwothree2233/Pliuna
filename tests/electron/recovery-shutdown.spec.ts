@@ -76,7 +76,7 @@ test('ordinary app quit drains accepted restore after renderer loss and restarts
     const task=(await request({type:'task.create',title:'P2 application lifecycle'})).task.id
     await request({type:'request.submit',task_id:task,text:'synthetic fixture',model_config_id:'fixture',resource_ids:[],import_ids:[]})
     await page.getByRole('button',{name:/P2 application lifecycle/}).click()
-    await expect(page.getByLabel('最近 Run 结果')).toContainText('completed')
+    await expect(page.locator('.agent-status')).toContainText('已完成')
     await page.getByLabel('你的想法').fill('P2_RESTART_PRESERVED')
     await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     const token=(await request({type:'maintenance.begin'})).reservation.token

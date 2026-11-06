@@ -9,14 +9,14 @@ import { runtimeFeatures } from './features'
 const directory = process.argv[2]
 if (!directory || !process.parentPort) throw new Error('Runtime requires a private directory and utility-process channel')
 const vaultPending = new Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
-function vaultRequest(vault: 'load' | 'save', records?: unknown[]): Promise<any> {
+function vaultRequest(vault: 'load' | 'save', records?: unknown[], channels?: import('./model/channels').SavedChannel[]): Promise<any> {
   return new Promise((resolve, reject) => {
     const id = randomUUID()
     const timer = setTimeout(() => { vaultPending.delete(id); reject(new Error('SETTINGS_TIMEOUT')) }, 30000)
-    vaultPending.set(id, { resolve, reject, timer }); process.parentPort!.postMessage({ id, vault, records })
+    vaultPending.set(id, { resolve, reject, timer }); process.parentPort!.postMessage({ id, vault, records, channels })
   })
 }
-const persistence: ModelPersistence = { load: () => vaultRequest('load'), save: records => vaultRequest('save', records) }
+const persistence: ModelPersistence = { load: () => vaultRequest('load'), save: (records, channels) => vaultRequest('save', records, channels) }
 const models = new ModelService(undefined, undefined, persistence)
 const ready = models.restore()
 // Baseline features retain authorization, platform and asset validation.

@@ -846,6 +846,8 @@ run_model_requests?: number
 run_tool_requests?: number
 run_wall_ms?: number
 }
+channel_id?: string
+display_name?: string
 }
 export interface ModelConfigurationModelMetadata {
 context_tokens: ModelConfigurationModelFieldOrigin
@@ -912,6 +914,32 @@ confirm: true
 type: "model.credential.delete"
 model_id: string
 confirm: true
+} | {
+type: "model.channel.configure"
+channel: {
+id: string
+name: string
+base_url: string
+compatibility_profile: ("chat-max-tokens" | "chat-max-completion-tokens")
+}
+api_key: string
+use_saved_credential?: boolean
+remember_connection?: boolean
+confirm_plaintext_storage?: true
+confirm_memory_only: true
+} | {
+type: "model.channel.remove"
+channel_id: string
+} | {
+type: "model.channel.discover"
+channel_id: string
+operation_id: string
+confirm_external_processing: true
+} | {
+type: "model.channel.model"
+channel_id: string
+configuration: HostModelRequestModelConfiguration
+confirm_history_processing?: true
 })
 
 export interface HostModelRequestModelConfiguration {
@@ -936,6 +964,8 @@ run_model_requests?: number
 run_tool_requests?: number
 run_wall_ms?: number
 }
+channel_id?: string
+display_name?: string
 }
 export interface HostModelRequestModelMetadata {
 context_tokens: HostModelRequestModelFieldOrigin

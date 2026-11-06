@@ -1,3 +1,5 @@
+import { openPending } from '../helpers/agent-ui'
+import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { modelInputFromHost } from '../helpers/model-server'
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -57,14 +59,11 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
   }
   try {
     let page = await app.firstWindow(); page.on('pageerror', error => errors.push(error.message))
-    await page.getByRole('button', { name: '模型与审批', exact: true }).click()
-    await page.getByLabel('配置标识').fill('evidence-main'); await page.getByLabel('服务 Base URL').fill(server.url)
-    await page.getByLabel('API Key', { exact: true }).fill('isolated-key'); await page.getByLabel('精确模型标识').fill('evidence-model')
-    await page.getByLabel('已知上下文容量').fill('1000000'); await page.getByLabel('输出上限', { exact: true }).fill('4096')
-    await page.getByRole('checkbox', { name: /^记住连接/ }).uncheck()
-    await page.getByRole('checkbox', { name: /我确认连接凭据/ }).check(); await page.getByRole('button', { name: '保存内存配置并查询' }).click()
-    await expect(page.getByText(/查询到 1 个服务候选/)).toBeVisible(); await page.getByRole('button', { name: '测试并启用主模型', exact: true }).click(); await page.getByRole('dialog', { name: '确认模型角色测试' }).getByRole('button', { name: '确认费用并开始测试', exact: true }).click(); await expect(page.getByText(/main 合成验证通过/)).toBeVisible()
-    await page.getByRole('button', { name: '关闭', exact: true }).click(); await page.getByRole('button', { name: '创建第一个任务' }).click()
+    await configureModel(page, { id: 'evidence-main', url: server.url, key: 'isolated-key', model: 'evidence-model', context: 1000000, output: 4096 })
+    await openSettings(page)
+    await testRole(page, '主模型')
+    await closeSettings(page)
+    await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('不可变证据验收'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
     const snapshot: any = await page.evaluate(async () => {
       const tasks: any = await window.trellis.request({ type: 'host.tasks' })
@@ -75,10 +74,11 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
     await page.getByLabel('证据作答').fill('原版作答'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     await page.getByRole('button', { name: '提交依据答案', exact: true }).click(); await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
     for (const request of ['更新源', '移除源']) {
-      await send(page, request); await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
+      await send(page, request); await openPending(page); await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
       await expect(page.getByText(request === '更新源' ? '源更新完成' : '源移除完成', { exact: true })).toBeVisible()
     }
     await page.getByRole('tab', { name: /执行记录/ }).click()
+    await page.locator('.execution-category > summary').filter({ hasText: /^界面历史依据$/ }).click()
     const history = page.getByRole('region', { name: '界面历史依据分页浏览' })
     await history.getByRole('button', { name: '刷新界面历史依据', exact: true }).click(); await history.locator('.object-list button').first().click()
     const saved = await full(history); expect(saved.evidence.sources[0].value.text).toBe(original)

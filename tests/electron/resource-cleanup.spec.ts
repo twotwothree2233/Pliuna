@@ -1,3 +1,4 @@
+import { chooseModel, openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -21,8 +22,8 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
   }
   try {
     await page.getByRole('button', { name: '创建第一个任务' }).click(); await page.getByLabel('任务名称').fill('保留的View任务'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    await page.getByLabel('本次模型', { exact: true }).selectOption('fixture'); await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
-    await expect(page.locator('.managed')).toHaveCount(1); await expect(page.getByLabel('最近 Run 结果')).toContainText('completed')
+    await chooseModel(page, 'fixture'); await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
     await page.getByLabel('你的想法').fill('保留的草稿'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存'); await page.getByRole('button', { name: '提交答案', exact: true }).click(); await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
     const keep = (await call({ type: 'host.tasks' }))[0].id, before = await inspect(), files = await readdir(join(directory, 'resources')), bytes = await Promise.all(files.map(f => readFile(join(directory, 'resources', f))))
     const source = await call({ type: 'task.create', title: '即将删除的材料任务' })
@@ -50,18 +51,18 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
     if(scenario==='active-run'){
       const started=await call({type:'task.submit',task_id:keep,text:'held fixture',model_config_id:'fixture',attachments:[]}),blocked=await page.evaluate(()=>window.trellis.request({type:'maintenance.begin'}));expect(blocked.ok).toBe(false);if(!blocked.ok)expect(blocked.error.code).toBe('MAINTENANCE_EXECUTION_ACTIVE');await call({type:'run.cancel',task_id:keep,run_id:started.run_id})
     }
-    await page.getByLabel('想从哪里开始？').fill('不能自动发送的消息');await page.getByRole('button',{name:'存储检查',exact:true}).click()
-    const panel=page.getByRole('dialog',{name:'存储检查',exact:true}),section=panel.getByRole('region',{name:'正式资源删除收尾'}),collect=section.getByRole('button',{name:'核验并回收此正式资源',exact:true})
+    await page.getByLabel('想从哪里开始？').fill('不能自动发送的消息');await openSettings(page, '存储与恢复')
+    const panel=page.getByRole('dialog',{name:'应用设置',exact:true}),section=panel.getByRole('region',{name:'正式资源删除收尾'}),collect=section.getByRole('button',{name:'核验并回收此正式资源',exact:true})
     if(['shared','recovery-protected'].includes(scenario)){await expect(collect).toBeEnabled();await expect(section).toContainText('尚未核验保护与文件');await collect.click();await expect(panel.getByRole('alert').last()).toContainText(scenario==='shared'?'TASK_ASSOCIATION':'VIEW_HISTORY_OR_RECOVERY');expect((await call({type:'maintenance.resource.status',operation_id:op.id})).phase).toBe('candidate');if(point)expect((await call({type:'maintenance.status'})).active.id).toBe(point.id)}
     else if(scenario==='input-conflict'){
       await expect(collect).toBeEnabled()
       await app.evaluate((_electron,root)=>{const Database=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('better-sqlite3'),db=new Database(root+'/trellis.sqlite');db.exec('UPDATE views SET state_revision=state_revision+1');db.close()},directory)
       await page.getByLabel('你的想法').evaluate(inputElement=>{const input=inputElement as HTMLTextAreaElement;input.value='必须保留的冲突输入';input.dispatchEvent(new Event('input',{bubbles:true}));Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(b=>b.textContent==='核验并回收此正式资源')!.click()})
       await expect(panel.getByRole('alert').last()).toContainText('VERSION_CONFLICT');expect((await inspect()).journal.resource_cleanups[0].phase).toBe('candidate');await expect(page.getByLabel('你的想法')).toHaveValue('必须保留的冲突输入')
-      await panel.getByRole('button',{name:'关闭',exact:true}).click();const dialog=page.waitForEvent('dialog');const discard=page.getByRole('button',{name:'放弃本地输入并重新加载',exact:true}).click();await (await dialog).accept();await discard;await expect(page.getByLabel('你的想法')).toHaveValue('保留的草稿')
+      await panel.getByRole('button',{name:/^返回工作区/}).click();const dialog=page.waitForEvent('dialog');const discard=page.getByRole('button',{name:'放弃本地输入并重新加载',exact:true}).click();await (await dialog).accept();await discard;await expect(page.getByLabel('你的想法')).toHaveValue('保留的草稿')
     }else if(scenario!=='active-run'){
       const button=scenario==='persisted-retry'?section.getByRole('button',{name:'重试原资源未完成收尾',exact:true}):collect
-      await expect(button).toBeEnabled();let message='';page.once('dialog',async d=>{message=d.message();if(scenario==='cancel')await d.dismiss();else await d.accept()});await button.click();await expect(panel.getByRole('button',{name:'关闭',exact:true})).toBeEnabled();expect(message).toContain('正式资源');expect(message).toContain('元数据')
+      await expect(button).toBeEnabled();let message='';page.once('dialog',async d=>{message=d.message();if(scenario==='cancel')await d.dismiss();else await d.accept()});await button.click();await expect(panel.getByRole('button',{name:/^返回工作区/})).toBeEnabled();expect(message).toContain('正式资源');expect(message).toContain('元数据')
       if(scenario==='cancel'){expect((await inspect()).journal.resource_cleanups[0].phase).toBe('candidate');expect((await readdir(join(directory,'resources')))).toContain(material)}else{await expect(section).toContainText('元数据收尾完成');await section.getByRole('button',{name:'查询原资源收尾',exact:true}).click();expect((await call({type:'maintenance.resource.status',operation_id:op.id})).phase).toBe('complete');await app.close();app=await launch();page=await app.firstWindow();expect((await call({type:'maintenance.resource.status',operation_id:op.id})).phase).toBe('complete');await page.getByRole('button',{name:/保留的View任务/}).click();await expect(page.getByLabel('你的想法')).toHaveValue('保留的草稿')}
     }
     const after=await inspect();expect(after.drafts).toEqual(before.drafts);expect(after.answers).toBe(before.answers);if(scenario!=='active-run')expect(after.runs).toEqual(before.runs)

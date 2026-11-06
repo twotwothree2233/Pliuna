@@ -67,6 +67,7 @@ test('long plaintext selection, independent tail evidence, request accounting an
     await page.getByRole('tab', { name: '资源', exact: true }).click()
     const browser = page.getByRole('region', { name: '全部资源分页浏览', exact: true })
     await browser.getByRole('button', { name: '刷新全部资源', exact: true }).click(); await browser.getByRole('button').filter({ hasText: resource }).click()
+    await browser.locator('summary').filter({ hasText: /^正文分段读取$/ }).click()
     const reader = browser.getByRole('region', { name: '正文分段读取', exact: true })
     await reader.getByLabel('每段字符数').fill('32000'); await reader.getByRole('button', { name: '读取选定正文', exact: true }).click(); await expect(reader.getByRole('status')).toContainText('32000 字符')
     await reader.getByRole('button', { name: '读取下一段正文', exact: true }).click(); await expect(reader.locator('pre')).toContainText(marker)

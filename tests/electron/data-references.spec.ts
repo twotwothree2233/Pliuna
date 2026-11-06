@@ -1,3 +1,4 @@
+import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -32,20 +33,10 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
   let app = await launch()
   try {
     let page = await app.firstWindow(); const errors: string[] = []; page.on('pageerror', e => errors.push(e.message))
-    await page.getByRole('button', { name: '模型与审批', exact: true }).click()
-    await page.getByLabel('配置标识').fill('references-main')
-    await page.getByLabel('服务 Base URL').fill(server.url)
-    await page.getByLabel('API Key', { exact: true }).fill('isolated-reference-sentinel')
-    await page.getByLabel('精确模型标识').fill('references-model')
-    await page.getByLabel('已知上下文容量').fill('1000000')
-    await page.getByLabel('输出上限', { exact: true }).fill('1024')
-    await page.getByRole('checkbox', { name: /我确认连接凭据/ }).check()
-    await page.getByRole('checkbox', { name: /^记住连接/ }).uncheck()
-    await page.getByRole('button', { name: '保存内存配置并查询' }).click()
-    await expect(page.getByText(/查询到 1 个服务候选/)).toBeVisible()
-    await page.getByRole('button', { name: '测试并启用主模型', exact: true }).click(); await page.getByRole('dialog', { name: '确认模型角色测试' }).getByRole('button', { name: '确认费用并开始测试', exact: true }).click()
-    await expect(page.getByText(/main 合成验证通过/)).toBeVisible()
-    await page.getByRole('button', { name: '关闭', exact: true }).click()
+    await configureModel(page, { id: 'references-main', url: server.url, key: 'isolated-reference-sentinel', model: 'references-model', context: 1000000, output: 1024 })
+    await openSettings(page)
+    await testRole(page, '主模型')
+    await closeSettings(page)
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('版本引用与安全移除')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
@@ -75,7 +66,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     await expect(linked.locator('pre')).toHaveText('')
     await linked.getByRole('button', { name: '查看当前版本（不更新引用）', exact: true }).click()
     await expect(linked.locator('pre')).toContainText('目标新值')
-    expect(JSON.parse((await data.locator(':scope > article pre').textContent())!).references[0].target.expected_revision).toBe(1)
+    expect(JSON.parse((await data.locator(':scope > .record-rows > article > .record-raw > pre').textContent())!).references[0].target.expected_revision).toBe(1)
     await send('尝试受保护移除')
     expect(blockedCode).toBe('OBJECT_REFERENCED')
     await expect(page.getByRole('button', { name: '批准本次动作', exact: true })).toHaveCount(0)
@@ -92,6 +83,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     await app.close(); app = await launch(); page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message))
     await page.getByRole('button', { name: /版本引用与安全移除/ }).click()
     await page.getByRole('tab', { name: /执行记录/ }).click()
+    await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     const actions = page.getByRole('region', { name: '原动作分页浏览' })
     await actions.getByRole('button', { name: '刷新原动作', exact: true }).click()
     await actions.getByRole('button', { name: new RegExp(removalAction) }).click()

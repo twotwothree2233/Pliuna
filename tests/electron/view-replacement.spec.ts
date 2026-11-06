@@ -1,3 +1,5 @@
+import { openPending } from '../helpers/agent-ui'
+import { chooseModel, closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { _electron as electron, expect, test, type Dialog } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -24,30 +26,20 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
   let app = await launch()
   try {
     let page = await app.firstWindow()
-    await expect(page.getByText('首版基础候选 · 本地运行', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '模型与审批', exact: true }).click()
-    await page.getByLabel('配置标识', { exact: true }).fill('replace-main')
-    await page.getByLabel('服务 Base URL').fill(server.url)
-    await page.getByLabel('API Key', { exact: true }).fill('local-replacement-sentinel')
-    await page.getByLabel('精确模型标识').fill('wire-model')
-    await page.getByLabel('已知上下文容量').fill('1000000')
-    await page.getByLabel('输出上限', { exact: true }).fill('4096')
-    await page.getByRole('checkbox', { name: /^我确认连接凭据/ }).check()
-    await page.getByRole('checkbox', { name: /^记住连接/ }).uncheck()
-    await page.getByRole('button', { name: '保存内存配置并查询', exact: true }).click()
-    await expect(page.getByRole('status')).toContainText('查询到 1 个服务候选')
-    await page.getByRole('button', { name: '测试并启用主模型', exact: true }).click(); await page.getByRole('dialog', { name: '确认模型角色测试' }).getByRole('button', { name: '确认费用并开始测试', exact: true }).click()
-    await expect(page.getByRole('status')).toContainText('main 合成验证通过')
-    await page.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(page.getByText('本地运行', { exact: true })).toBeVisible()
+    await configureModel(page, { id: 'replace-main', url: server.url, key: 'local-replacement-sentinel', model: 'wire-model', context: 1000000, output: 4096 })
+    await openSettings(page)
+    await testRole(page, '主模型')
+    await closeSettings(page)
     await page.getByRole('button', { name: '创建第一个任务', exact: true }).click()
     await page.getByLabel('任务名称').fill('替换草稿验收')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     for (let n = 0; n < 2; n++) {
-      await page.getByLabel('本次模型', { exact: true }).selectOption('fixture')
+      await chooseModel(page, 'fixture')
       await page.getByLabel('想从哪里开始？').fill('fixture form ' + n)
       await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
       await expect(page.locator('.managed')).toHaveCount(n + 1)
-      await expect(page.getByLabel('最近 Run 结果')).toContainText('completed')
+      await expect(page.locator('.agent-status')).toContainText('已完成')
     }
     const first = page.locator('.managed').nth(0), other = page.locator('.managed').nth(1)
     await first.getByLabel('你的想法').fill('保留的旧答案')
@@ -65,10 +57,12 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
       if (!result.ok) throw new Error('snapshot unavailable')
       return result.data as Snapshot
     })
-    await page.getByLabel('本次模型', { exact: true }).selectOption('replace-main')
+    await chooseModel(page, 'replace-main')
     await page.getByLabel('想从哪里开始？').fill('replace the first View only')
     await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await openPending(page)
     await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
+    await openPending(page)
     await expect(page.getByRole('button', { name: '保存输入并检查替换', exact: true })).toBeVisible()
     if (scenario === 'pending-input') {
       // Same turn as the input event: do not let the debounce save hide this race.

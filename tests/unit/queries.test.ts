@@ -162,3 +162,78 @@ it('keeps cursors within the wire limit for long IDs and refuses deleted anchors
   db.prepare('DELETE FROM task_data WHERE id=?').run('中'.repeat(190))
   expect(() => list('task_data', { cursor: page.next_cursor })).toThrow('anchor changed')
 })
+
+it('locates recent saved messages outside mixed-event windows without reading their payload', () => {
+  const insert = db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)')
+  const time = '2026-01-01T00:00:00.000Z'
+  insert.run('user-latest', task.task.id, 1, 'message.user', JSON.stringify({ text: 'latest request' }), time)
+  insert.run('reply-latest', task.task.id, 2, 'message.assistant', JSON.stringify({ text: '中文'.repeat(30000) }), time)
+  for (let i = 3; i < 250; i++) insert.run('event-latest-' + i, task.task.id, i, 'test.event', '{}', time)
+  expect(store.snapshot(task.task.id).records.some(row => row.id === 'reply-latest')).toBe(false)
+  const latest = () => store.handle({ type: 'host.messages.latest', task_id: task.task.id }) as any
+  expect(latest()).toEqual({ request: { id: 'user-latest', kind: 'message.user', created_at: time }, reply: { id: 'reply-latest', kind: 'message.assistant', created_at: time } })
+  expect(JSON.stringify(latest())).not.toContain('latest request')
+  expect(store.handle({ type: 'host.messages.latest', task_id: other.task.id })).toEqual({ request: null, reply: null })
+  insert.run('partial-latest', task.task.id, 250, 'message.assistant.partial', '{"text":"partial"}', time)
+  expect(latest().reply.id).toBe('partial-latest')
+  expect(() => store.handle({ type: 'host.messages.latest', task_id: task.task.id, extra: true })).toThrow()
+  expect(() => store.handle({ type: 'host.messages.latest', task_id: 'missing-task' })).toThrow()
+})
+
+function activityRecord(run: string, kind: string, payload: Record<string, unknown>) {
+  const sequence = (db.prepare('SELECT next_sequence n FROM tasks WHERE id=?').get(task.task.id) as { n: number }).n
+  db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)').run('activity-' + sequence, task.task.id, sequence, kind, JSON.stringify({ ...payload, run_id: run }), '2026-11-06T00:00:00.000Z')
+  db.prepare('UPDATE tasks SET next_sequence=next_sequence+1 WHERE id=?').run(task.task.id)
+}
+const activity = (run: string, taskId = task.task.id): any => store.handle({ type: 'host.run.activity', task_id: taskId, run_id: run })
+function toolRecord(run: string, name: string, args: unknown, result?: unknown) {
+  activityRecord(run, 'model.response', { message: { tool_calls: [{ id: 'reused-wire-id', function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) } }] } })
+  if (result) activityRecord(run, 'model.tool_result', { message: { tool_call_id: 'reused-wire-id', content: JSON.stringify(result) } })
+}
+it('derives bounded run-specific activity beyond the mixed-event window without returning bodies or arguments', () => {
+  const run = store.start(task.task.id, '创建学习进度', 'fixture', [])
+  store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run })
+  toolRecord(run, 'write', { operation: 'task_data.create', input_json: JSON.stringify({ value: 'PRIVATE_ARGUMENT' }) }, { execution: 'success', delivery: 'delivered', data: { id: 'learning-progress', value: 'PRIVATE_RESULT' } })
+  toolRecord(run, 'read', { kind: 'task_data', id: 'learning-progress' }, { execution: 'not_executed', delivery: 'delivered', error: { code: 'NOT_FOUND', message: 'PRIVATE_ERROR' } })
+  activityRecord(run, 'message.assistant', { text: 'PRIVATE_REPLY'.repeat(20000) })
+  for (let i = 0; i < 210; i++) activityRecord(run, 'test.event', {})
+  const next = store.start(task.task.id, '下一个任务请求', 'fixture', [])
+  store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: next })
+  const value = activity(run)
+  expect(value.request).toBe('创建学习进度')
+  expect(value.items).toHaveLength(3)
+  expect(value.items[0]).toMatchObject({ name: 'write', operation: 'task_data.create', target_id: 'learning-progress', execution: 'success' })
+  expect(value.items[1]).toMatchObject({ name: 'read', target_kind: 'task_data', execution: 'not_executed', error: 'NOT_FOUND' })
+  expect(value.items[2]).toMatchObject({ type: 'reply', execution: 'success' })
+  expect(JSON.stringify(value)).not.toContain('PRIVATE_')
+  expect(activity(next)).toMatchObject({ request: '下一个任务请求', items: [] })
+  expect(() => activity(run, other.task.id)).toThrow()
+  expect(() => activity('missing')).toThrow()
+  expect(() => store.handle({ type: 'host.run.activity', task_id: task.task.id, run_id: run, extra: true })).toThrow()
+})
+it('keeps unreturned tools, partial replies and failed delivery distinct and retains only recent activity', () => {
+  const run = store.start(task.task.id, '😀'.repeat(130), 'fixture', [])
+  store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run })
+  for (let i = 0; i < 5; i++) toolRecord(run, 'list', { kind: 'resource' }, { execution: 'success', delivery: 'delivered' })
+  toolRecord(run, 'call', { capability: 'builtin:monty:v1' }, { execution: 'success', delivery: 'failed' })
+  toolRecord(run, 'write', '{invalid')
+  activityRecord(run, 'message.assistant.partial', { text: 'PARTIAL_BODY' })
+  const before = db.prepare('SELECT count(*) n FROM records').get()
+  const value = activity(run)
+  expect(Array.from(value.request)).toHaveLength(121)
+  expect(value.request.endsWith('…')).toBe(true)
+  expect(value.items).toHaveLength(3)
+  expect(value.items[0]).toMatchObject({ name: 'call', target_id: 'builtin:monty:v1', execution: 'success', delivery: 'failed' })
+  expect(value.items[1]).toMatchObject({ name: 'write', operation: null, execution: null })
+  expect(value.items[2]).toMatchObject({ type: 'reply', execution: 'partial' })
+  activity(run)
+  expect(db.prepare('SELECT count(*) n FROM records').get()).toEqual(before)
+})
+it('shows actual fixture actions without requiring model-wire records', async () => {
+  const run = store.start(task.task.id, '练习单', 'fixture', [])
+  await vi.advanceTimersByTimeAsync(160)
+  expect(activity(run).items).toEqual([
+    expect.objectContaining({ type: 'tool', name: 'write', operation: 'surface.update', execution: 'success' }),
+    expect.objectContaining({ type: 'reply', execution: 'success' })
+  ])
+})

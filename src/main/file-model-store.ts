@@ -2,12 +2,14 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readF
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { SavedConnection } from '../runtime/model/persistence'
+import type { SavedChannel } from '../runtime/model/channels'
 import type { VaultLoad } from './secure-model-store'
 
 const limit = 2 * 1024 * 1024
 type SettingsRecord = Omit<SavedConnection, 'key'> & { credential: string | null; validation: string }
 type Auth = Record<string, string>
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const channelBinding = (channel: SavedChannel) => digest({ id: channel.id, name: channel.name, base_url: channel.base_url, compatibility_profile: channel.compatibility_profile, revision: channel.revision, key: channel.key })
 const binding = (record: SavedConnection) => digest({ configuration: record.configuration, key: record.key, revision: record.revision, protocol: record.protocol, roles: record.roles })
 
 // Main-process only. Never opens the legacy encrypted vault or another profile.
@@ -23,16 +25,16 @@ export class FileModelStore {
     return readFileSync(path, 'utf8')
   }
   private pair(): [string | null, string | null] { return [this.read('settings.json'), this.read('auth.json')] }
-  private parse(pair: [string | null, string | null]): { records: SavedConnection[]; auth: Auth } {
+  private parse(pair: [string | null, string | null]): { records: SavedConnection[]; auth: Auth; channels?: SavedChannel[] } {
     const [settingsText, authText] = pair
     const auth = authText === null ? { version: 1, credentials: {} } : JSON.parse(authText)
-    if (auth?.version !== 1 || !auth.credentials || typeof auth.credentials !== 'object' || Array.isArray(auth.credentials) || Object.keys(auth.credentials).length > 200 || Object.entries(auth.credentials).some(([id, key]) => !/^[a-f0-9-]{36}$/.test(id) || typeof key !== 'string' || key.length > 8192)) throw Error('SETTINGS_READ_FAILED')
+    if (auth?.version !== 1 || !auth.credentials || typeof auth.credentials !== 'object' || Array.isArray(auth.credentials) || Object.keys(auth.credentials).length > 400 || Object.entries(auth.credentials).some(([id, key]) => !/^[a-f0-9-]{36}$/.test(id) || typeof key !== 'string' || key.length > 8192)) throw Error('SETTINGS_READ_FAILED')
     if (settingsText === null) {
       if (authText !== null) throw Error('SETTINGS_READ_FAILED')
       return { records: [], auth: {} }
     }
     const settings = JSON.parse(settingsText)
-    if (![1, 2, 3].includes(settings?.version) || !Array.isArray(settings.connections) || settings.connections.length > 100) throw Error('SETTINGS_READ_FAILED')
+    if (![1, 2, 3, 4].includes(settings?.version) || !Array.isArray(settings.connections) || settings.connections.length > 100) throw Error('SETTINGS_READ_FAILED')
     const referenced: Auth = {}
     const records = settings.connections.map((entry: SettingsRecord) => {
       if (!entry || typeof entry !== 'object' || 'key' in entry || !(entry.credential === null || typeof entry.credential === 'string') || typeof entry.validation !== 'string') throw Error('SETTINGS_READ_FAILED')
@@ -44,14 +46,29 @@ export class FileModelStore {
       if (binding(record) !== validation) record.roles = []
       return record
     })
-    return { records, auth: referenced }
+    let channels: SavedChannel[] | undefined
+    if (settings.version === 4) {
+      if (!Array.isArray(settings.channels) || settings.channels.length > 100) throw Error('SETTINGS_READ_FAILED')
+      const ids = new Set<string>()
+      channels = settings.channels.map((entry: Omit<SavedChannel, 'key'> & { credential: string | null; validation: string }) => {
+        if (!entry || typeof entry !== 'object' || 'key' in entry || typeof entry.id !== 'string' || !entry.id || ids.has(entry.id) || typeof entry.name !== 'string' || !entry.name || typeof entry.base_url !== 'string' || !['chat-max-tokens','chat-max-completion-tokens'].includes(entry.compatibility_profile) || !Number.isSafeInteger(entry.revision) || entry.revision < 1 || !(entry.credential === null || typeof entry.credential === 'string')) throw Error('SETTINGS_READ_FAILED')
+        const key = entry.credential === null ? null : auth.credentials[entry.credential]
+        if (key === undefined) throw Error('SETTINGS_READ_FAILED')
+        const { credential, validation, ...saved } = entry
+        const channel = { ...saved, key } as SavedChannel
+        if (channelBinding(channel) !== validation) for (const record of records) if (record.configuration.channel_id === channel.id) record.roles = []
+        if (credential !== null) referenced[credential] = key
+        ids.add(entry.id); return channel
+      })
+    }
+    return { records, auth: referenced, ...(channels ? { channels } : {}) }
   }
   load(): VaultLoad {
     try {
       if (existsSync(join(this.directory, '.settings-write.lock'))) throw Error('SETTINGS_BUSY')
       const pair = this.pair(), parsed = this.parse(pair)
       this.snapshot = digest(pair); this.error = undefined
-      return { available: true, backend: 'plain-file', records: parsed.records }
+      return { available: true, backend: 'plain-file', records: parsed.records, ...(parsed.channels ? { channels: parsed.channels } : {}) }
     } catch { this.error = 'SETTINGS_READ_FAILED'; return { available: false, backend: 'plain-file', error: this.error, records: [] } }
   }
   private atomic(name: string, value: unknown): void {
@@ -68,7 +85,7 @@ export class FileModelStore {
       }
     } finally { try { unlinkSync(temporary) } catch {} }
   }
-  save(records: SavedConnection[]): void {
+  save(records: SavedConnection[], channels?: SavedChannel[]): void {
     if (this.error || this.snapshot === undefined) throw Error(this.error || 'SETTINGS_READ_FAILED')
     mkdirSync(this.directory, { recursive: true, mode: 0o700 })
     const lock = join(this.directory, '.settings-write.lock')
@@ -80,18 +97,24 @@ export class FileModelStore {
       if (digest(pair) !== this.snapshot) throw Error('SETTINGS_CONFLICT')
       const previous = this.parse(pair)
       if (!Array.isArray(records) || records.length > 100) throw Error('SETTINGS_WRITE_FAILED')
-      const auth: Auth = {}, connections: SettingsRecord[] = records.map(record => {
+      const auth: Auth = {}, credentials = new Map<string, string>()
+      const credentialFor = (key: string | null) => {
+        if (key === null) return null
+        const id = credentials.get(key) ?? randomUUID(); credentials.set(key, id); auth[id] = key; return id
+      }
+      if (channels && channels.length > 100) throw Error('SETTINGS_WRITE_FAILED')
+      const savedChannels = channels?.map(channel => { const { key, ...saved } = channel; if (key !== null && (typeof key !== 'string' || key.length > 8192)) throw Error('SETTINGS_WRITE_FAILED'); return { ...saved, credential: credentialFor(key), validation: channelBinding(channel) } })
+      const connections: SettingsRecord[] = records.map(record => {
         if (!record || typeof record !== 'object' || (record.key !== null && (typeof record.key !== 'string' || record.key.length > 8192))) throw Error('SETTINGS_WRITE_FAILED')
         const { key, ...saved } = record
-        const credential = key === null ? null : randomUUID()
-        if (credential !== null) auth[credential] = key!
+        const credential = credentialFor(key)
         return { ...saved, credential, validation: binding(record) }
       })
       // Seed an empty settings file before first auth write: a crash still loads an empty profile.
       if (pair[0] === null) this.atomic('settings.json', { version: 3, connections: [] })
       this.atomic('auth.json', { version: 1, credentials: { ...previous.auth, ...auth } })
       this.fault('auth-prepared')
-      this.atomic('settings.json', { version: 3, connections })
+      this.atomic('settings.json', { version: channels ? 4 : 3, connections, ...(savedChannels ? { channels: savedChannels } : {}) })
       committed = true; this.fault('settings-committed')
       this.atomic('auth.json', { version: 1, credentials: auth })
       this.fault('auth-pruned')

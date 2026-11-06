@@ -58,6 +58,7 @@ import { captureCheck, ExportChecks, type CheckRunner } from './export-check'
 import { backgroundCheck } from './export-check-runner'
 import { RpcError } from './plugins/rpc'
 import { boundedRecent, snapshotValue } from './snapshot-summary'
+import { runActivity } from './run-activity'
 
 const id = () => randomUUID()
 const now = () => new Date().toISOString()
@@ -1004,7 +1005,11 @@ export class RuntimeStore {
     assertContract<import('../shared/contracts.generated').HostModelRequest>('host_model_request', raw)
     switch (raw.type) {
       case 'model.configure': return this.models.configureConnection(raw)
-      case 'model.list': return { models: this.models.list(), storage: this.models.storageStatus(), approval: { mode: this.approvalMode, model_id: this.approvalModel }, features: { view_replacement: this.features.viewReplacement } }
+      case 'model.channel.configure': return this.models.configureChannel(raw)
+      case 'model.channel.model': return this.models.configureChannelModel(raw)
+      case 'model.channel.remove': return this.models.removeChannel(raw.channel_id)
+      case 'model.channel.discover': return this.models.discoverChannel(raw.channel_id, raw.operation_id)
+      case 'model.list': return { models: this.models.list(), channels: this.models.channelList(), storage: this.models.storageStatus(), approval: { mode: this.approvalMode, model_id: this.approvalModel }, features: { view_replacement: this.features.viewReplacement } }
       case 'model.test': return this.models.test(raw.model_id, raw.role, raw.operation_id)
       case 'model.discover': return this.models.discover(raw.model_id, raw.operation_id, raw.include_metadata)
       case 'model.probe': return this.models.probe(raw)
@@ -1558,6 +1563,19 @@ export class RuntimeStore {
   }
   handle(raw: unknown): unknown {
     this.acceptWork()
+    if (raw && typeof raw === 'object' && (raw as Row).type === 'host.run.activity') {
+      const r = raw as Row
+      if (Object.keys(r).sort().join(',') !== 'run_id,task_id,type' || typeof r.task_id !== 'string' || typeof r.run_id !== 'string') fail('INVALID_REQUEST', 'Invalid Run activity lookup')
+      this.task(r.task_id); this.one('SELECT id FROM runs WHERE id=? AND task_id=?', r.run_id, r.task_id)
+      return runActivity(this.db, r.task_id, r.run_id)
+    }
+    if (raw && typeof raw === 'object' && (raw as Row).type === 'host.messages.latest') {
+      const r = raw as Row
+      if (Object.keys(r).sort().join(',') !== 'task_id,type' || typeof r.task_id !== 'string') fail('INVALID_REQUEST', 'Invalid latest message lookup')
+      this.task(r.task_id)
+      const latest = (condition: string) => this.db.prepare(`SELECT id,kind,created_at FROM records WHERE task_id=? AND ${condition} ORDER BY sequence DESC LIMIT 1`).get(r.task_id) ?? null
+      return { request: latest("kind='message.user'"), reply: latest("kind IN ('message.assistant','message.assistant.partial')") }
+    }
     if (raw && typeof raw === 'object' && (raw as Row).type === 'host.run.accounting') {
       const r = raw as Row
       if (Object.keys(r).some(key => !['type', 'task_id', 'run_id', 'cursor'].includes(key)) || typeof r.task_id !== 'string' || typeof r.run_id !== 'string' || (r.cursor !== undefined && (typeof r.cursor !== 'string' || r.cursor.length > 2048))) fail('INVALID_REQUEST', 'Invalid paged Run accounting lookup')

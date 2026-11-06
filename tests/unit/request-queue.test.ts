@@ -55,3 +55,10 @@ it('large-material preflight detects damage before creating any Run',async()=>{
  vi.useRealTimers();const body=Buffer.alloc(262145,97),operation=reg();call('material.internal.begin',{operation_id:operation,byte_length:body.length,media_type:'text/plain; charset=utf-8'});for(let offset=0;offset<body.length;offset+=262144)call('material.internal.chunk',{operation_id:operation,offset,data:body.subarray(offset,offset+262144).toString('base64')});const resource=(await call('material.internal.finish',{operation_id:operation})).resource.id
  fs.writeFileSync(join(root,'resources',resource),Buffer.alloc(body.length,98));const request=submit({resource_ids:[resource]});expect(request.state).toBe('queued');await vi.waitFor(()=>expect(call('request.status',{request_id:request.request_id})).toMatchObject({state:'confirmation_required',code:'RESOURCE_CORRUPT'}));expect(store.snapshot(task).runs).toHaveLength(0)
 })
+
+it('keeps current queue counts independent of the history page',()=>{
+ const id=reg();for(let n=0;n<20;n++)submit({import_ids:[id]})
+ const first=call('request.list');call('request.cancel',{request_id:first.items.at(-1).request_id});submit({import_ids:[id]})
+ const current=call('request.list'),older=call('request.list',{before:current.next_before})
+ expect(current.summary).toEqual({pending:20,confirmation:0});expect(older.items).toHaveLength(1);expect(older.items[0].state).toBe('cancelled');expect(older.summary).toEqual(current.summary)
+})

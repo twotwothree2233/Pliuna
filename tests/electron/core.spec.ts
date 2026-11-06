@@ -1,3 +1,4 @@
+import { chooseModel, chooseTheme } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -18,7 +19,7 @@ test('core slice: task, fixture write, saved submission, data-only restart', asy
     await page.getByLabel('任务名称').fill('可追溯学习')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await expect(page.getByRole('button', { name: /发送 · 新 Run/ })).toBeDisabled()
-    await page.getByLabel('本次模型', { exact: true }).selectOption('fixture')
+    await chooseModel(page, 'fixture')
     await page.getByLabel('想从哪里开始？').fill('请帮助理解原子事务')
     await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
     await expect(page.getByRole('heading', { name: '思考与记录' })).toBeVisible()
@@ -36,7 +37,7 @@ test('core slice: task, fixture write, saved submission, data-only restart', asy
     await page.getByRole('button', { name: '提交答案', exact: true }).click()
     await page.getByRole('tab', { name: /作答记录/ }).click()
     await expect(page.getByText('第 2 次提交')).toBeVisible()
-    await page.getByLabel('主题').selectOption('paper')
+    await chooseTheme(page, 'paper')
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'paper')
     await app.close()
     app = await launch(); page = await app.firstWindow()

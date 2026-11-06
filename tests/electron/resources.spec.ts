@@ -1,3 +1,4 @@
+import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { modelInputFromHost } from '../helpers/model-server'
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -58,20 +59,10 @@ test('immutable resources: HTTP Agent, desktop continuation/reference/approval, 
   }
   try {
     let page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message))
-    await page.getByRole('button', { name: '模型与审批', exact: true }).click()
-    await page.getByLabel('配置标识').fill('resource-main')
-    await page.getByLabel('服务 Base URL').fill(server.url)
-    await page.getByLabel('API Key', { exact: true }).fill('isolated-resource-key')
-    await page.getByLabel('精确模型标识').fill('resource-model')
-    await page.getByLabel('已知上下文容量').fill('1000000')
-    await page.getByLabel('输出上限', { exact: true }).fill('4096')
-    await page.getByRole('checkbox', { name: /我确认连接凭据/ }).check()
-    await page.getByRole('checkbox', { name: /^记住连接/ }).uncheck()
-    await page.getByRole('button', { name: '保存内存配置并查询' }).click()
-    await expect(page.getByText(/查询到 1 个服务候选/)).toBeVisible()
-    await page.getByRole('button', { name: '测试并启用主模型', exact: true }).click(); await page.getByRole('dialog', { name: '确认模型角色测试' }).getByRole('button', { name: '确认费用并开始测试', exact: true }).click()
-    await expect(page.getByText(/main 合成验证通过/)).toBeVisible()
-    await page.getByRole('button', { name: '关闭', exact: true }).click()
+    await configureModel(page, { id: 'resource-main', url: server.url, key: 'isolated-resource-key', model: 'resource-model', context: 1000000, output: 4096 })
+    await openSettings(page)
+    await testRole(page, '主模型')
+    await closeSettings(page)
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('资源闭环验收')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()

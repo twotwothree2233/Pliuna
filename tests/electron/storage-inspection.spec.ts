@@ -1,3 +1,4 @@
+import { chooseModel, openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -12,7 +13,7 @@ for(const scenario of ['growth','damaged-resource','cancel','blocked-control','p
   const call=async(request:any):Promise<any>=>{const r=await page.evaluate(request=>window.trellis.request(request),request);if(!r.ok)throw Error(r.error.code);return r.data}
   const inspect=()=>app.evaluate((_electron,root)=>{const Database=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('better-sqlite3'),files=['trellis.sqlite','restore-control.sqlite','recovery-control.sqlite','gc-control.sqlite'];return JSON.stringify(files.map(file=>{const db=new Database(root+'/'+file,{readonly:true});try{return db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r:any)=>[r.name,db.prepare('SELECT * FROM '+r.name).all()])}finally{db.close()}}))},directory)
   try{
-    await page.getByRole('button',{name:'创建第一个任务'}).click();await page.getByLabel('任务名称').fill('只读诊断保留任务');await page.getByRole('button',{name:'创建任务',exact:true}).click();await page.getByLabel('本次模型',{exact:true}).selectOption('fixture');await page.getByLabel('想从哪里开始？').fill('正常发布');await page.getByRole('button',{name:/发送 · 新 Run/}).click();await expect(page.locator('.managed')).toHaveCount(1);await expect(page.getByLabel('最近 Run 结果')).toContainText('completed');await page.getByLabel('你的想法').fill('诊断不能改动的草稿');await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
+    await page.getByRole('button',{name:'创建第一个任务'}).click();await page.getByLabel('任务名称').fill('只读诊断保留任务');await page.getByRole('button',{name:'创建任务',exact:true}).click();await chooseModel(page, 'fixture');await page.getByLabel('想从哪里开始？').fill('正常发布');await page.getByRole('button',{name:/发送 · 新 Run/}).click();await expect(page.locator('.managed')).toHaveCount(1);await expect(page.locator('.agent-status')).toContainText('已完成');await page.getByLabel('你的想法').fill('诊断不能改动的草稿');await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     const tasks=await call({type:'host.tasks'}),resource=(await call({type:'task.query',task_id:tasks[0].id,query:{type:'list',input:{kind:'resource',limit:50}}})).items[0].id
     if(scenario==='paged-summary'){
       for(let i=0;i<23;i++){const t=await call({type:'task.create',title:'source'+i});await app.evaluate((_electron,{root,task})=>{const req=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json'),Database=req('better-sqlite3'),crypto=req('node:crypto'),fs=req('node:fs'),db=new Database(root+'/trellis.sqlite'),id=crypto.randomUUID();db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(id,id,crypto.createHash('sha256').update('x').digest('hex'),1,'text/plain','分页候选','now');db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task,id);fs.writeFileSync(root+'/resources/'+id,'x');db.close()},{root:directory,task:t.task.id});await call({type:'task.delete',task_id:t.task.id})}
@@ -20,7 +21,7 @@ for(const scenario of ['growth','damaged-resource','cancel','blocked-control','p
     if(scenario==='damaged-resource')await writeFile(join(directory,'resources',resource),'broken')
     if(scenario==='blocked-control'){await test.step('Close before controlled corruption',()=>app.close());await test.step('Corrupt isolated control file',()=>writeFile(join(directory,'restore-control.sqlite'),'damaged control'));app=await test.step('Restart with damaged isolated control',()=>launch());page=await app.firstWindow();page.on('pageerror',e=>errors.push(e.message))}
     const before=scenario==='blocked-control'?null:await inspect(),controlBefore=await readFile(join(directory,'restore-control.sqlite'))
-    await page.getByRole('button',{name:'存储检查',exact:true}).click();const panel=page.getByRole('dialog',{name:'存储检查',exact:true}),region=panel.getByRole('region',{name:'只读诊断与增长'})
+    await openSettings(page, '存储与恢复');const panel=page.getByRole('dialog',{name:'应用设置',exact:true}),region=panel.getByRole('region',{name:'只读诊断与增长'})
     if(scenario==='paged-summary'){
       const candidates=panel.getByRole('region',{name:'正式资源删除收尾'});await expect(candidates.locator('article')).toHaveCount(20);await expect(candidates).toContainText('尚未核验保护与文件');await candidates.getByRole('button',{name:'查看更早资源收尾'}).click();await expect(candidates.locator('article')).toHaveCount(3)
     }else if(scenario==='cancel'||scenario==='responsive'){
@@ -34,6 +35,6 @@ for(const scenario of ['growth','damaged-resource','cancel','blocked-control','p
       else {await region.getByRole('button',{name:'检查控制清单增长'}).click();await expect(region).toContainText(scenario==='blocked-control'?'未完成，不能推断健康或无保护':'独立控制记录（只增不裁剪）');if(scenario==='blocked-control')await expect(region).toContainText('INSPECT_UNAVAILABLE');else await expect(region).toContainText('控制格式 5')}
     }
     expect(await readFile(join(directory,'restore-control.sqlite'))).toEqual(controlBefore);if(before)expect(await inspect()).toBe(before)
-    await panel.getByRole('button',{name:'关闭',exact:true}).click();if(scenario!=='blocked-control')await expect(page.getByLabel('你的想法')).toHaveValue('诊断不能改动的草稿');expect(errors).toEqual([])
+    await panel.getByRole('button',{name:/^返回工作区/}).click();if(scenario!=='blocked-control')await expect(page.getByLabel('你的想法')).toHaveValue('诊断不能改动的草稿');expect(errors).toEqual([])
   }finally{await test.step('Close isolated inspection application',async()=>{await app.evaluate(({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())w.destroy()}).catch(()=>{});await app.close();await rm(directory,{recursive:true,force:true})})}
 })

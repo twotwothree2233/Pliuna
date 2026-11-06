@@ -5,7 +5,7 @@ type RecoveryPoint = { id: string; created_at: string; resource_count: number; d
 type Status = { maintenance_error: string | null; summary: { total: number; candidates: number; reviews: number; known_bytes: number; unknown_sizes: number }; items: Item[]; next_after: number | null }
 const labels: Record<string, string> = { committed: '正式提交已核对', pinned: '在途保护', candidate: '孤立候选（保留）', absent: '无残留文件', review: '需要核对（保留）' }
 type GcResult = { id: string; phase: string; authorized: boolean; files_deleted: number; deleted_bytes: number; next_after: number | null; protected: number; reviews: number; items: { index: number; state: string; reason: string; attempt: number; next_retry_at: string | null }[] }
-export function StorageStatus({ close, createRecovery, restoreRecovery, collectStaging, retireReplica, collectResource }: { close(): void; createRecovery(replace: string | null): Promise<void>; restoreRecovery(point: RecoveryPoint): Promise<void>; collectStaging(operationId?: string, after?: number): Promise<void>; retireReplica(replicaId: string, operationId?: string): Promise<void>; collectResource(operationId: string, retry?: boolean): Promise<void> }) {
+export function StorageStatus({ close, createRecovery, restoreRecovery, collectStaging, retireReplica, collectResource, embedded = false, onBusy }: { embedded?: boolean; onBusy?(busy: boolean): void; close(): void; createRecovery(replace: string | null): Promise<void>; restoreRecovery(point: RecoveryPoint): Promise<void>; collectStaging(operationId?: string, after?: number): Promise<void>; retireReplica(replicaId: string, operationId?: string): Promise<void>; collectResource(operationId: string, retry?: boolean): Promise<void> }) {
   const [resources, setResources] = useState<any[]>([]), [resourceBefore, setResourceBefore] = useState<number | null>(null), [resourceError, setResourceError] = useState('')
   async function loadResources(more = false) {
     try { const value = await hostRequest<{ items: any[]; next_before: number | null }>({ type: 'maintenance.resource.list', summary: true, ...(more && resourceBefore ? { before: resourceBefore } : {}) }); setResources(value.items); setResourceBefore(value.next_before); setResourceError('') } catch (e) { setResourceError(String(e)) }
@@ -57,8 +57,9 @@ export function StorageStatus({ close, createRecovery, restoreRecovery, collectS
     finally { await load(); if (failure) setError(failure) }
   }
   useEffect(() => { void load() }, [])
-  return <div className="overlay"><section className="modal model-modal" role="dialog" aria-modal="true" aria-label="存储检查" onKeyDown={e => { if (e.key === 'Escape' && !busy) close() }}>
-    <header><h2>存储检查</h2><button disabled={busy} onClick={close}>关闭</button></header>
+  useEffect(() => { onBusy?.(busy || inspection?.phase === 'running'); return () => onBusy?.(false) }, [busy, inspection?.phase, onBusy])
+  return <div className={embedded ? "settings-embedded" : "overlay"}><section className={embedded ? "storage-settings-content" : "modal model-modal"} role={embedded ? undefined : "dialog"} aria-modal={embedded ? undefined : true} aria-label="存储检查" onKeyDown={e => { if (e.key === 'Escape' && !busy) close() }}>
+    <header><h2>存储检查</h2>{!embedded && <button disabled={busy} onClick={close}>关闭</button>}</header>
     <p className="notice">仅开放已登记 staging、已核验副本及已删除任务的正式资源受限回收，迁移未开放。恢复旧数据须本人确认。重新核对只更新维护登记，不删除文件、不重新执行模型或写入。不是全部磁盘文件扫描。</p>
     <section aria-label="只读诊断与增长"><h3>只读诊断与增长</h3>
       <p>独立只读检查，不保存草稿、不修复、不删除、不改变保护或原重试次数，不调用模型。仅已登记资源，每批最多 50 项；结果是该次观察，不是回收许可。SQLite 读取可能产生辅助文件。控制损坏时不猜测当前代际。</p>

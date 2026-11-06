@@ -1,3 +1,4 @@
+import { chooseModel, openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -20,14 +21,14 @@ for (const scenario of ['save-cancel-replace-delete', 'input-conflict', 'save-fa
   }
   try {
     await page.getByRole('button', { name: '创建第一个任务' }).click(); await page.getByLabel('任务名称').fill('维护输入验收'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    await page.getByLabel('本次模型', { exact: true }).selectOption('fixture'); await page.getByLabel('想从哪里开始？').fill('fixture')
+    await chooseModel(page, 'fixture'); await page.getByLabel('想从哪里开始？').fill('fixture')
     if (scenario === 'active-run') {
       await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
       const result = await page.evaluate(() => window.trellis.request({ type: 'maintenance.begin' }))
       expect(result.ok).toBe(false); if (!result.ok) expect(result.error.code).toBe('MAINTENANCE_EXECUTION_ACTIVE')
-      await expect(page.getByLabel('最近 Run 结果')).toContainText('completed')
+      await expect(page.locator('.agent-status')).toContainText('已完成')
     } else {
-      await page.getByRole('button', { name: /发送 · 新 Run/ }).click(); await expect(page.locator('.managed')).toHaveCount(1); await expect(page.getByLabel('最近 Run 结果')).toContainText('completed')
+      await page.getByRole('button', { name: /发送 · 新 Run/ }).click(); await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
     }
     await page.getByLabel('你的想法').fill('已保存答案'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     if (scenario === 'answer-unknown') await app.evaluate(({ ipcMain }) => {
@@ -38,16 +39,16 @@ for (const scenario of ['save-cancel-replace-delete', 'input-conflict', 'save-fa
     if (scenario === 'answer-unknown') {
       await expect(page.locator('.managed').getByRole('alert')).toContainText('答案提交结果未知')
       await page.getByRole('tab', { name: /作答记录/ }).click(); await expect(page.locator('.managed')).toHaveCount(1)
-      await page.getByRole('button', { name: '存储检查', exact: true }).click()
-      const modal = page.getByRole('dialog', { name: '存储检查', exact: true }); await modal.getByRole('button', { name: '创建一致性恢复点', exact: true }).click()
+      await openSettings(page, '存储与恢复')
+      const modal = page.getByRole('dialog', { name: '应用设置', exact: true }); await modal.getByRole('button', { name: '创建一致性恢复点', exact: true }).click()
       await expect(modal.getByRole('alert')).toContainText('正在提交'); expect((await inspect()).control.active).toBeNull()
-      await modal.getByRole('button', { name: '关闭', exact: true }).click(); await page.getByRole('button', { name: '查询已保存作答状态', exact: true }).click()
+      await modal.getByRole('button', { name: /^返回工作区/ }).click(); await page.getByRole('button', { name: '查询已保存作答状态', exact: true }).click()
       await expect(page.locator('.managed').getByRole('status')).toContainText('已同步保存状态'); expect((await inspect()).answers).toBe(1)
     } else await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
     await page.getByLabel('想从哪里开始？').fill('不应自动发送的草稿')
     const before = await inspect()
-    await page.getByRole('button', { name: '存储检查', exact: true }).click()
-    const panel = page.getByRole('dialog', { name: '存储检查', exact: true }), button = panel.getByRole('button', { name: '创建一致性恢复点', exact: true })
+    await openSettings(page, '存储与恢复')
+    const panel = page.getByRole('dialog', { name: '应用设置', exact: true }), button = panel.getByRole('button', { name: '创建一致性恢复点', exact: true })
     await expect(button).toBeEnabled()
     if (scenario === 'input-conflict' || scenario === 'save-failure') {
       await app.evaluate((_electron, { directory, scenario }) => {
@@ -62,7 +63,7 @@ for (const scenario of ['save-cancel-replace-delete', 'input-conflict', 'save-fa
       expect((await inspect()).control.active).toBeNull()
       const status = await page.evaluate(() => window.trellis.request({ type: 'maintenance.status' })); expect(status.ok && (status.data as any).phase).toBe('idle')
       // Avoid the intentional unsaved-input close veto in this isolated negative test only.
-      await panel.getByRole('button', { name: '关闭', exact: true }).click()
+      await panel.getByRole('button', { name: /^返回工作区/ }).click()
       const confirmed = new Promise<void>((resolve, reject) => page.once('dialog', d => { d.accept().then(resolve, reject) }))
       await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click(); await confirmed
       await expect(page.getByLabel('你的想法')).toHaveValue('已保存答案')
@@ -88,7 +89,7 @@ for (const scenario of ['save-cancel-replace-delete', 'input-conflict', 'save-fa
       page.once('dialog', d => d.dismiss()); await panel.getByRole('button', { name: '创建新点并替换旧点' }).click(); expect((await inspect()).control.active.id).toBe(first.control.active.id)
       page.once('dialog', d => d.accept()); await panel.getByRole('button', { name: '创建新点并替换旧点' }).click(); await expect(panel.getByRole('button', { name: '创建新点并替换旧点' })).toBeEnabled()
       const next = await inspect(); expect(next.control.active.id).not.toBe(first.control.active.id); expect(next.control.retired).toContain(first.control.active.id)
-      await panel.getByRole('button', { name: '关闭', exact: true }).click()
+      await panel.getByRole('button', { name: /^返回工作区/ }).click()
       await app.close(); app = await launch(); page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message))
       await page.getByRole('button', { name: /维护输入验收/ }).click(); await expect(page.getByLabel('你的想法')).toHaveValue('屏障保存的输入')
       expect((await inspect()).control.active.id).toBe(next.control.active.id)
