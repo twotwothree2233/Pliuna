@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -64,7 +64,9 @@ test('starts without calculation, creates a task and restores it on the native d
         text: document.body.innerText.slice(0, 8000),
         maintenance: await Promise.race([window.trellis.request({ type: 'maintenance.status' }), new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 1500))])
       })).catch(diagnosticError => ({ diagnostic_error: String(diagnosticError) }))
-      await test.info().attach('desktop-failure', { body: JSON.stringify(diagnostics, null, 2), contentType: 'application/json' }).catch(() => {})
+      const diagnosticPath = test.info().outputPath('desktop-failure.json')
+      await writeFile(diagnosticPath, JSON.stringify(diagnostics, null, 2) + '\n')
+        .then(() => test.info().attach('desktop-failure', { path: diagnosticPath, contentType: 'application/json' })).catch(() => {})
     }
     throw error
   } finally { await app.close(); await rm(root, { recursive: true, force: true }) }
