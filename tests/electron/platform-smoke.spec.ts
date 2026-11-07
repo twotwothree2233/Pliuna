@@ -1,4 +1,4 @@
-import { _electron as electron, expect, test } from '@playwright/test'
+import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,8 +18,9 @@ test('starts without calculation, creates a task and restores it on the native d
     TRELLIS_TEST_DATA: join(root, 'user data'), TRELLIS_ENABLE_MONTY: '0'
   } })
   let app = await launch()
+  let page: Page | undefined
   try {
-    let page = await app.firstWindow()
+    page = await app.firstWindow()
     expect(page.url()).toMatch(/^file:/)
     expect(await page.evaluate(() => window.trellis.platform)).toBe(process.platform)
     expect(await page.locator('.app').evaluate(element => element.classList.contains('native-mac'))).toBe(process.platform === 'darwin')
@@ -56,5 +57,15 @@ test('starts without calculation, creates a task and restores it on the native d
     await page.close()
     await expect.poll(() => appProcess.exitCode).toBe(0)
     await expect.poll(() => utilityPids.filter(pid => { try { process.kill(pid, 0); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error } })).toEqual([])
+  } catch (error) {
+    if (page && !page.isClosed()) {
+      await page.screenshot({ path: test.info().outputPath('platform-failure.png') }).catch(() => {})
+      const diagnostics = await page.evaluate(async () => ({
+        text: document.body.innerText.slice(0, 8000),
+        maintenance: await Promise.race([window.trellis.request({ type: 'maintenance.status' }), new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 1500))])
+      })).catch(diagnosticError => ({ diagnostic_error: String(diagnosticError) }))
+      await test.info().attach('desktop-failure', { body: JSON.stringify(diagnostics, null, 2), contentType: 'application/json' }).catch(() => {})
+    }
+    throw error
   } finally { await app.close(); await rm(root, { recursive: true, force: true }) }
 })
