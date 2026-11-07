@@ -10,8 +10,11 @@ const packaged = process.env.TRELLIS_PACKAGED_OUTPUT ? verifyDesktop(process.env
 const executablePath: string = packaged?.executable ?? createRequire(import.meta.url)('electron')
 test('starts without calculation, creates a task and restores it on the native desktop', async () => {
   const root = await mkdtemp(join(tmpdir(), 'trellis-platform-smoke-'))
+  // Windows treats an empty value as present, so omit the flag entirely for GUI
+  // startup. App-node backends set it explicitly through their own launcher.
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'ELECTRON_RUN_AS_NODE'))
   const launch = () => electron.launch({ executablePath, args: packaged ? [] : ['.'], ...(packaged ? { cwd: root } : {}), env: {
-    ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: packaged ? 'http://127.0.0.1:1/must-not-load' : '',
+    ...environment, ELECTRON_RENDERER_URL: packaged ? 'http://127.0.0.1:1/must-not-load' : '',
     TRELLIS_TEST_DATA: join(root, 'user data'), TRELLIS_ENABLE_MONTY: '0'
   } })
   let app = await launch()

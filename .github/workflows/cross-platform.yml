@@ -112,8 +112,6 @@ jobs:
         run: xvfb-run -a pnpm exec playwright test platform-smoke.spec.ts
       - name: Desktop startup and restart (macOS / Windows)
         if: "!cancelled() && runner.os != 'Linux' && steps.electron_native.outcome == 'success'"
-        env:
-          DEBUG: ${{ runner.os == 'Windows' && 'pw:browser' || '' }}
         run: pnpm exec playwright test platform-smoke.spec.ts
       - name: Build local directory package
         id: directory_package
@@ -133,7 +131,6 @@ jobs:
         if: "!cancelled() && runner.os != 'Linux' && steps.directory_package.outcome == 'success' && steps.electron_native.outcome == 'success'"
         env:
           TRELLIS_PACKAGED_OUTPUT: ${{ runner.temp }}/trellis-package
-          DEBUG: ${{ runner.os == 'Windows' && 'pw:browser' || '' }}
         run: pnpm exec playwright test platform-smoke.spec.ts
       - name: Keep desktop failure evidence
         if: failure()
