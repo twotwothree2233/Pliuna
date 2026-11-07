@@ -147,6 +147,20 @@ it('reconciles global instances whose required enablement is unavailable', async
   processes!.reconcile(()=>false);expect(processes!.status(task,copy.digest)).toMatchObject([{state:'stopping'}])
   await expect.poll(()=>processes!.status(task,copy.digest)).toHaveLength(0)
 })
+it('coalesces synchronous RPC-close reentry into one tree termination request', async () => {
+  await setup({ global: true })
+  await processes!.execute(copy, task, request({ value: 1 }))
+  const instance = childInstance(), terminate = instance.tree.terminate.bind(instance.tree)
+  let attempts = 0
+  const stop = vi.spyOn(instance.tree, 'terminate').mockImplementation(() => {
+    if (++attempts > 1) throw Object.assign(Error('duplicate signal raced with exit'), { code: 'EPERM' })
+    return terminate()
+  })
+  processes!.reconcile(() => false)
+  expect(stop).toHaveBeenCalledTimes(1)
+  expect(processes!.status(task, copy.digest)).toMatchObject([{ state: 'stopping' }])
+  await expect.poll(() => processes!.status(task, copy.digest)).toHaveLength(0)
+})
 function childInstance(): { process: ChildProcess; tree: ManagedProcessTree; exited: Promise<void> } {
   return [...(processes as any).children][0]
 }
