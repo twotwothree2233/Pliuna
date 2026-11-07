@@ -66,6 +66,18 @@ macOS 保留现有标题栏与 Command 文案。
 桌面回归等待按钮恢复，再发送新建快捷键。
 弹窗关闭也等待可见状态，不依赖固定延时。
 
+## CI isolation and distribution links
+
+四平台 CI 禁用 pnpm 构建副作用缓存。
+依赖源码缓存继续使用，Electron 正常安装。
+macOS 在签名前检查 framework 三处链接。
+链接展开时明确失败，不手工改造上游分发。
+
+文件、进程和包内探针各自保留失败结果。
+前置构建和 ABI 切换成功后，独立探针继续。
+任一测试失败仍使矩阵任务失败。
+流程不使用 continue-on-error 掩盖持久化阻塞。
+
 ## Historical note audit
 
 历史决定按边界保留，不升级旧验证结论。
@@ -108,7 +120,8 @@ macOS 保留现有标题栏与 Command 文案。
 显式复制依赖也需在依赖升级时重新审计。
 
 本机 macOS ARM64 目录包提供真实运行证据。
-Windows、Linux 与 Intel Mac 仍需原生安装验收。
+四平台的发行格式仍需原生安装验收。
+目录包结果由各平台 CI 单独记录。
 ZIP、NSIS 和 AppImage 的安装体验不能由目录包替代。
 签名、公证、正式发布与支持声明继续留在后续门槛。
 

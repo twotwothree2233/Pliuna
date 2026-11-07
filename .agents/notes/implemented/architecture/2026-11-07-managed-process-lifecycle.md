@@ -56,7 +56,8 @@ Windows 使用最小 N-API 辅助模块。
 探针先于 Windows 的运行时回归执行。
 Electron 探针也执行同一组 Job 验证。
 本机 macOS 无法执行 Windows 编译及内核验证。
-代码已接入，Windows 原生验收仍是未完成项。
+Windows 最小原生 Job 探针已在 CI 通过。
+完整业务生命周期和包内链路继续独立验收。
 
 ## Lifecycle and publication
 
@@ -157,7 +158,8 @@ Windows 构建增加一个 N-API 原生模块。
 
 可信插件主动脱离 POSIX 进程组仍是信任边界。
 进程树接口不提供 OS 沙箱或副作用回滚。
-Windows 编译、嵌套 Job 与原生运行尚待验收。
+Windows 最小探针覆盖编译及嵌套 Job。
+业务文件身份阻塞不能关闭完整 D 验收。
 候选平台的计算门槛不随本机验证结果开放。
 
 ## Verification
@@ -179,6 +181,7 @@ ESM 与 CommonJS 崩溃夹具均参与验证。
 完整 PDF、验包及文件哈希测试未运行。
 
 具体通过数与环境以会话报告为准。
-Windows 探针源码检查通过，原生执行尚未完成。
+Windows 最小原生探针通过。
+完整 Windows 验收结果以同一提交的 CI 为准。
 笔记通过目录、链接与格式校验。
 不修改归档，不执行归档摘要检查。
