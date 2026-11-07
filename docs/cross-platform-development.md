@@ -1,12 +1,29 @@
 # 跨平台开发与验证
 
-A、B 阶段建立测试入口与统一资产描述。
-C 阶段统一文件操作、权限与持久化接口。
-D 阶段统一进程树与 Monty 生命周期。
-E 阶段统一候选打包、包内验证与桌面平台提示。
+第十轮四平台 CI 全部通过。
+已验证代码提交为：
+`bc79bd422c2a306347d33a57c55c16f973b030ef`。
+[运行 42386431419](https://github.com/twotwothree2233/Trellis/actions/runs/42386431419)。
+
+工程阶段 A、B 建立测试入口与统一资产描述。
+C 统一文件操作、权限与持久化接口。
+D 统一进程树与 Monty 生命周期。
+E 统一候选打包、包内验证与桌面平台提示。
+
+本次收尾提交只更新文档，标注 `[skip ci]`。
+上述 green 属于已验证代码头。
+文档头不另作完整矩阵已运行的声明。
 
 计算能力仍只向 macOS ARM64 开放。
-其他平台需继续通过生命周期与分发验收。
+其他平台已通过本轮生命周期与目录包门禁。
+正式支持仍需最低版本和安装分发验收。
+
+| 第十轮平台 | 执行器 | 结果 |
+| --- | --- | --- |
+| macOS ARM64 | `macos-15` ARM64 | success |
+| macOS Intel | `macos-15-intel` x64 | success |
+| Windows x64 | `windows-2022` x64 | success |
+| Linux glibc x64 | `ubuntu-24.04` x64 | success |
 
 ## 工程目标与验收环境
 
@@ -177,10 +194,31 @@ Windows 路径必须不依赖当前盘符或目录。
 文件打开前后检查文件与父目录身份。
 悬空链接不作为缺失文件处理。
 
-恢复日志继续保存数值 `dev`、`ino`。
-无法安全表示身份时明确拒绝操作。
+内存身份直接取自 BigInt Stats。
+`dev`、`ino` 使用规范 u64 十进制字符串。
+普通 Stats 保留原大小和时间字段精度。
+路径、句柄和父目录仍须通过稳定性检查。
+
+精确身份兼容方案 A 已授权并实施。
+它与工程阶段 A、B 的命名分别记录。
+仅新建 Windows 隔离测试目录可显式选择新版。
+开关为 `TRELLIS_TEST_FILE_IDENTITIES=decimal-v2`。
+
+- 新 export/GC 控制版本为 2。
+- 新 restore journal 为 6，`export_control=2`。
+- 新退役及资源清理嵌套记录为 2。
+- 安全旧数值记录可读，保持原记录版本。
+- 不安全旧数值拒绝且保留，不推算原编号。
+- 混合类型、非规范字符串及版本冲突均拒绝。
+
+旧目录按已存版本读取，不自动升级。
+旧目录激活与迁移方案 B 仍冻结。
+macOS 默认继续采用原数值存储版本。
+业务 schema、settings/auth 和内容格式不变。
+
 未知硬链接与多余链接同样拒绝。
-本轮不修改日志版本、schema 或 SQL。
+身份不确定时，恢复和清理保持拒绝边界。
+具体取舍见[精确身份笔记](../.agents/notes/implemented/architecture/2026-11-07-exact-file-identities.md)。
 
 ### 私有权限
 
@@ -194,6 +232,11 @@ Windows 使用系统 PowerShell 配置 DACL。
 - 不向权限子进程转发模型密钥。
 - 应用数据目录另设隐藏属性。
 - 权限设置或验证失败时拒绝继续。
+
+Windows 每次核对完整 DACL，仅按需改写。
+核对主体、权限、保护位、继承和传播标记。
+已有隐藏属性也不重复写入。
+原生探针确认重复保护不改变 ctimeNs。
 
 Windows 运行环境需允许系统 PowerShell。
 首次读取已有配置时收紧其文件权限。
@@ -239,7 +282,10 @@ macOS 保留既有原因字符串及目录刷盘行为。
 Windows 目录元数据断电一致性仍待原生验收。
 UNC 共享盘还需验证服务端文件系统语义。
 路径语法用例不替代真实共享盘验收。
-Windows、Linux 与 Intel Mac 的原生结果另报。
+四平台文件与恢复测试已在第十轮通过。
+
+Windows 结果使用新建的精确身份测试目录。
+旧目录拒绝与安全旧格式读取仍有回归覆盖。
 
 ## 进程树与计算生命周期
 
@@ -283,6 +329,9 @@ Node 与 Electron 探针均检查模块加载。
 Windows 的 Electron 探针还执行完整 Job 探针。
 候选目标的 `runtimeVerified` 保持关闭。
 Job 探针通过后仍需完整目标平台验收。
+
+第十轮已分别通过最小探针和完整业务生命周期。
+Windows 的真实 Monty 计算仍按原门槛跳过。
 
 ### POSIX 行为与托管范围
 
@@ -417,11 +466,17 @@ Windows 和 Linux 使用 Ctrl 文案及系统窗口框。
 - macOS：ZIP 解压启动、隔离属性和签名提示。
 - Windows：NSIS 当前用户安装、卸载及保留数据。
 - Windows：中文、空格路径和无管理员权限启动。
-- Windows：Job 模块在包内纳管、父崩溃和 IPC 失联。
+- Windows：普通用户安装后复验 Job 和异常退出。
 - Linux：AppImage、FUSE、桌面集成及 Chromium 沙箱。
 - 各系统：无源码、无系统 Node 的离线首次启动。
 - 各系统：完整插件安装、信任及真实材料解析。
 - 各系统：运行中取消、超时、窗口退出和重启恢复。
+- 各系统：正式签名、macOS 公证及分发提示。
+
+源码生命周期已覆盖父崩溃、取消和 IPC 失联。
+目录包已覆盖 app-node RPC 和整树退出。
+安装后的普通用户环境仍需复验这些行为。
+Windows 的 SmartScreen 与升级路径也未验收。
 
 ## 持续验证边界
 
@@ -442,5 +497,78 @@ Node 与 Electron binding 探针在原生系统运行。
 本轮增加的资产门槛单测使用合成摘要结果。
 文件测试入口也使用合成摘要结果。
 
-CI 配置需提交后才能在远端执行。
-本地通过与远端平台通过应分别报告。
+### 第十轮 Windows 实际覆盖
+
+Windows 原生日志已核对计数与跳过原因。
+独立核心进程入口是完整进程入口的子集。
+两者不相加计为独立测试总数。
+
+| 入口 | 第十轮结果 |
+| --- | --- |
+| Node / Electron 最小 Job 探针 | 两次均 success |
+| Portable | 94 通过 |
+| 独立核心进程 | 15 通过，3 跳过 |
+| 文件、身份、恢复与清理 | 532 通过，1 跳过 |
+| 完整业务进程 | 118 通过，3 跳过 |
+| 包结构与平台提示 | 19 通过，4 跳过 |
+| Electron 生命周期 | 5 通过，3 跳过 |
+| Node / Electron SQLite 与 Monty binding | success，不启动计算 |
+| 源码桌面首启与重启 | 1 通过，11.6 秒 |
+| 目录包构建及包内运行探针 | success |
+| 目录包桌面首启与重启 | 1 通过，10.6 秒 |
+
+三个计算跳过项来自同一 `runtimeVerified` 门槛。
+分别为原生限制、原生取消及原生父崩溃测试。
+Node 核心、完整进程与 Electron 入口各跳过它们。
+真实进程夹具仍覆盖取消、超时、失联与父崩溃。
+
+文件跳过项是 POSIX 目录 fsync 故障注入。
+Windows 明确只提供 `file-sync-only`。
+四个包结构跳过项是非 Windows 目标夹具。
+Windows 另有用例确认拒绝其 POSIX 可执行位缺失。
+
+Job 探针确认嵌套、先纳管和父崩溃清理。
+启动期父崩溃也通过，Node 和 Electron 均已执行。
+日志中的预期纳管失败用于验证后端不启动。
+它不构成步骤失败，最终探针断言均通过。
+
+包内 SQLite、Monty binding、app-node RPC 均通过。
+派生进程清理、PDF 后端和离线 PDF 均为 true。
+包内进程探针从临时 cwd 启动，PATH 为空。
+GUI 冒烟使用隔离数据并显式关闭计算。
+
+第十轮没有失败步骤。
+Windows 跳过 macOS framework 与 Linux 桌面步骤。
+失败附件上传因本轮成功而未执行。
+这些条件跳过不削减 Windows 对应入口的覆盖。
+
+### 保留结果与未验收范围
+
+第七至九轮原始结果继续保留。
+
+- [第七轮](https://github.com/twotwothree2233/Trellis/actions/runs/42352655882)：failure。
+  Windows 文件、完整业务进程和 GUI 失败。
+  原生截图显示 `RESTORE_JOURNAL_INVALID`。
+  该轮 blocked/error JSON 只有代码路径核对。
+- [第八轮](https://github.com/twotwothree2233/Trellis/actions/runs/42374570223)：cancelled。
+  Windows 文件 18 项失败，总预算耗尽。
+- [第九轮](https://github.com/twotwothree2233/Trellis/actions/runs/42378726207)：failure。
+  仅 Windows 包内 GUI 就绪竞态失败。
+  原生 JSON 为 idle、无恢复错误、GC 可用。
+
+第十轮 green 来自文首完整代码提交。
+源码与目录包的四平台自动化范围已通过。
+未制作或发布 ZIP、NSIS、AppImage 安装分发产物。
+
+尚未验收的范围如下：
+
+- Windows 11 普通用户及各平台最低系统版本。
+- 干净环境安装、卸载、升级和保留数据。
+- 正式签名、公证、隔离属性及 SmartScreen。
+- 完整插件安装、信任及真实材料解析。
+- UNC/SMB 服务端持久化语义。
+- Windows 目录元数据断电一致性。
+- 旧目录升级方案 B 和新计算目标开放。
+
+这些事项继续保留为独立授权与验收门槛。
+纯状态文档提交使用 `[skip ci]`，不重复整套 CI。
