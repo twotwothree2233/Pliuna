@@ -61,15 +61,17 @@ jobs:
           import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
           const root = fs.mkdtempSync(path.join(os.tmpdir(), 'trellis-file-id-'));
           try {
-            const file = path.join(root, 'owned'), fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
-            try {
-              const summarize = s => ({dev:String(s.dev),ino:String(s.ino),nlink:String(s.nlink)});
-              const readable = fs.openSync(file, fs.constants.O_RDWR);
-              try { console.log('[DEBUG-file-id]',JSON.stringify({path:summarize(fs.lstatSync(file)),pathExact:summarize(fs.lstatSync(file,{bigint:true})),handle:summarize(fs.fstatSync(fd)),handleExact:summarize(fs.fstatSync(fd,{bigint:true})),readWrite:summarize(fs.fstatSync(readable))})); }
-              finally { fs.closeSync(readable) }
-              const s = fs.fstatSync(fd);
-              if (!Number.isSafeInteger(s.dev) || !Number.isSafeInteger(s.ino) || s.dev < 0 || s.ino <= 0) throw Error('FILE_IDENTITY_UNSUPPORTED');
-            } finally { fs.closeSync(fd) }
+            for (let iteration = 0; iteration < 128; iteration++) {
+              const file = path.join(root, 'owned');
+              const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0), 0o600);
+              try {
+                const summarize = s => ({dev:String(s.dev),ino:String(s.ino),nlink:String(s.nlink)});
+                const s = fs.fstatSync(fd), safe = Number.isSafeInteger(s.dev) && Number.isSafeInteger(s.ino) && s.dev >= 0 && s.ino > 0;
+                if (iteration === 0 || !safe) console.log('[DEBUG-file-id]',JSON.stringify({iteration,safe,path:summarize(fs.lstatSync(file)),pathExact:summarize(fs.lstatSync(file,{bigint:true})),handle:summarize(s),handleExact:summarize(fs.fstatSync(fd,{bigint:true})),flags:{nofollow:fs.constants.O_NOFOLLOW,nonblock:fs.constants.O_NONBLOCK}}));
+                if (!safe) throw Error('FILE_IDENTITY_UNSUPPORTED');
+              } finally { fs.closeSync(fd) }
+              fs.unlinkSync(file);
+            }
           } finally { fs.rmSync(root,{recursive:true,force:true}) }
           JS
       - name: Filesystem behavior (synthetic integrity, Node ABI)
