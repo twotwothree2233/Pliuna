@@ -8,6 +8,14 @@ import { verifyDesktop } from '../../scripts/verify-desktop.mjs'
 
 const packaged = process.env.TRELLIS_PACKAGED_OUTPUT ? verifyDesktop(process.env.TRELLIS_PACKAGED_OUTPUT) : undefined
 const executablePath: string = packaged?.executable ?? createRequire(import.meta.url)('electron')
+const healthyMaintenance = { ok: true, data: { phase: 'idle', error: null, restore: { error: null }, gc: { enabled: true, error: null } } }
+async function runtimeReady(page: Page): Promise<void> {
+  // A visible renderer can precede native permission checks and runtime IPC.
+  // Wait for a read-only acknowledgement before dispatching a business action.
+  await expect.poll(() => page.evaluate(() => window.trellis.request({ type: 'maintenance.status' })), {
+    timeout: 15000, intervals: [100, 250, 500]
+  }).toMatchObject(healthyMaintenance)
+}
 test('starts without calculation, creates a task and restores it on the native desktop', async () => {
   const root = await mkdtemp(join(tmpdir(), 'trellis-platform-smoke-'))
   // Windows treats an empty value as present, so omit the flag entirely for GUI
@@ -25,6 +33,7 @@ test('starts without calculation, creates a task and restores it on the native d
     expect(page.url()).toMatch(/^file:/)
     expect(await page.evaluate(() => window.trellis.platform)).toBe(process.platform)
     expect(await page.locator('.app').evaluate(element => element.classList.contains('native-mac'))).toBe(process.platform === 'darwin')
+    await runtimeReady(page)
     await page.getByRole('button', { name: '创建第一个任务', exact: true }).click()
     await page.getByLabel('任务名称').fill('跨平台启动测试')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
@@ -34,7 +43,7 @@ test('starts without calculation, creates a task and restores it on the native d
     expect(await readFile(join(root, 'user data', 'gc-established'), 'utf8')).toBe(process.platform === 'win32' ? 'gc-v2\n' : 'gc-v1\n')
     const maintenance = await page.evaluate(() => window.trellis.request({ type: 'maintenance.status' }))
     await writeFile(test.info().outputPath('desktop-status.json'), JSON.stringify(maintenance, null, 2) + '\n')
-    expect(maintenance).toMatchObject({ ok: true, data: { phase: 'idle', error: null, restore: { error: null }, gc: { enabled: true, error: null } } })
+    expect(maintenance).toMatchObject(healthyMaintenance)
     await expect(page.getByTitle(/^新建任务（/)).toBeEnabled()
     await page.keyboard.press('ControlOrMeta+n')
     await expect(page.getByLabel('任务名称')).toBeVisible()
@@ -47,6 +56,7 @@ test('starts without calculation, creates a task and restores it on the native d
     await page.keyboard.press('Escape')
     await app.close()
     app = await launch(); page = await app.firstWindow()
+    await runtimeReady(page)
     await expect(page.getByRole('button', { name: /跨平台启动测试/ })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.style.getPropertyValue('--text-scale'))).toBe('1.1')
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(390, 650))
