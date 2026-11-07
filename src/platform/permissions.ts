@@ -23,18 +23,34 @@ foreach ($sid in @($user, $system)) {
   } else { $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow') }
   $acl.AddAccessRule($rule)
 }
-if ($directory) { [System.IO.Directory]::SetAccessControl($path, $acl); $actual = [System.IO.Directory]::GetAccessControl($path) }
-else { [System.IO.File]::SetAccessControl($path, $acl); $actual = [System.IO.File]::GetAccessControl($path) }
-if (-not $actual.AreAccessRulesProtected) { throw 'Unprotected ACL' }
-$seenUser = $false
-foreach ($rule in $actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-  if ($rule.AccessControlType -eq 'Allow') {
-    if ($rule.IdentityReference.Value -notin @($user.Value, $system.Value)) { throw 'Unexpected principal' }
-    if ($rule.IdentityReference.Value -eq $user.Value -and ($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl) { $seenUser = $true }
+function Test-PrivateAcl($candidate) {
+  if (-not $candidate.AreAccessRulesProtected) { return $false }
+  $rules = @($candidate.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+  $requiredCount = if ($user.Value -eq $system.Value) { 1 } else { 2 }
+  if ($rules.Count -ne $requiredCount) { return $false }
+  $seen = [System.Collections.Generic.HashSet[string]]::new()
+  $inheritance = if ($directory) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
+  foreach ($rule in $rules) {
+    if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow' -or
+        $rule.IdentityReference.Value -notin @($user.Value, $system.Value) -or
+        $rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl -or
+        $rule.InheritanceFlags -ne $inheritance -or
+        $rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None -or
+        -not $seen.Add($rule.IdentityReference.Value)) { return $false }
   }
+  return $true
 }
-if (-not $seenUser) { throw 'Current user cannot own private data' }
-if ($directory -and $env:TRELLIS_PRIVATE_HIDDEN -eq '1') { [System.IO.File]::SetAttributes($path, $attributes -bor [System.IO.FileAttributes]::Hidden) }
+if ($directory) { $actual = [System.IO.Directory]::GetAccessControl($path) }
+else { $actual = [System.IO.File]::GetAccessControl($path) }
+# Reapplying an equivalent inheritable ACL changes child metadata on NTFS.
+# Verify every time, but write only when the exact private ACL is missing.
+if (-not (Test-PrivateAcl $actual)) {
+  if ($directory) { [System.IO.Directory]::SetAccessControl($path, $acl); $actual = [System.IO.Directory]::GetAccessControl($path) }
+  else { [System.IO.File]::SetAccessControl($path, $acl); $actual = [System.IO.File]::GetAccessControl($path) }
+}
+if (-not (Test-PrivateAcl $actual)) { throw 'Private ACL verification failed' }
+if ($directory -and $env:TRELLIS_PRIVATE_HIDDEN -eq '1' -and ($attributes -band [System.IO.FileAttributes]::Hidden) -eq 0) { [System.IO.File]::SetAttributes($path, $attributes -bor [System.IO.FileAttributes]::Hidden) }
+
 `
 
 export function protectPrivatePath(file: string, kind: 'file' | 'directory', hidden = false): void {

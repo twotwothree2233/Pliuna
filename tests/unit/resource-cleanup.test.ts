@@ -1,3 +1,4 @@
+import * as platformFiles from '../../src/platform/files'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import fs from 'node:fs'
@@ -77,7 +78,7 @@ it('invalidated backup still protects until its separate replica retirement is f
 it.each(['EACCES','EPERM','EBUSY','EIO','ENOSPC'])('persists retry %s without auto deletion and keeps metadata until file result', code=>{
   const r=candidate(),t=prepare(r.id); vi.useFakeTimers(); vi.spyOn(fs,'unlinkSync').mockImplementation(()=>{throw Object.assign(new Error('private'),{code})})
   expect(execute(r.id,t)).toMatchObject({phase:'deleting',reason:code,attempt:1,metadata_cleaned:false}); vi.restoreAllMocks();restart();expect(fs.readdirSync(join(root,'resources'))).toHaveLength(1)
-  expect(execute(r.id,begin(),true).attempt).toBe(1);vi.advanceTimersByTime(1001);expect(execute(r.id,begin(),true).phase).toBe('complete')
+  expect(execute(r.id,begin(),true).attempt).toBe(1);vi.advanceTimersByTime(1001);expect(execute(r.id,begin(),true)).toMatchObject({phase:'complete',reason:'RESOURCE_CLEANUP_COMPLETE'})
 })
 it.each(['changed','symlink','dangling','hardlink','directory','corrupt','missing'])('retains unsafe %s resource without retirement or forced deletion',mode=>{
   const key=resource(),r=candidate(key),t=prepare(r.id),path=join(root,'resources',key)
@@ -103,17 +104,17 @@ it.each(['retired','deleting','file_deleted','complete'])('preserves last durabl
   const key=resource(),r=candidate(key),t=prepare(r.id),original=Database.prototype.prepare
   vi.spyOn(Database.prototype,'prepare').mockImplementation(function(this:Database.Database,sql:string){const stmt=original.call(this,sql);if(this.name.endsWith('restore-control.sqlite')&&sql.startsWith('UPDATE restore_control SET manifest='))return new Proxy(stmt,{get(target,k){if(k==='run')return(manifest:string)=>{const q=JSON.parse(manifest).resource_cleanups.find((v:any)=>v.id===r.id);if(q?.phase===phase)throw Object.assign(new Error('fault'),{code:'EIO'});return target.run(manifest)};const v=Reflect.get(target,k);return typeof v==='function'?v.bind(target):v}});return stmt} as typeof Database.prototype.prepare)
   if(phase==='retired')expect(()=>execute(r.id,t)).toThrow();else expect(execute(r.id,t).phase).not.toBe('complete')
-  vi.restoreAllMocks();restart();if(phase==='retired'){expect(fs.existsSync(join(root,'resources',key))).toBe(true);execute(r.id,prepare(r.id))}else{vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true).phase).toBe('complete')}
+  vi.restoreAllMocks();restart();if(phase==='retired'){expect(fs.existsSync(join(root,'resources',key))).toBe(true);execute(r.id,prepare(r.id))}else{vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true)).toMatchObject({phase:'complete',reason:'RESOURCE_CLEANUP_COMPLETE'})}
 })
 it('metadata transaction failure retains file_deleted and prevents new recovery publication until explicit original cleanup',async()=>{
   const r=candidate(),t=prepare(r.id),original=Database.prototype.prepare
   vi.spyOn(Database.prototype,'prepare').mockImplementation(function(this:Database.Database,sql:string){if(sql.startsWith('DELETE FROM resources WHERE id='))throw Object.assign(new Error('fault'),{code:'EIO'});return original.call(this,sql)})
   expect(execute(r.id,t)).toMatchObject({phase:'file_deleted',metadata_cleaned:false});vi.restoreAllMocks();restart();const token=begin();expect(()=>store.handle({type:'maintenance.create',token,inputs_saved:true,replace_id:null})).toThrow();cancel(token)
-  vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true).phase).toBe('complete');vi.useRealTimers();expect((await point()).active).toBeTruthy()
+  vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true)).toMatchObject({phase:'complete',reason:'RESOURCE_CLEANUP_COMPLETE'});vi.useRealTimers();expect((await point()).active).toBeTruthy()
 })
 it('flush failure after unlink is reconciled as absence only on explicit retry, not counted as confirmed deletion',()=>{
-  const r=candidate(),t=prepare(r.id),unlink=fs.unlinkSync,flush=fs.fsyncSync;let removed=false
-  vi.spyOn(fs,'unlinkSync').mockImplementation(p=>{unlink(p);removed=true});vi.spyOn(fs,'fsyncSync').mockImplementation(fd=>{if(removed)throw Object.assign(new Error('fault'),{code:'EIO'});flush(fd)})
+  const r=candidate(),t=prepare(r.id),unlink=fs.unlinkSync,flush=platformFiles.flushDirectorySync;let removed=false
+  vi.spyOn(fs,'unlinkSync').mockImplementation(p=>{unlink(p);removed=true});vi.spyOn(platformFiles,'flushDirectorySync').mockImplementation(directory=>{if(removed)throw Object.assign(new Error('fault'),{code:'EIO'});return flush(directory)})
   expect(execute(r.id,t).phase).toBe('deleting');vi.restoreAllMocks();restart();expect(status(r.id).file_result).toBeNull();vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true)).toMatchObject({phase:'complete',file_result:'absent',files_deleted:0})
 })
 it('new protection before retry blocks, never deletes it, and new preview cannot renew confirmed budget',()=>{
@@ -184,5 +185,5 @@ it('completion registration failure blocks generation changes even after metadat
   vi.spyOn(Database.prototype,'prepare').mockImplementation(function(this:Database.Database,sql:string){const stmt=original.call(this,sql);if(this.name.endsWith('restore-control.sqlite')&&sql.startsWith('UPDATE restore_control SET manifest='))return new Proxy(stmt,{get(target,k){if(k==='run')return(manifest:string)=>{if(JSON.parse(manifest).resource_cleanups.find((q:any)=>q.id===r.id)?.phase==='complete')throw Object.assign(new Error('fault'),{code:'EIO'});return target.run(manifest)};const value=Reflect.get(target,k);return typeof value==='function'?value.bind(target):value}});return stmt} as typeof Database.prototype.prepare)
   expect(execute(r.id,token).phase).toBe('file_deleted');vi.restoreAllMocks();const db=database();expect(db.prepare('SELECT * FROM resources').all()).toEqual([]);db.close();restart()
   const t=begin();expect(()=>store.handle({type:'maintenance.create',token:t,inputs_saved:true,replace_id:null})).toThrow('original resource cleanup');cancel(t)
-  vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true).phase).toBe('complete');vi.useRealTimers();expect((await point()).active).toBeTruthy()
+  vi.useFakeTimers();vi.advanceTimersByTime(1100);expect(execute(r.id,begin(),true)).toMatchObject({phase:'complete',reason:'RESOURCE_CLEANUP_COMPLETE'});vi.useRealTimers();expect((await point()).active).toBeTruthy()
 })

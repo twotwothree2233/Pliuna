@@ -13,7 +13,9 @@ jobs:
   baseline:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Native Windows file and process suites took the full 30-minute job budget.
+    # Keep finite tests and the final failure gate; allow the remaining probes to run.
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && 60 || 30 }}
     strategy:
       fail-fast: false
       matrix:

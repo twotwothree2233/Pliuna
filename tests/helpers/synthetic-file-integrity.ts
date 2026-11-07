@@ -1,7 +1,12 @@
-import { vi } from 'vitest'
+import { afterEach,vi } from 'vitest'
+import { setTimeout as yieldNativeReports } from 'node:timers/promises'
 
 // Only isolated test directories opt into the new Windows control format.
-if (process.platform === 'win32') process.env.TRELLIS_TEST_FILE_IDENTITIES = 'decimal-v2'
+if (process.platform === 'win32') {
+  process.env.TRELLIS_TEST_FILE_IDENTITIES = 'decimal-v2'
+  // Synchronous native ACL calls otherwise starve Vitest's queued worker RPCs.
+  afterEach(() => yieldNativeReports(0))
+}
 
 // These suites exercise real files and SQLite, with a digest test double.
 // Existing integrity comparisons still run; no file hash is computed.

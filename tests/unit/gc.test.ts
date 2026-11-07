@@ -88,7 +88,7 @@ it.each(['EACCES', 'EBUSY', 'EIO'])('records bounded manual retry %s and does no
   expect(execute(p, token).items[0]).toMatchObject({ state: 'failed', attempt: 1, reason: code })
   vi.restoreAllMocks(); restart(); expect(fs.readdirSync(join(root, 'resources'))).toHaveLength(1)
   const early = begin(); expect(execute(p, early, true).files_deleted).toBe(0)
-  vi.advanceTimersByTime(1001); const retry = begin(); expect(execute(p, retry, true).files_deleted).toBe(1); expect(original).toBeTruthy()
+  vi.advanceTimersByTime(1001); const retry = begin(), outcome = execute(p, retry, true); expect(outcome, JSON.stringify(outcome)).toMatchObject({ files_deleted: 1 }); expect(original).toBeTruthy()
 })
 it('never renews exhausted retries or resets their deadline on restart', () => {
   seed(undefined, false); vi.useFakeTimers(); const token = begin(), p = preview(token)

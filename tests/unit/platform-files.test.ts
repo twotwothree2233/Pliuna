@@ -161,3 +161,16 @@ it('protects private paths with the actual host permission mechanism', () => {
   expect(fs.readFileSync(target, 'utf8')).toBe('private')
   if (process.platform !== 'win32') { expect(fs.statSync(root).mode & 0o777).toBe(0o700); expect(fs.statSync(target).mode & 0o777).toBe(0o600) }
 })
+
+it.runIf(process.platform === 'win32')('keeps frozen metadata stable across repeated private ACL verification', () => {
+  const { root, target } = scene(); fs.writeFileSync(target, 'retained')
+  protectPrivatePath(root, 'directory', true)
+  const inherited = fs.statSync(target, { bigint: true }), directory = fs.statSync(root, { bigint: true })
+  protectPrivatePath(root, 'directory', true)
+  expect(fs.statSync(target, { bigint: true }).ctimeNs).toBe(inherited.ctimeNs)
+  expect(fs.statSync(root, { bigint: true }).ctimeNs).toBe(directory.ctimeNs)
+  protectPrivatePath(target, 'file')
+  const own = fs.statSync(target, { bigint: true })
+  protectPrivatePath(target, 'file')
+  expect(fs.statSync(target, { bigint: true }).ctimeNs).toBe(own.ctimeNs)
+})
