@@ -1,5 +1,6 @@
+import { fileFstatSync as fstatSync } from '../platform/files'
 import { createHash,randomUUID } from 'node:crypto'
-import { closeSync,fstatSync,mkdirSync } from 'node:fs'
+import { closeSync,mkdirSync } from 'node:fs'
 import { atomicWriteFileSync,entryExistsSync,managedFile,openExclusiveFileSync,readRegularFileSync,removeOwnedFileSync } from '../platform/files'
 import { protectPrivatePath } from '../platform/permissions'
 import type { SavedChannel } from '../runtime/model/channels'

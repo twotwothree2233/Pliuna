@@ -5,7 +5,7 @@ import { afterEach,expect,it,vi } from 'vitest'
 import {
 atomicWriteFileSync,entryExistsSync,FilePublicationError,flushDirectory,flushDirectorySync,flushFileSync,
 managedFile,openRegularFile,openRegularFileSync,publishPreparedFile,publishPreparedFileSync,
-readRegularFileSync,regularFile,removeOwnedFileSync
+readRegularFileSync,regularFile,removeOwnedFileSync,fileStatSync
 } from '../../src/platform/files'
 import { protectPrivatePath } from '../../src/platform/permissions'
 
@@ -122,8 +122,31 @@ it('refuses lossy numeric file identities without changing journal fields', () =
   const actual = fs.lstatSync(target), unsafe = Object.assign(Object.create(actual), { ino: Number.MAX_SAFE_INTEGER + 1 })
   expect(() => regularFile(unsafe)).toThrow('FILE_IDENTITY_UNSUPPORTED')
 })
+function largeIdentities(file: string, pathIno: bigint, handleIno = pathIno): void {
+  const lstat = fs.lstatSync, fstat = fs.fstatSync
+  const identity = (stat: fs.Stats | fs.BigIntStats, ino: bigint) => Object.assign(Object.create(stat), {
+    dev: typeof stat.dev === 'bigint' ? 1234n : 1234,
+    ino: typeof stat.ino === 'bigint' ? ino : Number(ino)
+  })
+  vi.spyOn(fs, 'lstatSync').mockImplementation(((path: fs.PathLike, options?: fs.StatOptions) => {
+    const stat = Reflect.apply(lstat, fs, [path, options])
+    return path === file ? identity(stat, pathIno) : stat
+  }) as typeof fs.lstatSync)
+  vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number, options?: fs.StatOptions) => identity(Reflect.apply(fstat, fs, [fd, options]), handleIno)) as typeof fs.fstatSync)
+}
+it('opens a stable handle with an exact inode above the Number safe range', () => {
+  const { target } = scene(); fs.writeFileSync(target, 'exact')
+  largeIdentities(target, 9007199256376705n)
+  const fd = openRegularFileSync(target)
+  try { expect(fs.readFileSync(fd, 'utf8')).toBe('exact') } finally { fs.closeSync(fd) }
+})
+it('rejects adjacent exact inodes even when Number would merge them', () => {
+  const { target } = scene(); fs.writeFileSync(target, 'different')
+  largeIdentities(target, 9007199254740992n, 9007199254740993n)
+  expect(() => { const fd = openRegularFileSync(target); fs.closeSync(fd) }).toThrow('FILE_CHANGED')
+})
 it('does not remove a replacement temporary file or lock', () => {
-  const { target, root } = scene(); fs.writeFileSync(target, 'owned'); const identity = fs.statSync(target)
+  const { target, root } = scene(); fs.writeFileSync(target, 'owned'); const identity = fileStatSync(target)
   fs.renameSync(target, join(root, 'kept')); fs.writeFileSync(target, 'foreign')
   expect(() => removeOwnedFileSync(target, identity)).toThrow('FILE_CHANGED')
   expect(fs.readFileSync(target, 'utf8')).toBe('foreign')

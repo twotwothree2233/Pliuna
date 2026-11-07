@@ -29,7 +29,8 @@ it('deletes only explicitly confirmed registered orphan files, preserves busines
   expect(execute(p, token)).toMatchObject({ phase: 'settled', files_deleted: 2, deleted_bytes: 12, database_files_deleted: 0, business_replayed: false })
   expect(db.prepare('SELECT * FROM actions').all()).toEqual(before); expect(db.prepare('SELECT state FROM staging').get()).toEqual({ state: 'invalid' })
   restart(); expect(status(p.id).last.files_deleted).toBe(2); expect(fs.existsSync(join(root, 'resources', s.key))).toBe(false)
-  expect(fs.statSync(join(root, 'gc-control.sqlite')).mode & 0o777).toBe(0o600)
+  // Windows private DACLs are verified by protectPrivatePath, not POSIX mode bits.
+  if (process.platform !== 'win32') expect(fs.statSync(join(root, 'gc-control.sqlite')).mode & 0o777).toBe(0o600)
 })
 it('cancels without deleting and rejects expired or rebound preview confirmations', () => {
   seed(); const token = begin(), p = preview(token); cancel(token)
@@ -136,7 +137,7 @@ it.each(['corrupt', 'missing', 'version'])('closes GC on invalid independent con
   seed(); store.close(); db.close()
   if (mode === 'corrupt') fs.writeFileSync(join(root, 'gc-control.sqlite'), 'bad')
   if (mode === 'missing') fs.unlinkSync(join(root, 'gc-control.sqlite'))
-  if (mode === 'version') { const control = new Database(join(root, 'gc-control.sqlite')); control.prepare('UPDATE gc_version SET version=2').run(); control.close() }
+  if (mode === 'version') { const control = new Database(join(root, 'gc-control.sqlite')); control.prepare('UPDATE gc_version SET version=97').run(); control.close() }
   store = new RuntimeStore(root); db = new Database(join(root, 'trellis.sqlite')); expect(status()).toMatchObject({ enabled: false, error: 'GC_CONTROL_INVALID' }); expect(store.create('safe business')).toBeTruthy(); expect(fs.readdirSync(join(root, 'resources'))).toHaveLength(2)
 })
 it('does not let a new preview reset the original failure budget and allows paged original-result lookup', () => {

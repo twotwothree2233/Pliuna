@@ -1,6 +1,7 @@
+import { fileLstatSync as lstatSync } from '../platform/files'
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { closeSync,lstatSync,mkdirSync,openSync,readdirSync,readFileSync } from 'node:fs'
+import { closeSync,mkdirSync,openSync,readdirSync,readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { assertDirectorySync,entryExistsSync as existsSync,flushDirectorySync,flushFileSync,managedFile,managedRegularFile,regularFile } from '../platform/files'
 import { protectPrivatePath } from '../platform/permissions'

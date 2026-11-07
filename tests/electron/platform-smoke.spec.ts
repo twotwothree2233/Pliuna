@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -15,7 +15,8 @@ test('starts without calculation, creates a task and restores it on the native d
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'ELECTRON_RUN_AS_NODE'))
   const launch = () => electron.launch({ executablePath, args: packaged ? [] : ['.'], ...(packaged ? { cwd: root } : {}), env: {
     ...environment, ELECTRON_RENDERER_URL: packaged ? 'http://127.0.0.1:1/must-not-load' : '',
-    TRELLIS_TEST_DATA: join(root, 'user data'), TRELLIS_ENABLE_MONTY: '0'
+    TRELLIS_TEST_DATA: join(root, 'user data'), TRELLIS_ENABLE_MONTY: '0',
+    ...(process.platform === 'win32' ? { TRELLIS_TEST_FILE_IDENTITIES: 'decimal-v2' } : {})
   } })
   let app = await launch()
   let page: Page | undefined
@@ -29,6 +30,11 @@ test('starts without calculation, creates a task and restores it on the native d
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await expect(page.getByRole('button', { name: /跨平台启动测试/ })).toBeVisible()
     await expect(page.getByRole('dialog', { name: '新建任务', exact: true })).toBeHidden()
+    expect(await readFile(join(root, 'user data', 'restore-established'), 'utf8')).toBe(process.platform === 'win32' ? 'restore-v6\n' : 'restore-v5\n')
+    expect(await readFile(join(root, 'user data', 'gc-established'), 'utf8')).toBe(process.platform === 'win32' ? 'gc-v2\n' : 'gc-v1\n')
+    const maintenance = await page.evaluate(() => window.trellis.request({ type: 'maintenance.status' }))
+    await writeFile(test.info().outputPath('desktop-status.json'), JSON.stringify(maintenance, null, 2) + '\n')
+    expect(maintenance).toMatchObject({ ok: true, data: { phase: 'idle', error: null, restore: { error: null }, gc: { enabled: true, error: null } } })
     await expect(page.getByTitle(/^新建任务（/)).toBeEnabled()
     await page.keyboard.press('ControlOrMeta+n')
     await expect(page.getByLabel('任务名称')).toBeVisible()

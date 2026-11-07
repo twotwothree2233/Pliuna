@@ -8,11 +8,12 @@ vi.mock('node:child_process', async importOriginal => ({ ...await importOriginal
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
 function windowsFile() {
-  const stat = fs.statSync(new URL('./platform-permissions.test.ts', import.meta.url))
+  const fixture = new URL('./platform-permissions.test.ts', import.meta.url)
+  const stat = fs.statSync(fixture), exact = fs.statSync(fixture, { bigint: true })
   const file = 'C:\\Users\\学习 用户\\private\\$(literal);file.json'
-  vi.spyOn(fs, 'lstatSync').mockReturnValue(stat)
+  vi.spyOn(fs, 'lstatSync').mockImplementation(((_path: fs.PathLike, options?: { bigint?: boolean }) => options?.bigint ? exact : stat) as typeof fs.lstatSync)
   vi.stubGlobal('process', { ...process, platform: 'win32', env: { SystemRoot: 'C:\\Windows', PRIVATE_MODEL_SECRET: 'never-forward' } })
-  return { stat, file }
+  return { stat, exact, file }
 }
 it('passes Windows paths as environment data to a fixed system executable', () => {
   const { file } = windowsFile()
@@ -37,11 +38,11 @@ it('fails closed when the Windows ACL operation fails', () => {
   expect(failure).toMatchObject({ message: 'FILE_PERMISSIONS_UNAVAILABLE' })
 })
 it('uses a writable handle for Windows FlushFileBuffers', () => {
-  const parent = fs.statSync(new URL('.', import.meta.url)), { stat, file } = windowsFile()
+  const parent = fs.statSync(new URL('.', import.meta.url)), parentExact = fs.statSync(new URL('.', import.meta.url), { bigint: true }), { stat, exact, file } = windowsFile()
   vi.spyOn(fs, 'realpathSync').mockReturnValue('C:\\Users\\学习 用户\\private')
-  vi.spyOn(fs, 'statSync').mockReturnValue(parent)
+  vi.spyOn(fs, 'statSync').mockImplementation(((_path: fs.PathLike, options?: { bigint?: boolean }) => options?.bigint ? parentExact : parent) as typeof fs.statSync)
   const opened = vi.spyOn(fs, 'openSync').mockReturnValue(123)
-  vi.spyOn(fs, 'fstatSync').mockReturnValue(stat)
+  vi.spyOn(fs, 'fstatSync').mockImplementation(((_fd: number, options?: { bigint?: boolean }) => options?.bigint ? exact : stat) as typeof fs.fstatSync)
   vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {})
   vi.spyOn(fs, 'closeSync').mockImplementation(() => {})
   try { flushFileSync(file) } finally { vi.unstubAllGlobals() }

@@ -1,3 +1,4 @@
+import { fileLstatSync,fileFstatSync,type FileStat } from '../platform/files'
 import fs from 'node:fs'
 import { basename,extname } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
@@ -26,13 +27,13 @@ export class MaterialSources {
       const call=(type:string,extra:Row={})=>this.call({type,task_id:task,operation_id:id,...extra})
       try{
         const status=await call('material.status');if(status.state!=='waiting')continue
-        let initial:fs.Stats|undefined,body:Buffer|undefined,size:number
+        let initial:FileStat|undefined,body:Buffer|undefined,size:number
         if(source.path){
-          initial=fs.lstatSync(source.path)
+          initial=fileLstatSync(source.path)
           try { regularFile(initial) } catch { throw Error('IMPORT_UNSAFE_SOURCE') }
           size=initial.size;if(size>defaults.transport.resource_bytes)throw Error('IMPORT_TOO_LARGE')
           fd=openRegularFileSync(source.path)
-          const opened=fs.fstatSync(fd);if(opened.ino!==initial.ino||opened.dev!==initial.dev)throw Error('IMPORT_SOURCE_CHANGED')
+          const opened=fileFstatSync(fd);if(opened.ino!==initial.ino||opened.dev!==initial.dev)throw Error('IMPORT_SOURCE_CHANGED')
         }else{body=Buffer.from(source.text!,'utf8');size=body.length;if(size>defaults.resource.inline_bytes)throw Error('IMPORT_TOO_LARGE')}
         const textual=!source.path||['.txt','.md','.csv','.tsv','.json','.log','.html','.htm','.svg','.xml','.css','.js','.ts'].includes(extname(source.name).toLowerCase())
         await call('material.internal.begin',{byte_length:size,media_type:textual?'text/plain; charset=utf-8':'application/octet-stream'})
@@ -43,7 +44,7 @@ export class MaterialSources {
           const chunk=body?body.subarray(offset,offset+n):buffer.subarray(0,n)
           await call('material.internal.chunk',{offset,data:chunk.toString('base64')});offset+=n;await setImmediate()
         }
-        if(source.path){const end=fs.fstatSync(fd!),path=fs.lstatSync(source.path);if([end,path].some(s=>s.ino!==initial!.ino||s.dev!==initial!.dev||s.size!==initial!.size||s.mtimeMs!==initial!.mtimeMs||s.ctimeMs!==initial!.ctimeMs))throw Error('IMPORT_SOURCE_CHANGED')}
+        if(source.path){const end=fileFstatSync(fd!),path=fileLstatSync(source.path);if([end,path].some(s=>s.ino!==initial!.ino||s.dev!==initial!.dev||s.size!==initial!.size||s.mtimeMs!==initial!.mtimeMs||s.ctimeMs!==initial!.ctimeMs))throw Error('IMPORT_SOURCE_CHANGED')}
         await call('material.internal.finish')
       }catch(e){const code=(e as Error).message;await call('material.internal.fail',{code:['IMPORT_UNSAFE_SOURCE','IMPORT_TOO_LARGE','IMPORT_SOURCE_CHANGED'].includes(code)?code:'IMPORT_SOURCE_UNAVAILABLE'}).catch(()=>{})}
       finally{if(fd!==undefined)fs.closeSync(fd)}

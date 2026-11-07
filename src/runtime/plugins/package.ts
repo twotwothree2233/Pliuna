@@ -1,5 +1,6 @@
+import { fileHandleStat,fileLstat as lstat } from '../../platform/files'
 import { createHash,randomUUID } from 'node:crypto'
-import { lstat,mkdir,readdir,rename } from 'node:fs/promises'
+import {mkdir,readdir,rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { assertDirectorySync,entryExistsSync,flushDirectory,openExclusiveFile,openRegularFile } from '../../platform/files'
 import { protectPrivatePath } from '../../platform/permissions'
@@ -60,13 +61,13 @@ async function body(path: string): Promise<Buffer> {
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > packageLimits.fileBytes) bad()
   const handle = await openRegularFile(path)
   try {
-    const actual = await handle.stat()
+    const actual = await fileHandleStat(handle)
     if (!actual.isFile() || actual.nlink !== 1 || actual.size !== before.size || actual.ino !== before.ino || actual.dev !== before.dev) bad()
     // Bound reads even if another process grows an already-open file.
     const output = Buffer.alloc(actual.size + 1)
     let offset = 0
     while (offset < output.length) { const { bytesRead } = await handle.read(output, offset, output.length - offset, offset); if (!bytesRead) break; offset += bytesRead }
-    const after = await handle.stat()
+    const after = await fileHandleStat(handle)
     if (offset !== actual.size || after.size !== actual.size || after.mtimeMs !== actual.mtimeMs || after.ctimeMs !== actual.ctimeMs) bad()
     return output.subarray(0, offset)
   } finally { await handle.close() }

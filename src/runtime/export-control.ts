@@ -1,3 +1,5 @@
+import { encodeFileIdentity,validStoredFileIdentity,type IdentityEncoding,type IdentityInput,type StoredFileIdentity } from '../platform/file-identity'
+import { newTestIdentityEncoding } from './file-format'
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import { lstatSync } from 'node:fs'
@@ -8,9 +10,9 @@ import { ContractError } from '../shared/validation'
 export interface ExportResource { id: string; storage_key: string; sha256: string; byte_length: number; media_type: string; display_name: string }
 export type ExportPhase = 'preparing' | 'preview' | 'saving' | 'saved' | 'cancelled' | 'failed' | 'interrupted' | 'unknown'
 export interface ExportJob {
-  version: 1; id: string; task_id: string; epoch: string; selected: string; created_at: string;
+  version: IdentityEncoding; id: string; task_id: string; epoch: string; selected: string; created_at: string;
   phase: ExportPhase; resources: ExportResource[]; snapshot: unknown; issues: string[]; html: string | null;
-  partial_confirmed: boolean; destination: null | { target: string; temporary: string; identity: { dev: number; ino: number } | null }; reason: string | null
+  partial_confirmed: boolean; destination: null | { target: string; temporary: string; identity: StoredFileIdentity | null }; reason: string | null
 }
 const uuid = /^[0-9a-f-]{36}$/
 const terminal = new Set<ExportPhase>(['saved', 'cancelled', 'failed'])
@@ -23,15 +25,23 @@ function flush(root: string, file: string): void {
 
 export class ExportControl {
   private db: Database.Database
-  constructor(private root: string, established: boolean, reconcile = true) {
+  readonly encoding: IdentityEncoding
+  constructor(private root: string, established: boolean, reconcile = true, expectedEncoding?: IdentityEncoding) {
+    const createEncoding = expectedEncoding ?? newTestIdentityEncoding(root)
     const file = managedRegularFile(root, 'export-control.sqlite'), present = existsSync(file)
     if (established && !present) fail()
     if (present) regular(file)
     this.db = new Database(file)
     try {
       this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); this.db.pragma('busy_timeout=0'); protectPrivatePath(file, 'file')
-      if (!present) this.db.transaction(() => this.db.exec('CREATE TABLE export_version(version INTEGER NOT NULL); INSERT INTO export_version VALUES(1); CREATE TABLE export_jobs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, phase TEXT NOT NULL, manifest TEXT NOT NULL); CREATE INDEX export_jobs_task ON export_jobs(task_id,phase)'))()
-      if (JSON.stringify(this.db.prepare('SELECT version FROM export_version').all()) !== '[{"version":1}]' || this.db.pragma('quick_check', { simple: true }) !== 'ok') fail()
+      if (!present) this.db.transaction(() => {
+        this.db.exec('CREATE TABLE export_version(version INTEGER NOT NULL); CREATE TABLE export_jobs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, phase TEXT NOT NULL, manifest TEXT NOT NULL); CREATE INDEX export_jobs_task ON export_jobs(task_id,phase)')
+        this.db.prepare('INSERT INTO export_version VALUES(?)').run(createEncoding)
+      })()
+      const versions = this.db.prepare('SELECT version FROM export_version').all() as { version: number }[]
+      if (versions.length !== 1 || ![1, 2].includes(versions[0]!.version) || this.db.pragma('quick_check', { simple: true }) !== 'ok') fail()
+      this.encoding = versions[0]!.version as IdentityEncoding
+      if (expectedEncoding !== undefined && this.encoding !== expectedEncoding) fail()
       if ((this.db.prepare("SELECT count(*) n FROM export_jobs WHERE phase NOT IN ('saved','failed','cancelled')").get() as any).n > 1) fail()
       let after = 0
       while (true) {
@@ -49,7 +59,7 @@ export class ExportControl {
     } catch (error) { this.db.close(); throw error }
   }
   static validate(job: ExportJob): void {
-    if (!job || Object.keys(job).sort().join(',') !== 'created_at,destination,epoch,html,id,issues,partial_confirmed,phase,reason,resources,selected,snapshot,task_id,version' || job.version !== 1 || !uuid.test(job.id) || !uuid.test(job.task_id) || !uuid.test(job.epoch) || !Number.isFinite(Date.parse(job.created_at)) || !['preparing', 'preview', 'saving', 'saved', 'cancelled', 'failed', 'interrupted', 'unknown'].includes(job.phase) || typeof job.selected !== 'string' || !/^(trellis|restore-[0-9a-f-]{36}-(target|rollback))\.sqlite$/.test(job.selected) || typeof job.partial_confirmed !== 'boolean' || !Array.isArray(job.resources) || job.resources.length > 1024 || !Array.isArray(job.issues) || job.issues.length > 1024 || job.issues.some(v => typeof v !== 'string' || v.length > 1000) || (job.html !== null && typeof job.html !== 'string') || (job.reason !== null && (typeof job.reason !== 'string' || !/^[a-zA-Z0-9_]+$/.test(job.reason)))) fail()
+    if (!job || Object.keys(job).sort().join(',') !== 'created_at,destination,epoch,html,id,issues,partial_confirmed,phase,reason,resources,selected,snapshot,task_id,version' || ![1, 2].includes(job.version) || !uuid.test(job.id) || !uuid.test(job.task_id) || !uuid.test(job.epoch) || !Number.isFinite(Date.parse(job.created_at)) || !['preparing', 'preview', 'saving', 'saved', 'cancelled', 'failed', 'interrupted', 'unknown'].includes(job.phase) || typeof job.selected !== 'string' || !/^(trellis|restore-[0-9a-f-]{36}-(target|rollback))\.sqlite$/.test(job.selected) || typeof job.partial_confirmed !== 'boolean' || !Array.isArray(job.resources) || job.resources.length > 1024 || !Array.isArray(job.issues) || job.issues.length > 1024 || job.issues.some(v => typeof v !== 'string' || v.length > 1000) || (job.html !== null && typeof job.html !== 'string') || (job.reason !== null && (typeof job.reason !== 'string' || !/^[a-zA-Z0-9_]+$/.test(job.reason)))) fail()
     const ids = new Set<string>()
     const snapshot = job.snapshot as any
     if (snapshot && typeof snapshot === 'object' && 'version' in snapshot) {
@@ -65,23 +75,24 @@ export class ExportControl {
       }
     }
     for (const r of job.resources) { if (!r || !uuid.test(r.id) || ids.has(r.id) || !/^[A-Za-z0-9_-]+$/.test(r.storage_key) || !/^[a-f0-9]{64}$/.test(r.sha256) || !Number.isSafeInteger(r.byte_length) || r.byte_length < 0 || r.byte_length > 268435456 || typeof r.media_type !== 'string' || typeof r.display_name !== 'string') fail(); ids.add(r.id) }
-    if (job.destination && (Object.keys(job.destination).sort().join(',') !== 'identity,target,temporary' || typeof job.destination.target !== 'string' || typeof job.destination.temporary !== 'string' || !job.destination.target || !job.destination.temporary || job.destination.target.includes('\0') || job.destination.temporary.includes('\0') || job.destination.target === job.destination.temporary || (job.destination.identity !== null && (Object.keys(job.destination.identity).sort().join(',') !== 'dev,ino' || !Number.isSafeInteger(job.destination.identity.dev) || !Number.isSafeInteger(job.destination.identity.ino))))) fail()
+    if (job.destination && (Object.keys(job.destination).sort().join(',') !== 'identity,target,temporary' || typeof job.destination.target !== 'string' || typeof job.destination.temporary !== 'string' || !job.destination.target || !job.destination.temporary || job.destination.target.includes('\0') || job.destination.temporary.includes('\0') || job.destination.target === job.destination.temporary || (job.destination.identity !== null && (Object.keys(job.destination.identity).sort().join(',') !== 'dev,ino' || !validStoredFileIdentity(job.destination.identity, job.version))))) fail()
     if (job.phase === 'saving' && (!job.destination || !job.html)) fail()
     if (Buffer.byteLength(JSON.stringify(job)) > 32 * 1024 * 1024) fail('EXPORT_SNAPSHOT_LIMIT')
   }
   get(id: string): ExportJob {
     const row = this.db.prepare('SELECT id,task_id,phase,manifest,length(CAST(manifest AS BLOB)) bytes FROM export_jobs WHERE id=?').get(id) as any
     if (!row || row.bytes > 32 * 1024 * 1024) fail('EXPORT_NOT_FOUND')
-    let job: ExportJob; try { job = JSON.parse(row.manifest); ExportControl.validate(job); if (job.id !== row.id || job.task_id !== row.task_id || job.phase !== row.phase) fail() } catch { return fail() }
+    let job: ExportJob; try { job = JSON.parse(row.manifest); ExportControl.validate(job); if (this.encoding === 1 && job.version !== 1) fail(); if (job.id !== row.id || job.task_id !== row.task_id || job.phase !== row.phase) fail() } catch { return fail() }
     return job
   }
   private put(job: ExportJob): void {
     ExportControl.validate(job)
+    if (this.encoding === 1 && job.version !== 1) fail()
     this.db.prepare('INSERT INTO export_jobs VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET phase=excluded.phase,manifest=excluded.manifest').run(job.id, job.task_id, job.phase, JSON.stringify(job))
   }
   create(task: string, epoch: string, selected: string, resources: ExportResource[], snapshot: unknown): ExportJob {
     if (this.busy()) fail('EXPORT_BUSY')
-    const job: ExportJob = { version: 1, id: randomUUID(), task_id: task, epoch, selected, resources, snapshot, created_at: new Date().toISOString(), phase: 'preparing', issues: [], html: null, partial_confirmed: false, destination: null, reason: null }
+    const job: ExportJob = { version: this.encoding, id: randomUUID(), task_id: task, epoch, selected, resources, snapshot, created_at: new Date().toISOString(), phase: 'preparing', issues: [], html: null, partial_confirmed: false, destination: null, reason: null }
     this.put(job); return job
   }
   generationFailed(id: string, reason: string): void { const job = this.get(id); if (job.phase !== 'preparing') fail('EXPORT_STATE_CHANGED'); this.put({ ...job, phase: 'failed', reason }) }
@@ -91,10 +102,10 @@ export class ExportControl {
     if (job.phase !== 'preview' || (job.issues.length && !partial)) fail('EXPORT_CONFIRMATION_REQUIRED')
     this.put({ ...job, phase: 'saving', destination: { target, temporary, identity: null }, partial_confirmed: partial }); return this.get(id)
   }
-  created(id: string, identity: { dev: number; ino: number }): void {
+  created(id: string, identity: IdentityInput): void {
     const job = this.get(id)
     if (job.phase !== 'saving' || !job.destination || job.destination.identity) fail('EXPORT_STATE_CHANGED')
-    this.put({ ...job, destination: { ...job.destination!, identity } })
+    this.put({ ...job, destination: { ...job.destination!, identity: encodeFileIdentity(identity, job.version) } })
   }
   resolve(id: string, phase: 'saved' | 'failed'): void {
     const job = this.get(id)

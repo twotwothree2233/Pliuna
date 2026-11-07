@@ -1,3 +1,4 @@
+import { fileLstatSync,fileFstatSync,type FileStat } from '../platform/files'
 import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -15,7 +16,7 @@ export type InspectionRequest = { scope: 'growth' | 'resources' | 'resource'; re
 const controlLimit = 64 * 1024 * 1024
 const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
 const safeCode = (e: unknown) => ['ENOENT', 'EACCES', 'EPERM', 'EIO', 'EBUSY'].includes((e as NodeJS.ErrnoException).code ?? '') ? (e as NodeJS.ErrnoException).code! : /^INSPECT_[A-Z_]+$/.test((e as Error).message ?? '') ? (e as Error).message : 'INSPECT_UNAVAILABLE'
-function regular(path: string): fs.Stats { const s = fs.lstatSync(path); if (!s.isFile() || s.nlink !== 1) fail('INSPECT_UNSAFE_FILE'); return s }
+function regular(path: string): FileStat { const s = fileLstatSync(path); if (!s.isFile() || s.nlink !== 1) fail('INSPECT_UNSAFE_FILE'); return s }
 function open(root: string, file: string): Database.Database {
   regular(join(root, file))
   const db = new Database(join(root, file), { readonly: true, fileMustExist: true, timeout: 0 })
@@ -29,7 +30,7 @@ function manifest(db: Database.Database, table: 'restore_control' | 'control' | 
 function bytes(root: string, file: string): number { return regular(join(root, file)).size }
 function selectedControl(root: string): any {
   const db = open(root, 'restore-control.sqlite')
-  try { const v = manifest(db, 'restore_control'); if (![1, 2, 3, 4, 5].includes(v.version)) fail('INSPECT_CONTROL_VERSION'); return RestoreJournal.normalizeControl(v) } finally { db.close() }
+  try { const v = manifest(db, 'restore_control'); if (![1, 2, 3, 4, 5, 6].includes(v.version)) fail('INSPECT_CONTROL_VERSION'); return RestoreJournal.normalizeControl(v) } finally { db.close() }
 }
 async function observeProtection(db: Database.Database, journal: Row, recovery: Row, rows: Row[], check: () => void): Promise<Map<string, Set<string>>> {
   const observed = new Map<string, Set<string>>(rows.map(r => [r.id, new Set<string>()]))
@@ -74,7 +75,7 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
   const started = new Date().toISOString(), result: Row = { scope: request.scope, started_at: started, readonly: true, deletion_authority: false, complete: false, items: [], next_after: null, sqlite_auxiliary_files_possible: true }
   const check = () => { if (signal.aborted) fail('INSPECT_CANCELLED') }
   try {
-    if (!fs.lstatSync(root).isDirectory()) fail('INSPECT_UNSAFE_DIRECTORY')
+    if (!fileLstatSync(root).isDirectory()) fail('INSPECT_UNSAFE_DIRECTORY')
     progress({ phase: 'checking_control', checked: 0 }); check()
     const journal = selectedControl(root); check()
     const db = open(root, journal.selected)
@@ -86,7 +87,7 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
         try {
           gc = open(root, 'gc-control.sqlite')
           const rv = manifest(recovery, 'control'); RecoveryManager.validateControl(rv)
-          if (JSON.stringify(gc.prepare('SELECT version FROM gc_version').all()) !== '[{"version":1}]') fail('INSPECT_CONTROL_VERSION')
+          if (JSON.stringify(gc.prepare('SELECT version FROM gc_version').all()) !== JSON.stringify([{ version: journal.export_control }])) fail('INSPECT_CONTROL_VERSION')
           const phases: Row = {}; for (const r of journal.resource_cleanups) phases[r.phase] = (phases[r.phase] ?? 0) + 1
           result.controls = { format: journal.version, restore_bytes: bytes(root, 'restore-control.sqlite'), recovery_bytes: bytes(root, 'recovery-control.sqlite'), gc_bytes: bytes(root, 'gc-control.sqlite'), resource_records: journal.resource_cleanups.length, deletion_sources: journal.task_deletions.length, replica_records: journal.retirements.length, restore_operations: journal.operations.length, deleted_task_intents: journal.deleted_tasks.length, resource_phases: phases, gc_records: (gc.prepare('SELECT count(*) n FROM gc_operations').get() as Row).n, retained_candidates: rv.candidates.length, effective_points: rv.active ? 1 : 0, retired_points: rv.retired.length, invalidated_points: rv.invalidated.length, records_pruned: 0 }
           const plugins = open(root, 'plugin-control.sqlite')
@@ -96,8 +97,8 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
           } finally { plugins.close() }
           const exports = open(root, 'export-control.sqlite')
           try {
-            if (JSON.stringify(exports.prepare('SELECT version FROM export_version').all()) !== '[{"version":1}]') fail('INSPECT_CONTROL_VERSION')
-            result.controls.exports = { format: 1, bytes: bytes(root, 'export-control.sqlite'), jobs: (exports.prepare('SELECT count(*) n FROM export_jobs').get() as Row).n, unfinished: (exports.prepare("SELECT count(*) n FROM export_jobs WHERE phase NOT IN ('saved','failed','cancelled')").get() as Row).n, records_pruned: 0 }
+            if (JSON.stringify(exports.prepare('SELECT version FROM export_version').all()) !== JSON.stringify([{ version: journal.export_control }])) fail('INSPECT_CONTROL_VERSION')
+            result.controls.exports = { format: journal.export_control, bytes: bytes(root, 'export-control.sqlite'), jobs: (exports.prepare('SELECT count(*) n FROM export_jobs').get() as Row).n, unfinished: (exports.prepare("SELECT count(*) n FROM export_jobs WHERE phase NOT IN ('saved','failed','cancelled')").get() as Row).n, records_pruned: 0 }
           } finally { exports.close() }
           result.business = db.transaction(() => {
             const counts: Row = {}; for (const table of ['tasks', 'resources', 'records', 'view_history', 'staging']) counts[table] = (db.prepare(`SELECT count(*) n FROM ${table}`).get() as Row).n
@@ -106,7 +107,7 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
           result.protection = { retained_generation_entries: new Set(['trellis.sqlite', journal.selected, ...journal.operations.flatMap((op: Row) => [op.previous, op.target.file, op.rollback.file])]).size, unreleased_replica_records: journal.retirements.filter((r: Row) => r.phase !== 'preview' && r.phase !== 'released').length, files_not_scanned: true, bytes_are_not_free_space: true }
         } finally { recovery.close(); gc?.close() }
       } else {
-        if (!fs.lstatSync(join(root, 'resources')).isDirectory()) fail('INSPECT_UNSAFE_DIRECTORY')
+        if (!fileLstatSync(join(root, 'resources')).isDirectory()) fail('INSPECT_UNSAFE_DIRECTORY')
         // A short consistent metadata snapshot; no long transaction is held while hashing resource bodies.
         const rows = db.transaction(() => request.scope === 'resource'
           ? db.prepare('SELECT rowid ordinal,* FROM resources WHERE id=?').all(request.resource_id)
@@ -118,11 +119,12 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
         const observed = await observeProtection(db, journal, recovery, rows.slice(0, 50), check)
         const exports = open(root, 'export-control.sqlite')
         try {
+          if (JSON.stringify(exports.prepare('SELECT version FROM export_version').all()) !== JSON.stringify([{ version: journal.export_control }])) fail('INSPECT_CONTROL_VERSION')
           const unfinished = exports.prepare("SELECT manifest,length(CAST(manifest AS BLOB)) bytes FROM export_jobs WHERE phase NOT IN ('saved','failed','cancelled') LIMIT 2").all() as Row[]
           if (unfinished.length > 1) fail('INSPECT_EXPORT_CONTROL_INVALID')
           for (const row of unfinished) {
             if (row.bytes > 32 * 1024 * 1024) fail('INSPECT_CONTROL_LIMIT')
-            const job = JSON.parse(row.manifest); ExportControl.validate(job)
+            const job = JSON.parse(row.manifest); ExportControl.validate(job); if (journal.export_control === 1 && job.version !== 1) fail('INSPECT_CONTROL_VERSION')
             for (const resource of rows.slice(0, 50)) if (job.resources.some((r: Row) => r.id === resource.id || r.storage_key === resource.storage_key)) observed.get(resource.id)!.add('INDEPENDENT_EXPORT_PIN')
           }
         } finally { exports.close() }
@@ -137,10 +139,10 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
             const path = managedFile(root, 'resources', r.storage_key), initial = regular(path)
             if (initial.size !== r.byte_length) fail('INSPECT_LENGTH_MISMATCH')
             fd = openRegularFileSync(path)
-            const opened = fs.fstatSync(fd); if (opened.dev !== initial.dev || opened.ino !== initial.ino) fail('INSPECT_IDENTITY_CHANGED')
+            const opened = fileFstatSync(fd); if (opened.dev !== initial.dev || opened.ino !== initial.ino) fail('INSPECT_IDENTITY_CHANGED')
             const hash = createHash('sha256'), buffer = Buffer.alloc(256 * 1024); let read = 0
             while (read < initial.size) { check(); const n = fs.readSync(fd, buffer, 0, Math.min(buffer.length, initial.size - read), read); if (!n) fail('INSPECT_IDENTITY_CHANGED'); hash.update(buffer.subarray(0, n)); read += n; if (read % (4 * 1024 * 1024) === 0) { progress({ phase: 'hashing', checked: result.items.length, bytes_read: read, resource_id: r.id }); await setImmediate() } }
-            const end = fs.fstatSync(fd), current = regular(path)
+            const end = fileFstatSync(fd), current = regular(path)
             if ([end, current].some(s => s.dev !== initial.dev || s.ino !== initial.ino || s.size !== initial.size || s.mtimeMs !== initial.mtimeMs || s.ctimeMs !== initial.ctimeMs)) fail('INSPECT_IDENTITY_CHANGED')
             if (hash.digest('hex') !== r.sha256) fail('INSPECT_HASH_MISMATCH')
             const row = db.prepare('SELECT * FROM resources WHERE id=?').get(r.id) as Row | undefined

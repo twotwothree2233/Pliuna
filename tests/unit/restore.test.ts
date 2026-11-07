@@ -63,7 +63,8 @@ it('keeps current data after a damaged or missing referenced resource', async ()
 it('keeps the active backup immutable, does not rename or remove the old WAL database', async () => {
   const p = (await point()).active, file = join(root, 'recovery', p.id + '.sqlite'), before = readFileSync(file)
   await restore(); expect(readFileSync(file)).toEqual(before); expect(readdirSync(root)).toContain('trellis.sqlite')
-  for (const image of [journal().operations[0].target, journal().operations[0].rollback]) expect(statSync(join(root, image.file)).mode & 0o777).toBe(0o600)
+  // Native Windows DACL verification is part of protection; mode bits are POSIX only.
+  if (process.platform !== 'win32') for (const image of [journal().operations[0].target, journal().operations[0].rollback]) expect(statSync(join(root, image.file)).mode & 0o777).toBe(0o600)
 })
 it('rolls back to the verified newer state after selected target reopen fails', async () => {
   await point(); const newer = store.create('保留当前'), original = Database.prototype.pragma

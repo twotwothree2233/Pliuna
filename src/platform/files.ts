@@ -1,27 +1,30 @@
 import { randomUUID } from 'node:crypto'
 import fs,{ constants,type Stats } from 'node:fs'
+import { exactFileIdentity,sameFileIdentity,type FileIdentity,type IdentityInput } from './file-identity'
+import { fileFstatSync,fileHandleStat,fileLstat,fileLstatSync,fileStat,fileStatSync,type FileStat } from './file-stat'
+export { exactFileIdentity,sameFileIdentity,type FileIdentity,type IdentityInput } from './file-identity'
+export { fileFstatSync,fileHandleStat,fileLstat,fileLstatSync,fileStat,fileStatSync,type FileStat } from './file-stat'
 import { basename,dirname,join,relative } from 'node:path'
 import { absoluteFilePath,pathWithin } from './paths'
 
-export type FileIdentity = { dev: number; ino: number }
 export type FileSnapshot = FileIdentity & { size: number; mtimeMs: number; ctimeMs: number }
 export type DirectoryDurability = 'directory-synced' | 'file-sync-only'
 const error = (code: string): never => { throw Object.assign(Error(code), { code }) }
 const noFollow = (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
 
-export function sameFileIdentity(a: FileIdentity, b: FileIdentity): boolean { return a.dev === b.dev && a.ino === b.ino }
-export function regularFile(stat: Stats, links = 1): Stats {
+export function regularFile<T extends Stats | FileStat>(stat: T, links = 1): T {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink < 1 || stat.nlink > links) return error('FILE_UNSAFE')
-  // Existing journals use numeric IDs. Never round a larger ID into that format.
-  if (!Number.isSafeInteger(stat.dev) || !Number.isSafeInteger(stat.ino) || stat.dev < 0 || stat.ino <= 0) return error('FILE_IDENTITY_UNSUPPORTED')
+  // Raw numeric Stats remain subject to the original safety check. Exact
+  // snapshots have already captured the ID directly from BigInt Stats.
+  exactFileIdentity(stat)
   return stat
 }
 export function entryExistsSync(file: string): boolean {
-  try { fs.lstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e }
+  try { fileLstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e }
 }
 export function assertDirectorySync(file: string): void {
   file = absoluteFilePath(file)
-  const stat = fs.lstatSync(file)
+  const stat = fileLstatSync(file)
   if (!stat.isDirectory() || stat.isSymbolicLink()) error('FILE_DIRECTORY_UNSAFE')
   // Also catches directory reparse aliases whose lstat type is not a symlink.
   if (dirname(file) !== file && relative(join(fs.realpathSync(dirname(file)), basename(file)), fs.realpathSync(file)) !== '') error('FILE_DIRECTORY_UNSAFE')
@@ -40,12 +43,12 @@ export function managedFile(root: string, ...parts: string[]): string {
 }
 export function managedRegularFile(root: string, ...parts: string[]): string {
   const file = managedFile(root, ...parts)
-  if (entryExistsSync(file)) regularFile(fs.lstatSync(file))
+  if (entryExistsSync(file)) regularFile(fileLstatSync(file))
   return file
 }
-function parentSync(file: string): { path: string; stat: Stats } {
+function parentSync(file: string): { path: string; stat: FileStat } {
   file = absoluteFilePath(file)
-  const folder = fs.realpathSync(dirname(file)), stat = fs.statSync(folder)
+  const folder = fs.realpathSync(dirname(file)), stat = fileStatSync(folder)
   if (!stat.isDirectory()) error('FILE_DIRECTORY_UNSAFE')
   return { path: folder, stat }
 }
@@ -55,10 +58,10 @@ function checkParent(file: string, before: ReturnType<typeof parentSync>): void 
 }
 export function openRegularFileSync(file: string, writable = false): number {
   file = absoluteFilePath(file)
-  const parent = parentSync(file), before = regularFile(fs.lstatSync(file))
+  const parent = parentSync(file), before = regularFile(fileLstatSync(file))
   const fd = fs.openSync(file, (writable ? constants.O_RDWR : constants.O_RDONLY) | noFollow)
   try {
-    const actual = regularFile(fs.fstatSync(fd)), current = regularFile(fs.lstatSync(file))
+    const actual = regularFile(fileFstatSync(fd)), current = regularFile(fileLstatSync(file))
     if (!sameFileIdentity(before, actual) || !sameFileIdentity(before, current)) error('FILE_CHANGED')
     checkParent(file, parent)
     return fd
@@ -66,12 +69,12 @@ export function openRegularFileSync(file: string, writable = false): number {
 }
 export async function openRegularFile(file: string, links = 1): Promise<fs.promises.FileHandle> {
   file = absoluteFilePath(file)
-  const folder = await fs.promises.realpath(dirname(file)), parent = await fs.promises.stat(folder)
-  const before = regularFile(await fs.promises.lstat(file), links)
+  const folder = await fs.promises.realpath(dirname(file)), parent = await fileStat(folder)
+  const before = regularFile(await fileLstat(file), links)
   const handle = await fs.promises.open(file, constants.O_RDONLY | noFollow)
   try {
-    const actual = regularFile(await handle.stat(), links), current = regularFile(await fs.promises.lstat(file), links)
-    const afterFolder = await fs.promises.realpath(dirname(file)), afterParent = await fs.promises.stat(afterFolder)
+    const actual = regularFile(await fileHandleStat(handle), links), current = regularFile(await fileLstat(file), links)
+    const afterFolder = await fs.promises.realpath(dirname(file)), afterParent = await fileStat(afterFolder)
     if (!sameFileIdentity(before, actual) || !sameFileIdentity(before, current) || relative(folder, afterFolder) !== '' || !sameFileIdentity(parent, afterParent)) error('FILE_CHANGED')
     return handle
   } catch (e) { await handle.close(); throw e }
@@ -81,19 +84,19 @@ export function openExclusiveFileSync(file: string): number {
   const parent = parentSync(file)
   const fd = fs.openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600)
   try {
-    if (!sameFileIdentity(regularFile(fs.fstatSync(fd)), regularFile(fs.lstatSync(file)))) error('FILE_CHANGED')
+    if (!sameFileIdentity(regularFile(fileFstatSync(fd)), regularFile(fileLstatSync(file)))) error('FILE_CHANGED')
     checkParent(file, parent)
     return fd
   } catch (e) { fs.closeSync(fd); throw e }
 }
 export async function openExclusiveFile(file: string): Promise<fs.promises.FileHandle> {
   file = absoluteFilePath(file)
-  const folder = await fs.promises.realpath(dirname(file)), parent = await fs.promises.stat(folder)
+  const folder = await fs.promises.realpath(dirname(file)), parent = await fileStat(folder)
   const handle = await fs.promises.open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600)
   try {
-    if (!sameFileIdentity(regularFile(await handle.stat()), regularFile(await fs.promises.lstat(file)))) error('FILE_CHANGED')
+    if (!sameFileIdentity(regularFile(await fileHandleStat(handle)), regularFile(await fileLstat(file)))) error('FILE_CHANGED')
     const after = await fs.promises.realpath(dirname(file))
-    if (relative(folder, after) !== '' || !sameFileIdentity(parent, await fs.promises.stat(after))) error('FILE_CHANGED')
+    if (relative(folder, after) !== '' || !sameFileIdentity(parent, await fileStat(after))) error('FILE_CHANGED')
     return handle
   } catch (e) { await handle.close(); throw e }
 }
@@ -101,12 +104,12 @@ export function readRegularFileSync(file: string, maximum: number): Buffer {
   file = absoluteFilePath(file)
   const fd = openRegularFileSync(file)
   try {
-    const before = fs.fstatSync(fd)
+    const before = fileFstatSync(fd)
     if (!Number.isSafeInteger(maximum) || maximum < 0 || before.size > maximum) error('FILE_SIZE_LIMIT')
     const body = Buffer.alloc(before.size + 1)
     let length = 0
     while (length < body.length) { const n = fs.readSync(fd, body, length, body.length - length, length); if (!n) break; length += n }
-    const end = regularFile(fs.fstatSync(fd)), current = regularFile(fs.lstatSync(file))
+    const end = regularFile(fileFstatSync(fd)), current = regularFile(fileLstatSync(file))
     if (length !== before.size || [end, current].some(s => !sameFileIdentity(s, before) || s.size !== before.size || s.mtimeMs !== before.mtimeMs || s.ctimeMs !== before.ctimeMs)) error('FILE_CHANGED')
     return body.subarray(0, length)
   } finally { fs.closeSync(fd) }
@@ -140,8 +143,8 @@ export class FilePublicationError extends Error {
 }
 function publicationOutcome(source: string, target: string, identity: FileIdentity): 'not-published' | 'published' | 'unknown' {
   try {
-    if (entryExistsSync(target) && sameFileIdentity(fs.lstatSync(target), identity)) return 'published'
-    if (entryExistsSync(source) && sameFileIdentity(fs.lstatSync(source), identity)) return 'not-published'
+    if (entryExistsSync(target) && sameFileIdentity(fileLstatSync(target), identity)) return 'published'
+    if (entryExistsSync(source) && sameFileIdentity(fileLstatSync(source), identity)) return 'not-published'
   } catch { /* Ambiguous publication retains its caller's protection. */ }
   return 'unknown'
 }
@@ -149,13 +152,13 @@ function publicationOutcome(source: string, target: string, identity: FileIdenti
 export function publishPreparedFileSync(source: string, target: string, replace = false, onPublished: () => void = () => {}): void {
   source = absoluteFilePath(source); target = absoluteFilePath(target)
   sameParent(source, target)
-  const identity = regularFile(fs.lstatSync(source))
-  if (entryExistsSync(target)) regularFile(fs.lstatSync(target))
+  const identity = regularFile(fileLstatSync(source))
+  if (entryExistsSync(target)) regularFile(fileLstatSync(target))
   try {
     if (replace) fs.renameSync(source, target)
     else {
       fs.linkSync(source, target); onPublished()
-      if (!sameFileIdentity(regularFile(fs.lstatSync(source), 2), identity)) error('FILE_CHANGED')
+      if (!sameFileIdentity(regularFile(fileLstatSync(source), 2), identity)) error('FILE_CHANGED')
       fs.unlinkSync(source); return
     }
   } catch (e) { throw new FilePublicationError(publicationOutcome(source, target, identity), e) }
@@ -171,16 +174,16 @@ export function publishManagedFileSync(source: string, target: string): void {
 export async function publishPreparedFile(source: string, target: string, replace: boolean, onPublished: () => void, expected?: FileSnapshot): Promise<void> {
   source = absoluteFilePath(source); target = absoluteFilePath(target)
   sameParent(source, target)
-  const identity = regularFile(await fs.promises.lstat(source))
+  const identity = regularFile(await fileLstat(source))
   try {
     if (replace) {
-      const current = regularFile(await fs.promises.lstat(target))
+      const current = regularFile(await fileLstat(target))
       if (expected && (!sameFileIdentity(current, expected) || current.size !== expected.size || current.mtimeMs !== expected.mtimeMs || current.ctimeMs !== expected.ctimeMs)) error('FILE_CHANGED')
       await fs.promises.rename(source, target)
       onPublished()
     } else {
       await fs.promises.link(source, target); onPublished()
-      if (!sameFileIdentity(regularFile(await fs.promises.lstat(source), 2), identity)) error('FILE_CHANGED')
+      if (!sameFileIdentity(regularFile(await fileLstat(source), 2), identity)) error('FILE_CHANGED')
       await fs.promises.unlink(source)
     }
   } catch (e) { throw new FilePublicationError(publicationOutcome(source, target, identity), e) }
@@ -191,18 +194,18 @@ export function atomicWriteFileSync(target: string, body: string | Buffer, onPub
   let identity: FileIdentity | undefined
   try {
     const fd = openExclusiveFileSync(temporary)
-    try { identity = fs.fstatSync(fd); fs.writeFileSync(fd, body); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    try { identity = fileFstatSync(fd); fs.writeFileSync(fd, body); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
     try { publishPreparedFileSync(temporary, target, true, onPublished) }
     catch (e) { if (e instanceof FilePublicationError && e.outcome !== 'not-published') onPublished(); throw e }
     flushDirectorySync(dirname(target))
   } finally {
     // A replaced temporary pathname is not owned by this write.
-    try { if (identity && entryExistsSync(temporary) && sameFileIdentity(regularFile(fs.lstatSync(temporary)), identity)) fs.unlinkSync(temporary) } catch { /* Keep an uncertain or occupied temporary file. */ }
+    try { if (identity && entryExistsSync(temporary) && sameFileIdentity(regularFile(fileLstatSync(temporary)), identity)) fs.unlinkSync(temporary) } catch { /* Keep an uncertain or occupied temporary file. */ }
   }
 }
-export function removeOwnedFileSync(file: string, expected: FileIdentity): void {
+export function removeOwnedFileSync(file: string, expected: IdentityInput): void {
   file = absoluteFilePath(file)
-  const current = regularFile(fs.lstatSync(file))
+  const current = regularFile(fileLstatSync(file))
   if (!sameFileIdentity(current, expected)) error('FILE_CHANGED')
   fs.unlinkSync(file)
 }

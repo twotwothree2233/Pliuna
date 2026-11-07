@@ -5,6 +5,7 @@ export default defineConfig({ test: {
   testTimeout: 30000,
   setupFiles: ['tests/helpers/synthetic-file-integrity.ts'],
   include: [
+    'tests/unit/file-identity.test.ts', 'tests/unit/file-format.test.ts', 'tests/unit/export-control.test.ts',
     'tests/unit/platform-paths.test.ts', 'tests/unit/platform-files.test.ts',
     'tests/unit/platform-permissions.test.ts', 'tests/unit/platform-persistence.test.ts',
     'tests/unit/file-model-store.test.ts', 'tests/unit/secure-model-store.test.ts',

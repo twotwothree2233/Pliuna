@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -11,7 +11,7 @@ const roots: string[] = [], close: { close(): void }[] = []
 const root = () => { const r = mkdtempSync(join(tmpdir(), 'trellis-export-control-')); roots.push(r); return r }
 const open = (r: string, established = false) => { const c = new ExportControl(r, established); close.push(c); return c }
 const resource = () => ({ id: randomUUID(), storage_key: randomUUID(), sha256: 'a'.repeat(64), byte_length: 1, media_type: 'text/plain', display_name: 'synthetic' })
-afterEach(() => { close.splice(0).reverse().forEach(c => c.close()); roots.splice(0).forEach(r => rmSync(r, { recursive: true, force: true })) })
+afterEach(() => { vi.unstubAllEnvs(); close.splice(0).reverse().forEach(c => c.close()); roots.splice(0).forEach(r => rmSync(r, { recursive: true, force: true })) })
 describe('independent export authority', () => {
   it('pins before preview and keeps private paths out of all public summaries', () => {
     const c = open(root()), r = resource(), job = c.create(randomUUID(), randomUUID(), 'trellis.sqlite', [r], { revision: 1 })
@@ -41,6 +41,7 @@ describe('independent export authority', () => {
     c.cancel(j.id); expect(() => c.beginSave(j.id, '/a', '/b', true)).toThrow()
   })
   it('establishes v5 and refuses missing dependency without recreating it', () => {
+    vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', '')
     const r = root(), store = new RuntimeStore(r); store.close()
     const db = new Database(join(r, 'restore-control.sqlite'))
     expect(JSON.parse((db.prepare('SELECT manifest FROM restore_control').get() as any).manifest)).toMatchObject({ version: 5, export_control: 1 }); db.close()

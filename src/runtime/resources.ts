@@ -1,5 +1,6 @@
+import { fileFstatSync as fstatSync,fileLstatSync as lstatSync } from '../platform/files'
 import { createHash } from 'node:crypto'
-import { closeSync,fstatSync,fsyncSync,lstatSync,readFileSync,writeFileSync } from 'node:fs'
+import { closeSync,fsyncSync,readFileSync,writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
 import { flushDirectorySync,managedFile,openExclusiveFileSync,openRegularFileSync,publishManagedFileSync } from '../platform/files'

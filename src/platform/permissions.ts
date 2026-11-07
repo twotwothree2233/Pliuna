@@ -1,3 +1,4 @@
+import { fileLstatSync,fileFstatSync } from './files'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import { win32 } from 'node:path'
@@ -39,12 +40,12 @@ if ($directory -and $env:TRELLIS_PRIVATE_HIDDEN -eq '1') { [System.IO.File]::Set
 export function protectPrivatePath(file: string, kind: 'file' | 'directory', hidden = false): void {
   file = absoluteFilePath(file)
   if (kind === 'directory') assertDirectorySync(file)
-  else regularFile(fs.lstatSync(file))
-  const before = fs.lstatSync(file)
+  else regularFile(fileLstatSync(file))
+  const before = fileLstatSync(file)
   if (process.platform !== 'win32') {
     const fd = kind === 'file' ? openRegularFileSync(file) : fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_DIRECTORY ?? 0))
     try {
-      if (!sameFileIdentity(before, fs.fstatSync(fd))) throw Error('FILE_CHANGED')
+      if (!sameFileIdentity(before, fileFstatSync(fd))) throw Error('FILE_CHANGED')
       fs.fchmodSync(fd, kind === 'directory' ? 0o700 : 0o600)
     } finally { fs.closeSync(fd) }
     return
@@ -58,7 +59,7 @@ export function protectPrivatePath(file: string, kind: 'file' | 'directory', hid
       env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP,
         TRELLIS_PRIVATE_PATH: win32.toNamespacedPath(file), TRELLIS_PRIVATE_KIND: kind, TRELLIS_PRIVATE_HIDDEN: hidden ? '1' : '0' }
     })
-    const after = fs.lstatSync(file)
+    const after = fileLstatSync(file)
     if (!sameFileIdentity(before, after) || after.isSymbolicLink()) throw Error()
   } catch { throw Error('FILE_PERMISSIONS_UNAVAILABLE') }
 }

@@ -1,3 +1,5 @@
+import { fileLstatSync,fileFstatSync } from '../platform/files'
+import { journalFileIdentity,sameJournalFileIdentity,validJournalFileIdentity,type IdentityEncoding,type JournalFileIdentity } from '../platform/file-identity'
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -11,19 +13,19 @@ import { digest } from './resources'
 import { verifyDatabase,type RestoreJournal } from './restore-journal'
 
 type Row = Record<string, any>
-type Identity = { dev: number; ino: number; size: number; mtime: number; ctime: number; hash: string }
+type Identity = JournalFileIdentity
 type Member = { suffix: '' | '-wal' | '-shm' | '-journal'; identity: Identity; state: 'pending' | 'deleting' | 'deleted' | 'absent' }
-export type Retirement = { version: 1; id: string; token: string; file: string; selected: string; graph: string; created_at: string; phase: 'preview' | 'retired' | 'group_deleted' | 'released'; protection: { tasks: string[]; resources: Row[]; staging: Row[]; references: Row[]; keys: string[] }; members: Member[]; attempt: number; next_retry_at: string | null; reason: string }
+export type Retirement = { version: IdentityEncoding; id: string; token: string; file: string; selected: string; graph: string; created_at: string; phase: 'preview' | 'retired' | 'group_deleted' | 'released'; protection: { tasks: string[]; resources: Row[]; staging: Row[]; references: Row[]; keys: string[] }; members: Member[]; attempt: number; next_retry_at: string | null; reason: string }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const generation = (f: unknown): f is string => typeof f === 'string' && (f === 'trellis.sqlite' || /^restore-[a-f0-9-]{36}-(target|rollback)\.sqlite$/.test(f))
 const managed = (f: unknown): f is string => generation(f) || (typeof f === 'string' && /^recovery\/[a-f0-9-]{36}\.sqlite$/.test(f))
 const suffixes = ['', '-wal', '-shm', '-journal'] as const
 const fail = (code: string): never => { throw new ContractError(code, 'Replica retained. Query the original retirement; no business or deletion is replayed') }
 function present(file: string): boolean {
-  try { fs.lstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e }
+  try { fileLstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e }
 }
 export function validateRetirement(r: any): asserts r is Retirement {
-  if (!r || r.version !== 1 || !uuid.test(r.id) || !uuid.test(r.token) || !managed(r.file) || !generation(r.selected) || !/^[a-f0-9]{64}$/.test(r.graph) || !Number.isFinite(Date.parse(r.created_at)) || !['preview', 'retired', 'group_deleted', 'released'].includes(r.phase) || !Number.isInteger(r.attempt) || r.attempt < 0 || r.attempt > 4 || (r.next_retry_at !== null && !Number.isFinite(Date.parse(r.next_retry_at))) || typeof r.reason !== 'string') fail('REPLICA_CONTROL_INVALID')
+  if (!r || ![1, 2].includes(r.version) || !uuid.test(r.id) || !uuid.test(r.token) || !managed(r.file) || !generation(r.selected) || !/^[a-f0-9]{64}$/.test(r.graph) || !Number.isFinite(Date.parse(r.created_at)) || !['preview', 'retired', 'group_deleted', 'released'].includes(r.phase) || !Number.isInteger(r.attempt) || r.attempt < 0 || r.attempt > 4 || (r.next_retry_at !== null && !Number.isFinite(Date.parse(r.next_retry_at))) || typeof r.reason !== 'string') fail('REPLICA_CONTROL_INVALID')
   const p = r.protection
   if (!p || !['tasks', 'resources', 'staging', 'references', 'keys'].every(k => Array.isArray(p[k])) || p.keys.some((k: unknown) => typeof k !== 'string') || p.tasks.some((k: unknown) => typeof k !== 'string') || !Array.isArray(r.members) || !r.members.length || r.members[0]?.suffix !== '' || r.members.length > 4 || new Set(r.members.map((m: Member) => m.suffix)).size !== r.members.length) fail('REPLICA_CONTROL_INVALID')
   for (const resource of p.resources) if (!resource || !uuid.test(resource.id) || typeof resource.storage_key !== 'string' || !/^[A-Za-z0-9_-]+$/.test(resource.storage_key) || !/^[a-f0-9]{64}$/.test(resource.sha256) || !Number.isSafeInteger(resource.byte_length) || resource.byte_length < 0) fail('REPLICA_CONTROL_INVALID')
@@ -31,7 +33,7 @@ export function validateRetirement(r: any): asserts r is Retirement {
   for (const ref of p.references) if (!ref || typeof ref.id !== 'string') fail('REPLICA_CONTROL_INVALID')
   const keys = [...new Set([...p.resources.flatMap((x: Row) => [x.id, x.storage_key]), ...p.staging.map((x: Row) => x.storage_key), ...p.references.map((x: Row) => x.id)])].sort()
   if (JSON.stringify(keys) !== JSON.stringify(p.keys)) fail('REPLICA_CONTROL_INVALID')
-  for (const m of r.members) if (!suffixes.includes(m.suffix) || !['pending', 'deleting', 'deleted', 'absent'].includes(m.state) || !m.identity || ![m.identity.dev, m.identity.ino, m.identity.size, m.identity.mtime, m.identity.ctime].every(Number.isFinite) || m.identity.size < 0 || !/^[a-f0-9]{64}$/.test(m.identity.hash)) fail('REPLICA_CONTROL_INVALID')
+  for (const m of r.members) if (!suffixes.includes(m.suffix) || !['pending', 'deleting', 'deleted', 'absent'].includes(m.state) ||  !validJournalFileIdentity(m.identity, r.version)) fail('REPLICA_CONTROL_INVALID')
   if (['group_deleted', 'released'].includes(r.phase) && r.members.some((m: Member) => !['deleted', 'absent'].includes(m.state))) fail('REPLICA_CONTROL_INVALID')
 }
 
@@ -52,16 +54,16 @@ export class ReplicaRetirement {
   }
   private identity(file: string): Identity {
     const path = managedFile(this.root, ...file.split('/')), parent = dirname(path)
-    if (!fs.lstatSync(parent).isDirectory()) fail('REPLICA_UNSAFE_FILE')
-    const stat = fs.lstatSync(path)
+    if (!fileLstatSync(parent).isDirectory()) fail('REPLICA_UNSAFE_FILE')
+    const stat = fileLstatSync(path)
     if (!stat.isFile() || stat.nlink !== 1) fail('REPLICA_UNSAFE_FILE')
     const fd = openRegularFileSync(path)
     try {
-      const opened = fs.fstatSync(fd)
+      const opened = fileFstatSync(fd)
       if (opened.dev !== stat.dev || opened.ino !== stat.ino) fail('REPLICA_FILE_CHANGED')
-      const hash = digest(fs.readFileSync(fd)), end = fs.fstatSync(fd)
+      const hash = digest(fs.readFileSync(fd)), end = fileFstatSync(fd)
       if (end.size !== stat.size || end.mtimeMs !== stat.mtimeMs || end.ctimeMs !== stat.ctimeMs) fail('REPLICA_FILE_CHANGED')
-      return { dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }
+      return journalFileIdentity({ dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }, this.journal.identityEncoding)
     } finally { fs.closeSync(fd) }
   }
   private syncDirectory(file: string): DirectoryDurability {
@@ -131,7 +133,7 @@ export class ReplicaRetirement {
     const file = [...this.journal.replicaFiles(), ...this.recovery.replicaPoints().map(p => p.file)].find(f => digest(Buffer.from(f)) === replicaId)
     if (!file || !this.allowed(file) || this.journal.retired(file)) fail('REPLICA_PROTECTED')
     const material = this.inspect(file!)
-    const r: Retirement = { version: 1, id: randomUUID(), token, file: file!, selected: this.journal.selected(), graph: this.graph(), created_at: new Date().toISOString(), phase: 'preview', ...material, attempt: 0, next_retry_at: null, reason: 'VERIFIED_REPLICA' }
+    const r: Retirement = { version: this.journal.identityEncoding, id: randomUUID(), token, file: file!, selected: this.journal.selected(), graph: this.graph(), created_at: new Date().toISOString(), phase: 'preview', ...material, attempt: 0, next_retry_at: null, reason: 'VERIFIED_REPLICA' }
     this.journal.saveRetirement(r); return this.public(r)
   }
   private read(id: string): Retirement { const r = this.journal.retirementRecord(id); if (!r) fail('REPLICA_OPERATION_NOT_FOUND'); return r! }
@@ -146,7 +148,7 @@ export class ReplicaRetirement {
       if (r.graph !== this.graph()) fail('REPLICA_FACTS_CHANGED')
       for (const suffix of suffixes) {
         const member = r.members.find(m => m.suffix === suffix)
-        if (present(join(this.root, r.file + suffix)) !== !!member || (member && JSON.stringify(this.identity(r.file + suffix)) !== JSON.stringify(member.identity))) fail('REPLICA_FACTS_CHANGED')
+        if (present(join(this.root, r.file + suffix)) !== !!member || (member && !sameJournalFileIdentity(this.identity(r.file + suffix), member.identity))) fail('REPLICA_FACTS_CHANGED')
       }
       r.phase = 'retired'; r.reason = 'RETIREMENT_DURABLE'; this.journal.saveRetirement(r)
     }
@@ -157,9 +159,9 @@ export class ReplicaRetirement {
       for (const m of r.members) {
         if (['deleted', 'absent'].includes(m.state)) { if (present(managedFile(this.root, ...(r.file + m.suffix).split('/')))) fail('REPLICA_FILE_REAPPEARED'); continue }
         if (!present(managedFile(this.root, ...(r.file + m.suffix).split('/')))) { m.state = 'absent'; this.journal.saveRetirement(r); continue }
-        if (JSON.stringify(this.identity(r.file + m.suffix)) !== JSON.stringify(m.identity)) fail('REPLICA_FILE_CHANGED')
+        if (!sameJournalFileIdentity(this.identity(r.file + m.suffix), m.identity)) fail('REPLICA_FILE_CHANGED')
         m.state = 'deleting'; r.reason = 'FILE_DELETE_INTENT'; this.journal.saveRetirement(r)
-        if (r.selected !== this.journal.selected() || !this.allowed(r.file) || JSON.stringify(this.identity(r.file + m.suffix)) !== JSON.stringify(m.identity)) fail('REPLICA_FACTS_CHANGED')
+        if (r.selected !== this.journal.selected() || !this.allowed(r.file) || !sameJournalFileIdentity(this.identity(r.file + m.suffix), m.identity)) fail('REPLICA_FACTS_CHANGED')
         fs.unlinkSync(managedFile(this.root, ...(r.file + m.suffix).split('/'))); this.syncDirectory(r.file)
         m.state = 'deleted'; this.journal.saveRetirement(r)
       }

@@ -1,5 +1,8 @@
 import { vi } from 'vitest'
 
+// Only isolated test directories opt into the new Windows control format.
+if (process.platform === 'win32') process.env.TRELLIS_TEST_FILE_IDENTITIES = 'decimal-v2'
+
 // These suites exercise real files and SQLite, with a digest test double.
 // Existing integrity comparisons still run; no file hash is computed.
 vi.mock('node:crypto', async importOriginal => {

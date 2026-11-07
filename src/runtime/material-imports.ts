@@ -1,3 +1,4 @@
+import { fileLstatSync,fileFstatSync } from '../platform/files'
 import type Database from 'better-sqlite3'
 import { createHash,randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -78,7 +79,7 @@ export class MaterialImports {
           if(t!.received!==t!.expected)fail('IMPORT_LENGTH_MISMATCH')
           if(t!.text){try{t!.text.decode()}catch{t!.media='application/octet-stream'}}
           fs.fsyncSync(t!.fd);fs.closeSync(t!.fd);t!.fd=-1
-          const hash=t!.hash.digest('hex'),temporary=join(this.root,'resources',t!.key+'.tmp'),stat=fs.lstatSync(temporary)
+          const hash=t!.hash.digest('hex'),temporary=join(this.root,'resources',t!.key+'.tmp'),stat=fileLstatSync(temporary)
           if(!stat.isFile()||stat.nlink!==1||stat.size!==t!.expected)fail('IMPORT_FILE_CHANGED')
           publishManagedFileSync(temporary,managedFile(this.root,'resources',t!.key));this.sync()
           this.db.prepare("UPDATE staging SET state='prepared',sha256=? WHERE id=?").run(hash,t!.stage)
@@ -129,18 +130,18 @@ export class MaterialImports {
     if(!Number.isSafeInteger(r.byte_length)||r.byte_length<0||r.byte_length>defaults.transport.resource_bytes)fail('RESOURCE_CORRUPT')
     if(!Number.isSafeInteger(offset)||offset<0||offset>r.byte_length)fail('INVALID_RANGE')
     if(!/^[A-Za-z0-9_-]+$/.test(r.storage_key))fail('RESOURCE_CORRUPT')
-    const id=r.id,path=managedFile(this.root,'resources',r.storage_key),initial=fs.lstatSync(path)
+    const id=r.id,path=managedFile(this.root,'resources',r.storage_key),initial=fileLstatSync(path)
     if(!/^[A-Za-z0-9_-]+$/.test(r!.storage_key)||!initial.isFile()||initial.nlink!==1||initial.size!==r!.byte_length)fail('RESOURCE_CORRUPT')
     const fd=openRegularFileSync(path)
     try {
-      const open=fs.fstatSync(fd);if(open.ino!==initial.ino||open.dev!==initial.dev)fail('RESOURCE_CORRUPT')
+      const open=fileFstatSync(fd);if(open.ino!==initial.ino||open.dev!==initial.dev)fail('RESOURCE_CORRUPT')
       const hash=createHash('sha256'),buffer=Buffer.alloc(defaults.transport.upload_chunk_bytes);let pos=0
       while(pos<initial.size){const n=fs.readSync(fd,buffer,0,Math.min(buffer.length,initial.size-pos),pos);if(!n)fail('RESOURCE_CORRUPT');hash.update(buffer.subarray(0,n));pos+=n}
-      const end=fs.fstatSync(fd);if(end.size!==initial.size||end.mtimeMs!==initial.mtimeMs||end.ctimeMs!==initial.ctimeMs||hash.digest('hex')!==r!.sha256)fail('RESOURCE_CORRUPT')
+      const end=fileFstatSync(fd);if(end.size!==initial.size||end.mtimeMs!==initial.mtimeMs||end.ctimeMs!==initial.ctimeMs||hash.digest('hex')!==r!.sha256)fail('RESOURCE_CORRUPT')
       const piece=Buffer.alloc(Math.min(4096,r!.byte_length-offset)),n=piece.length?fs.readSync(fd,piece,0,piece.length,offset):0
       let stop=n;if(offset+stop<r!.byte_length){let start=stop-1;while(start>=0&&(piece[start]!&0xc0)===0x80)start--;if(start>=0){const first=piece[start]!,needed=first<128?1:first<224?2:first<240?3:4;if(stop-start<needed)stop=start}}
       let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(piece.subarray(0,stop))}catch{if(r.media_type==='text/plain; charset=utf-8')return fail('RESOURCE_CORRUPT');text=''}
-      const final=fs.fstatSync(fd),current=fs.lstatSync(path)
+      const final=fileFstatSync(fd),current=fileLstatSync(path)
       if([final,current].some(s=>s.ino!==initial.ino||s.dev!==initial.dev||s.size!==initial.size||s.mtimeMs!==initial.mtimeMs||s.ctimeMs!==initial.ctimeMs))fail('RESOURCE_CORRUPT')
       return {id,sha256:r!.sha256,text,offset,next_offset:offset+stop<r!.byte_length?offset+stop:null,content_available:true,truncated:offset+stop<r!.byte_length}
     }finally{fs.closeSync(fd)}

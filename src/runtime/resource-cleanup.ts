@@ -1,3 +1,5 @@
+import { fileLstatSync,fileFstatSync } from '../platform/files'
+import { journalFileIdentity,sameJournalFileIdentity,validJournalFileIdentity,type IdentityEncoding,type JournalFileIdentity } from '../platform/file-identity'
 import type Database from 'better-sqlite3'
 import fs from 'node:fs'
 import { join } from 'node:path'
@@ -10,18 +12,17 @@ import { digest } from './resources'
 import type { RestoreJournal } from './restore-journal'
 
 type Row = Record<string, any>
-type Identity = { dev: number; ino: number; size: number; mtime: number; ctime: number; hash: string }
+type Identity = JournalFileIdentity
 export type TaskDeletion = { task_id: string; resources: Row[]; stages: Row[] }
-export type ResourceCleanup = { version: 1; id: string; resource: Row; source_tasks: string[]; stages: Row[]; phase: 'candidate' | 'retired' | 'deleting' | 'file_deleted' | 'complete'; preview: { token: string; selected: string; graph: string; identity: Identity } | null; identity: Identity | null; selected: string | null; attempt: number; next_retry_at: string | null; reason: string; file_result: 'deleted' | 'absent' | null; created_at: string }
+export type ResourceCleanup = { version: IdentityEncoding; id: string; resource: Row; source_tasks: string[]; stages: Row[]; phase: 'candidate' | 'retired' | 'deleting' | 'file_deleted' | 'complete'; preview: { token: string; selected: string; graph: string; identity: Identity } | null; identity: Identity | null; selected: string | null; attempt: number; next_retry_at: string | null; reason: string; file_result: 'deleted' | 'absent' | null; created_at: string }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const key = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]+$/.test(v)
 const fail = (code: string): never => { throw new ContractError(code, 'Resource retained or cleanup incomplete; query the original cleanup. No business request is replayed') }
-function validIdentity(i: any): boolean { return !!i && [i.dev, i.ino, i.size, i.mtime, i.ctime].every(Number.isFinite) && i.size >= 0 && /^[a-f0-9]{64}$/.test(i.hash) }
 export function validateResourceCleanup(r: any): asserts r is ResourceCleanup {
   const resource = r?.resource
-  if (!r || r.version !== 1 || !uuid.test(r.id) || !resource || !uuid.test(resource.id) || !key(resource.storage_key) || !/^[a-f0-9]{64}$/.test(resource.sha256) || !Number.isSafeInteger(resource.byte_length) || resource.byte_length < 0 || typeof resource.display_name !== 'string' || typeof resource.media_type !== 'string' || typeof resource.created_at !== 'string' || !Array.isArray(r.source_tasks) || !r.source_tasks.length || r.source_tasks.some((t: unknown) => typeof t !== 'string' || !uuid.test(t)) || !Array.isArray(r.stages) || !['candidate', 'retired', 'deleting', 'file_deleted', 'complete'].includes(r.phase) || !Number.isInteger(r.attempt) || r.attempt < 0 || r.attempt > 4 || (r.next_retry_at !== null && !Number.isFinite(Date.parse(r.next_retry_at))) || typeof r.reason !== 'string' || !Number.isFinite(Date.parse(r.created_at)) || ![null, 'deleted', 'absent'].includes(r.file_result)) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
-  if (r.preview !== null && (!r.preview || !uuid.test(r.preview.token) || typeof r.preview.selected !== 'string' || !/^[a-f0-9]{64}$/.test(r.preview.graph) || !validIdentity(r.preview.identity))) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
-  if (r.phase !== 'candidate' && (!validIdentity(r.identity) || typeof r.selected !== 'string')) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
+  if (!r || ![1, 2].includes(r.version) || !uuid.test(r.id) || !resource || !uuid.test(resource.id) || !key(resource.storage_key) || !/^[a-f0-9]{64}$/.test(resource.sha256) || !Number.isSafeInteger(resource.byte_length) || resource.byte_length < 0 || typeof resource.display_name !== 'string' || typeof resource.media_type !== 'string' || typeof resource.created_at !== 'string' || !Array.isArray(r.source_tasks) || !r.source_tasks.length || r.source_tasks.some((t: unknown) => typeof t !== 'string' || !uuid.test(t)) || !Array.isArray(r.stages) || !['candidate', 'retired', 'deleting', 'file_deleted', 'complete'].includes(r.phase) || !Number.isInteger(r.attempt) || r.attempt < 0 || r.attempt > 4 || (r.next_retry_at !== null && !Number.isFinite(Date.parse(r.next_retry_at))) || typeof r.reason !== 'string' || !Number.isFinite(Date.parse(r.created_at)) || ![null, 'deleted', 'absent'].includes(r.file_result)) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
+  if (r.preview !== null && (!r.preview || !uuid.test(r.preview.token) || typeof r.preview.selected !== 'string' || !/^[a-f0-9]{64}$/.test(r.preview.graph) || !validJournalFileIdentity(r.preview.identity, r.version))) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
+  if (r.phase !== 'candidate' && (!validJournalFileIdentity(r.identity, r.version) || typeof r.selected !== 'string')) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
   if (['file_deleted', 'complete'].includes(r.phase) && r.file_result === null) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
   for (const s of r.stages) if (!s || typeof s.id !== 'string' || !r.source_tasks.includes(s.task_id) || !key(s.storage_key)) fail('RESOURCE_CLEANUP_CONTROL_INVALID')
 }
@@ -31,18 +32,18 @@ export class ResourceCleanupManager {
   constructor(private root: string, private database: () => Database.Database, private journal: RestoreJournal, private recovery: RecoveryManager, private gc: RestrictedGc) {}
   private graph(): string { return digest(Buffer.from(JSON.stringify([this.journal.retirementGraph(), this.recovery.replicaGraph()]))) }
   private read(id: string): ResourceCleanup { const r = this.journal.resourceRecord(id); if (!r) fail('RESOURCE_CLEANUP_NOT_FOUND'); return r! }
-  private present(file: string): boolean { try { fs.lstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e } }
+  private present(file: string): boolean { try { fileLstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e } }
   private path(r: ResourceCleanup): string { return managedFile(this.root, 'resources', r.resource.storage_key) }
   private identity(r: ResourceCleanup): Identity {
     const directory = join(this.root, 'resources')
-    if (!fs.lstatSync(directory).isDirectory()) fail('RESOURCE_UNSAFE_FILE')
-    const path = this.path(r), stat = fs.lstatSync(path)
+    if (!fileLstatSync(directory).isDirectory()) fail('RESOURCE_UNSAFE_FILE')
+    const path = this.path(r), stat = fileLstatSync(path)
     if (!stat.isFile() || stat.nlink !== 1 || stat.size !== r.resource.byte_length || stat.size > defaults.transport.resource_bytes) fail('RESOURCE_UNSAFE_FILE')
     const fd = openRegularFileSync(path)
     try {
-      const opened = fs.fstatSync(fd), hash = digest(fs.readFileSync(fd)), end = fs.fstatSync(fd)
+      const opened = fileFstatSync(fd), hash = digest(fs.readFileSync(fd)), end = fileFstatSync(fd)
       if (opened.dev !== stat.dev || opened.ino !== stat.ino || end.size !== stat.size || end.mtimeMs !== stat.mtimeMs || end.ctimeMs !== stat.ctimeMs || hash !== r.resource.sha256) fail('RESOURCE_FILE_CHANGED')
-      return { dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }
+      return journalFileIdentity({ dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }, r.version)
     } finally { fs.closeSync(fd) }
   }
   private sync(): DirectoryDurability {
@@ -109,7 +110,7 @@ export class ResourceCleanupManager {
     if (r.attempt >= 4 || (r.next_retry_at && Date.parse(r.next_retry_at) > Date.now())) return this.public(r)
     const protection = this.protection(r); if (protection) fail(protection)
     if (!retry) {
-      if (!r.preview || r.preview.selected !== this.journal.selected() || r.preview.graph !== this.graph() || JSON.stringify(this.identity(r)) !== JSON.stringify(r.preview.identity)) fail('RESOURCE_FACTS_CHANGED')
+      if (!r.preview || r.preview.selected !== this.journal.selected() || r.preview.graph !== this.graph() || !sameJournalFileIdentity(this.identity(r), r.preview.identity)) fail('RESOURCE_FACTS_CHANGED')
       const preview = r.preview!
       r.identity = preview.identity; r.selected = preview.selected; r.phase = 'retired'; r.preview = null; r.reason = 'RESOURCE_RETIREMENT_DURABLE'; this.journal.saveResourceCleanup(r)
     } else if (r.selected !== this.journal.selected()) fail('RESOURCE_GENERATION_CHANGED')
@@ -120,10 +121,10 @@ export class ResourceCleanupManager {
       } else {
         let durability: DirectoryDurability
         if (this.present(this.path(r))) {
-          if (JSON.stringify(this.identity(r)) !== JSON.stringify(r.identity)) fail('RESOURCE_FILE_CHANGED')
+          if (!sameJournalFileIdentity(this.identity(r), r.identity!)) fail('RESOURCE_FILE_CHANGED')
           r.phase = 'deleting'; r.reason = 'RESOURCE_DELETE_INTENT'; this.journal.saveResourceCleanup(r)
           const protectedNow = this.protection(r); if (protectedNow) fail(protectedNow)
-          if (JSON.stringify(this.identity(r)) !== JSON.stringify(r.identity)) fail('RESOURCE_FILE_CHANGED')
+          if (!sameJournalFileIdentity(this.identity(r), r.identity!)) fail('RESOURCE_FILE_CHANGED')
           fs.unlinkSync(this.path(r)); durability = this.sync(); r.file_result = 'deleted'
         } else { durability = this.sync(); r.file_result = 'absent' }
         r.phase = 'file_deleted'; r.reason = durability === 'directory-synced' ? 'RESOURCE_FILE_DELETED_DURABLE' : 'RESOURCE_FILE_DELETED_CONFIRMED'; this.journal.saveResourceCleanup(r)

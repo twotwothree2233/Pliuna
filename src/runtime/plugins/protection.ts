@@ -1,5 +1,6 @@
+import { fileFstatSync as fstatSync,fileLstatSync as lstatSync } from '../../platform/files'
 import { createHash } from 'node:crypto'
-import { closeSync,fstatSync,lstatSync,readdirSync,readSync } from 'node:fs'
+import { closeSync,readdirSync,readSync } from 'node:fs'
 import { join } from 'node:path'
 import { managedFile,openRegularFileSync } from '../../platform/files'
 import { ContractError } from '../../shared/validation'

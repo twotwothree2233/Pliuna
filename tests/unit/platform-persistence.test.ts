@@ -96,7 +96,7 @@ it('refuses a multiply linked selected database before business writes', () => {
 })
 it('reconciles only the registered two-link export after interruption', async () => {
   const root = scene(), temporary = join(root, 'registered.tmp'), target = join(root, 'output.html')
-  fs.writeFileSync(temporary, 'fixed'); const identity = fs.statSync(temporary)
+  fs.writeFileSync(temporary, 'fixed'); const identity = files.fileStatSync(temporary)
   fs.linkSync(temporary, target)
   expect(await reconcileExport({ html: 'fixed', destination: { temporary, target, identity } }, false)).toBe('saved')
   expect(fs.existsSync(temporary)).toBe(false)
@@ -105,7 +105,7 @@ it('reconciles only the registered two-link export after interruption', async ()
 })
 it('does not accept an additional foreign export hard link', async () => {
   const root = scene(), temporary = join(root, 'registered.tmp'), target = join(root, 'output.html')
-  fs.writeFileSync(temporary, 'fixed'); const identity = fs.statSync(temporary)
+  fs.writeFileSync(temporary, 'fixed'); const identity = files.fileStatSync(temporary)
   fs.linkSync(temporary, target); fs.linkSync(target, join(root, 'foreign.html'))
   await expect(reconcileExport({ html: 'fixed', destination: { temporary, target, identity } }, true)).rejects.toThrow()
   expect(fs.statSync(target).nlink).toBe(3)

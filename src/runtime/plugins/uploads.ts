@@ -1,3 +1,4 @@
+import { fileHandleStat,fileLstat } from '../../platform/files'
 import type Database from 'better-sqlite3'
 import { createHash,randomUUID,type Hash } from 'node:crypto'
 import fs from 'node:fs'
@@ -104,12 +105,12 @@ export class PluginUploads {
   }
   private async finish(upload: Upload): Promise<unknown> {
     try {
-      const path = join(this.root, 'resources', upload.key + '.tmp'), stat = await fs.promises.lstat(path)
+      const path = join(this.root, 'resources', upload.key + '.tmp'), stat = await fileLstat(path)
       if (!stat.isFile() || stat.nlink !== 1 || stat.size !== upload.expected) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
       const file = await openRegularFile(path)
       try {
         const same = (value: typeof stat) => value.isFile() && value.nlink === 1 && value.ino === stat.ino && value.dev === stat.dev && value.size === stat.size && value.mtimeMs === stat.mtimeMs && value.ctimeMs === stat.ctimeMs
-        if (!same(await file.stat())) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
+        if (!same(await fileHandleStat(file))) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
         const hash = createHash('sha256'), buffer = Buffer.alloc(256 * 1024); let offset = 0
         do {
           if (!this.uploads.has(upload.id)) fail('PLUGIN_UPLOAD_SOURCE_INVALID')
@@ -118,7 +119,7 @@ export class PluginUploads {
           if (!bytesRead && offset < stat.size) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
           hash.update(buffer.subarray(0, bytesRead)); offset += bytesRead
         } while (offset < stat.size)
-        if (!same(await file.stat()) || !same(await fs.promises.lstat(path)) || hash.digest('hex') !== upload.sha256) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
+        if (!same(await fileHandleStat(file)) || !same(await fileLstat(path)) || hash.digest('hex') !== upload.sha256) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
       } finally { await file.close() }
       if (!this.uploads.has(upload.id)) fail('PLUGIN_UPLOAD_SOURCE_INVALID')
       this.qualify(upload); publishManagedFileSync(path, managedFile(this.root, 'resources', upload.key))

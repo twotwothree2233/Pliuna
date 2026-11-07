@@ -1,3 +1,5 @@
+import { sameJournalFileIdentity,type IdentityEncoding } from '../platform/file-identity'
+import { newTestIdentityEncoding } from './file-format'
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import { lstatSync,mkdirSync,readdirSync,readFileSync } from 'node:fs'
@@ -16,7 +18,7 @@ import { digest,resourceBody } from './resources'
 type Row = Record<string, any>
 export type RestoreImage = { file: string; tasks: string[]; resources: Row[]; plugins: PluginCopy[]; sha256?: string }
 type Operation = { id: string; token: string; point_id: string; phase: 'preparing' | 'switched' | 'completed' | 'rolled_back'; previous: string; target: RestoreImage; rollback: RestoreImage; created_at: string }
-type Journal = { version: 5; export_control: 1; selected: string; deleted_tasks: string[]; operations: Operation[]; verified_head: string | null; retirements: Retirement[]; task_deletions: TaskDeletion[]; resource_cleanups: ResourceCleanup[] }
+type Journal = { version: 5 | 6; export_control: IdentityEncoding; selected: string; deleted_tasks: string[]; operations: Operation[]; verified_head: string | null; retirements: Retirement[]; task_deletions: TaskDeletion[]; resource_cleanups: ResourceCleanup[] }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const managed = (file: unknown): file is string => typeof file === 'string' && (file === 'trellis.sqlite' || /^restore-[0-9a-f-]{36}-(target|rollback)\.sqlite$/.test(file))
 const fail = (): never => { throw new ContractError('RESTORE_JOURNAL_INVALID', 'Restore journal requires inspection; business access is closed') }
@@ -42,33 +44,38 @@ export class RestoreJournal {
   private db?: Database.Database
   private value: Journal = { version: 5, export_control: 1, selected: 'trellis.sqlite', deleted_tasks: [], operations: [], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] }
   readonly error: string | null
-  constructor(private root: string) {
+  get identityEncoding(): IdentityEncoding { if (this.error) fail(); return this.value.version === 6 ? 2 : 1 }
+  constructor(private root: string, createEncoding: IdentityEncoding = newTestIdentityEncoding(root)) {
     let error: string | null = null
     try {
       mkdirSync(root, { recursive: true, mode: 0o700 })
       const file = managedRegularFile(root, 'restore-control.sqlite'), present = existsSync(file), marker = join(root, 'restore-established')
-      if (existsSync(marker) && (!lstatSync(marker).isFile() || !['restore-v2\n', 'restore-v3\n', 'restore-v4\n', 'restore-v5\n'].includes(readRegularFileSync(marker, 32).toString('utf8')) || !present)) fail()
+      if (existsSync(marker) && (!lstatSync(marker).isFile() || !['restore-v2\n', 'restore-v3\n', 'restore-v4\n', 'restore-v5\n', 'restore-v6\n'].includes(readRegularFileSync(marker, 32).toString('utf8')) || !present)) fail()
       if (present && !lstatSync(file).isFile()) fail()
       if (!present && readdirSync(root).some(name => /^restore-.*-(target|rollback)\.sqlite/.test(name))) fail()
       this.db = new Database(file)
       this.db.pragma('busy_timeout=0'); this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); protectPrivatePath(file, 'file')
       if (!present) {
+        if (createEncoding === 2) this.value = { ...this.value, version: 6, export_control: 2 }
         // A missing selector must never silently reopen the pre-restore database.
         const count = this.db.prepare('SELECT count(*) n FROM sqlite_master').get() as Row
         if (count.n) fail()
         this.db.exec('CREATE TABLE restore_control (id INTEGER PRIMARY KEY CHECK(id=1), manifest TEXT NOT NULL)')
-        const exports = new ExportControl(root, false, false); exports.close()
+        const exports = new ExportControl(root, false, false, createEncoding); exports.close()
         this.db.prepare('INSERT INTO restore_control VALUES (1,?)').run(JSON.stringify(this.value))
       }
       const row = this.db.prepare('SELECT manifest FROM restore_control WHERE id=1').get() as Row
       const parsed = JSON.parse(row.manifest)
-      if (existsSync(marker) && readRegularFileSync(marker, 32).toString('utf8') === 'restore-v5\n' && parsed.version !== 5) fail()
+      const markerValue = existsSync(marker) ? readRegularFileSync(marker, 32).toString('utf8') : null
+      if ((markerValue === 'restore-v5\n' && parsed.version !== 5) || (markerValue === 'restore-v6\n' && parsed.version !== 6) || (parsed.version === 6 && markerValue !== null && markerValue !== 'restore-v6\n')) fail()
       const normalized = RestoreJournal.normalizeControl(parsed)
-      const exports = new ExportControl(root, present && parsed.version === 5, false); exports.close()
-      if (parsed.version !== 5) this.save(normalized)
+      const encoding: IdentityEncoding = normalized.version === 6 ? 2 : 1
+      const exports = new ExportControl(root, present && [5, 6].includes(parsed.version), false, encoding); exports.close()
+      if (parsed.version !== normalized.version) this.save(normalized)
       else this.value = normalized
       flushFile(root, 'restore-control.sqlite')
-      if (!existsSync(marker) || readRegularFileSync(marker, 32).toString('utf8') !== 'restore-v5\n') { atomicWriteFileSync(marker, 'restore-v5\n') }
+      const established = `restore-v${this.value.version}\n`
+      if (markerValue !== established) atomicWriteFileSync(marker, established)
       const pending = this.pending()
       if (pending?.phase === 'preparing') this.finish('rolled_back')
       else if (pending?.phase === 'switched') {
@@ -91,14 +98,14 @@ export class RestoreJournal {
     } finally { control.close() }
   }
   static validateControl(v: Journal): void {
-    if (!v || Object.keys(v).sort().join(',') !== 'deleted_tasks,export_control,operations,resource_cleanups,retirements,selected,task_deletions,verified_head,version' || v.version !== 5 || v.export_control !== 1 || !managed(v.selected) || !Array.isArray(v.deleted_tasks) || v.deleted_tasks.some(id => typeof id !== 'string' || !uuid.test(id)) || !Array.isArray(v.operations)) fail()
+    if (!v || Object.keys(v).sort().join(',') !== 'deleted_tasks,export_control,operations,resource_cleanups,retirements,selected,task_deletions,verified_head,version' || ![5, 6].includes(v.version) || v.export_control !== (v.version === 6 ? 2 : 1) || !managed(v.selected) || !Array.isArray(v.deleted_tasks) || v.deleted_tasks.some(id => typeof id !== 'string' || !uuid.test(id)) || !Array.isArray(v.operations)) fail()
     if ((v.verified_head !== null && typeof v.verified_head !== 'string') || !Array.isArray(v.retirements)) fail()
-    for (const r of v.retirements) validateRetirement(r)
+    for (const r of v.retirements) { validateRetirement(r); if (v.version === 5 && r.version !== 1) fail() }
     if (new Set(v.retirements.map(r => r.id)).size !== v.retirements.length || v.retirements.some(r => r.phase !== 'preview' && r.file === v.selected)) fail()
     if (!Array.isArray(v.task_deletions) || !Array.isArray(v.resource_cleanups)) fail()
     const deleted = new Set(v.deleted_tasks)
     for (const d of v.task_deletions) if (!d || !uuid.test(d.task_id) || !deleted.has(d.task_id) || !Array.isArray(d.resources) || !Array.isArray(d.stages)) fail()
-    for (const r of v.resource_cleanups) { validateResourceCleanup(r); if (r.source_tasks.some(id => !deleted.has(id))) fail() }
+    for (const r of v.resource_cleanups) { validateResourceCleanup(r); if (v.version === 5 && r.version !== 1) fail(); if (r.source_tasks.some(id => !deleted.has(id))) fail() }
     if (new Set(v.task_deletions.map(d => d.task_id)).size !== v.task_deletions.length || new Set(v.resource_cleanups.map(r => r.id)).size !== v.resource_cleanups.length || new Set(v.resource_cleanups.map(r => r.resource.id)).size !== v.resource_cleanups.length) fail()
     const byTask = new Map(v.task_deletions.map(d => [d.task_id, d]))
     const byResource = new Map(v.resource_cleanups.map(r => [r.resource.id, r]))
@@ -128,7 +135,7 @@ export class RestoreJournal {
     if (v.selected !== 'trellis.sqlite' && !v.operations.some(op => op.target.file === v.selected || op.rollback.file === v.selected)) fail()
   }
   static normalizeControl(value: any): Journal {
-    if (value?.version === 5) { RestoreJournal.validateControl(value); return value }
+    if ([5, 6].includes(value?.version)) { RestoreJournal.validateControl(value); return value }
     if (value?.version === 4) {
       if (Object.keys(value).sort().join(',') !== 'deleted_tasks,operations,resource_cleanups,retirements,selected,task_deletions,verified_head,version') fail()
       const next = { ...value, version: 5, export_control: 1 }; RestoreJournal.validateControl(next); return next
@@ -142,6 +149,7 @@ export class RestoreJournal {
   }
   private save(next: Journal): void {
     RestoreJournal.validateControl(next)
+    if (this.value.version === 6 && next.version !== 6) fail()
     this.db!.transaction(() => this.db!.prepare('UPDATE restore_control SET manifest=? WHERE id=1').run(JSON.stringify(next)))()
     this.value = next
   }
@@ -208,7 +216,7 @@ export class RestoreJournal {
         prior.source_tasks = [...new Set([...prior.source_tasks, taskId])]
         prior.stages.push(...stages.filter(s => s.resource_id === resource.id || s.storage_key === resource.storage_key))
         prior.preview = null
-      } else resource_cleanups.push({ version: 1, id: randomUUID(), resource, source_tasks: [taskId], stages: stages.filter(s => s.resource_id === resource.id || s.storage_key === resource.storage_key), phase: 'candidate', preview: null, identity: null, selected: null, attempt: 0, next_retry_at: null, reason: 'TASK_DELETION_REGISTERED', file_result: null, created_at: new Date().toISOString() })
+      } else resource_cleanups.push({ version: this.identityEncoding, id: randomUUID(), resource, source_tasks: [taskId], stages: stages.filter(s => s.resource_id === resource.id || s.storage_key === resource.storage_key), phase: 'candidate', preview: null, identity: null, selected: null, attempt: 0, next_retry_at: null, reason: 'TASK_DELETION_REGISTERED', file_result: null, created_at: new Date().toISOString() })
     }
     this.save({ ...this.value, deleted_tasks, task_deletions, resource_cleanups })
   }
@@ -222,7 +230,7 @@ export class RestoreJournal {
     if (this.error) fail()
     validateResourceCleanup(record)
     const prior = this.value.resource_cleanups.find(r => r.id === record.id)
-    if (!prior || JSON.stringify(prior.resource) !== JSON.stringify(record.resource) || JSON.stringify(prior.source_tasks) !== JSON.stringify(record.source_tasks) || JSON.stringify(prior.stages) !== JSON.stringify(record.stages) || ['candidate', 'retired', 'deleting', 'file_deleted', 'complete'].indexOf(record.phase) < ['candidate', 'retired', 'deleting', 'file_deleted', 'complete'].indexOf(prior.phase) || (prior.phase !== 'candidate' && (JSON.stringify(prior.identity) !== JSON.stringify(record.identity) || prior.selected !== record.selected))) fail()
+    if (!prior || prior.version !== record.version || JSON.stringify(prior.resource) !== JSON.stringify(record.resource) || JSON.stringify(prior.source_tasks) !== JSON.stringify(record.source_tasks) || JSON.stringify(prior.stages) !== JSON.stringify(record.stages) || ['candidate', 'retired', 'deleting', 'file_deleted', 'complete'].indexOf(record.phase) < ['candidate', 'retired', 'deleting', 'file_deleted', 'complete'].indexOf(prior.phase) || (prior.phase !== 'candidate' && ((!prior.identity || !record.identity || !sameJournalFileIdentity(prior.identity, record.identity)) || prior.selected !== record.selected))) fail()
     this.save({ ...this.value, resource_cleanups: this.value.resource_cleanups.map(r => r.id === record.id ? structuredClone(record) : r) })
   }
   resourceRetired(key: string): boolean { return this.value.resource_cleanups.some(r => r.phase !== 'candidate' && (r.resource.id === key || r.resource.storage_key === key)) }
@@ -240,7 +248,7 @@ export class RestoreJournal {
   saveRetirement(record: Retirement): void {
     if (this.error) fail()
     const prior = this.value.retirements.find(r => r.id === record.id)
-    if (prior && (prior.file !== record.file || JSON.stringify(prior.protection) !== JSON.stringify(record.protection) || (prior.phase !== 'preview' && record.phase === 'preview'))) fail()
+    if (prior && (prior.version !== record.version || prior.file !== record.file || JSON.stringify(prior.protection) !== JSON.stringify(record.protection) || (prior.phase !== 'preview' && record.phase === 'preview'))) fail()
     if (record.phase !== 'preview' && this.value.retirements.some(r => r.id !== record.id && r.file === record.file && r.phase !== 'preview')) fail()
     if (prior && ['preview', 'retired', 'group_deleted', 'released'].indexOf(record.phase) < ['preview', 'retired', 'group_deleted', 'released'].indexOf(prior.phase)) fail()
     this.save({ ...this.value, retirements: [...this.value.retirements.filter(r => r.id !== record.id), structuredClone(record)] })
