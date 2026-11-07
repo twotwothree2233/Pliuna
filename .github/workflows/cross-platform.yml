@@ -2,7 +2,7 @@ name: Cross-platform baseline
 
 on:
   push:
-    branches: [main]
+    branches: [main, ao/trellis-12/cross-platform-ci]
   pull_request:
   workflow_dispatch:
 
@@ -40,6 +40,9 @@ jobs:
         run: node -e "if(process.arch!==process.env.EXPECTED_ARCH)throw Error('Unexpected runner architecture');console.log(process.platform,process.arch,process.version)"
       - name: Install pinned dependencies
         run: pnpm install --frozen-lockfile
+      - name: Windows Job Object minimal acceptance
+        if: runner.os == 'Windows'
+        run: pnpm verify:windows-job
       - name: Install contract validation dependency
         run: python -m pip install -r scripts/requirements-dev.txt
       - name: Build and check generated types
@@ -52,10 +55,16 @@ jobs:
         run: pnpm test:portable
       - name: Filesystem behavior (synthetic integrity, Node ABI)
         run: pnpm exec vitest run --config vitest.files.config.ts
+      - name: Process trees and lifecycle (synthetic integrity, Node ABI)
+        run: pnpm exec vitest run --config vitest.process.config.ts
+      - name: Production payload and desktop platform checks
+        run: pnpm test:packaging
       - name: Probe installed Node bindings
         run: node scripts/check-native.mjs
       - name: Probe installed Electron bindings (switch ABI)
         run: pnpm verify:native:electron
+      - name: Process control with Electron runtime
+        run: node scripts/check-electron-process.mjs
       - name: Prepare Linux desktop
         if: runner.os == 'Linux'
         run: |
@@ -68,6 +77,22 @@ jobs:
         run: xvfb-run -a pnpm exec playwright test platform-smoke.spec.ts
       - name: Desktop startup and restart (macOS / Windows)
         if: runner.os != 'Linux'
+        run: pnpm exec playwright test platform-smoke.spec.ts
+      - name: Build local directory package
+        shell: bash
+        run: node scripts/package-desktop.mjs --output "$RUNNER_TEMP/trellis-package" --format dir
+      - name: Probe packaged native modules, process trees and offline PDF
+        shell: bash
+        run: node scripts/check-desktop-runtime.mjs "$RUNNER_TEMP/trellis-package"
+      - name: Packaged desktop startup and restart (Linux)
+        if: runner.os == 'Linux'
+        env:
+          TRELLIS_PACKAGED_OUTPUT: ${{ runner.temp }}/trellis-package
+        run: xvfb-run -a pnpm exec playwright test platform-smoke.spec.ts
+      - name: Packaged desktop startup and restart (macOS / Windows)
+        if: runner.os != 'Linux'
+        env:
+          TRELLIS_PACKAGED_OUTPUT: ${{ runner.temp }}/trellis-package
         run: pnpm exec playwright test platform-smoke.spec.ts
       - name: Keep desktop failure evidence
         if: failure()

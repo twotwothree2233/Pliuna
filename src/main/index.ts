@@ -64,7 +64,7 @@ function startRuntime(): void {
 app.whenReady().then(() => {
   startRuntime()
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : [{ label: '文件', submenu: [{ role: 'quit' as const }] }]),
     { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }
   ]))
   const window = new BrowserWindow({ title: 'Trellis', width: 1320, height: 860, minWidth: 390, minHeight: 600, show: false,
@@ -162,7 +162,7 @@ app.whenReady().then(() => {
     })
   })
   window.once('ready-to-show', () => window.show())
-  if (process.env.ELECTRON_RENDERER_URL) window.loadURL(process.env.ELECTRON_RENDERER_URL)
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) window.loadURL(process.env.ELECTRON_RENDERER_URL)
   else window.loadFile(join(__dirname, '../renderer/index.html'))
 })
 // A renderer may still veto quitting to retain unsaved input or an unknown result.

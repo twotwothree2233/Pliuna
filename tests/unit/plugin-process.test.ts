@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { ChildProcess } from 'node:child_process'
+import type { ManagedProcessTree } from '../../src/platform/process-tree'
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
  if(m.method==='shutdown'){require('node:fs').writeFileSync(MARKER_PATH+'.shutdown','yes');send({jsonrpc:'2.0',id:m.id,result:{accepted:true}});return}
  if(m.method==='tools.execute'){
   const a=m.params.arguments;
+  if(a.descendant){const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{env:{ELECTRON_RUN_AS_NODE:process.env.ELECTRON_RUN_AS_NODE},stdio:'ignore'});child.once('spawn',()=>send({jsonrpc:'2.0',id:m.id,result:{value:child.pid}}));return}
   if(active){send({jsonrpc:'2.0',id:m.id,error:{code:-32000,message:'overlap'}});return}
   active=true;
   if(a.error){active=false;send({jsonrpc:'2.0',id:m.id,error:{code:-32000,message:'expected fixture failure'}});return}
@@ -30,14 +32,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
  }
 });
 `
-async function setup(options: { timeout?: number; badHandshake?: boolean; global?: boolean; pdf?: boolean; appRuntime?: boolean } = {}): Promise<void> {
+async function setup(options: { timeout?: number; badHandshake?: boolean; global?: boolean; pdf?: boolean; appRuntime?: boolean; hostRuntime?: string } = {}): Promise<void> {
   const source = join(root, 'source'); await mkdir(source)
   const script = backend.replaceAll('MARKER_PATH', JSON.stringify(join(root, 'started')))
   await writeFile(join(source, 'backend.cjs'), options.badHandshake ? script.replace("protocol_version:'0.1'", "protocol_version:'future'") : script)
   await writeFile(join(source, 'echo.json'), JSON.stringify({ id: 'echo', description: 'fixture', when_to_use: 'testing', input_schema: { type: 'object' }, output_schema: { type: 'object', properties: { value: {} }, required: ['value'], additionalProperties: false }, effect: 'read', timeout_ms: options.timeout ?? 2000, errors: [], examples: [] }))
   await writeFile(join(source, 'manifest.json'), JSON.stringify({ manifest_version: '0.1', protocol_version: '0.1', id: options.pdf ? 'trellis.pdf-text' : 'fixture.process', version: '1.0.0', access_level: options.global ? 'global' : 'task', contributes: [{ id: 'echo', kind: 'tool', entry: 'echo.json', description: 'fixture' }], backend: options.appRuntime ? { runtime: 'app-node', entry: 'backend.cjs' } : { command: process.execPath, args: ['backend.cjs'], entry: 'backend.cjs' } }))
   copy = await control.install(source); await control.grant(copy.digest, { local_code: true, cross_task: options.global ?? false })
-  processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return { value: 'reverse result' } })
+  processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return { value: 'reverse result' } }, () => {}, options.hostRuntime)
 }
 function request(args: Record<string, unknown> = {}, options: Partial<PluginExecution> = {}): PluginExecution {
   return { call_id: crypto.randomUUID(), capability: 'echo', arguments: args, references: [], signal: new AbortController().signal, dispatch() {}, valid() {}, ...options }
@@ -54,6 +56,19 @@ it('rejects app-runtime packages without a trusted host executable and never fal
   await setup({ appRuntime: true })
   await expect(processes!.execute(copy, task, request({ value: 1 }))).rejects.toMatchObject({ code: 'PLUGIN_APP_RUNTIME_UNAVAILABLE' })
   await expect(readFile(join(root, 'started'))).rejects.toBeDefined()
+})
+it('runs an app-node backend through the trusted host runtime', async () => {
+  await setup({ appRuntime: true, hostRuntime: process.execPath })
+  expect(await processes!.execute(copy, task, request({ value: 17 }))).toEqual({ value: 17 })
+})
+it('stops descendants retained by an otherwise idle plugin', async () => {
+  await setup()
+  const result = await processes!.execute(copy, task, request({ descendant: true })) as { value: number }
+  const instance = childInstance()
+  expect(() => process.kill(result.value, 0)).not.toThrow()
+  processes!.stopTask(task); await instance.exited
+  expect(() => process.kill(result.value, 0)).toThrow()
+  expect(processes!.cleaning(task)).toBe(false)
 })
 it('admits at most two PDF executions app-wide and one per task, releasing only after cancellation exit', async () => {
   await setup({ pdf: true })
@@ -132,7 +147,7 @@ it('reconciles global instances whose required enablement is unavailable', async
   processes!.reconcile(()=>false);expect(processes!.status(task,copy.digest)).toMatchObject([{state:'stopping'}])
   await expect.poll(()=>processes!.status(task,copy.digest)).toHaveLength(0)
 })
-function childInstance(): { process: ChildProcess; exited: Promise<void> } {
+function childInstance(): { process: ChildProcess; tree: ManagedProcessTree; exited: Promise<void> } {
   return [...(processes as any).children][0]
 }
 it('holds ordinary cancelled work and its instance slot until confirmed exit', async () => {
@@ -160,7 +175,7 @@ it.each(['false', 'throw', 'error'])('retains unresolved shutdown when terminati
   await setup()
   await processes!.execute(copy,task,request({value:1}))
   const instance=childInstance(), child=instance.process
-  const kill=vi.spyOn(child,'kill').mockImplementation(()=>{if(mode==='throw')throw Error('synthetic');return false})
+  const kill=vi.spyOn(instance.tree,'terminate').mockImplementation(()=>{if(mode==='throw')throw Error('synthetic');return false})
   if(mode==='error') child.emit('error',new Error('synthetic runtime error'))
   let settled=false
   const shutting=processes!.shutdown('fixture',10).then(()=>{settled=true})
@@ -184,7 +199,7 @@ it('keeps a global instance bound to active task cleanup until its exit', async(
 })
 it('waits for idle child exit before database rebind and admits only later explicit work', async()=>{
   await setup();await processes!.execute(copy,task,request({value:1}))
-  const instance=childInstance(),kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+  const instance=childInstance(),kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
   let settled=false;const stopping=processes!.stopForRebind().then(()=>{settled=true})
   await Promise.resolve();expect(settled).toBe(false)
   await expect(processes!.execute(copy,task,request({value:2}))).rejects.toMatchObject({code:'PLUGIN_CLEANUP_PENDING'})

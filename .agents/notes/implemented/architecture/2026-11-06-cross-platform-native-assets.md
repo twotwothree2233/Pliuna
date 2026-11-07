@@ -42,11 +42,15 @@ Node 与 Electron ABI 在同一目录顺序切换。
 桌面冒烟显式关闭计算并验证任务重启恢复。
 
 CI 使用三个系统的四个原生执行器。
+独立测试分支允许精确匹配的 push 触发。
+测试分支只制作目录包，不发布安装器。
 macOS 两种架构分别运行。
-CI 当前覆盖 A–C 的基线、探针与桌面冒烟。
+CI 当前覆盖 A–D 的基线、探针与桌面冒烟。
 文件测试使用合成摘要及真实文件系统。
 [C 阶段文件持久化](2026-11-07-platform-file-persistence.md)细化文件边界。
-进程树和安装包仍留给后续阶段。
+[D 阶段进程树](2026-11-07-managed-process-lifecycle.md)细化生命周期。
+[E 阶段统一打包](2026-11-07-unified-desktop-packaging.md)细化候选分发。
+候选平台原生安装验收仍待完成。
 
 ## Historical note audit
 

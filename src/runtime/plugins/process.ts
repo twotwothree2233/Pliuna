@@ -1,6 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { startProcessTree, type ManagedProcessTree } from '../../platform/process-tree'
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js'
 import { assertContract, ContractError } from '../../shared/validation'
 import defaults from '../../shared/contracts/development-defaults.json'
@@ -28,7 +29,7 @@ export async function pluginCapabilities(root: string, copy: PluginCopy): Promis
 }
 export type PluginExecution = { call_id: string; capability: string; arguments: unknown; references: unknown[]; signal: AbortSignal; nested?: boolean; dispatch(state: 'sent' | 'unknown'): void; valid(): void; started?(instance: string): void; ended?(reason: string): void; settle?(output: unknown): unknown | Promise<unknown> }
 export type PluginIdentity = { instance_id: string; digest: string; task_id: string | null; call_id: string | null }
-type Instance = { id: string; copy: PluginCopy; task: string | null; activeTask?: string; process: ChildProcessWithoutNullStreams; rpc: PluginRpc; ready: Promise<void>; exited: Promise<void>; exitConfirmed: boolean; cleanup_error?: string; cleanupTimer?: ReturnType<typeof setTimeout>; active: PluginExecution | null; pending: number; tail: Promise<void>; invalid: boolean; stderr_bytes: number }
+type Instance = { id: string; copy: PluginCopy; task: string | null; activeTask?: string; process: ChildProcessWithoutNullStreams; tree: ManagedProcessTree; rpc: PluginRpc; ready: Promise<void>; exited: Promise<void>; exitConfirmed: boolean; cleanup_error?: string; cleanupTimer?: ReturnType<typeof setTimeout>; active: PluginExecution | null; pending: number; tail: Promise<void>; invalid: boolean; stderr_bytes: number }
 
 export class PluginProcesses {
   private instances = new Map<string, Instance>()
@@ -78,8 +79,21 @@ export class PluginProcesses {
     const bundled = 'runtime' in backend
     if (bundled && !this.appRuntime) fail('PLUGIN_APP_RUNTIME_UNAVAILABLE')
     if (bundled) env.ELECTRON_RUN_AS_NODE = '1'
-    const child = spawn(bundled ? this.appRuntime! : backend.command, bundled ? [backend.entry] : backend.args, { cwd: join(this.root, 'plugins', copy.digest), env, shell: false, windowsHide: true, stdio: 'pipe' })
-    const instance = { id: randomUUID(), copy, task: copy.manifest.access_level === 'global' ? null : task, process: child, active: null, pending: 0, tail: Promise.resolve(), invalid: false, exitConfirmed: false, stderr_bytes: 0 } as unknown as Instance
+    let instance: Instance
+    let tree: ManagedProcessTree
+    try {
+      tree = startProcessTree({ mode: 'spawn', command: bundled ? this.appRuntime! : backend.command, args: bundled ? [backend.entry] : backend.args, cwd: join(this.root, 'plugins', copy.digest), env }, {
+        runtime: this.appRuntime ?? process.execPath,
+        beforeStart: () => { if (this.closed || generation !== this.generation) fail('PLUGIN_PROCESS_REVOKED') },
+        failed: code => {
+          if (!instance) return
+          if (code === 'PROCESS_TREE_CLEANUP_UNCONFIRMED') { instance.cleanup_error = 'PLUGIN_TERMINATION_UNCONFIRMED'; this.disconnected() }
+          else this.terminate(instance, code === 'PROCESS_TREE_IPC_LOST' ? 'PLUGIN_CONNECTION_CLOSED' : 'PLUGIN_START_FAILED')
+        }
+      })
+    } catch { return fail('PLUGIN_START_FAILED') }
+    const child = tree.process as ChildProcessWithoutNullStreams
+    instance = { id: randomUUID(), copy, task: copy.manifest.access_level === 'global' ? null : task, process: child, tree, active: null, pending: 0, tail: Promise.resolve(), invalid: false, exitConfirmed: false, stderr_bytes: 0 } as unknown as Instance
     instance.exited = new Promise(resolve => {
       const exited = () => {
         if (instance.exitConfirmed) return
@@ -88,9 +102,9 @@ export class PluginProcesses {
         if (this.instances.get(this.key(copy, task)) === instance) this.instances.delete(this.key(copy, task))
         this.children.delete(instance); resolve(); this.disconnected()
       }
-      child.once('exit', exited)
-      // A failed spawn has no process to wait for. Runtime errors are not exit facts.
-      child.on('error', () => { if (child.pid === undefined) exited(); else { instance.cleanup_error = 'PLUGIN_PROCESS_ERROR'; this.disconnected() } })
+      // Reaping the supervisor alone does not establish descendant exit.
+      void tree.exited.then(exited)
+      child.on('error', () => { instance.cleanup_error = 'PLUGIN_PROCESS_ERROR'; this.disconnected() })
     })
     instance.rpc = new PluginRpc(child.stdout, child.stdin, (method, params) => {
       if (instance.invalid) fail('PLUGIN_PROCESS_REVOKED')
@@ -102,7 +116,7 @@ export class PluginProcesses {
     this.children.add(instance)
     const handshake = { protocol_version: '0.1', plugin_id: copy.manifest.id, package_digest: copy.digest, access_level: copy.manifest.access_level, instance_id: instance.id, task_id: instance.task, capabilities: descriptors.map(d => d.capability.id) }
     assertContract('plugin_initialize', handshake)
-    instance.ready = instance.rpc.request('initialize', handshake, { timeout: 10000 }).then(async value => {
+    instance.ready = tree.ready.then(() => instance.rpc.request('initialize', handshake, { timeout: 10000 })).then(async value => {
       try { assertContract('plugin_initialized', value) } catch { fail('PLUGIN_HANDSHAKE_INVALID') }
       const response = value as { protocol_version?: unknown; capabilities?: unknown; plugin_id?: unknown }
       if (!response || Object.keys(response).sort().join(',') !== 'capabilities,plugin_id,protocol_version' || response.protocol_version !== '0.1' || response.plugin_id !== copy.manifest.id || JSON.stringify(response.capabilities) !== JSON.stringify(descriptors.map(d => d.capability.id))) fail('PLUGIN_HANDSHAKE_INVALID')
@@ -190,7 +204,7 @@ export class PluginProcesses {
     if (!instance.exitConfirmed) {
       clearTimeout(instance.cleanupTimer)
       try {
-        if (!instance.process.kill('SIGKILL')) instance.cleanup_error = 'PLUGIN_TERMINATION_UNCONFIRMED'
+        if (!instance.tree.terminate()) instance.cleanup_error = 'PLUGIN_TERMINATION_UNCONFIRMED'
         else instance.cleanup_error = undefined
       } catch { instance.cleanup_error = 'PLUGIN_TERMINATION_FAILED' }
       instance.cleanupTimer = setTimeout(() => { if (!instance.exitConfirmed) { instance.cleanup_error ??= 'PLUGIN_EXIT_UNCONFIRMED'; this.disconnected() } }, defaults.cleanup.cancel_grace_ms)

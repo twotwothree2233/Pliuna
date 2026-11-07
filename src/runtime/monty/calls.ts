@@ -29,6 +29,10 @@ export class MontyCalls {
     this.closed = true
     for (const [id, entry] of this.active) { this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(id); entry.controller.abort() }
     await Promise.all([...this.active.values()].map(entry => entry.done))
+    for (const [id, entry] of this.active) if (entry.cleanupUnknown && entry.execution) {
+      try { await entry.execution.stop(); this.active.delete(id) }
+      catch { /* A failed retry retains the original Call and occupied slot. */ }
+    }
     if (this.busy()) throw new ContractError('MONTY_CLEANUP_UNCONFIRMED', 'Calculation cleanup is unresolved; storage remains protected')
   }
   async call(task: string, run: string, raw: unknown, references: any[], signal: AbortSignal): Promise<unknown> {

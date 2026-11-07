@@ -1,5 +1,6 @@
 import { createContext, forwardRef, useContext, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { defaultWorkspace, fitWorkspace, maximumPaneWidth, paneMinimum, resizeWorkspace, type PaneSide, type WorkspaceGeometry, type WorkspacePreferences } from './workspace-layout'
+import { shortcutLabel } from './desktop-platform'
 
 export interface WorkspaceHandle { dismissDrawer(): void; showAgent(): void }
 interface LayoutControls {
@@ -32,7 +33,7 @@ export function PaneReopen() {
 }
 export function SettingsShortcut({ open }: { open(): void }) {
   const layout = useLayoutControls()
-  return !layout.visible('left') ? <button className="settings-shortcut" onClick={open} title="设置（⌘,）">设置</button> : null
+  return !layout.visible('left') ? <button className="settings-shortcut" onClick={open} title={`设置（${shortcutLabel(',')}）`}>设置</button> : null
 }
 
 interface Drag { side: PaneSide; pointer: number; x: number; start: number; original: WorkspacePreferences; target: HTMLDivElement }

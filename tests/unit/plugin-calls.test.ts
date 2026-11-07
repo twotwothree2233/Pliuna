@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -32,7 +33,7 @@ rl.on('line',line=>{
   });return;
  }
  if(value&&value.upload){
-  const bytes=Buffer.from(value.upload),sha256=require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const bytes=Buffer.from(value.upload),sha256=value.sha256;
   request('upload.begin',{task_id:m.params.task_id,owner_id:m.params.call_id,byte_length:bytes.length,sha256,media_type:'text/plain',display_name:'fixture upload'},r=>{
    if(r.error){finish({rpc_error:r.error});return}
    const id=r.result.upload_id;
@@ -69,7 +70,7 @@ it('keeps Run and task in cleanup until the ordinary child exits, including kill
  const p=await plugin(),r=await run(p.capability,{delay:1000})
  await until(()=>db.prepare("SELECT id FROM calls WHERE dispatch='sent'").get()!==undefined)
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
  call('task.stop',{task_id:task})
  expect(store.snapshot(task).task.state).toBe('stopping')
  expect(db.prepare('SELECT state,wait_reason,commit_valid FROM runs WHERE id=?').get(r.id)).toEqual({state:'waiting',wait_reason:'ending_cleanup',commit_valid:0})
@@ -89,7 +90,7 @@ it('does not close storage or acknowledge shutdown before exit and Call settleme
  const p=await plugin(),r=await run(p.capability,{delay:1000})
  await until(()=>db.prepare("SELECT id FROM calls WHERE dispatch='sent'").get()!==undefined)
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
  const shutdown=manager.shutdown.bind(manager)
  vi.spyOn(manager,'shutdown').mockImplementation(()=>shutdown('fixture',20))
  let closed=false;const shutting=store.shutdown().then(()=>{closed=true})
@@ -105,7 +106,7 @@ it('holds stopped task cleanup even when the plugin is idle and no Run remains a
  const p=await plugin(),r=await run(p.capability,'idle');await r.result
  call('run.cancel',{task_id:task,run_id:r.id})
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
  call('task.stop',{task_id:task})
  expect(store.snapshot(task).task.state).toBe('stopping')
  expect(()=>call('maintenance.begin')).toThrow(expect.objectContaining({code:'MAINTENANCE_EXECUTION_ACTIVE'}))
@@ -121,7 +122,7 @@ it('does not switch databases until an idle plugin exits',async()=>{
  const point=await call('maintenance.create',{token,inputs_saved:true,replace_id:null})
  token=call('maintenance.begin').reservation.token
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false),epoch=store.epoch
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false),epoch=store.epoch
  let restored=false
  const restoring=call('maintenance.restore',{token,point_id:point.active.id,database_sha256:point.active.database_sha256,inputs_saved:true,confirm_replace_newer_data:true}).then(()=>{restored=true})
  await until(()=>manager.cleaning())
@@ -135,7 +136,7 @@ it('keeps shutdown pending through beforeRebind and lets repeated shutdown retry
  call('run.cancel',{task_id:task,run_id:r.id})
  const point=await call('maintenance.create',{token:call('maintenance.begin').reservation.token,inputs_saved:true,replace_id:null})
  const token=call('maintenance.begin').reservation.token,manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false),epoch=store.epoch
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false),epoch=store.epoch
  const restoring=call('maintenance.restore',{token,point_id:point.active.id,database_sha256:point.active.database_sha256,inputs_saved:true,confirm_replace_newer_data:true})
  await until(()=>manager.cleaning())
  let closed=false;const shutting=store.shutdown().then(()=>{closed=true})
@@ -291,7 +292,7 @@ it('rejects actual self reentry without creating or dispatching a second Call',a
  expect(db.prepare('SELECT id FROM calls').all()).toHaveLength(1)
 })
 it('receives actual plugin upload and atomically publishes it with the successful original Call',async()=>{
- const caller=await plugin(),text='bounded upload '.repeat(1000),r=await run(caller.capability,{upload:text}),result=await r.result
+ const caller=await plugin(),text='bounded upload '.repeat(1000),r=await run(caller.capability,{upload:text,sha256:createHash('sha256').update(Buffer.from(text)).digest('hex')}),result=await r.result
  expect(result).toMatchObject({execution:'success',data:{value:{state:'prepared',published:false}},resources:[{byte_length:Buffer.byteLength(text)}]})
  expect(db.prepare('SELECT state FROM staging').get()).toEqual({state:'committed'})
  expect(db.prepare('SELECT result FROM actions').get()).toEqual({result:'success'})

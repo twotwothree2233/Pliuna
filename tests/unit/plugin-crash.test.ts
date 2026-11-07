@@ -12,6 +12,8 @@ beforeAll(async () => {
   working = fs.mkdtempSync(join(tmpdir(), 'trellis-plugin-crash-build-')); executable = join(working, 'crash.cjs')
   const req = createRequire(import.meta.url), esbuild = createRequire(req.resolve('vite'))('esbuild')
   await esbuild.build({ entryPoints: ['tests/helpers/plugin-crash.ts'], outfile: executable, bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.txt': 'text', '.sql': 'text' } })
+  fs.copyFileSync('src/platform/process-supervisor.mjs', join(working, 'process-supervisor.mjs'))
+  if (process.platform === 'win32') fs.cpSync('out/main/native', join(working, 'native'), { recursive: true })
 })
 afterAll(() => fs.rmSync(working, { recursive: true, force: true }))
 for (const boundary of ['sent', 'prepared', 'committed']) it('plugin SIGKILL at ' + boundary + ' retains facts without replay or file deletion', async () => {

@@ -9,6 +9,7 @@ export default defineConfig({ test: { include: [
   'tests/unit/contracts.test.ts',
   'tests/unit/features.test.ts',
   'tests/unit/workspace-layout.test.ts',
+  'tests/unit/desktop-platform.test.ts',
   'tests/unit/tool-input.test.ts',
   'tests/unit/monty-diagnostics.test.ts'
 ] } })

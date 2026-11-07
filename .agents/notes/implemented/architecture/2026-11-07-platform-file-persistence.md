@@ -134,7 +134,8 @@ Windows 权限失败、占用和身份缺口明确可见。
 Windows 原生 ACL、共享锁和长路径需原生验证。
 Linux 与 Intel Mac 也需运行已配置的 CI。
 本地 macOS 测试不升级为其他平台支持声明。
-进程树与安装包验收继续留给后续阶段。
+进程树实现见 [D 阶段生命周期](2026-11-07-managed-process-lifecycle.md)。
+候选平台与安装包仍需原生验收。
 
 ## Verification
 

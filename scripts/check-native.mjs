@@ -5,6 +5,12 @@ import { hostMontyTarget, nativeTargets } from '../src/shared/native-targets.mjs
 const target = hostMontyTarget()
 if (!target) throw Error('No native target for this OS, architecture and libc')
 const require = createRequire(import.meta.url)
+if (process.platform === 'win32') {
+  const { randomUUID } = await import('node:crypto')
+  const jobs = require('../out/main/native/trellis_job.node')
+  const job = jobs.create('Local\\Trellis-' + randomUUID())
+  try { if (jobs.active(job) !== 0) throw Error('Fresh Job was not empty') } finally { jobs.close(job) }
+}
 const Database = require('better-sqlite3')
 const db = new Database(':memory:')
 try {

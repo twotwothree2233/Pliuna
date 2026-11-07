@@ -35,7 +35,8 @@ vi.mock('node:crypto', async importOriginal => {
         ended = true
         if (pending.length) parts.push(blockId(pending))
         const key = algorithm + ':' + parts.join(',')
-        if (!values.has(key)) values.set(key, Buffer.from((values.size + 1).toString(16).padStart(64, '0'), 'hex'))
+        // Repeated IDs remain distinct when a consumer takes a digest prefix.
+        if (!values.has(key)) values.set(key, Buffer.from((values.size + 1).toString(16).padStart(8, '0').repeat(8), 'hex'))
         const result = values.get(key)!
         return encoding ? result.toString(encoding) : Buffer.from(result)
       }

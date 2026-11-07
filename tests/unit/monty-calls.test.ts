@@ -66,11 +66,21 @@ it('revokes commit before cancellation and rejects a late successful result',asy
  deliver(ok);expect(await pending).toMatchObject({execution:'cancelled'});expect(db.prepare('SELECT count(*) n FROM resources').get()).toEqual({n:0})
 })
 it('keeps cleanup-unknown work busy and refuses shutdown rather than claiming destroyed',async()=>{
- const invoke=setup(ok,(_a,_i,_s,_r,started)=>{started(123);return{result:Promise.reject(new ContractError('MONTY_CLEANUP_UNCONFIRMED','injected')),stop:async()=>{}}})
+ const invoke=setup(ok,(_a,_i,_s,_r,started)=>{started(123);return{result:Promise.reject(new ContractError('MONTY_CLEANUP_UNCONFIRMED','injected')),stop:async()=>{throw new ContractError('MONTY_CLEANUP_UNCONFIRMED','still occupied')}}})
  expect(await invoke()).toMatchObject({error:{code:'MONTY_CLEANUP_UNCONFIRMED'}});expect(manager.busy()).toBe(true)
  await expect(manager.shutdown()).rejects.toMatchObject({code:'MONTY_CLEANUP_UNCONFIRMED'})
  // Test fixture only: discard manager after asserting the conservative production state.
  manager=undefined as any
+})
+it('retries cleanup without rewriting or replaying the original unknown Call',async()=>{
+ let confirmed=false
+ const invoke=setup(ok,(_a,_i,_s,_r,started)=>{started(123);return{result:Promise.reject(new ContractError('MONTY_CLEANUP_UNCONFIRMED','injected')),stop:async()=>{if(!confirmed)throw new ContractError('MONTY_CLEANUP_UNCONFIRMED','still occupied')}}})
+ const original=await invoke()
+ await expect(manager.shutdown()).rejects.toMatchObject({code:'MONTY_CLEANUP_UNCONFIRMED'})
+ expect(manager.busy()).toBe(true)
+ confirmed=true;await manager.shutdown();expect(manager.busy()).toBe(false)
+ expect(db.prepare('SELECT count(*) n FROM calls').get()).toEqual({n:1})
+ expect(JSON.parse((db.prepare('SELECT result_json FROM calls').get() as any).result_json)).toEqual(original)
 })
 it('rejects invalid or cross-task references before registration and never replays a failed computation',async()=>{
  const invoke=setup({ok:false,execution:'failure',error:'MONTY_EXECUTION_FAILED'})

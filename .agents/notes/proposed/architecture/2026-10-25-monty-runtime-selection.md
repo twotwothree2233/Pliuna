@@ -44,3 +44,6 @@ Monty 是语言级而非 OS 级沙箱，解释器漏洞不保证有第二层 OS 
 [跨平台资产与测试入口](../../implemented/architecture/2026-11-06-cross-platform-native-assets.md)记录 A、B 阶段的工程实现。
 原生后端选择与本篇启用门槛继续有效。
 候选平台包存在时，计算能力仍保持关闭。
+
+后续细化：[托管进程与生命周期](../../implemented/architecture/2026-11-07-managed-process-lifecycle.md)记录 D 阶段实现。
+本篇独立取舍保留，Windows 原生验收另行记录。
