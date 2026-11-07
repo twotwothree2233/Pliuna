@@ -78,6 +78,11 @@ macOS 在签名前检查 framework 三处链接。
 任一测试失败仍使矩阵任务失败。
 流程不使用 continue-on-error 掩盖持久化阻塞。
 
+POSIX 可执行位在 POSIX 原生主机验证。
+Windows 对无法保留可执行位的 POSIX 夹具明确拒绝。
+Windows 仍验收本机载荷、原生模块及错误目标拒绝。
+四个平台都保留实际目录包与包内启动门禁。
+
 ## Historical note audit
 
 历史决定按边界保留，不升级旧验证结论。

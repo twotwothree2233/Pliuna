@@ -17,6 +17,8 @@ export async function processFixtures(): Promise<string> {
     platform: 'node', format: 'cjs', packages: 'external', logLevel: 'error' })
   cpSync('src/platform/process-supervisor.mjs', join(directory, 'process-supervisor.mjs'))
   symlinkSync(resolve('node_modules'), join(directory, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
-  if (process.platform === 'win32') cpSync('out/main/native', join(directory, 'native'), { recursive: true })
+  // Node keeps a loaded .node library mapped until the host exits. Point the
+  // temporary bundle at the app-owned helper so teardown removes only a junction.
+  if (process.platform === 'win32') symlinkSync(resolve('out/main/native'), join(directory, 'native'), 'junction')
   return directory
 }

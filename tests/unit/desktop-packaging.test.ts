@@ -38,7 +38,7 @@ function fixture() {
   return { root, stage }
 }
 
-it.each(nativeTargets.targets)('stages only the $id production closure with workers and offline assets', target => {
+for (const target of nativeTargets.targets) it.skipIf(process.platform === 'win32' && target.platform !== 'win32')(`stages only the ${target.id} production closure with workers and offline assets`, () => {
   const { root, stage } = fixture()
   put(root, 'auth.json', 'private'); put(root, '.env', 'private'); put(root, 'runtime.sqlite', 'private')
   put(root, 'node_modules/bindings/tests/fixture.js'); put(root, 'node_modules/bindings/node_modules/dev/package.json')
@@ -75,14 +75,20 @@ it('rejects a changed native package and unaudited optional dependencies', () =>
   expect(() => stageDesktop(root, stage, target)).toThrow('native target catalog')
 })
 it('checks packaged permissions and rejects a second native target', () => {
-  const { root, stage } = fixture(), target = nativeTargets.targets[0]!
+  const { root, stage } = fixture(), target = nativeTargets.targets.find(t => t.platform === process.platform && t.arch === process.arch)!
   const { app, plugin } = stageDesktop(root, stage, target)
   if (process.platform !== 'win32') {
     const file = join(app, 'node_modules', target.package, target.binary); chmodSync(file, 0o644)
     expect(() => verifyDesktopPayload(app, target, plugin)).toThrow('not executable'); chmodSync(file, 0o755)
   }
-  mkdirSync(join(app, 'node_modules', nativeTargets.targets[1]!.package))
+  mkdirSync(join(app, 'node_modules', nativeTargets.targets.find(t => t.id !== target.id)!.package))
   expect(() => verifyDesktopPayload(app, target, plugin)).toThrow('Wrong target')
+})
+it.runIf(process.platform === 'win32')('rejects POSIX fixture payloads whose executable permissions Windows cannot preserve', () => {
+  for (const target of nativeTargets.targets.filter(t => t.platform !== 'win32')) {
+    const { root, stage } = fixture()
+    expect(() => stageDesktop(root, stage, target)).toThrow('Native binary is not executable')
+  }
 })
 it('configures local platform artifacts and current-user Windows installation', () => {
   for (const target of nativeTargets.targets) {
