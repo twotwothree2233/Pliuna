@@ -1,13 +1,14 @@
 import type Database from 'better-sqlite3'
-import fs, { constants } from 'node:fs'
+import { createHash,randomUUID } from 'node:crypto'
+import fs from 'node:fs'
 import { join } from 'node:path'
-import { createHash, randomUUID } from 'node:crypto'
 import { TextDecoder } from 'node:util'
+import { flushDirectorySync,managedFile,openExclusiveFileSync,openRegularFileSync,publishManagedFileSync } from '../platform/files'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
 import { readPluginResource } from './plugins/resource-reader'
-import type { StorageLifecycle } from './storage-lifecycle'
 import type { RestoreJournal } from './restore-journal'
+import type { StorageLifecycle } from './storage-lifecycle'
 
 type Row = Record<string, any>
 type Transfer = { fd: number; key: string; stage: string; received: number; expected: number; hash: ReturnType<typeof createHash>; text: TextDecoder | null; media: string }
@@ -62,7 +63,7 @@ export class MaterialImports {
           this.db.prepare("INSERT INTO staging (id,task_id,owner_kind,owner_id,runtime_epoch,state,storage_key,expected_bytes,sha256,created_at) VALUES (?,?,'action',?,?,'receiving',?,?,NULL,?)").run(stage,r.task_id,row.id,this.epoch,key,r.byte_length,now())
           this.db.prepare("UPDATE actions SET state='executing',request_json=? WHERE id=?").run(JSON.stringify({...JSON.parse(row.request_json),byte_length:r.byte_length,media_type:r.media_type}),row.id)
         })()
-        const fd=fs.openSync(join(this.root,'resources',key+'.tmp'),constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600)
+        const fd=openExclusiveFileSync(managedFile(this.root,'resources',key+'.tmp'))
         this.transfers.set(row.id,{fd,key,stage,received:0,expected:r.byte_length,hash:createHash('sha256'),text:r.media_type.startsWith('text/')?new TextDecoder('utf-8',{fatal:true}):null,media:r.media_type})
       }else{
         const t=this.transfers.get(row.id);if(!t)fail('IMPORT_SEQUENCE_INVALID')
@@ -79,7 +80,7 @@ export class MaterialImports {
           fs.fsyncSync(t!.fd);fs.closeSync(t!.fd);t!.fd=-1
           const hash=t!.hash.digest('hex'),temporary=join(this.root,'resources',t!.key+'.tmp'),stat=fs.lstatSync(temporary)
           if(!stat.isFile()||stat.nlink!==1||stat.size!==t!.expected)fail('IMPORT_FILE_CHANGED')
-          fs.renameSync(temporary,join(this.root,'resources',t!.key));this.sync()
+          publishManagedFileSync(temporary,managedFile(this.root,'resources',t!.key));this.sync()
           this.db.prepare("UPDATE staging SET state='prepared',sha256=? WHERE id=?").run(hash,t!.stage)
           const commit = () => { if (this.closed) fail('IMPORT_SOURCE_INVALID'); this.db.transaction(()=>{
             this.qualify(r.task_id,row.id);this.journal.assertResource({id:t!.key,storage_key:t!.key})
@@ -98,7 +99,7 @@ export class MaterialImports {
       return this.public(this.row(r.task_id,row.id))
     }catch(e){this.end(r.task_id,row.id,'failure',e instanceof ContractError?e.code:'IMPORT_SAVE_FAILED');throw e instanceof ContractError?e:new ContractError('IMPORT_SAVE_FAILED','Material save failed; original source was not changed')}
   }
-  private sync():void {if(process.platform!=='win32'){const fd=fs.openSync(join(this.root,'resources'),'r');try{fs.fsyncSync(fd)}finally{fs.closeSync(fd)}}}
+  private sync():void {flushDirectorySync(managedFile(this.root,'resources'))}
   private end(task:string,id:string,result:string,code:string):unknown {
     const row=this.row(task,id);if(row.state==='ended')return this.public(row)
     this.db.prepare("UPDATE actions SET state='ended',result=?,commit_valid=0,result_json=?,ended_at=? WHERE id=?").run(result,JSON.stringify({code}),now(),id)
@@ -128,9 +129,9 @@ export class MaterialImports {
     if(!Number.isSafeInteger(r.byte_length)||r.byte_length<0||r.byte_length>defaults.transport.resource_bytes)fail('RESOURCE_CORRUPT')
     if(!Number.isSafeInteger(offset)||offset<0||offset>r.byte_length)fail('INVALID_RANGE')
     if(!/^[A-Za-z0-9_-]+$/.test(r.storage_key))fail('RESOURCE_CORRUPT')
-    const id=r.id,path=join(this.root,'resources',r.storage_key),initial=fs.lstatSync(path)
+    const id=r.id,path=managedFile(this.root,'resources',r.storage_key),initial=fs.lstatSync(path)
     if(!/^[A-Za-z0-9_-]+$/.test(r!.storage_key)||!initial.isFile()||initial.nlink!==1||initial.size!==r!.byte_length)fail('RESOURCE_CORRUPT')
-    const fd=fs.openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW)
+    const fd=openRegularFileSync(path)
     try {
       const open=fs.fstatSync(fd);if(open.ino!==initial.ino||open.dev!==initial.dev)fail('RESOURCE_CORRUPT')
       const hash=createHash('sha256'),buffer=Buffer.alloc(defaults.transport.upload_chunk_bytes);let pos=0

@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readdir, rename } from 'node:fs/promises'
+import { createHash,randomUUID } from 'node:crypto'
+import { lstat,mkdir,readdir,rename } from 'node:fs/promises'
 import { join } from 'node:path'
-import { assertContract, ContractError } from '../../shared/validation'
+import { assertDirectorySync,entryExistsSync,flushDirectory,openExclusiveFile,openRegularFile } from '../../platform/files'
+import { protectPrivatePath } from '../../platform/permissions'
+import { assertContract,ContractError } from '../../shared/validation'
 
 export type PluginManifest = {
   manifest_version: '0.1'; protocol_version: '0.1'; id: string; version: string
@@ -52,13 +53,12 @@ export function validatePluginCopy(value: unknown): asserts value is PluginCopy 
   validatePluginManifest(copy.manifest, copy.files)
 }
 async function directory(path: string): Promise<void> {
-  const stat = await lstat(path)
-  if (!stat.isDirectory() || stat.isSymbolicLink()) bad()
+  try { assertDirectorySync(path) } catch { bad() }
 }
 async function body(path: string): Promise<Buffer> {
   const before = await lstat(path)
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > packageLimits.fileBytes) bad()
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  const handle = await openRegularFile(path)
   try {
     const actual = await handle.stat()
     if (!actual.isFile() || actual.nlink !== 1 || actual.size !== before.size || actual.ino !== before.ino || actual.dev !== before.dev) bad()
@@ -105,8 +105,7 @@ async function scan(root: string, consume?: (path: string, content: Buffer) => P
   return copy
 }
 async function syncDirectory(path: string): Promise<void> {
-  if (process.platform === 'win32') return
-  const handle = await open(path, 'r'); try { await handle.sync() } finally { await handle.close() }
+  await flushDirectory(path)
 }
 export async function verifyPluginCopy(root: string, expected: PluginCopy): Promise<void> {
   validatePluginCopy(expected)
@@ -129,7 +128,7 @@ export async function copyPluginPackage(root: string, source: string): Promise<P
   const original = await scan(source, async (path, content) => {
     const parts = path.split('/'); parts.pop()
     await mkdir(join(temporary, ...parts), { recursive: true, mode: 0o700 })
-    const file = await open(join(temporary, path), 'wx', 0o600)
+    const file = await openExclusiveFile(join(temporary, path))
     try { await file.writeFile(content); await file.sync() } finally { await file.close() }
   })
   const after = await scan(source), copied = await scan(temporary)
@@ -140,9 +139,9 @@ export async function copyPluginPackage(root: string, source: string): Promise<P
   await syncDirectory(temporary)
   try { await rename(temporary, join(folder, original.digest)) }
   catch (error) {
-    if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+    if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') || !entryExistsSync(join(folder, original.digest))) throw error
     await verifyPluginCopy(root, original)
   }
-  await chmod(join(folder, original.digest), 0o700); await syncDirectory(folder)
+  protectPrivatePath(join(folder, original.digest), 'directory'); await syncDirectory(folder)
   return original
 }

@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
-import { constants } from 'node:fs'
-import { lstat, open, type FileHandle } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat,type FileHandle } from 'node:fs/promises'
+import { managedFile,openRegularFile } from '../../platform/files'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { ContractError } from '../../shared/validation'
 
@@ -9,9 +8,9 @@ export type Resource = { id: string; storage_key: string; byte_length: number; s
 const fail = (): never => { throw new ContractError('RESOURCE_CORRUPT', 'Plugin result resource is missing, changed or not valid UTF-8; it was not repaired') }
 export async function verifiedResource<T>(root: string, resource: Resource, consume: (file: FileHandle) => Promise<T>, valid: () => void = () => {}, utf8 = false): Promise<T> {
   if (!/^[A-Za-z0-9_-]+$/.test(resource.storage_key) || !Number.isSafeInteger(resource.byte_length) || resource.byte_length < 0 || resource.byte_length > defaults.transport.resource_bytes) return fail()
-  const path = join(root, 'resources', resource.storage_key), initial = await lstat(path).catch(fail)
+  const path = managedFile(root, 'resources', resource.storage_key), initial = await lstat(path).catch(fail)
   if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink !== 1 || initial.size !== resource.byte_length) return fail()
-  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  const file = await openRegularFile(path)
   try {
     const opened = await file.stat(), same = (s: typeof initial) => s.isFile() && s.nlink === 1 && s.ino === initial.ino && s.dev === initial.dev && s.size === initial.size && s.mtimeMs === initial.mtimeMs && s.ctimeMs === initial.ctimeMs
     if (!same(opened)) return fail()

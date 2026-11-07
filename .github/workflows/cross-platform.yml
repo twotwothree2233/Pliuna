@@ -50,6 +50,8 @@ jobs:
         run: pnpm verify:contracts
       - name: Portable tests (Node ABI)
         run: pnpm test:portable
+      - name: Filesystem behavior (synthetic integrity, Node ABI)
+        run: pnpm exec vitest run --config vitest.files.config.ts
       - name: Probe installed Node bindings
         run: node scripts/check-native.mjs
       - name: Probe installed Electron bindings (switch ABI)

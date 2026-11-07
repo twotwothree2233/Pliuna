@@ -1,13 +1,14 @@
 import Database from 'better-sqlite3'
-import fs, { constants } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
-import { ContractError } from '../shared/validation'
-import { digest } from './resources'
-import { verifyDatabase, type RestoreJournal } from './restore-journal'
-import type { RecoveryManager } from './recovery'
+import fs from 'node:fs'
+import { dirname,join } from 'node:path'
+import { flushDirectorySync,managedFile,openRegularFileSync, type DirectoryDurability } from '../platform/files'
 import defaults from '../shared/contracts/development-defaults.json'
+import { ContractError } from '../shared/validation'
 import { verifyPluginProtection } from './plugins/protection'
+import type { RecoveryManager } from './recovery'
+import { digest } from './resources'
+import { verifyDatabase,type RestoreJournal } from './restore-journal'
 
 type Row = Record<string, any>
 type Identity = { dev: number; ino: number; size: number; mtime: number; ctime: number; hash: string }
@@ -50,11 +51,11 @@ export class ReplicaRetirement {
     return file.startsWith('recovery/') ? this.recovery.replicaPoints().some(p => p.file === file && p.allowed) : this.journal.retirementAllowed(file)
   }
   private identity(file: string): Identity {
-    const path = join(this.root, file), parent = dirname(path)
+    const path = managedFile(this.root, ...file.split('/')), parent = dirname(path)
     if (!fs.lstatSync(parent).isDirectory()) fail('REPLICA_UNSAFE_FILE')
     const stat = fs.lstatSync(path)
     if (!stat.isFile() || stat.nlink !== 1) fail('REPLICA_UNSAFE_FILE')
-    const fd = fs.openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const fd = openRegularFileSync(path)
     try {
       const opened = fs.fstatSync(fd)
       if (opened.dev !== stat.dev || opened.ino !== stat.ino) fail('REPLICA_FILE_CHANGED')
@@ -63,16 +64,15 @@ export class ReplicaRetirement {
       return { dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }
     } finally { fs.closeSync(fd) }
   }
-  private syncDirectory(file: string): void {
-    if (process.platform === 'win32') return
-    const fd = fs.openSync(dirname(join(this.root, file)), 'r'); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+  private syncDirectory(file: string): DirectoryDurability {
+    return flushDirectorySync(dirname(managedFile(this.root, ...file.split('/'))))
   }
   private inspect(file: string): Pick<Retirement, 'members' | 'protection'> {
-    if (!managed(file) || !present(join(this.root, file))) fail('REPLICA_MANIFEST_UNAVAILABLE')
+    if (!managed(file) || !present(managedFile(this.root, ...file.split('/')))) fail('REPLICA_MANIFEST_UNAVAILABLE')
     this.identity(file)
     const sealed = this.journal.sealedReplica(file)
-    if (sealed?.sha256 && digest(fs.readFileSync(join(this.root, file))) !== sealed.sha256) fail('REPLICA_SEAL_MISMATCH')
-    const db = new Database(join(this.root, file), { readonly: true, fileMustExist: true })
+    if (sealed?.sha256 && digest(fs.readFileSync(managedFile(this.root, ...file.split('/')))) !== sealed.sha256) fail('REPLICA_SEAL_MISMATCH')
+    const db = new Database(managedFile(this.root, ...file.split('/')), { readonly: true, fileMustExist: true })
     let protection: Retirement['protection']
     try {
       // One read transaction includes WAL contents; never infer protection from main-file bytes alone.
@@ -155,17 +155,17 @@ export class ReplicaRetirement {
       // No inspectors may reopen this database after retirement. Only the frozen file identities are used.
       for (const suffix of suffixes) if (present(join(this.root, r.file + suffix)) && !r.members.some(m => m.suffix === suffix)) fail('REPLICA_NEW_GROUP_MEMBER')
       for (const m of r.members) {
-        if (['deleted', 'absent'].includes(m.state)) { if (present(join(this.root, r.file + m.suffix))) fail('REPLICA_FILE_REAPPEARED'); continue }
-        if (!present(join(this.root, r.file + m.suffix))) { m.state = 'absent'; this.journal.saveRetirement(r); continue }
+        if (['deleted', 'absent'].includes(m.state)) { if (present(managedFile(this.root, ...(r.file + m.suffix).split('/')))) fail('REPLICA_FILE_REAPPEARED'); continue }
+        if (!present(managedFile(this.root, ...(r.file + m.suffix).split('/')))) { m.state = 'absent'; this.journal.saveRetirement(r); continue }
         if (JSON.stringify(this.identity(r.file + m.suffix)) !== JSON.stringify(m.identity)) fail('REPLICA_FILE_CHANGED')
         m.state = 'deleting'; r.reason = 'FILE_DELETE_INTENT'; this.journal.saveRetirement(r)
         if (r.selected !== this.journal.selected() || !this.allowed(r.file) || JSON.stringify(this.identity(r.file + m.suffix)) !== JSON.stringify(m.identity)) fail('REPLICA_FACTS_CHANGED')
-        fs.unlinkSync(join(this.root, r.file + m.suffix)); this.syncDirectory(r.file)
+        fs.unlinkSync(managedFile(this.root, ...(r.file + m.suffix).split('/'))); this.syncDirectory(r.file)
         m.state = 'deleted'; this.journal.saveRetirement(r)
       }
       for (const suffix of suffixes) if (present(join(this.root, r.file + suffix))) fail('REPLICA_GROUP_REMAINS')
-      this.syncDirectory(r.file)
-      r.phase = 'group_deleted'; r.reason = 'GROUP_DELETED_DURABLE'; this.journal.saveRetirement(r)
+      const durability = this.syncDirectory(r.file)
+      r.phase = 'group_deleted'; r.reason = durability === 'directory-synced' ? 'GROUP_DELETED_DURABLE' : 'GROUP_DELETED_CONFIRMED'; this.journal.saveRetirement(r)
       r.phase = 'released'; r.reason = 'PROTECTION_RELEASED'; this.journal.saveRetirement(r)
     } catch (e) {
       const code = e instanceof ContractError ? e.code : (e as NodeJS.ErrnoException).code

@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, openSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync } from 'node:fs'
+import { entryExistsSync as existsSync,flushDirectorySync,flushFileSync,managedRegularFile } from '../platform/files'
+import { protectPrivatePath } from '../platform/permissions'
 import { ContractError } from '../shared/validation'
 
 export interface ExportResource { id: string; storage_key: string; sha256: string; byte_length: number; media_type: string; display_name: string }
@@ -16,19 +17,19 @@ const terminal = new Set<ExportPhase>(['saved', 'cancelled', 'failed'])
 const fail = (code = 'EXPORT_CONTROL_INVALID'): never => { throw new ContractError(code, 'Export state cannot be safely used; retained files were not replayed or deleted') }
 function regular(file: string): void { const s = lstatSync(file); if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1) fail() }
 function flush(root: string, file: string): void {
-  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); try { fsyncSync(fd) } finally { closeSync(fd) }
-  if (process.platform !== 'win32') { const dir = openSync(root, 'r'); try { fsyncSync(dir) } finally { closeSync(dir) } }
+  flushFileSync(file)
+  flushDirectorySync(root)
 }
 
 export class ExportControl {
   private db: Database.Database
   constructor(private root: string, established: boolean, reconcile = true) {
-    const file = join(root, 'export-control.sqlite'), present = existsSync(file)
+    const file = managedRegularFile(root, 'export-control.sqlite'), present = existsSync(file)
     if (established && !present) fail()
     if (present) regular(file)
     this.db = new Database(file)
     try {
-      this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); this.db.pragma('busy_timeout=0'); chmodSync(file, 0o600)
+      this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); this.db.pragma('busy_timeout=0'); protectPrivatePath(file, 'file')
       if (!present) this.db.transaction(() => this.db.exec('CREATE TABLE export_version(version INTEGER NOT NULL); INSERT INTO export_version VALUES(1); CREATE TABLE export_jobs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, phase TEXT NOT NULL, manifest TEXT NOT NULL); CREATE INDEX export_jobs_task ON export_jobs(task_id,phase)'))()
       if (JSON.stringify(this.db.prepare('SELECT version FROM export_version').all()) !== '[{"version":1}]' || this.db.pragma('quick_check', { simple: true }) !== 'ok') fail()
       if ((this.db.prepare("SELECT count(*) n FROM export_jobs WHERE phase NOT IN ('saved','failed','cancelled')").get() as any).n > 1) fail()

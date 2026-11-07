@@ -1,3 +1,5 @@
+import { assertDirectorySync, managedRegularFile } from '../platform/files'
+import { protectPrivatePath } from '../platform/permissions'
 import { MontyCalls } from './monty/calls'
 import { MONTY_ID, montyContract } from './monty/contract'
 import { deadline } from './model/limits'
@@ -120,13 +122,14 @@ export class RuntimeStore {
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     this.owner = ownDirectory(directory)
     try {
-    mkdirSync(join(directory, 'resources'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(directory, 'resources'), { recursive: true, mode: 0o700 }); assertDirectorySync(join(directory, 'resources'))
     this.plugins = new PluginControl(directory)
     if (this.plugins.error) fail('PLUGIN_CONTROL_INVALID', 'Plugin authority requires inspection; startup is closed')
     this.journal = new RestoreJournal(directory)
     this.journal.selected()
     this.exports = new ExportControl(directory, true)
-    this.db = new Database(join(directory, this.journal.selected()))
+    this.db = new Database(managedRegularFile(directory, this.journal.selected()))
+    protectPrivatePath(managedRegularFile(directory, this.journal.selected()), 'file')
     this.db.pragma('foreign_keys = ON')
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('synchronous = FULL')
@@ -435,7 +438,7 @@ export class RuntimeStore {
     this.pluginDrafts.close(); for (const pending of this.pluginIndependentCalls.values()) pending.controller.abort(); this.pluginIndependentCalls.clear(); this.pluginUploads.close(); this.pluginActions.close(); this.pluginCalls.close(); this.pluginProcesses.close()
     this.storage.close()
     if (this.db.open) this.db.close()
-    this.db = new Database(join(this.root, file), { fileMustExist: true })
+    this.db = new Database(managedRegularFile(this.root, file), { fileMustExist: true })
     this.db.pragma('foreign_keys=ON'); this.db.pragma('journal_mode=WAL'); this.db.pragma('synchronous=FULL')
     this.epoch = id(); this.sync.clear(); this.syncFacts.clear()
     this.storage = new StorageLifecycle(this.db, this.root, this.epoch, (action, task) => this.pluginActions?.owner(action, task) || this.pluginUploads?.owns(action, task) || false)

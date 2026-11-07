@@ -1,13 +1,14 @@
 import Database from 'better-sqlite3'
-import fs, { constants } from 'node:fs'
-import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import { join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
-import { RestoreJournal } from './restore-journal'
-import { RecoveryManager } from './recovery'
+import { managedFile,openRegularFileSync } from '../platform/files'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ExportControl } from './export-control'
 import { validatePluginControl } from './plugins/control'
+import { RecoveryManager } from './recovery'
+import { RestoreJournal } from './restore-journal'
 
 type Row = Record<string, any>
 export type InspectionRequest = { scope: 'growth' | 'resources' | 'resource'; resource_id?: string; after?: number }
@@ -133,9 +134,9 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
           let fd: number | undefined
           try {
             if (!/^[A-Za-z0-9_-]+$/.test(r.storage_key) || !/^[a-f0-9]{64}$/.test(r.sha256) || !Number.isSafeInteger(r.byte_length) || r.byte_length < 0 || r.byte_length > defaults.transport.resource_bytes) fail('INSPECT_METADATA_INVALID')
-            const path = join(root, 'resources', r.storage_key), initial = regular(path)
+            const path = managedFile(root, 'resources', r.storage_key), initial = regular(path)
             if (initial.size !== r.byte_length) fail('INSPECT_LENGTH_MISMATCH')
-            fd = fs.openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+            fd = openRegularFileSync(path)
             const opened = fs.fstatSync(fd); if (opened.dev !== initial.dev || opened.ino !== initial.ino) fail('INSPECT_IDENTITY_CHANGED')
             const hash = createHash('sha256'), buffer = Buffer.alloc(256 * 1024); let read = 0
             while (read < initial.size) { check(); const n = fs.readSync(fd, buffer, 0, Math.min(buffer.length, initial.size - read), read); if (!n) fail('INSPECT_IDENTITY_CHANGED'); hash.update(buffer.subarray(0, n)); read += n; if (read % (4 * 1024 * 1024) === 0) { progress({ phase: 'hashing', checked: result.items.length, bytes_read: read, resource_id: r.id }); await setImmediate() } }

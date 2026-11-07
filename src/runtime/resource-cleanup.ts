@@ -1,12 +1,13 @@
 import type Database from 'better-sqlite3'
-import fs, { constants } from 'node:fs'
+import fs from 'node:fs'
 import { join } from 'node:path'
-import type { RestoreJournal } from './restore-journal'
-import type { RecoveryManager } from './recovery'
-import type { RestrictedGc } from './gc'
-import { ContractError } from '../shared/validation'
-import { digest } from './resources'
+import { flushDirectorySync,managedFile,openRegularFileSync, type DirectoryDurability } from '../platform/files'
 import defaults from '../shared/contracts/development-defaults.json'
+import { ContractError } from '../shared/validation'
+import type { RestrictedGc } from './gc'
+import type { RecoveryManager } from './recovery'
+import { digest } from './resources'
+import type { RestoreJournal } from './restore-journal'
 
 type Row = Record<string, any>
 type Identity = { dev: number; ino: number; size: number; mtime: number; ctime: number; hash: string }
@@ -31,22 +32,21 @@ export class ResourceCleanupManager {
   private graph(): string { return digest(Buffer.from(JSON.stringify([this.journal.retirementGraph(), this.recovery.replicaGraph()]))) }
   private read(id: string): ResourceCleanup { const r = this.journal.resourceRecord(id); if (!r) fail('RESOURCE_CLEANUP_NOT_FOUND'); return r! }
   private present(file: string): boolean { try { fs.lstatSync(file); return true } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e } }
-  private path(r: ResourceCleanup): string { return join(this.root, 'resources', r.resource.storage_key) }
+  private path(r: ResourceCleanup): string { return managedFile(this.root, 'resources', r.resource.storage_key) }
   private identity(r: ResourceCleanup): Identity {
     const directory = join(this.root, 'resources')
     if (!fs.lstatSync(directory).isDirectory()) fail('RESOURCE_UNSAFE_FILE')
     const path = this.path(r), stat = fs.lstatSync(path)
     if (!stat.isFile() || stat.nlink !== 1 || stat.size !== r.resource.byte_length || stat.size > defaults.transport.resource_bytes) fail('RESOURCE_UNSAFE_FILE')
-    const fd = fs.openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const fd = openRegularFileSync(path)
     try {
       const opened = fs.fstatSync(fd), hash = digest(fs.readFileSync(fd)), end = fs.fstatSync(fd)
       if (opened.dev !== stat.dev || opened.ino !== stat.ino || end.size !== stat.size || end.mtimeMs !== stat.mtimeMs || end.ctimeMs !== stat.ctimeMs || hash !== r.resource.sha256) fail('RESOURCE_FILE_CHANGED')
       return { dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }
     } finally { fs.closeSync(fd) }
   }
-  private sync(): void {
-    if (process.platform === 'win32') return
-    const fd = fs.openSync(join(this.root, 'resources'), 'r'); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+  private sync(): DirectoryDurability {
+    return flushDirectorySync(managedFile(this.root, 'resources'))
   }
   private protection(r: ResourceCleanup): string | null {
     const db = this.database(), material = r.resource, ids = new Set([material.id])
@@ -118,14 +118,15 @@ export class ResourceCleanupManager {
       if (r.phase === 'file_deleted') {
         if (this.present(this.path(r))) fail('RESOURCE_FILE_REAPPEARED')
       } else {
+        let durability: DirectoryDurability
         if (this.present(this.path(r))) {
           if (JSON.stringify(this.identity(r)) !== JSON.stringify(r.identity)) fail('RESOURCE_FILE_CHANGED')
           r.phase = 'deleting'; r.reason = 'RESOURCE_DELETE_INTENT'; this.journal.saveResourceCleanup(r)
           const protectedNow = this.protection(r); if (protectedNow) fail(protectedNow)
           if (JSON.stringify(this.identity(r)) !== JSON.stringify(r.identity)) fail('RESOURCE_FILE_CHANGED')
-          fs.unlinkSync(this.path(r)); this.sync(); r.file_result = 'deleted'
-        } else { this.sync(); r.file_result = 'absent' }
-        r.phase = 'file_deleted'; r.reason = 'RESOURCE_FILE_DELETED_DURABLE'; this.journal.saveResourceCleanup(r)
+          fs.unlinkSync(this.path(r)); durability = this.sync(); r.file_result = 'deleted'
+        } else { durability = this.sync(); r.file_result = 'absent' }
+        r.phase = 'file_deleted'; r.reason = durability === 'directory-synced' ? 'RESOURCE_FILE_DELETED_DURABLE' : 'RESOURCE_FILE_DELETED_CONFIRMED'; this.journal.saveResourceCleanup(r)
       }
       // The file result precedes metadata cleanup. A failed transaction can only retry this exact cleanup.
       this.database().transaction(() => {

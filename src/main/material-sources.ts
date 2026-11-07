@@ -1,6 +1,7 @@
-import fs, { constants } from 'node:fs'
-import { basename, extname } from 'node:path'
+import fs from 'node:fs'
+import { basename,extname } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
+import { openRegularFileSync,regularFile } from '../platform/files'
 import defaults from '../shared/contracts/development-defaults.json'
 type Row=Record<string,any>
 export class MaterialSources {
@@ -28,9 +29,9 @@ export class MaterialSources {
         let initial:fs.Stats|undefined,body:Buffer|undefined,size:number
         if(source.path){
           initial=fs.lstatSync(source.path)
-          if(!initial.isFile()||initial.nlink!==1)throw Error('IMPORT_UNSAFE_SOURCE')
+          try { regularFile(initial) } catch { throw Error('IMPORT_UNSAFE_SOURCE') }
           size=initial.size;if(size>defaults.transport.resource_bytes)throw Error('IMPORT_TOO_LARGE')
-          fd=fs.openSync(source.path,constants.O_RDONLY|constants.O_NOFOLLOW)
+          fd=openRegularFileSync(source.path)
           const opened=fs.fstatSync(fd);if(opened.ino!==initial.ino||opened.dev!==initial.dev)throw Error('IMPORT_SOURCE_CHANGED')
         }else{body=Buffer.from(source.text!,'utf8');size=body.length;if(size>defaults.resource.inline_bytes)throw Error('IMPORT_TOO_LARGE')}
         const textual=!source.path||['.txt','.md','.csv','.tsv','.json','.log','.html','.htm','.svg','.xml','.css','.js','.ts'].includes(extname(source.name).toLowerCase())

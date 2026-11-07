@@ -1,15 +1,17 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { lstatSync,mkdirSync,readdirSync,readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { atomicWriteFileSync,entryExistsSync as existsSync,flushDirectorySync,flushFileSync,managedFile,managedRegularFile,readRegularFileSync } from '../platform/files'
+import { protectPrivatePath } from '../platform/permissions'
 import { ContractError } from '../shared/validation'
-import { digest, resourceBody } from './resources'
-import { PluginDerivations } from './plugins/derivations'
-import { validateRetirement, type Retirement } from './replicas'
-import { validateResourceCleanup, type ResourceCleanup, type TaskDeletion } from './resource-cleanup'
-import { validatePluginProtection, verifyPluginProtection } from './plugins/protection'
 import { ExportControl } from './export-control'
+import { PluginDerivations } from './plugins/derivations'
 import type { PluginCopy } from './plugins/package'
+import { validatePluginProtection,verifyPluginProtection } from './plugins/protection'
+import { validateRetirement,type Retirement } from './replicas'
+import { validateResourceCleanup,type ResourceCleanup,type TaskDeletion } from './resource-cleanup'
+import { digest,resourceBody } from './resources'
 
 type Row = Record<string, any>
 export type RestoreImage = { file: string; tasks: string[]; resources: Row[]; plugins: PluginCopy[]; sha256?: string }
@@ -20,8 +22,8 @@ const managed = (file: unknown): file is string => typeof file === 'string' && (
 const fail = (): never => { throw new ContractError('RESTORE_JOURNAL_INVALID', 'Restore journal requires inspection; business access is closed') }
 
 export function flushFile(root: string, file: string): void {
-  const fd = openSync(join(root, file), 'r'); try { fsyncSync(fd) } finally { closeSync(fd) }
-  if (process.platform !== 'win32') { const dir = openSync(root, 'r'); try { fsyncSync(dir) } finally { closeSync(dir) } }
+  flushFileSync(managedFile(root, ...file.split('/')))
+  flushDirectorySync(root)
 }
 export function describeDatabase(db: Database.Database, file: string): RestoreImage {
   return { file, tasks: (db.prepare('SELECT id FROM tasks ORDER BY id').all() as Row[]).map(row => row.id), resources: db.prepare('SELECT * FROM resources ORDER BY id').all() as Row[], plugins: [] }
@@ -44,12 +46,12 @@ export class RestoreJournal {
     let error: string | null = null
     try {
       mkdirSync(root, { recursive: true, mode: 0o700 })
-      const file = join(root, 'restore-control.sqlite'), present = existsSync(file), marker = join(root, 'restore-established')
-      if (existsSync(marker) && (!lstatSync(marker).isFile() || !['restore-v2\n', 'restore-v3\n', 'restore-v4\n', 'restore-v5\n'].includes(readFileSync(marker, 'utf8')) || !present)) fail()
+      const file = managedRegularFile(root, 'restore-control.sqlite'), present = existsSync(file), marker = join(root, 'restore-established')
+      if (existsSync(marker) && (!lstatSync(marker).isFile() || !['restore-v2\n', 'restore-v3\n', 'restore-v4\n', 'restore-v5\n'].includes(readRegularFileSync(marker, 32).toString('utf8')) || !present)) fail()
       if (present && !lstatSync(file).isFile()) fail()
       if (!present && readdirSync(root).some(name => /^restore-.*-(target|rollback)\.sqlite/.test(name))) fail()
       this.db = new Database(file)
-      this.db.pragma('busy_timeout=0'); this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); chmodSync(file, 0o600)
+      this.db.pragma('busy_timeout=0'); this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); protectPrivatePath(file, 'file')
       if (!present) {
         // A missing selector must never silently reopen the pre-restore database.
         const count = this.db.prepare('SELECT count(*) n FROM sqlite_master').get() as Row
@@ -60,13 +62,13 @@ export class RestoreJournal {
       }
       const row = this.db.prepare('SELECT manifest FROM restore_control WHERE id=1').get() as Row
       const parsed = JSON.parse(row.manifest)
-      if (existsSync(marker) && readFileSync(marker, 'utf8') === 'restore-v5\n' && parsed.version !== 5) fail()
+      if (existsSync(marker) && readRegularFileSync(marker, 32).toString('utf8') === 'restore-v5\n' && parsed.version !== 5) fail()
       const normalized = RestoreJournal.normalizeControl(parsed)
       const exports = new ExportControl(root, present && parsed.version === 5, false); exports.close()
       if (parsed.version !== 5) this.save(normalized)
       else this.value = normalized
       flushFile(root, 'restore-control.sqlite')
-      if (!existsSync(marker) || readFileSync(marker, 'utf8') !== 'restore-v5\n') { writeFileSync(marker, 'restore-v5\n', { mode: 0o600 }); flushFile(root, 'restore-established') }
+      if (!existsSync(marker) || readRegularFileSync(marker, 32).toString('utf8') !== 'restore-v5\n') { atomicWriteFileSync(marker, 'restore-v5\n') }
       const pending = this.pending()
       if (pending?.phase === 'preparing') this.finish('rolled_back')
       else if (pending?.phase === 'switched') {

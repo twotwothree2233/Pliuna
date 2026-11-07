@@ -1,8 +1,9 @@
-import { constants, closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { closeSync,fstatSync,lstatSync,readdirSync,readSync } from 'node:fs'
 import { join } from 'node:path'
+import { managedFile,openRegularFileSync } from '../../platform/files'
 import { ContractError } from '../../shared/validation'
-import { pluginPath, validatePluginCopy, type PluginCopy } from './package'
+import { pluginPath,validatePluginCopy,type PluginCopy } from './package'
 
 export function validatePluginProtection(value: unknown): asserts value is PluginCopy[] {
   if (!Array.isArray(value) || value.length > 512) throw new ContractError('PLUGIN_PROTECTION_INVALID', 'Plugin copy protection cannot be verified')
@@ -25,11 +26,11 @@ export function verifyPluginProtection(root: string, copies: PluginCopy[]): void
       for (const name of entries) {
         const path = relative ? relative + '/' + name : name
         if (!pluginPath(path)) fail()
-        const file = join(folder, path), stat = lstatSync(file)
+        const file = managedFile(root, 'plugins', copy.digest, ...path.split('/')), stat = lstatSync(file)
         if (stat.isDirectory() && !stat.isSymbolicLink()) { if (!directories.has(path)) fail(); visit(path); continue }
         const wanted = expected.get(path)
         if (!wanted || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size !== wanted.bytes) fail()
-        const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+        const fd = openRegularFileSync(file)
         try {
           const opened = fstatSync(fd)
           if (opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size !== stat.size || opened.nlink !== 1) fail()

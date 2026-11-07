@@ -1,13 +1,15 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync } from 'node:fs'
+import { closeSync,lstatSync,mkdirSync,openSync,readdirSync,readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ContractError } from '../shared/validation'
-import { digest, resourceBody } from './resources'
-import { RestoreJournal, describeDatabase, verifyDatabase, flushFile } from './restore-journal'
+import { assertDirectorySync,entryExistsSync as existsSync,flushDirectorySync,flushFileSync,managedFile,managedRegularFile,regularFile } from '../platform/files'
+import { protectPrivatePath } from '../platform/permissions'
 import defaults from '../shared/contracts/development-defaults.json'
-import { validatePluginProtection, verifyPluginProtection } from './plugins/protection'
+import { ContractError } from '../shared/validation'
 import type { PluginCopy } from './plugins/package'
+import { validatePluginProtection,verifyPluginProtection } from './plugins/protection'
+import { digest,resourceBody } from './resources'
+import { describeDatabase,flushFile,RestoreJournal,verifyDatabase } from './restore-journal'
 
 type Row = Record<string, any>
 type Material = { id: string; storage_key: string; sha256: string; byte_length: number }
@@ -16,17 +18,18 @@ type Control = { version: 2; active: Point | null; candidates: Point[]; retired:
 const fail = (code: string, text: string): never => { throw new ContractError(code, text) }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function privateFile(file: string): void {
-  if (existsSync(file) && !lstatSync(file).isFile()) fail('RECOVERY_CONTROL_INVALID', 'Unsafe managed file type')
+  if (existsSync(file)) { try { regularFile(lstatSync(file)) } catch { fail('RECOVERY_CONTROL_INVALID', 'Unsafe managed file type') } }
 }
 
 // A separate SQLite transaction is an OS-released, same-directory writer lock.
 export function ownDirectory(root: string): Database.Database {
-  const file = join(root, 'runtime-owner.sqlite'); privateFile(file)
+  protectPrivatePath(root, 'directory')
+  const file = managedFile(root, 'runtime-owner.sqlite'); privateFile(file)
   const owner = new Database(file)
   try {
     owner.pragma('busy_timeout=0')
     owner.exec('CREATE TABLE IF NOT EXISTS owner (id INTEGER PRIMARY KEY); BEGIN EXCLUSIVE')
-    chmodSync(file, 0o600)
+    protectPrivatePath(file, 'file')
     return owner
   } catch { owner.close(); return fail('DIRECTORY_BUSY', 'Another runtime owns this data directory; it was not interrupted') }
 }
@@ -44,17 +47,17 @@ export class RecoveryManager {
     this.folder = join(root, 'recovery')
     try {
       if (existsSync(this.folder) && !lstatSync(this.folder).isDirectory()) throw new Error()
-      mkdirSync(this.folder, { recursive: true, mode: 0o700 })
-      const path = join(root, 'recovery-control.sqlite'); privateFile(path)
+      mkdirSync(this.folder, { recursive: true, mode: 0o700 }); assertDirectorySync(this.folder)
+      const path = managedRegularFile(root, 'recovery-control.sqlite'); privateFile(path)
       const present = existsSync(path)
       if (!present && ((this.db.prepare('SELECT id FROM recovery_points LIMIT 1').get()) || readdirSync(this.folder).length)) throw new Error()
       this.control = new Database(path)
-      this.control.pragma('busy_timeout=0'); this.control.pragma('journal_mode=DELETE'); this.control.pragma('synchronous=FULL'); chmodSync(path, 0o600)
+      this.control.pragma('busy_timeout=0'); this.control.pragma('journal_mode=DELETE'); this.control.pragma('synchronous=FULL'); protectPrivatePath(path, 'file')
       if (!present) {
         this.control.exec('CREATE TABLE control (id INTEGER PRIMARY KEY CHECK(id=1), manifest TEXT NOT NULL)')
         this.control.prepare('INSERT INTO control VALUES (1,?)').run(JSON.stringify(this.state))
       }
-      if (process.platform !== 'win32') { const fd = openSync(root, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } }
+      flushDirectorySync(root)
       const row = this.control.prepare('SELECT manifest FROM control WHERE id=1').get() as Row | undefined
       const state = row && JSON.parse(row.manifest)
       RecoveryManager.validateControl(state)
@@ -89,7 +92,7 @@ export class RecoveryManager {
     verifyPluginProtection(this.root, point.plugins)
     this.journal.assertMaterials(point.resources)
     if (this.journal.retired('recovery/' + point.id + '.sqlite')) fail('RECOVERY_RETIRED', 'This replica is permanently retired')
-    const path = join(this.folder, point.id + '.sqlite'); privateFile(path)
+    const path = managedRegularFile(this.root, 'recovery', point.id + '.sqlite'); privateFile(path)
     if (point.database_sha256 && digest(readFileSync(path)) !== point.database_sha256) fail('RECOVERY_CORRUPT', 'Recovery database checksum mismatch')
     const copy = new Database(path, { readonly: true, fileMustExist: true })
     try {
@@ -159,12 +162,12 @@ export class RecoveryManager {
       this.write({ ...this.state, candidates: [...this.state.candidates, point] }); this.project()
       for (const r of point.resources) resourceBody(this.root, r as Parameters<typeof resourceBody>[1])
       verifyPluginProtection(this.root, point.plugins)
-      const path = join(this.folder, point.id + '.sqlite')
+      const path = managedRegularFile(this.root, 'recovery', point.id + '.sqlite')
       const placeholder = openSync(path, 'wx', 0o600); closeSync(placeholder)
       await this.db.backup(path)
-      chmodSync(path, 0o600)
-      const fd = openSync(path, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) }
-      if (process.platform !== 'win32') { const dir = openSync(this.folder, 'r'); try { fsyncSync(dir) } finally { closeSync(dir) } }
+      protectPrivatePath(path, 'file')
+      flushFileSync(path)
+      flushDirectorySync(this.folder)
       point.database_sha256 = digest(readFileSync(path)); this.verify(point)
       this.write({ ...this.state, active: point, candidates: [], retired: [...this.state.retired, ...this.state.candidates.filter(p => p.id !== point.id).map(p => p.id), ...(this.state.active ? [this.state.active.id] : [])] })
       switched = true; this.project(); this.release('created', point.id)
@@ -231,7 +234,7 @@ export class RecoveryManager {
     try {
       await this.beforeRebind()
       this.verify(point)
-      const source = new Database(join(this.folder, point.id + '.sqlite'), { readonly: true, fileMustExist: true })
+      const source = new Database(managedRegularFile(this.root, 'recovery', point.id + '.sqlite'), { readonly: true, fileMustExist: true })
       let op: ReturnType<RestoreJournal['prepare']>
       try {
         const target = describeDatabase(source, '')
@@ -241,7 +244,7 @@ export class RecoveryManager {
         await source.backup(join(this.root, op.target.file))
       } finally { source.close() }
       // Normalize executable history before publishing; credentials and configuration remain outside this database.
-      const candidate = new Database(join(this.root, op!.target.file), { fileMustExist: true })
+      const candidate = new Database(managedRegularFile(this.root, op!.target.file), { fileMustExist: true })
       try {
         candidate.pragma('synchronous=FULL')
         candidate.transaction(() => {

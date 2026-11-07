@@ -1,11 +1,13 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import fs, { constants, chmodSync, closeSync, existsSync, fsyncSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import fs,{ closeSync,fstatSync,lstatSync,openSync,readFileSync,readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { atomicWriteFileSync,entryExistsSync as existsSync,flushDirectorySync,managedFile,managedRegularFile,openRegularFileSync,readRegularFileSync } from '../platform/files'
+import { protectPrivatePath } from '../platform/permissions'
+import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
 import { digest } from './resources'
 import { flushFile } from './restore-journal'
-import defaults from '../shared/contracts/development-defaults.json'
 
 type Row = Record<string, any>
 type Identity = { dev: number; ino: number; size: number; mtime: number; ctime: number; hash: string }
@@ -21,13 +23,13 @@ export class RestrictedGc {
   private error: string | null = null
   constructor(private root: string, private database: () => Database.Database, private selected: () => string, private retained: () => string[], private protects: (key: string) => boolean, private points: () => string[], private retired: (file: string) => boolean = () => false, private released: (file: string) => boolean = () => false) {
     try {
-      const file = join(root, 'gc-control.sqlite'), marker = join(root, 'gc-established')
-      if (existsSync(marker) && (!lstatSync(marker).isFile() || readFileSync(marker, 'utf8') !== 'gc-v1\n' || !existsSync(file))) fail('GC_CONTROL_INVALID')
+      const file = managedRegularFile(root, 'gc-control.sqlite'), marker = join(root, 'gc-established')
+      if (existsSync(marker) && (!lstatSync(marker).isFile() || readRegularFileSync(marker, 32).toString('utf8') !== 'gc-v1\n' || !existsSync(file))) fail('GC_CONTROL_INVALID')
       if (existsSync(file) && !lstatSync(file).isFile()) fail('GC_CONTROL_INVALID')
       const present = existsSync(file)
       if (!present) { const fd = openSync(file, 'wx', 0o600); closeSync(fd) }
       this.control = new Database(file)
-      this.control.pragma('busy_timeout=0'); this.control.pragma('journal_mode=DELETE'); this.control.pragma('synchronous=FULL'); chmodSync(file, 0o600)
+      this.control.pragma('busy_timeout=0'); this.control.pragma('journal_mode=DELETE'); this.control.pragma('synchronous=FULL'); protectPrivatePath(file, 'file')
       if (!present) this.control.exec('CREATE TABLE gc_version (version INTEGER NOT NULL); INSERT INTO gc_version VALUES (1); CREATE TABLE gc_operations (id TEXT PRIMARY KEY, manifest TEXT NOT NULL)')
       if (JSON.stringify(this.control.prepare('SELECT version FROM gc_version').all()) !== '[{"version":1}]') fail('GC_CONTROL_INVALID')
       let after = 0
@@ -48,7 +50,7 @@ export class RestrictedGc {
         after = rows.at(-1)!.ordinal
       }
       flushFile(root, 'gc-control.sqlite')
-      if (!existsSync(marker)) { writeFileSync(marker, 'gc-v1\n', { flag: 'wx', mode: 0o600 }); flushFile(root, 'gc-established') }
+      if (!existsSync(marker)) { atomicWriteFileSync(marker, 'gc-v1\n') }
     } catch { this.error = 'GC_CONTROL_INVALID' }
   }
   private validate(value: any): Operation {
@@ -86,7 +88,7 @@ export class RestrictedGc {
     if (!lstatSync(directory).isDirectory()) fail('GC_UNSAFE_FILE')
     const file = join(directory, this.name(item)), stat = lstatSync(file)
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > defaults.transport.resource_bytes) fail('GC_UNSAFE_FILE')
-    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const fd = openRegularFileSync(file)
     try {
       const opened = fstatSync(fd)
       if (opened.dev !== stat.dev || opened.ino !== stat.ino) fail('GC_FILE_CHANGED')
@@ -193,8 +195,8 @@ export class RestrictedGc {
           item.attempt++; item.state = 'deleting'; item.next_retry_at = null; item.reason = 'DELETE_INTENT'; this.save(op)
           // Recheck after durable intent and immediately before unlink. The runtime writer is still frozen.
           if (!this.eligible(item.stage, this.retainedProtection()) || JSON.stringify(this.identity(item)) !== JSON.stringify(item.identity)) { item.state = 'skipped'; item.reason = 'FINAL_CHECK_CHANGED'; this.save(op); continue }
-          fs.unlinkSync(join(this.root, 'resources', this.name(item)))
-          if (process.platform !== 'win32') { const fd = openSync(join(this.root, 'resources'), 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } }
+          fs.unlinkSync(managedFile(this.root, 'resources', this.name(item)))
+          flushDirectorySync(managedFile(this.root, 'resources'))
           item.state = 'deleted'; item.reason = 'DELETED'; this.save(op)
         } catch (error) {
           if (this.error) throw error

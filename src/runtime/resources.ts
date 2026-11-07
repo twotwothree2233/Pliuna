@@ -1,7 +1,8 @@
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { closeSync,fstatSync,fsyncSync,lstatSync,readFileSync,writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
+import { flushDirectorySync,managedFile,openExclusiveFileSync,openRegularFileSync,publishManagedFileSync } from '../platform/files'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
 
@@ -10,12 +11,13 @@ export const digest = (body: Buffer): string => createHash('sha256').update(body
 const fail = (code: string, message: string): never => { throw new ContractError(code, message) }
 export function resourceBody(root: string, resource: Resource): Buffer {
   if (!/^[a-zA-Z0-9_-]+$/.test(resource.storage_key)) return fail('RESOURCE_CORRUPT', 'Invalid managed resource key')
-  const file = join(root, 'resources', resource.storage_key)
+  let file: string
   let body: Buffer
   try {
+    file = managedFile(root, 'resources', resource.storage_key)
     const stat = lstatSync(file)
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size !== resource.byte_length || stat.size > defaults.transport.resource_bytes) return fail('RESOURCE_CORRUPT', 'Resource length or managed file type mismatch')
-    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    const fd = openRegularFileSync(file)
     const same = (value: typeof stat) => value.isFile() && value.nlink === 1 && value.dev === stat.dev && value.ino === stat.ino && value.size === stat.size && value.mtimeMs === stat.mtimeMs && value.ctimeMs === stat.ctimeMs
     try {
       if (!same(fstatSync(fd))) return fail('RESOURCE_CORRUPT', 'Managed resource identity changed')
@@ -24,6 +26,7 @@ export function resourceBody(root: string, resource: Resource): Buffer {
     } finally { closeSync(fd) }
   } catch (error) {
     if (error instanceof ContractError) throw error
+    if ((error as NodeJS.ErrnoException).code?.startsWith('FILE_')) return fail('RESOURCE_CORRUPT', 'Managed resource identity or path is unsafe')
     return fail('RESOURCE_MISSING', 'Saved resource is unavailable; it was not regenerated')
   }
   if (body.length !== resource.byte_length || digest(body) !== resource.sha256) return fail('RESOURCE_CORRUPT', 'Saved resource checksum mismatch')
@@ -42,11 +45,10 @@ export function resourceValue(root: string, resource: Resource): Record<string, 
   } catch { return fail('RESOURCE_CORRUPT', 'Resource representation is invalid; it was not repaired') }
 }
 export function publishResourceFile(root: string, key: string, body: Buffer): void {
-  const temporary = join(root, 'resources', key + '.tmp')
-  writeFileSync(temporary, body, { flag: 'wx', mode: 0o600 })
-  const fd = openSync(temporary, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) }
-  renameSync(temporary, join(root, 'resources', key))
-  if (process.platform !== 'win32') {
-    const directory = openSync(join(root, 'resources'), 'r'); try { fsyncSync(directory) } finally { closeSync(directory) }
-  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(key)) fail('RESOURCE_CORRUPT', 'Invalid managed resource key')
+  const temporary = managedFile(root, 'resources', key + '.tmp')
+  const fd = openExclusiveFileSync(temporary)
+  try { writeFileSync(fd, body); fsyncSync(fd) } finally { closeSync(fd) }
+  publishManagedFileSync(temporary, managedFile(root, 'resources', key))
+  flushDirectorySync(join(root, 'resources'))
 }

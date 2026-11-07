@@ -18,6 +18,7 @@
     "test": "pnpm test:unit && pnpm test:native",
     "test:unit": "pnpm rebuild:node && vitest run",
     "test:portable": "node scripts/check-test-environment.mjs && pnpm rebuild:node && vitest run --config vitest.portable.config.ts",
+    "test:files": "node scripts/check-test-environment.mjs && pnpm rebuild:node && vitest run --config vitest.files.config.ts",
     "test:native": "pnpm rebuild:node && pnpm build && vitest run --config vitest.native.config.ts",
     "test:electron": "pnpm rebuild:electron && pnpm build && playwright test",
     "test:electron:portable": "pnpm rebuild:electron && pnpm build && playwright test platform-smoke.spec.ts",

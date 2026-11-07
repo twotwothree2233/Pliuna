@@ -1,10 +1,10 @@
 import type Database from 'better-sqlite3'
-import { createHash, randomUUID, type Hash } from 'node:crypto'
-import fs, { constants } from 'node:fs'
-import { open } from 'node:fs/promises'
+import { createHash,randomUUID,type Hash } from 'node:crypto'
+import fs from 'node:fs'
 import { join } from 'node:path'
+import { flushDirectorySync,managedFile,openExclusiveFileSync,openRegularFile,publishManagedFileSync } from '../../platform/files'
 import defaults from '../../shared/contracts/development-defaults.json'
-import { assertContract, ContractError } from '../../shared/validation'
+import { assertContract,ContractError } from '../../shared/validation'
 import type { StorageLifecycle } from '../storage-lifecycle'
 import type { PluginIdentity } from './process'
 
@@ -75,7 +75,7 @@ export class PluginUploads {
       })()
       const upload: Upload = { id, action, task: params.task_id, call: params.owner_id, identity, key, fd: -1, hash: createHash('sha256'), expected: params.byte_length, sha256: params.sha256, received: 0, media: params.media_type, name: params.display_name.replace(/[\x00-\x1f/\\]/g, '_'), prepared: false, independent }
       this.uploads.set(id, upload)
-      try { upload.fd = fs.openSync(join(this.root, 'resources', key + '.tmp'), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600) }
+      try { upload.fd = openExclusiveFileSync(managedFile(this.root, 'resources', key + '.tmp')) }
       catch { this.abort(upload); return fail('PLUGIN_UPLOAD_WRITE_FAILED') }
       return { upload_id: id, action_id: action, resource_id: key, state: 'receiving' }
     }
@@ -106,7 +106,7 @@ export class PluginUploads {
     try {
       const path = join(this.root, 'resources', upload.key + '.tmp'), stat = await fs.promises.lstat(path)
       if (!stat.isFile() || stat.nlink !== 1 || stat.size !== upload.expected) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
-      const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      const file = await openRegularFile(path)
       try {
         const same = (value: typeof stat) => value.isFile() && value.nlink === 1 && value.ino === stat.ino && value.dev === stat.dev && value.size === stat.size && value.mtimeMs === stat.mtimeMs && value.ctimeMs === stat.ctimeMs
         if (!same(await file.stat())) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
@@ -121,8 +121,8 @@ export class PluginUploads {
         if (!same(await file.stat()) || !same(await fs.promises.lstat(path)) || hash.digest('hex') !== upload.sha256) fail('PLUGIN_UPLOAD_INTEGRITY_INVALID')
       } finally { await file.close() }
       if (!this.uploads.has(upload.id)) fail('PLUGIN_UPLOAD_SOURCE_INVALID')
-      this.qualify(upload); fs.renameSync(path, join(this.root, 'resources', upload.key))
-      if (process.platform !== 'win32') { const fd = fs.openSync(join(this.root, 'resources'), 'r'); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) } }
+      this.qualify(upload); publishManagedFileSync(path, managedFile(this.root, 'resources', upload.key))
+      flushDirectorySync(managedFile(this.root, 'resources'))
       this.db.prepare("UPDATE staging SET state='prepared' WHERE id=?").run(upload.id); upload.prepared = true; upload.finishing = false
       if(upload.independent){
         const resources=this.db.transaction(()=>this.commit(upload.call))();this.settled(upload.call,true)
