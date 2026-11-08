@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_only && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -11,13 +11,17 @@ on:
         description: Only test Windows 11 on DESKTOP-SFE95TP
         type: boolean
         default: false
+      install_windows11_tools:
+        description: Install approved missing Git, Python 3.12 and VS2022 C++ tools on DESKTOP-SFE95TP
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows11_only) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -151,9 +155,9 @@ jobs:
 
   windows11:
     name: Windows 11 x64 / DESKTOP-SFE95TP
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows11_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools) }}
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 60
+    timeout-minutes: 120
     defaults:
       run:
         shell: cmd
@@ -207,30 +211,15 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-      - name: Check native build tools and existing Python
+      - name: Inspect or install the approved Windows 11 toolchain
         id: tools
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('node:fs');
-            const path = require('node:path');
-            const { execFileSync } = require('node:child_process');
-            const capture = (file, args) => { try { return execFileSync(file, args, { encoding: 'utf8', timeout: 15000 }).trim(); } catch { return ''; } };
-            const vswhere = path.join(process.env['ProgramFiles(x86)'], 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
-            const visualStudio = fs.existsSync(vswhere) ? capture(vswhere, ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath']) : '';
-            const pythonQuery = 'import sys; print(sys.executable if sys.version_info[:2] == (3, 12) else "")';
-            const python = capture('py', ['-3.12', '-c', pythonQuery]) || capture('python', ['-c', pythonQuery]);
-            const tools = { git: Boolean(capture('git', ['--version'])), visual_cpp: Boolean(visualStudio), node: capture('node', ['--version']), python_on_path: capture('python', ['--version']), python_312_available: Boolean(python) };
-            core.setOutput('python_312_available', String(Boolean(python)));
-            if (python) { core.addPath(path.dirname(python)); core.exportVariable('PYTHON', python); }
-            fs.writeFileSync(path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'tools.json'), JSON.stringify(tools, null, 2) + '\n');
-            console.log(JSON.stringify(tools));
-            if (!tools.git) throw Error('GIT_REQUIRED');
-            if (!tools.visual_cpp) throw Error('VISUAL_CPP_BUILD_TOOLS_REQUIRED');
-      - uses: actions/setup-python@v5
-        if: steps.tools.outputs.python_312_available != 'true'
-        with:
-          python-version: '3.12'
+        env:
+          TRELLIS_INSTALL_WINDOWS11_TOOLS: ${{ inputs.install_windows11_tools && '1' || '0' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/windows11-toolchain.cjs
+      - name: Establish Git checkout after tool preparation
+        if: steps.tools.outputs.checkout_required == 'true'
+        uses: actions/checkout@v4
       - name: Install pinned dependencies
         id: install
         run: pnpm install --frozen-lockfile --config.side-effects-cache=false
