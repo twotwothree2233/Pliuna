@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import { join, relative } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { execFileSync } from 'node:child_process'
 import { setTimeout as yieldReports } from 'node:timers/promises'
 import * as permissions from '../../src/platform/permissions'
 import { RuntimeStore } from '../../src/runtime/store'
@@ -32,6 +33,14 @@ it.skipIf(process.platform !== 'win32' || process.env.RUNNER_NAME !== 'DESKTOP-S
     measure('create_task', () => store!.create('Windows 11 isolated startup probe'))
     expect(store.tasks()).toHaveLength(1)
     expect(measure('maintenance_status', () => store!.handle({ type: 'maintenance.status' }))).toMatchObject({ phase: 'idle' })
+    const systemRoot = process.env.SystemRoot
+    if (!systemRoot) throw Error('WINDOWS_SYSTEM_ROOT_REQUIRED')
+    for (let index = 1; index <= 3; index++) measure('powershell_baseline_' + index, () => {
+      expect(execFileSync(join(systemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from("[Console]::Write('ok')", 'utf16le').toString('base64')],
+        { encoding: 'utf8', timeout: 15000, windowsHide: true,
+          env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP } })).toBe('ok')
+    })
   } finally {
     try { if (store) measure('close', () => store!.close()) }
     finally {

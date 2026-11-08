@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -15,6 +15,10 @@ on:
         description: Install approved missing Git, Python 3.12 and VS2022 C++ tools on DESKTOP-SFE95TP
         type: boolean
         default: false
+      windows11_process_package_only:
+        description: Only verify process, Electron, GUI and directory-package entries on the designated Windows 11 host
+        type: boolean
+        default: false
       windows11_startup_probe_only:
         description: Only diagnose isolated RuntimeStore startup on the designated Windows 11 host
         type: boolean
@@ -25,7 +29,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -158,8 +162,8 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
-    name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only) }}
+    name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -181,6 +185,7 @@ jobs:
             fs.mkdirSync(evidence, { recursive: true });
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
+            if (context.payload.inputs?.windows11_startup_probe_only === 'true' && context.payload.inputs?.windows11_process_package_only === 'true') throw Error('WINDOWS11_MODES_ARE_EXCLUSIVE');
             if (process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('UNEXPECTED_RUNNER');
             if (process.platform !== 'win32' || process.arch !== 'x64') throw Error('WINDOWS_X64_REQUIRED');
             // Read-only inline queries do not load a .ps1 file or change
@@ -268,7 +273,7 @@ jobs:
       - name: Diagnose isolated Windows 11 file startup
         env:
           TRELLIS_WINDOWS11_STARTUP_PROBE: '1'
-        if: "!cancelled() && inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        if: "!cancelled() && (inputs.windows11_startup_probe_only || inputs.windows11_process_package_only) && steps.build.outcome == 'success'"
         run: pnpm exec vitest run --config vitest.windows11-probe.config.ts
       - name: Portable tests (Node ABI)
         id: portable
@@ -278,7 +283,7 @@ jobs:
         if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
         run: pnpm exec vitest run --config vitest.process.config.ts tests/unit/platform-process-tree.test.ts tests/unit/monty-lifecycle.test.ts
       - name: Filesystem behavior (synthetic integrity, Node ABI)
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && !inputs.windows11_process_package_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
         run: pnpm exec vitest run --config vitest.files.config.ts
       - name: Process trees and lifecycle (synthetic integrity, Node ABI)
         if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
