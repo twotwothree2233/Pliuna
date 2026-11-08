@@ -82,7 +82,8 @@ async function download(url, name) {
       await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(destination))
       const descriptor = fs.openSync(destination, 'r'), magic = Buffer.alloc(2)
       try { fs.readSync(descriptor, magic, 0, 2, 0) } finally { fs.closeSync(descriptor) }
-      if (magic.toString('ascii') !== 'MZ') throw Error('INSTALLER_FORMAT_INVALID')
+      const expected = name.endsWith('.zip') ? 'PK' : 'MZ'
+      if (magic.toString('ascii') !== expected) throw Error('INSTALLER_FORMAT_INVALID')
       return destination
     } catch (error) {
       if (attempt === 2) throw error
@@ -91,17 +92,37 @@ async function download(url, name) {
     }
   }
 }
-async function install(name, url, filename, args) {
+async function install(name, url, filename, args, archiveEntry) {
   const record = { name, source: url, status: 'started' }
+  if (archiveEntry) record.archive_entry = archiveEntry
   report.installations.push(record); save()
   try {
-    const file = await download(url, filename)
+    let file = await download(url, filename)
+    const installerEnv = { ...process.env }
+    delete installerEnv.GITHUB_TOKEN
+    if (archiveEntry) {
+      const destination = path.join(work, archiveEntry)
+      // Extract only the official installer. The distribution's setup.ps1
+      // also clears existing Python registrations and is deliberately unused.
+      execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+        $ErrorActionPreference = 'Stop';
+        Add-Type -AssemblyName System.IO.Compression.FileSystem;
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($env:TRELLIS_PYTHON_ARCHIVE);
+        try {
+          $entry = $archive.GetEntry($env:TRELLIS_PYTHON_ENTRY);
+          if ($null -eq $entry) { throw 'PYTHON_INSTALLER_ENTRY_MISSING' };
+          [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $env:TRELLIS_PYTHON_INSTALLER, $false)
+        } finally { $archive.Dispose() }
+      `], { stdio: 'inherit', windowsHide: true, env: { ...installerEnv,
+        TRELLIS_PYTHON_ARCHIVE: file, TRELLIS_PYTHON_ENTRY: archiveEntry, TRELLIS_PYTHON_INSTALLER: destination } })
+      file = destination
+    }
     console.log(JSON.stringify({ phase: 'install', name }))
     const log = fs.openSync(path.join(evidence, filename + '.log'), 'a')
     let code
     try {
       code = await new Promise((resolve, reject) => {
-        const child = spawn(file, args, { windowsHide: true, stdio: ['ignore', log, log] })
+        const child = spawn(file, args, { windowsHide: true, env: installerEnv, stdio: ['ignore', log, log] })
         const progress = setInterval(() => console.log(JSON.stringify({ phase: 'install_in_progress', name })), 30000)
         child.once('error', error => { clearInterval(progress); reject(error) })
         child.once('exit', value => { clearInterval(progress); resolve(value) })
@@ -122,7 +143,6 @@ function expose(tools) {
   }
   if (tools.python) fs.appendFileSync(process.env.GITHUB_ENV, 'PYTHON=' + tools.python.executable + '\n')
   fs.appendFileSync(process.env.GITHUB_OUTPUT, 'python_312_available=' + Boolean(tools.python) + '\n')
-  fs.appendFileSync(process.env.GITHUB_OUTPUT, 'checkout_required=' + !fs.existsSync(path.join(process.env.GITHUB_WORKSPACE, '.git')) + '\n')
 }
 async function main() {
   report.before = inspect(); save()
@@ -132,8 +152,8 @@ async function main() {
       'https://api.github.com/repos/git-for-windows/git/releases/assets/677312539', 'Git-2.56.0.4-64-bit.exe',
       ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER', '/DIR=' + gitTarget, '/o:PathOption=BashOnly'])
     if (!report.before.python) await install('Python 3.12.10 x64',
-      'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe', 'python-3.12.10-amd64.exe',
-      ['/quiet', '/norestart', 'InstallAllUsers=0', 'TargetDir=' + pythonTarget, 'PrependPath=0', 'Include_launcher=0', 'Include_test=0', 'Include_doc=0', 'Include_pip=1', 'Shortcuts=0', '/log', path.join(evidence, 'python-install.log')])
+      'https://api.github.com/repos/actions/python-versions/releases/assets/244701309', 'python-3.12.10-win32-x64.zip',
+      ['/quiet', '/norestart', 'InstallAllUsers=0', 'TargetDir=' + pythonTarget, 'PrependPath=0', 'Include_launcher=0', 'Include_test=0', 'Include_doc=0', 'Include_pip=1', 'Shortcuts=0', '/log', path.join(evidence, 'python-install.log')], 'python-3.12.10-amd64.exe')
     if (!report.before.visual_cpp || !report.before.windows_sdk) await install('Visual Studio 2022 C++ Build Tools and Windows SDK',
       'https://aka.ms/vs/17/release/vs_BuildTools.exe', 'vs_BuildTools.exe',
       ['--quiet', '--wait', '--norestart', '--nocache', '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended'])

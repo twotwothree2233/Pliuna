@@ -217,9 +217,8 @@ jobs:
           TRELLIS_INSTALL_WINDOWS11_TOOLS: ${{ inputs.install_windows11_tools && '1' || '0' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/windows11-toolchain.cjs
-      - name: Establish Git checkout after tool preparation
-        if: steps.tools.outputs.checkout_required == 'true'
-        uses: actions/checkout@v4
+      - name: Save the generated contract source baseline
+        run: node -e "require('node:fs').copyFileSync('src/shared/contracts.generated.ts', require('node:path').join(process.env.TRELLIS_WIN11_EVIDENCE, 'contracts.generated.before.ts'))"
       - name: Install pinned dependencies
         id: install
         run: pnpm install --frozen-lockfile --config.side-effects-cache=false
@@ -240,7 +239,7 @@ jobs:
         run: pnpm build
       - name: Check generated contract drift
         if: "!cancelled() && steps.build.outcome == 'success'"
-        run: git diff --exit-code -- src/shared/contracts.generated.ts
+        run: node -e "const fs=require('node:fs'), path=require('node:path'), text=p=>fs.readFileSync(p,'utf8').replace(/\r\n/g,'\n'); if(text(path.join(process.env.TRELLIS_WIN11_EVIDENCE,'contracts.generated.before.ts'))!==text('src/shared/contracts.generated.ts')) throw Error('GENERATED_CONTRACT_DRIFT');"
       - name: Validate contracts
         if: "!cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success'"
         run: pnpm verify:contracts
