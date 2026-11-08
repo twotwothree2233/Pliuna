@@ -121,10 +121,11 @@ if (process.argv[2] === 'owner') {
         $a.SetAccessRuleProtection($true,$false);
         $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($u,'FullControl','ContainerInherit,ObjectInherit','None','Allow'));
         $sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-5-18');
+        $everyone=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0');
         $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'));
         switch($env:VARIANT) {
-          'extra' {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new('S-1-1-0','Read','Allow'))}
-          'deny' {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new('S-1-1-0','Write','Deny'))}
+          'extra' {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone,'Read','Allow'))}
+          'deny' {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone,'Write','Deny'))}
           'propagation' {$a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($u,'Read','ContainerInherit','InheritOnly','Allow'))}
           'inheritance' {$a.SetAccessRuleProtection($false,$false)}
         }; [System.IO.Directory]::SetAccessControl($p,$a)`, { TARGET: target, VARIANT: variant })
