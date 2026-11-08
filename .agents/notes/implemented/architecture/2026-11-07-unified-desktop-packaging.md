@@ -111,6 +111,8 @@ Windows 11 使用现有工作流的独立手动模式。
 构建要求已有 Visual C++，不自动改装系统工具。
 服务会话不关闭 GUI 门槛，原生结果单独保留。
 Python 契约依赖放在执行器临时 venv 中。
+构建工具盘点先于 Python 下载，避免掩盖缺项。
+已有 Python 3.12 优先使用，缺失才请求下载。
 
 Windows 11 命令使用 CMD，不依赖 .ps1 启动。
 环境查询使用 Node action 与只读 PowerShell 命令。
