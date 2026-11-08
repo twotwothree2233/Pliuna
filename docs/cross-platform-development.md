@@ -482,6 +482,26 @@ Windows 的 SmartScreen 与升级路径也未验收。
 
 CI 工作流配置覆盖 A–E 基线及目录包冒烟。
 
+手动派发可选择 `windows11_only=true`。
+此模式只调度 `DESKTOP-SFE95TP`。
+原四平台 baseline 整组跳过，不执行其他版本。
+指定标签为 `self-hosted`、`Windows`、`X64`。
+
+测试前核对主机名、Windows 11 client 及 x64。
+主机不匹配时明确失败，不回退到其他执行器。
+构建需已有 Visual C++ 工具，不自动安装它。
+GUI 需交互桌面，服务会话保持失败和未验收。
+
+此模式复用文件、Job、生命周期和目录包入口。
+Node 与 Electron ABI 仍顺序切换。
+Windows 数据仍为 A 的新建隔离测试目录。
+默认用户目录、旧目录升级 B 和安装器仍未验收。
+
+环境 JSON 与源码、包内 GUI 输出分别保存。
+独立失败继续保留，不使用 continue-on-error。
+目录包只在执行器本地生成，不上传应用包。
+入口提交使用 `[skip ci]`，再单独手动派发。
+
 Windows 先执行 Job Object 最小原生探针。
 再执行文件、进程与两种 ABI 的验证。
 

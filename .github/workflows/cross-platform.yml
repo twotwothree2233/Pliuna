@@ -1,16 +1,23 @@
 name: Cross-platform baseline
+run-name: ${{ inputs.windows11_only && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
     branches: [main, ao/trellis-12/cross-platform-ci]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows11_only:
+        description: Only test Windows 11 on DESKTOP-SFE95TP
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   baseline:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows11_only) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -141,3 +148,155 @@ jobs:
           name: desktop-${{ matrix.os }}
           path: test-results/
           if-no-files-found: ignore
+
+  windows11:
+    name: Windows 11 x64 / DESKTOP-SFE95TP
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows11_only }}
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Require the designated Windows 11 x64 host
+        id: host
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $suffix = $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT
+          $env:TRELLIS_WIN11_EVIDENCE = Join-Path $env:RUNNER_TEMP ('trellis-win11-' + $suffix)
+          $packageOutput = Join-Path $env:RUNNER_TEMP ('trellis-win11-package-' + $suffix)
+          ('TRELLIS_WIN11_EVIDENCE=' + $env:TRELLIS_WIN11_EVIDENCE) | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          ('TRELLIS_DESKTOP_OUTPUT=' + $packageOutput) | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $os = Get-CimInstance Win32_OperatingSystem
+          $session = (Get-Process -Id $PID).SessionId
+          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+          $facts = [ordered]@{
+            runner = $env:RUNNER_NAME
+            caption = $os.Caption
+            version = $os.Version
+            build = [int]$os.BuildNumber
+            product_type = [int]$os.ProductType
+            architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            powershell = $PSVersionTable.PSVersion.ToString()
+            user_interactive = [Environment]::UserInteractive
+            session_id = $session
+            elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          }
+          New-Item -ItemType Directory -Path $env:TRELLIS_WIN11_EVIDENCE -Force | Out-Null
+          $json = $facts | ConvertTo-Json
+          $json | Set-Content (Join-Path $env:TRELLIS_WIN11_EVIDENCE 'host.json') -Encoding UTF8
+          Write-Output $json
+          if ($env:RUNNER_NAME -ne 'DESKTOP-SFE95TP') { throw 'UNEXPECTED_RUNNER' }
+          if ($facts.architecture -ne 'X64') { throw 'WINDOWS_X64_REQUIRED' }
+          if ($facts.product_type -ne 1 -or $facts.build -lt 22000 -or $facts.caption -notmatch 'Windows 11') {
+            throw 'WINDOWS_11_CLIENT_REQUIRED: no tests were started'
+          }
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check native build tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $git = Get-Command git -ErrorAction SilentlyContinue
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $visualStudio = if (Test-Path $vswhere) {
+            & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          } else { $null }
+          $tools = [ordered]@{ git = [bool]$git; visual_cpp = [bool]$visualStudio; node = (node --version); python = (python --version) }
+          $json = $tools | ConvertTo-Json
+          $json | Set-Content (Join-Path $env:TRELLIS_WIN11_EVIDENCE 'tools.json') -Encoding UTF8
+          Write-Output $json
+          if (!$git) { throw 'GIT_REQUIRED' }
+          if (!$visualStudio) { throw 'VISUAL_CPP_BUILD_TOOLS_REQUIRED' }
+      - name: Install pinned dependencies
+        id: install
+        run: pnpm install --frozen-lockfile --config.side-effects-cache=false
+      - name: Install isolated contract validation dependency
+        id: contracts
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP ('trellis-contracts-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $venv 'Scripts\python.exe') -m pip install -r scripts/requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          (Join-Path $venv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Windows 11 Job Object minimal acceptance (Node)
+        if: "!cancelled() && steps.install.outcome == 'success'"
+        run: pnpm verify:windows-job
+      - name: Build and check generated types
+        id: build
+        if: "!cancelled() && steps.install.outcome == 'success'"
+        run: pnpm build
+      - name: Check generated contract drift
+        if: "!cancelled() && steps.build.outcome == 'success'"
+        run: git diff --exit-code -- src/shared/contracts.generated.ts
+      - name: Validate contracts
+        if: "!cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success'"
+        run: pnpm verify:contracts
+      - name: Portable tests (Node ABI)
+        id: portable
+        if: "!cancelled() && steps.build.outcome == 'success'"
+        run: pnpm test:portable
+      - name: Windows 11 core process lifecycle (Node ABI)
+        if: "!cancelled() && steps.build.outcome == 'success'"
+        run: pnpm exec vitest run --config vitest.process.config.ts tests/unit/platform-process-tree.test.ts tests/unit/monty-lifecycle.test.ts
+      - name: Filesystem behavior (synthetic integrity, Node ABI)
+        if: "!cancelled() && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        run: pnpm exec vitest run --config vitest.files.config.ts
+      - name: Process trees and lifecycle (synthetic integrity, Node ABI)
+        if: "!cancelled() && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        run: pnpm exec vitest run --config vitest.process.config.ts
+      - name: Production payload and desktop platform checks
+        id: packaging_checks
+        if: "!cancelled() && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        run: pnpm test:packaging
+      - name: Probe installed Node bindings
+        id: node_native
+        if: "!cancelled() && steps.build.outcome == 'success'"
+        run: node scripts/check-native.mjs
+      - name: Probe installed Electron bindings and Job Object
+        id: electron_native
+        if: "!cancelled() && steps.node_native.outcome == 'success'"
+        run: pnpm verify:native:electron
+      - name: Process control with Electron runtime
+        if: "!cancelled() && steps.electron_native.outcome == 'success'"
+        run: node scripts/check-electron-process.mjs
+      - name: Require an interactive desktop for GUI acceptance
+        id: desktop
+        if: "!cancelled() && steps.electron_native.outcome == 'success'"
+        run: |
+          if (![Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) {
+            throw 'INTERACTIVE_DESKTOP_REQUIRED: GUI acceptance remains unverified'
+          }
+      - name: Windows 11 desktop startup and restart
+        if: "!cancelled() && steps.desktop.outcome == 'success'"
+        run: pnpm exec playwright test platform-smoke.spec.ts --output "$env:TRELLIS_WIN11_EVIDENCE/source-desktop"
+      - name: Build local directory package
+        id: directory_package
+        if: "!cancelled() && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success'"
+        run: node scripts/package-desktop.mjs --output "$env:TRELLIS_DESKTOP_OUTPUT" --format dir
+      - name: Probe packaged native modules, process trees and offline PDF
+        if: "!cancelled() && steps.directory_package.outcome == 'success'"
+        run: node scripts/check-desktop-runtime.mjs "$env:TRELLIS_DESKTOP_OUTPUT"
+      - name: Windows 11 packaged desktop startup and restart
+        if: "!cancelled() && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
+        env:
+          TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
+        run: pnpm exec playwright test platform-smoke.spec.ts --output "$env:TRELLIS_WIN11_EVIDENCE/packaged-desktop"
+      - name: Keep Windows 11 environment and desktop evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows11-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TRELLIS_WIN11_EVIDENCE }}
+          if-no-files-found: warn
