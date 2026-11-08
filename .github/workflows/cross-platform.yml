@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      windows11_acl_probe_only:
+        description: Only verify native ACL identity, permission semantics and Job containment before product activation
+        type: boolean
+        default: false
       windows11_only:
         description: Only test Windows 11 on DESKTOP-SFE95TP
         type: boolean
@@ -29,7 +33,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -162,8 +166,8 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
-    name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only) }}
+    name: ${{ inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -185,7 +189,7 @@ jobs:
             fs.mkdirSync(evidence, { recursive: true });
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
-            if (context.payload.inputs?.windows11_startup_probe_only === 'true' && context.payload.inputs?.windows11_process_package_only === 'true') throw Error('WINDOWS11_MODES_ARE_EXCLUSIVE');
+            if (['windows11_startup_probe_only', 'windows11_process_package_only', 'windows11_acl_probe_only'].filter(key => context.payload.inputs?.[key] === 'true').length > 1) throw Error('WINDOWS11_MODES_ARE_EXCLUSIVE');
             if (process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('UNEXPECTED_RUNNER');
             if (process.platform !== 'win32' || process.arch !== 'x64') throw Error('WINDOWS_X64_REQUIRED');
             // Read-only inline queries do not load a .ps1 file or change
@@ -251,6 +255,7 @@ jobs:
         run: pnpm rebuild electron --config.side-effects-cache=false
       - name: Install isolated contract validation dependency
         id: contracts
+        if: "!inputs.windows11_acl_probe_only"
         run: |
           python -m venv "%RUNNER_TEMP%\trellis-contracts-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%"
           if errorlevel 1 exit /b %errorlevel%
@@ -260,9 +265,19 @@ jobs:
       - name: Windows 11 Job Object minimal acceptance (Node)
         if: "!cancelled() && steps.install.outcome == 'success'"
         run: pnpm verify:windows-job
+      - name: Build native ACL technical validation assets
+        id: acl_build
+        if: "!cancelled() && inputs.windows11_acl_probe_only && steps.install.outcome == 'success'"
+        run: node scripts/build-windows-acl.mjs
+      - name: Native ACL identity and security semantics (Node)
+        if: "!cancelled() && inputs.windows11_acl_probe_only && steps.acl_build.outcome == 'success'"
+        run: node scripts/verify-windows-acl.mjs
+      - name: Native ACL identity and security semantics (Electron)
+        if: "!cancelled() && inputs.windows11_acl_probe_only && steps.acl_build.outcome == 'success'"
+        run: node -e "require('node:child_process').execFileSync(require('electron'), ['scripts/verify-windows-acl.mjs'], {env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},stdio:'inherit',windowsHide:true})"
       - name: Build and check generated types
         id: build
-        if: "!cancelled() && steps.install.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_acl_probe_only && steps.install.outcome == 'success'"
         run: pnpm build
       - name: Check generated contract drift
         if: "!cancelled() && steps.build.outcome == 'success'"
