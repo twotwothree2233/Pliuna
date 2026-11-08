@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -15,13 +15,17 @@ on:
         description: Install approved missing Git, Python 3.12 and VS2022 C++ tools on DESKTOP-SFE95TP
         type: boolean
         default: false
+      windows11_startup_probe_only:
+        description: Only diagnose isolated RuntimeStore startup on the designated Windows 11 host
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -154,8 +158,8 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
-    name: Windows 11 x64 / DESKTOP-SFE95TP
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools) }}
+    name: ${{ inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -217,6 +221,11 @@ jobs:
           TRELLIS_INSTALL_WINDOWS11_TOOLS: ${{ inputs.install_windows11_tools && '1' || '0' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/windows11-toolchain.cjs
+      - name: Read bounded Runner shutdown evidence
+        if: "!cancelled() && inputs.windows11_startup_probe_only && steps.tools.outcome == 'success'"
+        env:
+          TRELLIS_RUNNER_INCIDENT_UTC: '2026-11-08T11:14:28Z'
+        run: node scripts/windows11-runner-evidence.cjs
       - name: Save the generated contract source baseline
         run: node -e "require('node:fs').copyFileSync('src/shared/contracts.generated.ts', require('node:path').join(process.env.TRELLIS_WIN11_EVIDENCE, 'contracts.generated.before.ts'))"
       - name: Materialize pinned dependencies before native builds
@@ -256,54 +265,59 @@ jobs:
       - name: Validate contracts
         if: "!cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success'"
         run: pnpm verify:contracts
+      - name: Diagnose isolated Windows 11 file startup
+        env:
+          TRELLIS_WINDOWS11_STARTUP_PROBE: '1'
+        if: "!cancelled() && inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        run: pnpm exec vitest run --config vitest.windows11-probe.config.ts
       - name: Portable tests (Node ABI)
         id: portable
-        if: "!cancelled() && steps.build.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
         run: pnpm test:portable
       - name: Windows 11 core process lifecycle (Node ABI)
-        if: "!cancelled() && steps.build.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
         run: pnpm exec vitest run --config vitest.process.config.ts tests/unit/platform-process-tree.test.ts tests/unit/monty-lifecycle.test.ts
       - name: Filesystem behavior (synthetic integrity, Node ABI)
-        if: "!cancelled() && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
         run: pnpm exec vitest run --config vitest.files.config.ts
       - name: Process trees and lifecycle (synthetic integrity, Node ABI)
-        if: "!cancelled() && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
         run: pnpm exec vitest run --config vitest.process.config.ts
       - name: Production payload and desktop platform checks
         id: packaging_checks
-        if: "!cancelled() && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
         run: pnpm test:packaging
       - name: Probe installed Node bindings
         id: node_native
-        if: "!cancelled() && steps.build.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
         run: node scripts/check-native.mjs
       - name: Probe installed Electron bindings and Job Object
         id: electron_native
-        if: "!cancelled() && steps.node_native.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.node_native.outcome == 'success'"
         run: pnpm verify:native:electron
       - name: Process control with Electron runtime
-        if: "!cancelled() && steps.electron_native.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
         run: node scripts/check-electron-process.mjs
       - name: Require an interactive desktop for GUI acceptance
         id: desktop
-        if: "!cancelled() && steps.electron_native.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
         run: |
           if not "%TRELLIS_WIN11_DESKTOP%"=="true" (
             echo INTERACTIVE_DESKTOP_REQUIRED: GUI acceptance remains unverified
             exit /b 1
           )
       - name: Windows 11 desktop startup and restart
-        if: "!cancelled() && steps.desktop.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.desktop.outcome == 'success'"
         run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/source-desktop"
       - name: Build local directory package
         id: directory_package
-        if: "!cancelled() && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success'"
         run: node scripts/package-desktop.mjs --output "%TRELLIS_DESKTOP_OUTPUT%" --format dir
       - name: Probe packaged native modules, process trees and offline PDF
-        if: "!cancelled() && steps.directory_package.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success'"
         run: node scripts/check-desktop-runtime.mjs "%TRELLIS_DESKTOP_OUTPUT%"
       - name: Windows 11 packaged desktop startup and restart
-        if: "!cancelled() && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
         env:
           TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
         run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/packaged-desktop"
