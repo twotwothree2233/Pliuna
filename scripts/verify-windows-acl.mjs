@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -46,9 +47,17 @@ async function until(check) {
 function call(path, kind = 'file', hidden = false, operation = 'protect', identity, executable = probe) {
   const jobName = name(), job = binding.create(jobName)
   try {
+    const deadline = performance.now() + 15000
     const output = execFileSync(executable, args(operation, jobName, path, kind, hidden, identity),
       { env, encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 16384 })
-    assert.equal(binding.active(job), 0)
+    let waiting
+    while (binding.active(job) !== 0) {
+      const remaining = deadline - performance.now()
+      assert.ok(remaining > 0, 'ACL probe did not confirm an empty Job within the original deadline')
+      waiting ??= new Int32Array(new SharedArrayBuffer(4))
+      Atomics.wait(waiting, 0, 0, Math.min(5, remaining))
+    }
+    assert.ok(performance.now() <= deadline, 'ACL probe exceeded its original deadline')
     return JSON.parse(output)
   } finally { binding.close(job) }
 }

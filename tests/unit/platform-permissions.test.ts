@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import { afterEach,expect,it,vi } from 'vitest'
 import { flushFileSync } from '../../src/platform/files'
 import { protectPrivatePath } from '../../src/platform/permissions'
@@ -48,6 +49,13 @@ it('accepts a verified native result without launching PowerShell', () => {
 it('does not retry an uncertain native operation with PowerShell', () => {
   const { file } = windowsFile()
   vi.mocked(protectWindowsPath).mockImplementationOnce(() => { throw Error('unknown native result') })
+  try { expect(() => protectPrivatePath(file, 'file')).toThrow('FILE_PERMISSIONS_UNAVAILABLE') }
+  finally { vi.unstubAllGlobals() }
+  expect(execFileSync).not.toHaveBeenCalled()
+})
+it('does not grant a fresh deadline to an unsupported-backend fallback', () => {
+  const { file } = windowsFile()
+  vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(15001)
   try { expect(() => protectPrivatePath(file, 'file')).toThrow('FILE_PERMISSIONS_UNAVAILABLE') }
   finally { vi.unstubAllGlobals() }
   expect(execFileSync).not.toHaveBeenCalled()

@@ -30,13 +30,43 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
-import {join,dirname} from 'node:path';
-import {readFileSync} from 'node:fs';
+import {join,dirname,win32} from 'node:path';
+import {readFileSync,writeFileSync,lstatSync} from 'node:fs';
 import {Worker} from 'node:worker_threads';
 const root=process.argv[2], require=createRequire(join(root,'package.json'));
 const Database=require('better-sqlite3'), db=new Database('probe.sqlite');
 db.exec('create table probe(value text)'); db.prepare('insert into probe values (?)').run('包内运行');
 assert.equal(db.prepare('select value from probe').get().value,'包内运行');db.close();
+let privateAcl=false;
+if(process.platform==='win32') {
+  const {execFileSync}=await import('node:child_process'),{randomUUID}=await import('node:crypto');
+  const {performance}=await import('node:perf_hooks');
+  const jobs=require(join(root,'out/main/native/trellis_job.node'));
+  const helper=join(root,'out/main/native/trellis_acl.exe'),file=join(process.cwd(),'private-acl.txt');
+  writeFileSync(file,'package ACL fixture');
+  const identity=lstatSync(file,{bigint:true});
+  let protectedTime;
+  for(let repeat=0;repeat<2;repeat++) {
+    const name='Local\\\\Trellis-'+randomUUID(),owner=jobs.create(name);
+    try {
+      const deadline=performance.now()+15000;
+      const result=JSON.parse(execFileSync(helper,['protect',name,win32.toNamespacedPath(file),String(identity.dev),String(identity.ino),'file','0'],
+        {env:process.env,encoding:'utf8',windowsHide:true,timeout:15000,maxBuffer:4096}));
+      assert.deepEqual(result,{version:1,backend:'native',verified:true,changed:repeat===0});
+      let waiting;
+      while(jobs.active(owner)!==0) {
+        const remaining=deadline-performance.now();assert.ok(remaining>0,'Packaged ACL Job exit unconfirmed');
+        waiting??=new Int32Array(new SharedArrayBuffer(4));Atomics.wait(waiting,0,0,Math.min(5,remaining));
+      }
+      assert.ok(performance.now()<=deadline,'Packaged ACL probe exceeded its deadline');
+    } finally {try {jobs.terminate(owner)} finally {jobs.close(owner)}}
+    const actual=lstatSync(file,{bigint:true});
+    assert.equal(actual.dev,identity.dev);assert.equal(actual.ino,identity.ino);
+    if(repeat===0)protectedTime=actual.ctimeNs;
+    else assert.equal(actual.ctimeNs,protectedTime);
+  }
+  privateAcl=true;
+}
 const native=require(join(root,'node_modules',${JSON.stringify(target.package)},${JSON.stringify(target.native)}));
 assert.equal(typeof native.NativePool,'function');
 const {startProcessTree,processEnvironment,PluginRpc}=await import(pathToFileURL(join(root,'out/main/process-control.js')));
@@ -65,7 +95,7 @@ try {
   const parsed=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.once('exit',code=>{if(code!==0)reject(Error('PDF worker exited: '+code))})});
   assert.equal(parsed.ok,true);assert.equal(parsed.page_count,1);assert.ok(parsed.text.includes('Trellis offline package'));
 } finally {await worker.terminate();}
-console.log(JSON.stringify({sqlite:true,montyBinding:true,appNodeRpc:true,descendantsReaped:true,pdfBackend:true,offlinePdf:true,platform:process.platform,arch:process.arch,electron:process.versions.electron}));
+console.log(JSON.stringify({sqlite:true,montyBinding:true,appNodeRpc:true,descendantsReaped:true,pdfBackend:true,offlinePdf:true,...(privateAcl?{privateAcl:true}:{}),platform:process.platform,arch:process.arch,electron:process.versions.electron}));
 `)
   const env = { ELECTRON_RUN_AS_NODE: '1', PATH: '' }
   for (const name of ['SystemRoot', 'WINDIR', 'TMPDIR', 'TEMP', 'TMP']) if (process.env[name]) env[name] = process.env[name]

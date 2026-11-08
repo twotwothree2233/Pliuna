@@ -1,5 +1,27 @@
-import { afterEach,vi } from 'vitest'
+import { afterEach,expect,vi } from 'vitest'
 import { setTimeout as yieldNativeReports } from 'node:timers/promises'
+import { performance as nativeClock } from 'node:perf_hooks'
+const aclConfirmation = vi.hoisted(() => ({ failures: [] as string[] }))
+
+vi.mock('../../src/platform/process-tree', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/platform/process-tree')>()
+  return { ...original, createWindowsJob() {
+    const owner = original.createWindowsJob()
+    if (process.env.TRELLIS_WINDOWS11_ACL_DIAGNOSTICS !== '1') return owner
+    let firstPending: number | undefined, firstActive: number | undefined
+    const binding = Object.create(owner.binding) as typeof owner.binding
+    Object.defineProperty(binding, 'active', { value: (job: object) => {
+      const active = owner.binding.active(job)
+      if (active > 0 && firstPending === undefined) { firstPending = nativeClock.now(); firstActive = active }
+      if (active === 0 && firstPending !== undefined) {
+        console.log('WINDOWS_ACL_JOB_DRAINED ' + JSON.stringify({ first_active: firstActive, confirmed_active: 0, elapsed_ms: nativeClock.now() - firstPending }))
+        firstPending = undefined
+      }
+      return active
+    } })
+    return { ...owner, binding }
+  } }
+})
 
 // Observe the real native adapter before its error is intentionally collapsed
 // by permission/control boundaries. No path, environment or command is logged.
@@ -11,7 +33,11 @@ vi.mock('../../src/platform/windows-acl', async importOriginal => {
       if (process.platform === 'win32' && process.env.TRELLIS_WINDOWS11_ACL_DIAGNOSTICS === '1') {
         const value = error as { code?: string; name?: string; stderr?: Buffer; cause?: Error }
         const native = value.stderr?.toString().match(/FILE_PERMISSIONS_UNAVAILABLE:([a-z-]+):([0-9]+)/)
-        const cause = value.cause?.message.match(/^WINDOWS_ACL_[A-Z_]+$/)?.[0]
+        const cause = value.cause?.message?.match(/^WINDOWS_ACL_[A-Z_]+$/)?.[0]
+        if (cause === 'WINDOWS_ACL_JOB_NOT_EMPTY' || cause === 'WINDOWS_ACL_DEADLINE' ||
+            value.code === 'ETIMEDOUT' || value.code?.startsWith('PROCESS_JOB_') || native?.[1]?.startsWith('job-')) {
+          aclConfirmation.failures.push(cause ?? value.code ?? native![1]!)
+        }
         console.error('WINDOWS_ACL_FAILURE ' + JSON.stringify({ kind: args[1], code: value.code ?? value.name,
           ...(native ? { stage: native[1], win32: native[2] } : {}), ...(cause ? { cause } : {}) }))
       }
@@ -24,7 +50,15 @@ vi.mock('../../src/platform/windows-acl', async importOriginal => {
 if (process.platform === 'win32') {
   process.env.TRELLIS_TEST_FILE_IDENTITIES = 'decimal-v2'
   // Synchronous native ACL calls otherwise starve Vitest's queued worker RPCs.
-  afterEach(() => yieldNativeReports(0))
+  afterEach(async () => {
+    const failures = aclConfirmation.failures.splice(0)
+    await yieldNativeReports(0)
+    // Dedicated negative unit fixtures deliberately supply fake query/deadline
+    // failures. Every real integration must surface them even if a manager has
+    // collapsed the error into an inspection/disabled status.
+    const path = expect.getState().testPath?.replaceAll('\\', '/') ?? ''
+    if (!/\/(windows-acl|platform-permissions)\.test\.ts$/.test(path)) expect(failures).toEqual([])
+  })
 }
 
 // These suites exercise real files and SQLite, with a digest test double.

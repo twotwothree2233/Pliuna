@@ -2,6 +2,7 @@ import { fileLstatSync,fileFstatSync } from './files'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import { win32 } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { assertDirectorySync,openRegularFileSync,regularFile,sameFileIdentity } from './files'
 import { absoluteFilePath } from './paths'
 import { protectWindowsPath } from './windows-acl'
@@ -70,12 +71,17 @@ export function protectPrivatePath(file: string, kind: 'file' | 'directory', hid
   const systemRoot = process.env.SystemRoot
   if (!systemRoot) throw Error('FILE_PERMISSIONS_UNAVAILABLE')
   const powershell = win32.join(absoluteFilePath(systemRoot, 'win32'), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const deadline = performance.now() + 15000
   try {
-    if (protectWindowsPath(file, kind, hidden, before) === 'legacy') execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsPrivateAcl, 'utf16le').toString('base64')], {
-      windowsHide: true, timeout: 15000, stdio: 'pipe',
-      env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP,
-        TRELLIS_PRIVATE_PATH: win32.toNamespacedPath(file), TRELLIS_PRIVATE_KIND: kind, TRELLIS_PRIVATE_HIDDEN: hidden ? '1' : '0' }
-    })
+    if (protectWindowsPath(file, kind, hidden, before, deadline) === 'legacy') {
+      const remaining = Math.ceil(deadline - performance.now())
+      if (remaining <= 0) throw Error('FILE_PERMISSIONS_UNAVAILABLE')
+      execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsPrivateAcl, 'utf16le').toString('base64')], {
+        windowsHide: true, timeout: remaining, stdio: 'pipe',
+        env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP,
+          TRELLIS_PRIVATE_PATH: win32.toNamespacedPath(file), TRELLIS_PRIVATE_KIND: kind, TRELLIS_PRIVATE_HIDDEN: hidden ? '1' : '0' }
+      })
+    }
     const after = fileLstatSync(file)
     if (!sameFileIdentity(before, after) || after.isSymbolicLink()) throw Error()
   } catch { throw Error('FILE_PERMISSIONS_UNAVAILABLE') }
