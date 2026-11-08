@@ -112,6 +112,11 @@ Windows 11 使用现有工作流的独立手动模式。
 服务会话不关闭 GUI 门槛，原生结果单独保留。
 Python 契约依赖放在执行器临时 venv 中。
 
+Windows 11 命令使用 CMD，不依赖 .ps1 启动。
+环境查询使用 Node action 与只读 PowerShell 命令。
+主机的 Restricted 执行策略保持原样。
+不使用 Set-ExecutionPolicy 或 Bypass 参数。
+
 源码与包内 GUI 使用不同输出目录。
 环境和失败证据上传，不上传应用目录包。
 入口提交带 [skip ci]，只手动派发 Windows 11。

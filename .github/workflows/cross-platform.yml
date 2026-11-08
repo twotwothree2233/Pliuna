@@ -156,43 +156,49 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        shell: powershell
+        shell: cmd
     env:
       PYTHONUTF8: '1'
     steps:
       - name: Require the designated Windows 11 x64 host
         id: host
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $suffix = $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT
-          $env:TRELLIS_WIN11_EVIDENCE = Join-Path $env:RUNNER_TEMP ('trellis-win11-' + $suffix)
-          $packageOutput = Join-Path $env:RUNNER_TEMP ('trellis-win11-package-' + $suffix)
-          ('TRELLIS_WIN11_EVIDENCE=' + $env:TRELLIS_WIN11_EVIDENCE) | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          ('TRELLIS_DESKTOP_OUTPUT=' + $packageOutput) | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          $os = Get-CimInstance Win32_OperatingSystem
-          $session = (Get-Process -Id $PID).SessionId
-          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-          $facts = [ordered]@{
-            runner = $env:RUNNER_NAME
-            caption = $os.Caption
-            version = $os.Version
-            build = [int]$os.BuildNumber
-            product_type = [int]$os.ProductType
-            architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-            powershell = $PSVersionTable.PSVersion.ToString()
-            user_interactive = [Environment]::UserInteractive
-            session_id = $session
-            elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          }
-          New-Item -ItemType Directory -Path $env:TRELLIS_WIN11_EVIDENCE -Force | Out-Null
-          $json = $facts | ConvertTo-Json
-          $json | Set-Content (Join-Path $env:TRELLIS_WIN11_EVIDENCE 'host.json') -Encoding UTF8
-          Write-Output $json
-          if ($env:RUNNER_NAME -ne 'DESKTOP-SFE95TP') { throw 'UNEXPECTED_RUNNER' }
-          if ($facts.architecture -ne 'X64') { throw 'WINDOWS_X64_REQUIRED' }
-          if ($facts.product_type -ne 1 -or $facts.build -lt 22000 -or $facts.caption -notmatch 'Windows 11') {
-            throw 'WINDOWS_11_CLIENT_REQUIRED: no tests were started'
-          }
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { execFileSync } = require('node:child_process');
+            const suffix = process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT;
+            const evidence = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + suffix);
+            fs.mkdirSync(evidence, { recursive: true });
+            core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
+            core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
+            if (process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('UNEXPECTED_RUNNER');
+            if (process.platform !== 'win32' || process.arch !== 'x64') throw Error('WINDOWS_X64_REQUIRED');
+            // Inline read-only commands work under Restricted policy; no .ps1
+            // file or ExecutionPolicy override is used by this job.
+            const command = `
+              $ErrorActionPreference = 'Stop';
+              [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false;
+              $os = Get-CimInstance Win32_OperatingSystem;
+              $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent());
+              [ordered]@{
+                caption = $os.Caption; version = $os.Version;
+                build = [int]$os.BuildNumber; product_type = [int]$os.ProductType;
+                architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();
+                powershell = $PSVersionTable.PSVersion.ToString();
+                user_interactive = [Environment]::UserInteractive;
+                session_id = (Get-Process -Id $PID).SessionId;
+                elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+              } | ConvertTo-Json -Compress
+            `;
+            const facts = { runner: process.env.RUNNER_NAME, ...JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' }).replace(/^\uFEFF/, '')) };
+            fs.writeFileSync(path.join(evidence, 'host.json'), JSON.stringify(facts, null, 2) + '\n');
+            console.log(JSON.stringify(facts));
+            if (facts.product_type !== 1 || facts.build < 22000 || !facts.caption.includes('Windows 11') || facts.architecture !== 'X64') {
+              throw Error('WINDOWS_11_CLIENT_REQUIRED: no tests were started');
+            }
+            core.exportVariable('TRELLIS_WIN11_DESKTOP', String(facts.user_interactive && facts.session_id > 0));
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
@@ -205,31 +211,31 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check native build tools
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $git = Get-Command git -ErrorAction SilentlyContinue
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $visualStudio = if (Test-Path $vswhere) {
-            & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          } else { $null }
-          $tools = [ordered]@{ git = [bool]$git; visual_cpp = [bool]$visualStudio; node = (node --version); python = (python --version) }
-          $json = $tools | ConvertTo-Json
-          $json | Set-Content (Join-Path $env:TRELLIS_WIN11_EVIDENCE 'tools.json') -Encoding UTF8
-          Write-Output $json
-          if (!$git) { throw 'GIT_REQUIRED' }
-          if (!$visualStudio) { throw 'VISUAL_CPP_BUILD_TOOLS_REQUIRED' }
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { execFileSync } = require('node:child_process');
+            const capture = (file, args) => { try { return execFileSync(file, args, { encoding: 'utf8' }).trim(); } catch { return ''; } };
+            const vswhere = path.join(process.env['ProgramFiles(x86)'], 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+            const visualStudio = fs.existsSync(vswhere) ? capture(vswhere, ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath']) : '';
+            const tools = { git: Boolean(capture('git', ['--version'])), visual_cpp: Boolean(visualStudio), node: capture('node', ['--version']), python: capture('python', ['--version']) };
+            fs.writeFileSync(path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'tools.json'), JSON.stringify(tools, null, 2) + '\n');
+            console.log(JSON.stringify(tools));
+            if (!tools.git) throw Error('GIT_REQUIRED');
+            if (!tools.visual_cpp) throw Error('VISUAL_CPP_BUILD_TOOLS_REQUIRED');
       - name: Install pinned dependencies
         id: install
         run: pnpm install --frozen-lockfile --config.side-effects-cache=false
       - name: Install isolated contract validation dependency
         id: contracts
         run: |
-          $venv = Join-Path $env:RUNNER_TEMP ('trellis-contracts-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
-          python -m venv $venv
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $venv 'Scripts\python.exe') -m pip install -r scripts/requirements-dev.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          (Join-Path $venv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          python -m venv "%RUNNER_TEMP%\trellis-contracts-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%"
+          if errorlevel 1 exit /b %errorlevel%
+          "%RUNNER_TEMP%\trellis-contracts-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\Scripts\python.exe" -m pip install -r scripts/requirements-dev.txt
+          if errorlevel 1 exit /b %errorlevel%
+          echo %RUNNER_TEMP%\trellis-contracts-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\Scripts>>"%GITHUB_PATH%"
       - name: Windows 11 Job Object minimal acceptance (Node)
         if: "!cancelled() && steps.install.outcome == 'success'"
         run: pnpm verify:windows-job
@@ -275,28 +281,29 @@ jobs:
         id: desktop
         if: "!cancelled() && steps.electron_native.outcome == 'success'"
         run: |
-          if (![Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) {
-            throw 'INTERACTIVE_DESKTOP_REQUIRED: GUI acceptance remains unverified'
-          }
+          if not "%TRELLIS_WIN11_DESKTOP%"=="true" (
+            echo INTERACTIVE_DESKTOP_REQUIRED: GUI acceptance remains unverified
+            exit /b 1
+          )
       - name: Windows 11 desktop startup and restart
         if: "!cancelled() && steps.desktop.outcome == 'success'"
-        run: pnpm exec playwright test platform-smoke.spec.ts --output "$env:TRELLIS_WIN11_EVIDENCE/source-desktop"
+        run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/source-desktop"
       - name: Build local directory package
         id: directory_package
         if: "!cancelled() && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success'"
-        run: node scripts/package-desktop.mjs --output "$env:TRELLIS_DESKTOP_OUTPUT" --format dir
+        run: node scripts/package-desktop.mjs --output "%TRELLIS_DESKTOP_OUTPUT%" --format dir
       - name: Probe packaged native modules, process trees and offline PDF
         if: "!cancelled() && steps.directory_package.outcome == 'success'"
-        run: node scripts/check-desktop-runtime.mjs "$env:TRELLIS_DESKTOP_OUTPUT"
+        run: node scripts/check-desktop-runtime.mjs "%TRELLIS_DESKTOP_OUTPUT%"
       - name: Windows 11 packaged desktop startup and restart
         if: "!cancelled() && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
         env:
           TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
-        run: pnpm exec playwright test platform-smoke.spec.ts --output "$env:TRELLIS_WIN11_EVIDENCE/packaged-desktop"
+        run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/packaged-desktop"
       - name: Keep Windows 11 environment and desktop evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows11-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.TRELLIS_WIN11_EVIDENCE }}
+          path: ${{ runner.temp }}/trellis-win11-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
