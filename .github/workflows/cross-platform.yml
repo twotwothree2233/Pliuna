@@ -225,10 +225,16 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts --config.side-effects-cache=false
       - name: Select the lockfile native build toolchain
         run: node scripts/windows11-dependencies.cjs
+      - name: Build pinned Node dependencies
+        run: pnpm rebuild better-sqlite3 esbuild --config.side-effects-cache=false
+      - name: Cache the official Electron distribution through GitHub API
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/windows11-electron.cjs
       - name: Install pinned dependencies
         id: install
-        # Run every allowed dependency lifecycle, with no cached build effects.
-        run: pnpm rebuild better-sqlite3 electron esbuild --config.side-effects-cache=false
+        # The unmodified installer still validates and extracts its distribution.
+        run: pnpm rebuild electron --config.side-effects-cache=false
       - name: Install isolated contract validation dependency
         id: contracts
         run: |
