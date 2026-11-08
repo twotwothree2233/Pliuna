@@ -219,9 +219,16 @@ jobs:
         run: node scripts/windows11-toolchain.cjs
       - name: Save the generated contract source baseline
         run: node -e "require('node:fs').copyFileSync('src/shared/contracts.generated.ts', require('node:path').join(process.env.TRELLIS_WIN11_EVIDENCE, 'contracts.generated.before.ts'))"
+      - name: Materialize pinned dependencies before native builds
+        # Resolve the lockfile's node-gyp before any dependency lifecycle runs.
+        # pnpm 10.20.0 bundles tar 7.5.1; the lockfile pins tar 7.5.22.
+        run: pnpm install --frozen-lockfile --ignore-scripts --config.side-effects-cache=false
+      - name: Select the lockfile native build toolchain
+        run: node scripts/windows11-dependencies.cjs
       - name: Install pinned dependencies
         id: install
-        run: pnpm install --frozen-lockfile --config.side-effects-cache=false
+        # Run every allowed dependency lifecycle, with no cached build effects.
+        run: pnpm rebuild better-sqlite3 electron esbuild --config.side-effects-cache=false
       - name: Install isolated contract validation dependency
         id: contracts
         run: |

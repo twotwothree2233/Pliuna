@@ -503,6 +503,16 @@ GUI 需交互桌面，服务会话保持失败和未验收。
 归档检出时，保存生成文件原始副本供构建后比较。
 只统一 CRLF，其他生成差异仍导致失败。
 
+Windows 11 先按锁文件安装，暂不执行依赖脚本。
+再选用 `@electron/rebuild` 引用的固定 node-gyp。
+当前版本为 11.5.0，tar 由项目锁定为 7.5.22。
+显式重建 better-sqlite3、Electron 和 esbuild。
+
+此处避免使用 pnpm 发行包内置的 tar 7.5.1。
+第五轮在其 Node 头文件解包处出现 ENOENT。
+两者的原生结果需以指定 Windows 11 运行核对。
+不修改依赖源码，版本及入口保存到环境附件。
+
 此模式复用文件、Job、生命周期和目录包入口。
 Node 与 Electron ABI 仍顺序切换。
 Windows 数据仍为 A 的新建隔离测试目录。
