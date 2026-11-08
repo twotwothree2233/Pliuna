@@ -28,7 +28,7 @@ function installedFile(candidates: URL[], code: string): string {
 function supervisorFile(): string {
   return installedFile([new URL('./process-supervisor.mjs', moduleURL), new URL('../process-supervisor.mjs', moduleURL)], 'PROCESS_SUPERVISOR_UNAVAILABLE')
 }
-function windowsJob(): { binding: JobBinding; file: string; job: object; name: string } {
+export function createWindowsJob(): { binding: JobBinding; file: string; job: object; name: string } {
   const file = installedFile([
     new URL('./native/trellis_job.node', moduleURL), new URL('../native/trellis_job.node', moduleURL),
     new URL('../../out/main/native/trellis_job.node', moduleURL)
@@ -52,7 +52,7 @@ export function startProcessTree(spec: ProcessSpec, options: {
   message?(value: unknown): void
   failed?(code: string): void
 }): ManagedProcessTree {
-  const supervisor = supervisorFile(), job = process.platform === 'win32' ? windowsJob() : undefined
+  const supervisor = supervisorFile(), job = process.platform === 'win32' ? createWindowsJob() : undefined
   let child: ChildProcess
   try {
     child = fork(supervisor, [], { execPath: options.runtime, execArgv: [], serialization: 'advanced', detached: process.platform !== 'win32', ...{ windowsHide: true },

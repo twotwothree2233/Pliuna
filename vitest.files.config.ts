@@ -7,7 +7,7 @@ export default defineConfig({ test: {
   include: [
     'tests/unit/file-identity.test.ts', 'tests/unit/file-format.test.ts', 'tests/unit/export-control.test.ts',
     'tests/unit/platform-paths.test.ts', 'tests/unit/platform-files.test.ts',
-    'tests/unit/platform-permissions.test.ts', 'tests/unit/platform-persistence.test.ts',
+    'tests/unit/platform-permissions.test.ts', 'tests/unit/windows-acl.test.ts', 'tests/unit/platform-persistence.test.ts',
     'tests/unit/file-model-store.test.ts', 'tests/unit/secure-model-store.test.ts',
     'tests/unit/export-save.test.ts', 'tests/unit/resources.test.ts',
     'tests/unit/storage-lifecycle.test.ts', 'tests/unit/recovery.test.ts',

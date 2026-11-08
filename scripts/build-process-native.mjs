@@ -21,4 +21,5 @@ if (process.platform === 'win32') {
     copyFileSync(join(directory, 'build/Release/trellis_job.node'), join(destination, 'trellis_job.node'))
     console.log('Windows Job Object N-API helper built')
   } finally { rmSync(directory, { recursive: true, force: true }) }
+  await import('./build-windows-acl.mjs')
 } else console.log('Windows Job Object helper: not required on ' + process.platform)

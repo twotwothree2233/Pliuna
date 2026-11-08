@@ -3,8 +3,10 @@ import fs from 'node:fs'
 import { afterEach,expect,it,vi } from 'vitest'
 import { flushFileSync } from '../../src/platform/files'
 import { protectPrivatePath } from '../../src/platform/permissions'
+import { protectWindowsPath } from '../../src/platform/windows-acl'
 
 vi.mock('node:child_process', async importOriginal => ({ ...await importOriginal<typeof import('node:child_process')>(), execFileSync: vi.fn() }))
+vi.mock('../../src/platform/windows-acl', () => ({ protectWindowsPath: vi.fn(() => 'legacy') }))
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
 function windowsFile() {
@@ -36,6 +38,19 @@ it('fails closed when the Windows ACL operation fails', () => {
   let failure: unknown
   try { protectPrivatePath(file, 'file') } catch (e) { failure = e } finally { vi.unstubAllGlobals() }
   expect(failure).toMatchObject({ message: 'FILE_PERMISSIONS_UNAVAILABLE' })
+})
+it('accepts a verified native result without launching PowerShell', () => {
+  const { file } = windowsFile()
+  vi.mocked(protectWindowsPath).mockReturnValueOnce('verified')
+  try { protectPrivatePath(file, 'file') } finally { vi.unstubAllGlobals() }
+  expect(execFileSync).not.toHaveBeenCalled()
+})
+it('does not retry an uncertain native operation with PowerShell', () => {
+  const { file } = windowsFile()
+  vi.mocked(protectWindowsPath).mockImplementationOnce(() => { throw Error('unknown native result') })
+  try { expect(() => protectPrivatePath(file, 'file')).toThrow('FILE_PERMISSIONS_UNAVAILABLE') }
+  finally { vi.unstubAllGlobals() }
+  expect(execFileSync).not.toHaveBeenCalled()
 })
 it('uses a writable handle for Windows FlushFileBuffers', () => {
   const parent = fs.statSync(new URL('.', import.meta.url)), parentExact = fs.statSync(new URL('.', import.meta.url), { bigint: true }), { stat, exact, file } = windowsFile()

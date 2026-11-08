@@ -9,6 +9,16 @@ const json = file => JSON.parse(readFileSync(file, 'utf8'))
 function regular(file) {
   if (!lstatSync(file).isFile()) throw Error('Expected regular payload file: ' + file)
 }
+function windowsAclExecutable(file, target) {
+  regular(file)
+  const body = readFileSync(file)
+  const invalid = () => { throw Error('Invalid Windows ACL executable') }
+  if (body.length < 64 || body.readUInt16LE(0) !== 0x5a4d) invalid()
+  const pe = body.readUInt32LE(0x3c)
+  if (pe > body.length - 26 || body.toString('ascii', pe, pe + 4) !== 'PE\0\0' ||
+      body.readUInt16LE(pe + 4) !== ({ x64: 0x8664, arm64: 0xaa64 })[target.arch] ||
+      (body.readUInt16LE(pe + 22) & 0x2000) || body.readUInt16LE(pe + 24) !== 0x20b) invalid()
+}
 
 // The stage contains only the build output, the resolved production closure,
 // and this explicit offline reference plugin. Never copy the workspace root.
@@ -58,6 +68,7 @@ export function verifyDesktopPayload(app, target, plugin) {
     for (const name of readdirSync(folder)) {
       const file = join(folder, name), path = relative(root, file).split(sep).join('/'), stat = lstatSync(file)
       if (privateEntry.test(path)) throw Error('Private payload rejected: ' + path)
+      if (name === 'trellis_acl_probe.exe') throw Error('Diagnostic ACL helper rejected from payload')
       if (stat.isSymbolicLink()) throw Error('Payload symlink rejected: ' + path)
       if (stat.isDirectory()) visit(file, root)
       else if (stat.isFile()) files++
@@ -68,7 +79,10 @@ export function verifyDesktopPayload(app, target, plugin) {
   const pkg = json(join(app, 'package.json'))
   if (pkg.main !== 'out/main/index.js' || pkg.devDependencies || pkg.scripts) throw Error('Unexpected packaged manifest')
   for (const file of [...mainEntries.map(name => 'out/main/' + name), 'out/preload/index.cjs', 'out/renderer/index.html', 'node_modules/better-sqlite3/build/Release/better_sqlite3.node']) regular(join(app, file))
-  if (target.platform === 'win32') regular(join(app, 'out/main/native/trellis_job.node'))
+  if (target.platform === 'win32') {
+    regular(join(app, 'out/main/native/trellis_job.node'))
+    windowsAclExecutable(join(app, 'out/main/native/trellis_acl.exe'), target)
+  }
   else if ((lstatSync(join(app, 'node_modules', target.package, target.binary)).mode & 0o111) === 0) throw Error('Native binary is not executable')
   for (const file of [target.binary, target.native]) regular(join(app, 'node_modules', target.package, file))
   for (const candidate of nativeTargets.targets) {

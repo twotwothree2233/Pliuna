@@ -32,6 +32,10 @@ function fixture() {
   }
   for (const entry of mainEntries) put(root, 'out/main/' + entry)
   for (const file of ['out/main/native/trellis_job.node', 'out/preload/index.cjs', 'out/renderer/index.html', 'node_modules/better-sqlite3/LICENSE', 'node_modules/better-sqlite3/lib/index.js', 'node_modules/better-sqlite3/build/Release/better_sqlite3.node']) put(root, file)
+  const executable = Buffer.alloc(512)
+  executable.writeUInt16LE(0x5a4d, 0); executable.writeUInt32LE(0x80, 0x3c)
+  executable.write('PE\0\0', 0x80); executable.writeUInt16LE(0x8664, 0x84); executable.writeUInt16LE(0x20b, 0x98)
+  writeFileSync(put(root, 'out/main/native/trellis_acl.exe'), executable)
   for (const file of ['manifest.json', 'backend.mjs', 'parser-worker.mjs', 'network-guard.mjs', 'extract.json', 'vendor/legacy/build/pdf.mjs', 'vendor/legacy/build/pdf.worker.mjs', 'vendor/cmaps/LICENSE', 'vendor/standard_fonts/LiberationSans-Regular.ttf']) put(root, 'reference-plugins/pdf-text/' + file)
   put(root, 'reference-plugins/pdf-text/vendor-source.json', JSON.stringify({ files: [{ path: 'vendor/cmaps/LICENSE' }] }))
   const stage = join(root, 'stage'); mkdirSync(stage)
@@ -59,12 +63,23 @@ it('rejects source symlinks even when they point to existing workspace files', (
   const target = put(root, 'secret.txt'); symlinkSync(target, join(root, 'out', 'escape.txt'))
   expect(() => stageDesktop(root, stage, nativeTargets.targets[0])).toThrow('symlink')
 })
-it('rejects missing workers and Windows Job helper', () => {
-  for (const file of ['out/main/runtime.js', 'out/main/process-supervisor.mjs', 'out/main/native/trellis_job.node']) {
+it('rejects missing workers and Windows native helpers', () => {
+  for (const file of ['out/main/runtime.js', 'out/main/process-supervisor.mjs', 'out/main/native/trellis_job.node', 'out/main/native/trellis_acl.exe']) {
     const { root, stage } = fixture(); rmSync(join(root, file))
     const target = nativeTargets.targets.find(t => t.platform === 'win32')!
     expect(() => stageDesktop(root, stage, target)).toThrow()
   }
+})
+it('rejects an ACL helper built for another architecture', () => {
+  const { root, stage } = fixture(), target = nativeTargets.targets.find(t => t.platform === 'win32')!
+  const file = join(root, 'out/main/native/trellis_acl.exe'), body = readFileSync(file)
+  body.writeUInt16LE(0x014c, 0x84); writeFileSync(file, body)
+  expect(() => stageDesktop(root, stage, target)).toThrow('Invalid Windows ACL executable')
+})
+it('rejects diagnostic ACL executables in the production payload', () => {
+  const { root, stage } = fixture(), target = nativeTargets.targets.find(t => t.platform === 'win32')!
+  put(root, 'out/main/native/trellis_acl_probe.exe')
+  expect(() => stageDesktop(root, stage, target)).toThrow('Diagnostic ACL helper')
 })
 it('rejects a changed native package and unaudited optional dependencies', () => {
   const { root, stage } = fixture(), target = nativeTargets.targets[0]!

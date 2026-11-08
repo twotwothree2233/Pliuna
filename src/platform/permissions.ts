@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import { win32 } from 'node:path'
 import { assertDirectorySync,openRegularFileSync,regularFile,sameFileIdentity } from './files'
 import { absoluteFilePath } from './paths'
+import { protectWindowsPath } from './windows-acl'
 
 // Static script: paths are environment data, never PowerShell source/arguments.
 const windowsPrivateAcl = `
@@ -70,7 +71,7 @@ export function protectPrivatePath(file: string, kind: 'file' | 'directory', hid
   if (!systemRoot) throw Error('FILE_PERMISSIONS_UNAVAILABLE')
   const powershell = win32.join(absoluteFilePath(systemRoot, 'win32'), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   try {
-    execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsPrivateAcl, 'utf16le').toString('base64')], {
+    if (protectWindowsPath(file, kind, hidden, before) === 'legacy') execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsPrivateAcl, 'utf16le').toString('base64')], {
       windowsHide: true, timeout: 15000, stdio: 'pipe',
       env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP,
         TRELLIS_PRIVATE_PATH: win32.toNamespacedPath(file), TRELLIS_PRIVATE_KIND: kind, TRELLIS_PRIVATE_HIDDEN: hidden ? '1' : '0' }

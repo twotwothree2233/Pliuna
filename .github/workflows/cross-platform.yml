@@ -285,6 +285,14 @@ jobs:
       - name: Validate contracts
         if: "!cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success'"
         run: pnpm verify:contracts
+      - name: Verify integrated native ACL safety (Node)
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        run: node scripts/verify-windows-acl.mjs
+      - name: Measure twenty isolated Windows 11 startups
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && !inputs.windows11_process_package_only && steps.build.outcome == 'success'"
+        env:
+          TRELLIS_WINDOWS11_ACL_PERFORMANCE: '1'
+        run: pnpm exec vitest run --config vitest.windows11-acl-performance.config.ts
       - name: Diagnose isolated Windows 11 file startup
         env:
           TRELLIS_WINDOWS11_STARTUP_PROBE: '1'
@@ -315,6 +323,9 @@ jobs:
         id: electron_native
         if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.node_native.outcome == 'success'"
         run: pnpm verify:native:electron
+      - name: Verify integrated native ACL safety (Electron)
+        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
+        run: node -e "require('node:child_process').execFileSync(require('electron'), ['scripts/verify-windows-acl.mjs'], {env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},stdio:'inherit',windowsHide:true})"
       - name: Process control with Electron runtime
         if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
         run: node scripts/check-electron-process.mjs
