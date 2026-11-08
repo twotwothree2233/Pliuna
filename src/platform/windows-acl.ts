@@ -7,7 +7,7 @@ import { createWindowsJob } from './process-tree'
 import { absoluteFilePath } from './paths'
 
 const moduleURL = typeof __filename === 'string' ? pathToFileURL(__filename) : new URL(import.meta.url)
-const unavailable = (): never => { throw Error('FILE_PERMISSIONS_UNAVAILABLE') }
+const unavailable = (reason = 'ASSET'): never => { throw Error('FILE_PERMISSIONS_UNAVAILABLE', { cause: Error('WINDOWS_ACL_' + reason) }) }
 function helperFile(): string {
   for (const url of [new URL('./native/trellis_acl.exe', moduleURL), new URL('../native/trellis_acl.exe', moduleURL),
     new URL('../../out/main/native/trellis_acl.exe', moduleURL)]) {
@@ -32,10 +32,11 @@ export function protectWindowsPath(file: string, kind: 'file' | 'directory', hid
     })
     const result = JSON.parse(output)
     if (!result || Array.isArray(result) || Object.keys(result).sort().join(',') !== 'backend,changed,verified,version' ||
-        result.version !== 1 || typeof result.changed !== 'boolean' || owner.binding.active(owner.job) !== 0) return unavailable()
+        result.version !== 1 || typeof result.changed !== 'boolean') return unavailable('PROTOCOL')
+    if (owner.binding.active(owner.job) !== 0) return unavailable('JOB_NOT_EMPTY')
     if (result.backend === 'native' && result.verified === true) return 'verified'
     if (result.backend === 'legacy' && result.verified === false && result.changed === false) return 'legacy'
-    return unavailable()
+    return unavailable('PROTOCOL')
   } finally {
     try { owner.binding.terminate(owner.job) } finally { owner.binding.close(owner.job) }
   }

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import fs from 'node:fs'
+import { lstatSync, type Stats } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { protectWindowsPath } from '../../src/platform/windows-acl'
 
@@ -7,11 +7,12 @@ const job = vi.hoisted(() => ({ value: {}, name: 'Local\\Trellis-test',
   binding: { active: vi.fn(() => 0), terminate: vi.fn(), close: vi.fn() } }))
 vi.mock('../../src/platform/process-tree', () => ({ createWindowsJob: vi.fn(() => ({ job: job.value, name: job.name, binding: job.binding })) }))
 vi.mock('node:child_process', async original => ({ ...await original<typeof import('node:child_process')>(), execFileSync: vi.fn() }))
+vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), lstatSync: vi.fn() }))
 const path = 'C:\\Users\\学习 用户\\$(literal);file.json', identity = { dev: '1', ino: '9007199254740993' }
 const success = JSON.stringify({ version: 1, backend: 'native', verified: true, changed: false })
 beforeEach(() => {
   vi.clearAllMocks(); job.binding.active.mockReturnValue(0)
-  vi.spyOn(fs, 'lstatSync').mockReturnValue({ isFile: () => true, nlink: 1 } as fs.Stats)
+  vi.mocked(lstatSync).mockReturnValue({ isFile: () => true, nlink: 1 } as Stats)
   vi.mocked(execFileSync).mockReturnValue(success)
   vi.stubGlobal('process', { ...process, env: { SystemRoot: 'C:\\Windows', PRIVATE_MODEL_SECRET: 'never-forward' } })
 })
@@ -60,10 +61,10 @@ it('refuses a helper that left any process running', () => {
 })
 it('refuses missing, linked or non-regular fixed helper assets', () => {
   for (const stat of [{ isFile: () => false, nlink: 1 }, { isFile: () => true, nlink: 2 }]) {
-    vi.mocked(fs.lstatSync).mockReturnValue(stat as fs.Stats)
+    vi.mocked(lstatSync).mockReturnValue(stat as Stats)
     expect(() => protectWindowsPath(path, 'file', false, identity)).toThrow('FILE_PERMISSIONS_UNAVAILABLE')
   }
-  vi.mocked(fs.lstatSync).mockImplementation(() => { throw Object.assign(Error('missing'), { code: 'ENOENT' }) })
+  vi.mocked(lstatSync).mockImplementation(() => { throw Object.assign(Error('missing'), { code: 'ENOENT' }) })
   expect(() => protectWindowsPath(path, 'file', false, identity)).toThrow('FILE_PERMISSIONS_UNAVAILABLE')
   expect(execFileSync).not.toHaveBeenCalled()
 })

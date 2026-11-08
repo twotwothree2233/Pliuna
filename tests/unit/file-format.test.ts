@@ -10,6 +10,7 @@ import { ExportControl } from '../../src/runtime/export-control'
 import { RuntimeStore } from '../../src/runtime/store'
 import { inspectStorage } from '../../src/runtime/storage-inspection'
 import { digest } from '../../src/runtime/resources'
+import * as permissions from '../../src/platform/permissions'
 
 // Exercise Windows creation policy on every CI host without changing OS I/O.
 vi.mock('../../src/runtime/file-format', async importOriginal => {
@@ -24,11 +25,19 @@ function edit(r: string, update: (value: any) => void): void { const db = new Da
 beforeEach(() => { vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', 'decimal-v2') })
 afterEach(() => { opened.splice(0).reverse().forEach(c => c.close()); vi.restoreAllMocks(); vi.unstubAllEnvs(); roots.splice(0).forEach(r => fs.rmSync(r, { recursive: true, force: true })) })
 function largeNativeIds(): void {
+  // Business format fixtures use a virtual identity namespace. A real Win32
+  // handle must still receive its real lstat identity, never the synthetic ID.
+  let permissionBoundary = false
+  const protect = permissions.protectPrivatePath
+  vi.spyOn(permissions, 'protectPrivatePath').mockImplementation((...args) => {
+    permissionBoundary = true
+    try { return protect(...args) } finally { permissionBoundary = false }
+  })
   for (const name of ['lstatSync', 'statSync', 'fstatSync'] as const) {
     const original = fs[name]
     vi.spyOn(fs, name).mockImplementation(((...args: unknown[]) => {
       const stat = Reflect.apply(original, fs, args) as fs.Stats | fs.BigIntStats
-      return typeof stat.ino === 'bigint' ? Object.assign(Object.create(stat), { ino: stat.ino + 9007199254740992n }) : stat
+      return !permissionBoundary && typeof stat.ino === 'bigint' ? Object.assign(Object.create(stat), { ino: stat.ino + 9007199254740992n }) : stat
     }))
   }
 }

@@ -175,6 +175,7 @@ jobs:
         shell: cmd
     env:
       PYTHONUTF8: '1'
+      TRELLIS_WINDOWS11_ACL_DIAGNOSTICS: '1'
     steps:
       - name: Require the designated Windows 11 x64 host
         id: host

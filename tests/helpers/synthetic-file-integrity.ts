@@ -1,6 +1,25 @@
 import { afterEach,vi } from 'vitest'
 import { setTimeout as yieldNativeReports } from 'node:timers/promises'
 
+// Observe the real native adapter before its error is intentionally collapsed
+// by permission/control boundaries. No path, environment or command is logged.
+vi.mock('../../src/platform/windows-acl', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/platform/windows-acl')>()
+  return { ...original, protectWindowsPath(...args: Parameters<typeof original.protectWindowsPath>) {
+    try { return original.protectWindowsPath(...args) }
+    catch (error) {
+      if (process.platform === 'win32' && process.env.TRELLIS_WINDOWS11_ACL_DIAGNOSTICS === '1') {
+        const value = error as { code?: string; name?: string; stderr?: Buffer; cause?: Error }
+        const native = value.stderr?.toString().match(/FILE_PERMISSIONS_UNAVAILABLE:([a-z-]+):([0-9]+)/)
+        const cause = value.cause?.message.match(/^WINDOWS_ACL_[A-Z_]+$/)?.[0]
+        console.error('WINDOWS_ACL_FAILURE ' + JSON.stringify({ kind: args[1], code: value.code ?? value.name,
+          ...(native ? { stage: native[1], win32: native[2] } : {}), ...(cause ? { cause } : {}) }))
+      }
+      throw error
+    }
+  } }
+})
+
 // Only isolated test directories opt into the new Windows control format.
 if (process.platform === 'win32') {
   process.env.TRELLIS_TEST_FILE_IDENTITIES = 'decimal-v2'
