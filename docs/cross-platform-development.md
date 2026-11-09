@@ -694,6 +694,38 @@ checkout 使用本轮全新受控子目录，HEAD 匹配本轮提交。
 应用测试数为 0，JSON 附件已实际下载核对。
 当前账户 Python/VS/SDK 仍未经验证，本轮没有联动安装。
 
+### 标准账户完整验收的只读工具门禁
+
+完整标准账户入口先核对现有 Python、VS 与 SDK。
+该门禁在 pnpm、Node 配置和全部依赖步骤之前。
+仅 only+standard_user，其他安装与定向开关全部关闭。
+已有 Git 仅复用本账户固定位置与当次 job PATH。
+
+脚本为 scripts/windows11-standard-toolchain.cjs。
+它没有下载或安装分支，不读取旧账户私有目录。
+当前账户 Python 查有限 PATH、固定目录与3.12注册。
+机器级候选只读 Program Files、固定根目录和注册。
+
+Python 必须为3.12/x64，并能导入 venv、ensurepip、ssl。
+以隔离、禁用site和禁写字节码的模式检查，每次3秒。
+注册及 vswhere 各5秒，独立子进程共享50秒总截止。
+步骤硬限1分钟，未知、超时与缺项均保留失败。
+
+VS 要求完整可启动的2022 C++ x64组件。
+继续只读核对 MSBuild、vcvars、cl/link/lib及运行库。
+SDK 按本机注册核对x64头、库和资源工具。
+不执行编译，不改变注册、目录权限或持久PATH。
+
+标准模式跳过旧的总工具安装脚本。
+齐备时只将已验证Python暴露到当次job。
+任一缺失时在依赖前失败，应用0，不自动补装或重派。
+脱敏 standard-toolchain.json 随原环境附件始终保留。
+
+用户已授权齐备后同次继续一次完整应用复验。
+原10秒hook、15秒ACL预算与GUI截止保持。
+文件、恢复关闭、完整进程、Electron和包内GUI逐项取证。
+继续使用A新隔离目录，结果以实际运行提交与计数为准。
+
 ### Windows 11 工具与依赖准备
 
 用户授权后可显式启用 `install_windows11_tools`。
