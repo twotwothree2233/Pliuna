@@ -523,3 +523,13 @@ Portable/packaging原自检继续作为最终门禁，原应用预算不变。
 25个隔离进程与11个路径分支覆盖拒绝、版本和超时。
 本机未执行Windows原生代码，实际结果绑定后续运行头。
 旧EPERM、恢复/插件初始拒绝和检出清理unknown记录保留。
+
+
+42586965647在b864a1a20848dd48b98675302414887b413e33f2结束success。
+原file symlink/realpath实际通过，Node22.23.1/TEMP/TMP保持。
+三个子进程均started=true/exit0/timeout=false，共281ms。
+Win11 Pro26300/X64/session2标准令牌门禁再次通过。
+Git复用、新目录检出和HEAD核对通过，无工具安装。
+37步骤skip，含35依赖应用；baseline skip，应用0。
+当前标准会话原链接前置已具备，完整矩阵结果另行绑定运行头。
+旧EPERM及恢复/插件和旧根清理unknown原因不改写。
