@@ -180,7 +180,7 @@ async function child(operation) {
   const executable = installing ? state.installer : path.join(state.install_dir, 'Uninstall Trellis.exe')
   const args = installing ? ['/S', '/currentuser', '/D=' + state.install_dir] : ['/S', '/currentuser']
   const result = await new Promise((resolve, reject) => {
-    const process = spawn(executable, args, { env: environment(), windowsHide: true, windowsVerbatimArguments: true, stdio: 'ignore' })
+    const process = spawn(executable, args, { argv0: '"' + executable + '"', env: environment(), windowsHide: true, windowsVerbatimArguments: true, stdio: 'ignore' })
     process.once('error', reject); process.once('close', (exit, signal) => resolve({ started: true, exit, signal }))
   })
   console.log(JSON.stringify(result))

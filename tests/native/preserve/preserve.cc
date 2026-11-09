@@ -11,6 +11,7 @@
 // Test-only executable. Never included in an application payload.
 struct Error { const char* stage; DWORD status; };
 static bool renamed = false;
+static size_t actualNameLength = 0, expectedNameLength = 0;
 [[noreturn]] static void fail(const char* stage, DWORD status = ERROR_INVALID_DATA) { throw Error{stage, status}; }
 static void check(BOOL ok, const char* stage) { if (!ok) fail(stage, GetLastError()); }
 struct Handle {
@@ -55,6 +56,14 @@ static void absent(const std::wstring& file) {
   auto status = GetLastError();
   if (status != ERROR_FILE_NOT_FOUND) fail("destination-unknown", status);
 }
+static std::wstring finalPath(HANDLE h) {
+  DWORD size = GetFinalPathNameByHandleW(h, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (!size || size > 32768) fail("final-name-size", GetLastError());
+  std::vector<wchar_t> buffer(size + 1);
+  DWORD count = GetFinalPathNameByHandleW(h, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (!count || count >= buffer.size()) fail("final-name", GetLastError());
+  return std::wstring(buffer.data(), count);
+}
 static void move(const std::wstring& parent, const std::wstring& source, const std::wstring& destination,
                  Identity expectedParent, Identity expectedSource) {
   Handle p(parent), s(source, DELETE);
@@ -62,7 +71,9 @@ static void move(const std::wstring& parent, const std::wstring& source, const s
   auto descriptor = security(s.h);
   absent(destination);
   const size_t bytes = destination.size() * sizeof(wchar_t);
-  std::vector<unsigned char> buffer(offsetof(FILE_RENAME_INFO, FileName) + bytes);
+  // The Win32 wrapper may normalize FileName before passing its explicit
+  // byte length to NT. Keep a terminating WCHAR as well as FileNameLength.
+  std::vector<unsigned char> buffer(sizeof(FILE_RENAME_INFO) + bytes + sizeof(wchar_t));
   auto rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
   rename->ReplaceIfExists = FALSE; rename->RootDirectory = nullptr;
   rename->FileNameLength = static_cast<DWORD>(bytes);
@@ -70,6 +81,9 @@ static void move(const std::wstring& parent, const std::wstring& source, const s
   // Rename the held source object. No path reopen, copy fallback or overwrite.
   check(SetFileInformationByHandle(s.h, FileRenameInfo, rename, static_cast<DWORD>(buffer.size())), "rename");
   renamed = true;
+  const auto actual = finalPath(s.h), expected = finalPath(p.h) + destination.substr(parent.size());
+  actualNameLength = actual.size(); expectedNameLength = expected.size();
+  if (_wcsicmp(actual.c_str(), expected.c_str()) != 0) fail("rename-name", ERROR_INVALID_NAME);
   Handle after(destination, 0, true);
   if (!same(identity(after.h), expectedSource) || !same(identity(p.h), expectedParent) || security(after.h) != descriptor) fail("postcondition");
   absent(source);
@@ -106,7 +120,7 @@ int wmain(int argc, wchar_t** argv) {
     std::puts("{\"version\":1,\"renamed\":true,\"same_identity\":true,\"security_preserved\":true,\"source_absent\":true}");
     return 0;
   } catch (Error e) {
-    std::printf("{\"version\":1,\"renamed\":%s,\"error\":\"%s\",\"status\":%lu}\n", renamed ? "true" : "false", e.stage, e.status);
+    std::printf("{\"version\":1,\"renamed\":%s,\"error\":\"%s\",\"status\":%lu,\"actual_name_length\":%zu,\"expected_name_length\":%zu}\n", renamed ? "true" : "false", e.stage, e.status, actualNameLength, expectedNameLength);
     return 1;
   } catch (...) { std::puts("{\"error\":\"unknown\"}"); return 1; }
 }

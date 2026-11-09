@@ -27,6 +27,10 @@ on:
         description: Only verify existing Node and real file symlinks; requires windows11_only and windows11_standard_user, all installation and other modes off
         type: boolean
         default: false
+      windows11_candidate_reuse_run:
+        description: Optional completed candidate run whose identical pinned dependencies may be reused on this host
+        type: string
+        default: ''
       windows11_candidate_acceptance:
         description: Approved current-user NSIS install, preserved default root and synthetic business acceptance; requires only + standard_user + default_startup_only
         type: boolean
@@ -61,7 +65,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -194,8 +198,11 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
+    permissions:
+      contents: read
+      actions: read
     name: ${{ inputs.windows11_candidate_acceptance && 'Windows 11 local candidate / DESKTOP-SFE95TP' || inputs.windows11_default_startup_only && 'Windows 11 default startup / DESKTOP-SFE95TP' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics / DESKTOP-SFE95TP' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -220,6 +227,7 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
             const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (context.payload.inputs?.windows11_candidate_reuse_run && context.payload.inputs?.windows11_candidate_acceptance !== 'true') throw Error('DEPENDENCY_REUSE_REQUIRES_CANDIDATE_MODE');
             if (context.payload.inputs?.windows11_candidate_acceptance === 'true' && (!standardUser || context.payload.inputs?.windows11_only !== 'true' || context.payload.inputs?.windows11_default_startup_only !== 'true')) throw Error('CANDIDATE_REQUIRES_STANDARD_DEFAULT_MODE');
             if (context.payload.inputs?.windows11_default_startup_only === 'true' &&
                 (!standardUser || context.payload.inputs?.windows11_only !== 'true' ||
@@ -763,22 +771,60 @@ jobs:
         if: "!inputs.windows11_default_startup_only && (!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success'))"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node -e "require('node:fs').copyFileSync('src/shared/contracts.generated.ts', require('node:path').join(process.env.TRELLIS_WIN11_EVIDENCE, 'contracts.generated.before.ts'))"
+      - name: Reuse only identical pinned dependencies from a completed candidate run
+        id: candidate_dependencies
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.standard_tools.outcome == 'success'"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prior = context.payload.inputs?.windows11_candidate_reuse_run;
+            if (!prior) return;
+            if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) throw Error('CANDIDATE_REUSE_ID_INVALID');
+            const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
+            const source = path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE);
+            const previous = path.join(process.env.GITHUB_WORKSPACE, 'trellis-standard-' + prior + '-1');
+            const modules = fs.realpathSync(path.join(previous, 'node_modules'));
+            const relativeModules = path.relative(process.env.GITHUB_WORKSPACE, modules);
+            if (!/^trellis-standard-[0-9]+-1[\\/]node_modules$/.test(relativeModules)) throw Error('CANDIDATE_REUSE_MODULE_PATH_UNSAFE');
+            for (const folder of [previous, path.dirname(modules), modules]) {
+              const stat = fs.lstatSync(folder);
+              if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error('CANDIDATE_REUSE_PATH_UNSAFE');
+            }
+            for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) {
+              const expected = fs.readFileSync(path.join(source, name));
+              for (const owner of [previous, path.dirname(modules)]) if (!fs.readFileSync(path.join(owner, name)).equals(expected)) throw Error('CANDIDATE_REUSE_VERSION_CHANGED');
+            }
+            const options = { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
+            const oldHead = cp.execFileSync('git.exe', ['rev-parse', 'HEAD'], { ...options, cwd: previous }).trim();
+            const parent = cp.execFileSync('git.exe', ['rev-parse', 'HEAD^'], { ...options, cwd: source }).trim();
+            if (!/^[0-9a-f]{40}$/.test(oldHead) || oldHead !== parent) throw Error('CANDIDATE_REUSE_HEAD_MISMATCH');
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: prior });
+            if (run.status !== 'completed' || run.head_sha !== oldHead || run.head_branch !== context.ref.replace('refs/heads/', '') || run.event !== 'workflow_dispatch') throw Error('CANDIDATE_REUSE_RUN_UNCONFIRMED');
+            const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({ ...context.repo, run_id: prior, per_page: 100 });
+            const job = jobs.jobs.find(job => job.runner_name === 'DESKTOP-SFE95TP');
+            if (!job || !['Prepare the existing Electron ABI for default-startup acceptance', 'Build local directory package'].every(name => job.steps.some(step => step.name === name && step.conclusion === 'success'))) throw Error('CANDIDATE_REUSE_ABI_UNCONFIRMED');
+            const destination = path.join(source, 'node_modules');
+            try { fs.lstatSync(destination); throw Error('CANDIDATE_REUSE_TARGET_EXISTS'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+            fs.symlinkSync(modules, destination, 'junction');
+            core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '1');
+            core.setOutput('reused', 'true');
+            console.log(JSON.stringify({ reused: true, source_run: prior, pinned_inputs_equal: true, installation: false }));
       - name: Materialize pinned dependencies before native builds
-        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success')"
+        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && steps.candidate_dependencies.outputs.reused != 'true'"
         # Resolve the lockfile's node-gyp before any dependency lifecycle runs.
         # pnpm 10.20.0 bundles tar 7.5.1; the lockfile pins tar 7.5.22.
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm install --frozen-lockfile --ignore-scripts --config.side-effects-cache=false
       - name: Select the lockfile native build toolchain
-        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success')"
+        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && steps.candidate_dependencies.outputs.reused != 'true'"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/windows11-dependencies.cjs
       - name: Build pinned Node dependencies
-        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success')"
+        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && steps.candidate_dependencies.outputs.reused != 'true'"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm rebuild better-sqlite3 esbuild --config.side-effects-cache=false
       - name: Cache the official Electron distribution through GitHub API
-        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success')"
+        if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && steps.candidate_dependencies.outputs.reused != 'true'"
         env:
           GITHUB_TOKEN: ${{ github.token }}
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
@@ -788,7 +834,12 @@ jobs:
         id: install
         # The unmodified installer still validates and extracts its distribution.
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
-        run: pnpm rebuild electron --config.side-effects-cache=false
+        run: |
+          if "%TRELLIS_CANDIDATE_DEPENDENCIES_REUSED%"=="1" goto candidate_cached_electron
+          call pnpm rebuild electron --config.side-effects-cache=false
+          exit /b %errorlevel%
+          :candidate_cached_electron
+          node -e "const p=require('electron/package.json'),fs=require('node:fs'),path=require('node:path');if(p.version!==require('./package.json').devDependencies.electron||fs.readFileSync(path.join(path.dirname(require.resolve('electron/package.json')),'dist/version'),'utf8').trim().replace(/^v/,'')!==p.version)throw Error('CACHED_ELECTRON_VERSION_MISMATCH')"
       - name: Install isolated contract validation dependency
         id: contracts
         if: "!inputs.windows11_default_startup_only && (!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && (!inputs.windows11_acl_probe_only))"
@@ -890,8 +941,10 @@ jobs:
         if: "!cancelled() && inputs.windows11_default_startup_only && steps.build.outcome == 'success' && steps.standard_tools.outcome == 'success'"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: |
+          if "%TRELLIS_CANDIDATE_DEPENDENCIES_REUSED%"=="1" goto candidate_electron_probe
           call pnpm rebuild:electron
           if errorlevel 1 exit /b %errorlevel%
+          :candidate_electron_probe
           node -e "require('node:child_process').execFileSync(require('electron'), ['scripts/check-native.mjs'], {env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},stdio:'inherit',windowsHide:true})"
       - name: Require an interactive desktop for GUI acceptance
         id: desktop
