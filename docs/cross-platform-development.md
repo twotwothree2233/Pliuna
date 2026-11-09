@@ -1,6 +1,10 @@
 # 跨平台开发与验证
 
-指定Win11标准账户完整入口已通过。
+默认目录定向验收尚未通过。
+42600636612失败于测试PATH断言，具体PATH类型unknown。
+最小测试修正尚未原生复验，默认目录按可能已创建保留。
+
+指定Win11标准账户的A隔离目录完整入口已通过。
 [42587842121](https://github.com/twotwothree2233/Trellis/actions/runs/42587842121)为completed/success。
 精确验证头为：
 `45883cf4f9cf19a9ef358b433d73f510b9fc1a18`。
@@ -1420,3 +1424,62 @@ ELECTRON_RUN_AS_NODE连空键也不传，排除NODE_OPTIONS等注入。
 不加decimal-v2重试，不修改产品或格式，不把拒绝当预期通过。
 安装器、真实插件/材料/摘要、其他系统均不执行。
 历史全套验收结果仍绑定45883cf，不能代替本次默认入口结果。
+
+
+### 42600636612：环境断言失败，默认入口结论未取得
+
+[42600636612](https://github.com/twotwothree2233/Trellis/actions/runs/42600636612) completed/failure。
+精确运行头546b4e1dd0bf8cebbc136dd6d444c41a9795dc41。
+指定Win11专业版26300/X64/session2真标准账户门禁通过。
+baseline及原全套矩阵跳过，未安装Git/Python/VS/SDK或制作安装器。
+
+只读前检实际passed=true，默认目录不存在、相关实例0。
+隔离checkout/HEAD、工具门禁、构建、Electron ABI及目录包均通过。
+应用实际启动1次，场景1失败，最终结果门禁也保持failure。
+原JSON的failed_stage=prelaunch只是旧测试标签，应用已经启动。
+
+已证实首个失败点为actual_environment.empty_path=false。
+HOME/USERPROFILE及默认userData检查均true。
+数据/格式测试变量、ELECTRON_RUN_AS_NODE、NODE_OPTIONS均未出现。
+该布尔未记录缺键、非空、大小写重复等分型，具体PATH原因unknown。
+
+锁定Playwright1.56.1的客户端与服务端都保留显式env。
+源码未显示把父环境合并进options.env的步骤。
+Windows Electron启动使用shell=true，返回进程可能是cmd代理。
+这些源码事实不用于追认本轮PATH实际类型。
+
+失败截图已实际查看，主界面显示早期“未连接运行时”。
+本轮没有维护状态JSON返回，也没有目录身份或版本标记附件。
+空任务、字号保存、重启和正常窗口退出断言均未执行。
+app.close未记录异常，但真实主进程及utility退出未获确认附件。
+
+Runner仅记录vctip编译辅助进程的孤儿清理。
+该日志不作为应用树已正常退出的证明。
+本轮默认目录创建字段为null，不能按不存在处理。
+应用已进入真实默认userData，目录按可能已创建保留，不复用为fresh。
+
+最小测试修正如下，尚未原生验证：
+
+- PATH记录absent/empty/nonempty/ambiguous/unknown和键/条目计数。
+  仅缺键或空值两种零条目状态合格，非空或重复大小写键仍失败。
+  不记录原始PATH，不把该修正回写为首轮原因或通过。
+- 从Electron主进程内process.pid取得真实owner。
+  cmd代理PID单独记录，不用于named-process所有权核对。
+- 环境断言前先记录默认目录身份，失败时保留必要标记与状态。
+  维护状态超时/错误显式落盘，补主进程与utility退出事实。
+- 每次launch清空当前PID、process_identity、环境和维护快照。
+  第二次launch/firstWindow/evaluate失败时不借用首轮PID。
+  首轮已确认退出只作为历史exits记录保留。
+
+本机隔离检查：PATH分型10组、第二次启动失败3分支通过。
+结果门禁2正向/44负向，父进程29/元数据19分支通过。
+GUI安全3分支、TypeScript及必要文档检查通过。
+所有本机检查未执行原生Windows应用或其他系统应用。
+
+下一次fresh必须重新确认真实默认目录不存在及无相关实例。
+本轮目录不清理、不移动、不迁移，也不换HOME绕过。
+由用户准备满足前提的标准账户环境后，再决定单次复验。
+当前没有新增dispatch，修复不继承首轮或A隔离目录的green。
+
+产品/格式/schema/settings-auth/B/超时及计算门槛均未改。
+不主动计算摘要，不合并、不创建PR或发布。

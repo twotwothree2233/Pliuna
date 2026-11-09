@@ -32,7 +32,13 @@ test('uses the real fresh default directory and preserves a task and local setti
   for (const [key, value] of Object.entries(process.env)) if (allowed.has(key.toUpperCase()) && value !== undefined) environment[key] = value
   environment.PATH = ''
   let app: ElectronApplication | undefined, page: Page | undefined, previous: any, owned: any
-  let failure: string | undefined
+  let failure: string | undefined, mainPid: number | undefined
+  let utilityPids: number[] = []
+  const absent = (pid: number | undefined): boolean | null => {
+    if (!Number.isInteger(pid) || !pid) return null
+    try { process.kill(pid, 0); return false }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? true : null }
+  }
   const save = () => writeFile(output, JSON.stringify(report, null, 2) + '\n')
   async function maintenance(): Promise<any> {
     const value = await page!.evaluate(() => window.trellis.request({ type: 'maintenance.status' }))
@@ -56,35 +62,53 @@ test('uses the real fresh default directory and preserves a task and local setti
     } finally { await handle.close() }
   }
   async function launch(): Promise<void> {
-    report.application_tests = 1; report.application_launch_attempts++
+    mainPid = undefined; utilityPids = []
+    delete report.process_identity; delete report.actual_environment
+    delete report.maintenance; delete report.maintenance_capture
+    report.stage = 'launch'; report.application_tests = 1; report.application_launch_attempts++
     app = await electron.launch({ executablePath: executable, args: [], cwd, env: environment })
     report.application_launches++
     page = await app.firstWindow()
-    const actual = await app.evaluate(({ app }, expected) => {
+    report.stage = 'environment'
+    const facts = await app.evaluate(({ app }, expected) => {
       const keys = new Set(Object.keys(process.env).map(key => key.toUpperCase()))
       const inherited = (key: string) => Object.entries(process.env).find(([name]) => name.toUpperCase() === key)?.[1]
-      return {
+      const pathKeys = Object.keys(process.env).filter(key => key.toUpperCase() === 'PATH')
+      const pathValue = pathKeys.length === 1 ? process.env[pathKeys[0]!] : undefined
+      const pathState = pathKeys.length === 0 ? 'absent' : pathKeys.length !== 1 ? 'ambiguous' :
+        pathValue === '' ? 'empty' : typeof pathValue === 'string' ? 'nonempty' : 'unknown'
+      return { main_pid: process.pid, utility_pids: app.getAppMetrics().filter(m => m.type === 'Utility').map(m => m.pid), environment: {
         default_user_data: app.getPath('userData').toLowerCase() === expected.root.toLowerCase(),
         actual_home_preserved: app.getPath('home').toLowerCase() === expected.home.toLowerCase(),
         home_environment_preserved: inherited('HOME') === expected.homeEnv,
         userprofile_environment_preserved: inherited('USERPROFILE') === expected.profileEnv,
-        empty_path: inherited('PATH') === '',
+        empty_path: pathState === 'empty', path_state: pathState, path_key_count: pathKeys.length,
+        path_entry_count: typeof pathValue === 'string' ? pathValue.split(';').filter(entry => entry !== '').length : 0,
+        path_has_no_entries: pathState === 'absent' || pathState === 'empty',
         test_data_present: keys.has('TRELLIS_TEST_DATA'), identity_override_present: keys.has('TRELLIS_TEST_FILE_IDENTITIES'),
         electron_node_present: keys.has('ELECTRON_RUN_AS_NODE'), renderer_url_present: keys.has('ELECTRON_RENDERER_URL'),
         all_trellis_keys_absent: ![...keys].some(key => key.startsWith('TRELLIS_')), node_options_present: keys.has('NODE_OPTIONS')
-      }
+      } }
     }, { root: previous.root, home: previous.root.slice(0, -'\\.trellis'.length),
       homeEnv: Object.entries(process.env).find(([name]) => name.toUpperCase() === 'HOME')?.[1],
       profileEnv: Object.entries(process.env).find(([name]) => name.toUpperCase() === 'USERPROFILE')?.[1] })
+    const actual = facts.environment
+    mainPid = facts.main_pid; utilityPids = facts.utility_pids
+    report.process_identity = { main_pid: mainPid, wrapper_pid: app.process().pid }
     report.actual_environment = actual
     report.launch_environments ??= []; report.launch_environments.push(actual)
-    expect(actual).toEqual({ default_user_data: true, actual_home_preserved: true, home_environment_preserved: true,
-      userprofile_environment_preserved: true, empty_path: true, test_data_present: false, identity_override_present: false,
-      electron_node_present: false, renderer_url_present: false, all_trellis_keys_absent: true, node_options_present: false })
-    owned = await defaultData.observeCreated(previous, app.process().pid)
+    report.stage = 'observe_directory'
+    // On Windows Playwright uses a cmd wrapper. Ownership must use Electron's
+    // own process.pid, never app.process().pid.
+    owned = await defaultData.observeCreated(previous, mainPid)
     report.default_directory_created = true
     report.identity = { home: owned.homeIdentity, directory: owned.rootIdentity }
     report.foreign_instances_observed = false
+    report.stage = 'environment'
+    expect(actual).toMatchObject({ default_user_data: true, actual_home_preserved: true, home_environment_preserved: true,
+      userprofile_environment_preserved: true, path_has_no_entries: true, path_entry_count: 0,
+      test_data_present: false, identity_override_present: false, electron_node_present: false, renderer_url_present: false,
+      all_trellis_keys_absent: true, node_options_present: false })
     expect(page.url().startsWith('file:')).toBe(true)
     report.stage = 'maintenance'
     await expect.poll(maintenance, { timeout: 15000, intervals: [100, 250, 500] }).toMatchObject(healthy)
@@ -92,14 +116,16 @@ test('uses the real fresh default directory and preserves a task and local setti
     expect(report.formats).toEqual({ restore: 'restore-v5', gc: 'gc-v1' })
   }
   async function closeWindow(): Promise<void> {
-    const process = app!.process(), utility = await app!.evaluate(({ app }) => app.getAppMetrics().filter(m => m.type === 'Utility').map(m => m.pid))
-    expect(utility.length).toBeGreaterThan(0)
+    const wrapper = app!.process()
+    utilityPids = await app!.evaluate(({ app }) => app.getAppMetrics().filter(m => m.type === 'Utility').map(m => m.pid))
+    expect(utilityPids.length).toBeGreaterThan(0)
     await page!.close()
-    await expect.poll(() => process.exitCode).toBe(0)
-    await expect.poll(() => utility.filter(pid => {
-      try { globalThis.process.kill(pid, 0); return true }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error }
-    })).toEqual([])
+    await expect.poll(() => wrapper.exitCode).toBe(0)
+    await expect.poll(() => absent(mainPid)).toBe(true)
+    await expect.poll(() => utilityPids.map(pid => absent(pid))).toEqual(utilityPids.map(() => true))
+    report.exits ??= []
+    report.exits.push({ main_pid: mainPid, wrapper_exit_code: wrapper.exitCode, main_exit_confirmed: true,
+      observed_utility_count: utilityPids.length, utility_exit_confirmed: true })
     await app!.close(); app = undefined; page = undefined
   }
   try {
@@ -134,7 +160,13 @@ test('uses the real fresh default directory and preserves a task and local setti
     report.stage = report.application_tests === 0 ? 'blocked_environment' : 'failed_application'
     if (page && !page.isClosed()) {
       await page.screenshot({ path: test.info().outputPath('default-startup-failure.png') }).catch(() => {})
-      await Promise.race([maintenance(), new Promise(resolve => setTimeout(resolve, 1500))]).catch(() => {})
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([maintenance(), new Promise(resolve => { timer = setTimeout(() => {
+          report.maintenance_capture = { timeout: true }; resolve(undefined)
+        }, 1500) })])
+      } catch (error) { report.maintenance_capture = { error: safeCode(error) } }
+      finally { clearTimeout(timer) }
     }
     if (owned) {
       report.formats_observed_after_failure = {}
@@ -144,8 +176,23 @@ test('uses the real fresh default directory and preserves a task and local setti
       }
     }
   } finally {
-    try { await app?.close() }
-    catch (error) { report.cleanup_error = safeCode(error); failure ??= report.cleanup_error; report.passed = false }
+    if (app) {
+      const wrapper = app.process()
+      let currentUtilitySnapshot = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const metrics = await Promise.race([app.evaluate(({ app }) => app.getAppMetrics().filter(m => m.type === 'Utility').map(m => m.pid)),
+          new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 1000) })])
+        if (metrics) { utilityPids = metrics; currentUtilitySnapshot = true }
+      } catch (error) { report.exit_capture_error = safeCode(error) }
+      finally { clearTimeout(timer) }
+      try { await app.close() }
+      catch (error) { report.cleanup_error = safeCode(error); failure ??= report.cleanup_error; report.passed = false }
+      report.failure_exit = { main_pid: mainPid ?? null, wrapper_exit_code: wrapper.exitCode,
+        main_exit_confirmed: absent(mainPid), observed_utility_count: utilityPids.length,
+        utility_snapshot_current: currentUtilitySnapshot,
+        utility_exit_confirmed: currentUtilitySnapshot && utilityPids.length ? utilityPids.every(pid => absent(pid) === true) : null }
+    }
     // Only the unrelated test cwd is removed. Real default data is preserved.
     await rm(cwd, { recursive: true, force: true })
     await save()
