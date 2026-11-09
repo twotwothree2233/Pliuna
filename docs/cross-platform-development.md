@@ -539,6 +539,46 @@ SID 固定比较 S-1-5-32-544，不依赖本地化组名。
 默认新目录格式仅先评估，B 迁移继续冻结。
 安装器、签名和正式分发仍是后续独立验收。
 
+#### 标准用户门禁首轮结果与本机准备
+
+[运行 42547553223](https://github.com/twotwothree2233/Trellis/actions/runs/42547553223)为环境门禁 failure。
+入口头为 ad4f8057ea84fe5527e3fdd95af3ea53ae1eeaa6。
+指定主机及交互桌面匹配，baseline skipped。
+依赖准备、构建及应用步骤全部 skipped，应用测试数为 0。
+
+实际 host.json 为 Win11 Pro26300、X64、session1。
+elevated=false，administrators_group_present=true。
+system_account=false，user_interactive=true。
+该令牌仍属于管理员账户，标准用户条件不满足。
+
+错误为 STANDARD_USER_INTERACTIVE_SESSION_REQUIRED。
+这次证据验证了对管理员非提升令牌的拒绝。
+不记为应用失败或通过，不改写既有提升会话结果。
+标准用户的实际接受分支和完整应用矩阵仍未执行。
+
+下一步必须由用户在指定 Win11 本机准备。
+
+1. 确认已有不属于 Administrators 的标准账户。
+   没有时，由用户决定是否新增本地标准账户。
+   这会新增独立用户配置目录，不改当前日常账户类型。
+2. 交互登录该账户，使用其自身可访问的专用目录。
+   不接管原账户目录，不复制已有 Runner 凭据。
+   旧 Runner 空闲后退出，避免同名实例并行。
+3. 通过[官方 Runner 页面](https://github.com/twotwothree2233/Trellis/settings/actions/runners/new)准备 Windows x64 Runner。
+   如需重新登记同名 DESKTOP-SFE95TP，由用户本机操作。
+   替换登记可能改变 Runner ID，并使旧登记失效。
+   注册令牌只在本机使用，不提交到聊天或附件。
+4. 保留默认 self-hosted/Windows/X64 标签。
+   不安装为服务，不使用管理员终端，正常运行 run.cmd。
+   等待 Listening for Jobs 后，通知标准账户 Runner 已就绪。
+5. 若目录权限或现有构建工具不可用，先停止并报告。
+   不递归放宽权限，不改服务，不自动补装工具。
+   账户、重注册或目录权限变更均由用户明确处理。
+
+在本机准备前停止 dispatch，不重复管理员矩阵。
+恢复时先重新核对真实令牌，再进入同一完整入口。
+默认 HOME、格式启用和旧目录 B 均保持现状。
+
 ### Windows 11 工具与依赖准备
 
 用户授权后可显式启用 `install_windows11_tools`。
