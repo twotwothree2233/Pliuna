@@ -27,16 +27,20 @@ function inspectDefaultData(config) {
   let target
   try { target = fs.lstatSync(root, { bigint: true }) }
   catch (error) { if (error.code !== 'ENOENT') throw error }
+  if (config.operation === 'inventory' && config.previous && config.previous.absent !== !target) fail('DEFAULT_DIRECTORY_CHANGED')
   if (config.operation === 'absent') {
     if (target) fail(target.isSymbolicLink() ? 'DEFAULT_DIRECTORY_REPARSE' : 'DEFAULT_DIRECTORY_EXISTS')
     return { root, homeIdentity, absent: true }
   }
-  if (!target) fail('DEFAULT_DIRECTORY_MISSING')
+  if (!target) {
+    if (config.operation === 'inventory') return { root, homeIdentity, absent: true }
+    fail('DEFAULT_DIRECTORY_MISSING')
+  }
   if (!target.isDirectory() || target.isSymbolicLink()) fail('DEFAULT_DIRECTORY_REPARSE')
   const rootIdentity = identity(target)
   if ((config.operation === 'owned' && !config.previous?.rootIdentity) ||
       (config.previous?.rootIdentity && !same(config.previous.rootIdentity, rootIdentity))) fail('DEFAULT_DIRECTORY_CHANGED')
-  if (!['observe', 'owned'].includes(config.operation)) fail('DEFAULT_OPERATION_INVALID')
+  if (!['observe', 'owned', 'inventory'].includes(config.operation)) fail('DEFAULT_OPERATION_INVALID')
   return { root, homeIdentity, rootIdentity, absent: false }
 }
 
@@ -145,3 +149,5 @@ module.exports.beforeFirstLaunch = () => check('absent')
 module.exports.observeCreated = (previous, appPid) => check('observe', previous, appPid)
 module.exports.beforeRestart = previous => check('owned', previous)
 module.exports.verifyIdentity = previous => { standardHost(); return metadata('owned', previous) }
+module.exports.inventory = previous => check('inventory', previous)
+module.exports.standardHost = standardHost

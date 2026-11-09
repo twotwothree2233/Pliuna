@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 export interface Exchange { body: any; authorization?: string; url?: string }
-export async function modelServer(handle: (exchange: Exchange, response: ServerResponse) => void | Promise<void>) {
+export async function modelServer(handle: (exchange: Exchange, response: ServerResponse) => void | Promise<void>, port = 0) {
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('FIXTURE_PORT_INVALID')
   const exchanges: Exchange[] = []
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
@@ -10,7 +11,7 @@ export async function modelServer(handle: (exchange: Exchange, response: ServerR
       await handle(exchange, res)
     } catch { res.writeHead(500); res.end() }
   })
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve) })
   const address = server.address() as { port: number }
   return { url: `http://127.0.0.1:${address.port}/v1`, exchanges, close: () => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()) }) }
 }

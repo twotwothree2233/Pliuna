@@ -6,7 +6,8 @@ import { hostMontyTarget } from '../src/shared/native-targets.mjs'
 import { verifyDesktop } from './verify-desktop.mjs'
 
 if (process.argv.length !== 3) throw Error('Usage: node scripts/check-desktop-runtime.mjs /absolute/package-output')
-const { app, executable } = verifyDesktop(process.argv[2]), target = hostMontyTarget()
+const installedMode = process.argv[2] === '--installed' && process.env.TRELLIS_WINDOWS11_CANDIDATE === '1'
+const { app, executable } = installedMode ? await (await import('./windows11-candidate.cjs')).default.installed() : verifyDesktop(process.argv[2]), target = hostMontyTarget()
 const directory = mkdtempSync(join(tmpdir(), 'trellis-packaged-runtime-'))
 try {
   const fixture = join(directory, 'backend.cjs'), probe = join(directory, 'probe.mjs'), pdf = join(directory, 'sample.pdf')
@@ -99,5 +100,13 @@ console.log(JSON.stringify({sqlite:true,montyBinding:true,appNodeRpc:true,descen
 `)
   const env = { ELECTRON_RUN_AS_NODE: '1', PATH: '' }
   for (const name of ['SystemRoot', 'WINDIR', 'TMPDIR', 'TEMP', 'TMP']) if (process.env[name]) env[name] = process.env[name]
-  execFileSync(executable, [probe, app, fixture, pdf], { cwd: directory, env, timeout: 30000, stdio: 'inherit', windowsHide: true })
+  const output = execFileSync(executable, [probe, app, fixture, pdf], { cwd: directory, env, timeout: 30000,
+    stdio: installedMode ? ['ignore', 'pipe', 'pipe'] : 'inherit', maxBuffer: 1048576, windowsHide: true })
+  if (installedMode) {
+    const line = output.toString().trim().split(/\r?\n/).filter(line => line.startsWith('{')).at(-1)
+    const result = JSON.parse(line)
+    if (!['sqlite', 'montyBinding', 'appNodeRpc', 'descendantsReaped', 'pdfBackend', 'offlinePdf', 'privateAcl'].every(key => result[key] === true)) throw Error('INSTALLED_RUNTIME_INCOMPLETE')
+    writeFileSync(join(process.env.TRELLIS_WIN11_EVIDENCE, 'installed-runtime.json'), JSON.stringify({ ...result, installed: true, passed: true }, null, 2) + '\n')
+    console.log(JSON.stringify(result))
+  }
 } finally { rmSync(directory, { recursive: true, force: true }) }

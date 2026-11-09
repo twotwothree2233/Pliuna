@@ -49,3 +49,4 @@ if (report.passed !== true || report.stage !== 'ready' || report.error || report
   throw Error('DEFAULT_STARTUP_ACCEPTANCE_INCOMPLETE')
 }
 console.log('DEFAULT_STARTUP_ACCEPTANCE ' + JSON.stringify({ passed: true, application_tests: 1, launches: 2, directory_preserved: true }))
+module.exports = report

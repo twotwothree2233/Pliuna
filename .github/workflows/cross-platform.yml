@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_default_startup_only && 'Windows 11 default startup acceptance' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics' || inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_candidate_acceptance && 'Windows 11 local candidate acceptance' || inputs.windows11_default_startup_only && 'Windows 11 default startup acceptance' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics' || inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -25,6 +25,10 @@ on:
         default: false
       windows11_symlink_probe_only:
         description: Only verify existing Node and real file symlinks; requires windows11_only and windows11_standard_user, all installation and other modes off
+        type: boolean
+        default: false
+      windows11_candidate_acceptance:
+        description: Approved current-user NSIS install, preserved default root and synthetic business acceptance; requires only + standard_user + default_startup_only
         type: boolean
         default: false
       windows11_default_startup_only:
@@ -57,7 +61,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -190,8 +194,8 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
-    name: ${{ inputs.windows11_default_startup_only && 'Windows 11 default startup / DESKTOP-SFE95TP' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics / DESKTOP-SFE95TP' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    name: ${{ inputs.windows11_candidate_acceptance && 'Windows 11 local candidate / DESKTOP-SFE95TP' || inputs.windows11_default_startup_only && 'Windows 11 default startup / DESKTOP-SFE95TP' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics / DESKTOP-SFE95TP' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -200,6 +204,7 @@ jobs:
     env:
       PYTHONUTF8: '1'
       TRELLIS_WINDOWS11_ACL_DIAGNOSTICS: '1'
+      TRELLIS_WINDOWS11_CANDIDATE: ${{ inputs.windows11_candidate_acceptance && '1' || '0' }}
     steps:
       - name: Require the designated Windows 11 x64 host
         id: host
@@ -215,6 +220,7 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
             const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (context.payload.inputs?.windows11_candidate_acceptance === 'true' && (!standardUser || context.payload.inputs?.windows11_only !== 'true' || context.payload.inputs?.windows11_default_startup_only !== 'true')) throw Error('CANDIDATE_REQUIRES_STANDARD_DEFAULT_MODE');
             if (context.payload.inputs?.windows11_default_startup_only === 'true' &&
                 (!standardUser || context.payload.inputs?.windows11_only !== 'true' ||
                  ['windows11_checkout_probe_only', 'windows11_symlink_probe_only', 'windows11_prepare_git', 'windows11_prepare_python', 'install_windows11_tools', 'windows11_startup_probe_only', 'windows11_process_package_only', 'windows11_acl_probe_only'].some(key => context.payload.inputs?.[key] === 'true'))) {
@@ -677,7 +683,7 @@ jobs:
             }
             fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
             console.log(JSON.stringify({ stage: report.stage, head_matches: report.head_matches, application_tests: 0 }));
-      - name: Require an absent real default directory and no existing Trellis instance
+      - name: Read-only default target and instance preflight
         id: default_data
         if: "!cancelled() && inputs.windows11_default_startup_only && steps.checkout_head.outcome == 'success'"
         timeout-minutes: 1
@@ -688,7 +694,8 @@ jobs:
             const relative = process.env.TRELLIS_WIN11_SOURCE;
             if (!/^trellis-standard-[0-9]+-[0-9]+$/.test(relative)) throw Error('SOURCE_PATH_INVALID');
             const source = path.resolve(process.env.GITHUB_WORKSPACE, relative);
-            await require(path.join(source, 'scripts', 'windows11-default-data.cjs'))(core);
+            if (context.payload.inputs?.windows11_candidate_acceptance === 'true') await require(path.join(source, 'scripts', 'windows11-candidate.cjs')).preflight(core);
+            else await require(path.join(source, 'scripts', 'windows11-default-data.cjs'))(core);
       - name: Prepare approved current-standard-user Python only
         id: python_prepare
         if: "!cancelled() && inputs.windows11_prepare_python && inputs.windows11_standard_user && steps.source_checkout.outcome == 'success'"
@@ -903,7 +910,7 @@ jobs:
         id: directory_package
         if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && (steps.electron_native.outcome == 'success' || steps.default_electron.outcome == 'success') && (inputs.windows11_default_startup_only || steps.packaging_checks.outcome == 'success'))"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
-        run: node scripts/package-desktop.mjs --output "%TRELLIS_DESKTOP_OUTPUT%" --format dir
+        run: node scripts/package-desktop.mjs --output "%TRELLIS_DESKTOP_OUTPUT%" --format ${{ inputs.windows11_candidate_acceptance && 'default' || 'dir' }}
       - name: Probe packaged native modules, process trees and offline PDF
         if: "!inputs.windows11_default_startup_only && (!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && (!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success'))"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
@@ -914,18 +921,62 @@ jobs:
           TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/packaged-desktop"
+      - name: Build test-only handle-preservation helper
+        id: preservation_helper
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: node scripts/build-windows-preserve.mjs
+      - name: Preserve prior default data and install the current-user NSIS candidate
+        id: candidate_install
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.preservation_helper.outcome == 'success'"
+        timeout-minutes: 5
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: node scripts/windows11-candidate.cjs install
+      - name: Verify installed ACL, Job, RPC, descendant cleanup and PDF
+        id: installed_runtime
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.candidate_install.outcome == 'success'"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: node scripts/check-desktop-runtime.mjs --installed
       - name: Windows 11 fresh default startup and restart
         id: default_desktop
-        if: "!cancelled() && inputs.windows11_default_startup_only && steps.default_data.outcome == 'success' && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
+        if: "!cancelled() && inputs.windows11_default_startup_only && steps.default_data.outcome == 'success' && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success' && (!inputs.windows11_candidate_acceptance || steps.installed_runtime.outcome == 'success')"
         env:
           TRELLIS_WINDOWS11_DEFAULT_STARTUP: '1'
           TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec playwright test default-startup.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/default-desktop"
       - name: Require the actual default-startup result and all exit confirmations
+        id: default_result
         if: "!cancelled() && inputs.windows11_default_startup_only && steps.default_desktop.outcome != 'skipped'"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/verify-default-startup-result.cjs
+      - name: Installed candidate synthetic materials, plugin, export and recovery
+        id: candidate_business
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.default_result.outcome == 'success'"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: pnpm exec playwright test candidate-business.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/candidate-business"
+      - name: Uninstall, retain default data and reinstall the same candidate
+        id: candidate_reinstall
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.candidate_business.outcome == 'success'"
+        timeout-minutes: 7
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: node scripts/windows11-candidate.cjs reinstall
+      - name: Verify reinstalled task, plugin, recovery and real process exits
+        id: candidate_restored
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.candidate_reinstall.outcome == 'success'"
+        env:
+          TRELLIS_CANDIDATE_REINSTALLED: '1'
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: pnpm exec playwright test candidate-business.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/candidate-reinstalled"
+      - name: Require all actual local-candidate results
+        if: "!cancelled() && inputs.windows11_candidate_acceptance"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: node scripts/verify-windows11-candidate.cjs
+      - name: Remove only this candidate installation after a failed application scenario
+        if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.candidate_install.outcome == 'success' && steps.candidate_business.outcome != 'success'"
+        timeout-minutes: 4
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
+        run: node scripts/windows11-candidate.cjs uninstall-after-failure
       - name: Keep the checkout diagnostic stage
         if: "always() && (inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only) && steps.host.outcome == 'success'"
         uses: actions/github-script@v7

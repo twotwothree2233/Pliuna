@@ -18,11 +18,12 @@ const healthy = { ok: true, data: { phase: 'idle', error: null, restore: { error
 test('uses the real fresh default directory and preserves a task and local settings across restart', async () => {
   test.skip(process.env.TRELLIS_WINDOWS11_DEFAULT_STARTUP !== '1', 'Requires the explicit designated-host default-startup workflow')
   if (process.env.TRELLIS_WINDOWS11_DEFAULT_STARTUP !== '1' || process.platform !== 'win32' || !process.env.TRELLIS_PACKAGED_OUTPUT) throw Error('DEFAULT_STARTUP_EXPLICIT_WINDOWS_MODE_REQUIRED')
-  const { executable } = verifyDesktop(process.env.TRELLIS_PACKAGED_OUTPUT)
+  const candidateMode = process.env.TRELLIS_WINDOWS11_CANDIDATE === '1'
+  const { executable } = candidateMode ? await createRequire(import.meta.url)('../../scripts/windows11-candidate.cjs').installed() : verifyDesktop(process.env.TRELLIS_PACKAGED_OUTPUT)
   if (basename(executable).toLowerCase() !== 'trellis.exe') throw Error('DEFAULT_STARTUP_FINAL_EXECUTABLE_REQUIRED')
   const report: Record<string, any> = { stage: 'prelaunch', passed: false, application_tests: 0,
     application_launch_attempts: 0, application_launches: 0, default_directory_created: null,
-    directory_cleanup_performed: false, isolated_working_directory: true }
+    directory_cleanup_performed: false, isolated_working_directory: true, installed_candidate: candidateMode }
   const output = test.info().outputPath('default-startup.json')
   const cwd = await mkdtemp(join(tmpdir(), 'trellis-default-startup-cwd-'))
   const allowed = new Set(['SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'HOME', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'RUNNER_TRACKING_ID'])
@@ -169,6 +170,17 @@ test('uses the real fresh default directory and preserves a task and local setti
       finally { clearTimeout(timer) }
     }
     if (owned) {
+      // Only the new root created in this test is inspected. No prior user
+      // content is read. Exact metadata helps distinguish legacy precision
+      // rejection from unrelated generic maintenance errors.
+      report.created_file_identities = {}
+      for (const name of ['', 'restore-control.sqlite', 'export-control.sqlite', 'gc-control.sqlite']) {
+        try {
+          const stat = await lstat(join(owned.root, name), { bigint: true })
+          report.created_file_identities[name || 'root'] = { dev: String(stat.dev), ino: String(stat.ino),
+            legacy_safe: stat.dev <= BigInt(Number.MAX_SAFE_INTEGER) && stat.ino <= BigInt(Number.MAX_SAFE_INTEGER) }
+        } catch (error) { report.created_file_identities[name || 'root'] = { error: safeCode(error) } }
+      }
       report.formats_observed_after_failure = {}
       for (const name of ['restore-established', 'gc-established']) {
         try { report.formats_observed_after_failure[name] = await marker(name) }
