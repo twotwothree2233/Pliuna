@@ -810,6 +810,7 @@ jobs:
             try { fs.lstatSync(destination); throw Error('CANDIDATE_REUSE_TARGET_EXISTS'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
             fs.symlinkSync(modules, destination, 'junction');
             core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '1');
+            core.exportVariable('TRELLIS_CANDIDATE_PREVIOUS_RUN', prior);
             core.setOutput('reused', 'true');
             console.log(JSON.stringify({ reused: true, source_run: prior, pinned_inputs_equal: true, installation: false }));
       - name: Materialize pinned dependencies before native builds

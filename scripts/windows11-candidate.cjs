@@ -50,7 +50,7 @@ async function managed(command, args, timeout = 180000) {
     return { output, job_empty: true, exit: exit.code }
   } finally { tree.terminate(); await tree.confirm(10000) }
 }
-async function registry() {
+async function registry(expectedDirectory) {
   // Same fixed UUID-v5 namespace as electron-builder 26.4.0, not an app scan.
   const { createRequire } = require('node:module')
   const builderRequire = createRequire(require.resolve('electron-builder'))
@@ -58,16 +58,78 @@ async function registry() {
   const { UUID } = libRequire('builder-util-runtime')
   const guid = UUID.v5('app.trellis.desktop', UUID.parse('50e065bc-3134-11e6-9bab-38c9862bdaf3'))
   const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe')
-  const command = `$ErrorActionPreference='Stop'; $keys=@('Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}','Registry::HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}','Registry::HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'); $present=@($keys|Where-Object { Test-Path -LiteralPath $_ }); [Console]::Write($present.Count)`
+  const expected = Buffer.from(expectedDirectory ? '"' + path.join(expectedDirectory, 'Uninstall Trellis.exe') + '" /currentuser' : '', 'utf8').toString('base64')
+  const command = `$ErrorActionPreference='Stop'; $keys=@('Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}','Registry::HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}','Registry::HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'); $present=@($keys|Where-Object { Test-Path -LiteralPath $_ }); $expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${expected}')); $owned=$false; if($present.Count -eq 1 -and $present[0] -eq $keys[0] -and $expected) { $owned=[StringComparer]::OrdinalIgnoreCase.Equals((Get-ItemPropertyValue -LiteralPath $keys[0] -Name UninstallString),$expected) }; [ordered]@{count=$present.Count;owned=$owned}|ConvertTo-Json -Compress`
   const result = await managed(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], 10000)
-  if (!/^[0-3]$/.test(result.output.trim())) fail('CANDIDATE_REGISTRY_UNKNOWN')
-  return Number(result.output.trim())
+  const value = JSON.parse(result.output.trim())
+  if (!Number.isInteger(value.count) || value.count < 0 || value.count > 3 || typeof value.owned !== 'boolean') fail('CANDIDATE_REGISTRY_UNKNOWN')
+  if (expectedDirectory && value.count && !value.owned) fail('CANDIDATE_REGISTRY_OWNER_UNCONFIRMED')
+  return value.count
+}
+function readEvidence(file) {
+  const stat = fs.lstatSync(file)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
+  return JSON.parse(fs.readFileSync(file, 'utf8'))
+}
+async function removePreviousCandidate(current) {
+  // This variable is exported only after the workflow has verified the exact
+  // first-parent run, host, pinned inputs and completed ABI/package stages.
+  const prior = process.env.TRELLIS_CANDIDATE_PREVIOUS_RUN
+  if (!prior) return
+  if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) fail('CANDIDATE_PREVIOUS_RUN_INVALID')
+  const folder = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1')
+  identity(folder)
+  const previous = readEvidence(path.join(folder, 'candidate.json'))
+  const expectedDirectory = path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + prior + '-1')
+  if (previous.stage !== 'installed' || previous.passed !== true || previous.install_dir !== expectedDirectory ||
+      previous.install?.exit !== 0 || previous.install?.job_empty !== true || current.absent ||
+      previous.default?.root !== current.root || !same(previous.default?.homeIdentity, current.homeIdentity) ||
+      previous.backup?.performed !== true || previous.backup.path !== path.join(os.homedir(), '.trellis.ao-preserved-' + prior + '-1') ||
+      !same(previous.backup.identity, previous.default.rootIdentity) ||
+      !same(identity(previous.backup.path), previous.backup.identity) || !same(identity(expectedDirectory), previous.install_identity)) fail('CANDIDATE_PREVIOUS_IDENTITY_UNCONFIRMED')
+  const defaults = path.join(folder, 'default-desktop')
+  identity(defaults)
+  const matches = []
+  const entries = fs.readdirSync(defaults, { withFileTypes: true })
+  if (entries.length > 32) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
+    if (entry.isDirectory()) {
+      identity(path.join(defaults, entry.name))
+      const file = path.join(defaults, entry.name, 'default-startup.json')
+      try { matches.push(readEvidence(file)) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+  }
+  if (matches.length !== 1 || matches[0].passed !== true || matches[0].installed_candidate !== true ||
+      !same(matches[0].identity?.directory, current.rootIdentity)) fail('CANDIDATE_PREVIOUS_DEFAULT_UNCONFIRMED')
+  const parents = []
+  let cursor = path.parse(process.env.LOCALAPPDATA).root
+  for (const part of process.env.LOCALAPPDATA.slice(cursor.length).split(path.sep).filter(Boolean)) { cursor = path.join(cursor, part); parents.push(cursor) }
+  if (!Array.isArray(previous.parents) || previous.parents.length !== parents.length || previous.parents.some((parent, index) =>
+    parent.path !== parents[index] || !same(identity(parents[index]), parent.identity))) fail('CANDIDATE_INSTALL_PARENT_CHANGED')
+  const recovery = { prior_run: prior, prior_backup: previous.backup.path, test_root_identity: current.rootIdentity, stage: 'verify' }
+  const record = () => fs.writeFileSync(path.join(evidence(), 'candidate-previous-cleanup.json'), JSON.stringify(recovery, null, 2) + '\n')
+  record()
+  const count = await registry(expectedDirectory)
+  if (count) {
+    const uninstaller = path.join(expectedDirectory, 'Uninstall Trellis.exe'), stat = fs.lstatSync(uninstaller)
+    if (!stat.isFile() || stat.isSymbolicLink()) fail('CANDIDATE_UNINSTALLER_UNSAFE')
+    const result = await managed(process.execPath, [__filename, 'child-previous-uninstall', expectedDirectory, prior])
+    recovery.uninstall = { ...JSON.parse(result.output.trim()), job_empty: result.job_empty }; record()
+  }
+  if (await registry() !== 0) fail('CANDIDATE_UNINSTALL_REGISTRATION_REMAINS')
+  absent(path.join(expectedDirectory, 'Trellis.exe'))
+  await data.inventory(current)
+  if (!same(identity(previous.backup.path), previous.backup.identity)) fail('CANDIDATE_PREVIOUS_BACKUP_CHANGED')
+  recovery.stage = 'removed_data_retained'; recovery.passed = true; record()
+  return recovery
 }
 async function install() {
   approved()
   const preflight = JSON.parse(fs.readFileSync(path.join(evidence(), 'candidate-preflight.json'), 'utf8'))
   if (!preflight.passed) fail('CANDIDATE_PREFLIGHT_REQUIRED')
   const current = await data.inventory(preflight.default)
+  const previousCleanup = await removePreviousCandidate(current)
   if (await registry() !== 0) fail('CANDIDATE_EXISTING_INSTALLATION')
   const suffix = process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT
   if (!/^[0-9]+-[0-9]+$/.test(suffix)) fail('CANDIDATE_BATCH_INVALID')
@@ -84,7 +146,7 @@ async function install() {
   const installer = path.join(output, installers[0])
   const stat = fs.lstatSync(installer)
   if (!stat.isFile() || stat.isSymbolicLink()) fail('CANDIDATE_INSTALLER_UNSAFE')
-  const report = { stage: 'native_preservation_probe', passed: false, default: current, install_dir: installDir, installer, parents, published: false, signed: false }
+  const report = { stage: 'native_preservation_probe', passed: false, default: current, install_dir: installDir, installer, parents, published: false, signed: false, previous_cleanup: previousCleanup }
   save(report)
   try {
     const helper = path.resolve('node_modules/.cache/trellis-native/trellis_preserve.exe')
@@ -146,7 +208,7 @@ async function reinstall() {
   if (profile.absent || !same(profile.rootIdentity, defaultProof.identity.directory)) fail('CANDIDATE_TEST_PROFILE_REQUIRED')
   state.test_profile_identity = profile.rootIdentity; save(state)
   const result = await managed(process.execPath, [__filename, 'child-uninstall'])
-  state.uninstall = JSON.parse(result.output.trim()); state.uninstall.job_empty = result.job_empty
+  state.uninstall = JSON.parse(result.output.trim()); state.uninstall.job_empty = result.job_empty; save(state)
   if (await registry() !== 0) fail('CANDIDATE_UNINSTALL_REGISTRATION_REMAINS')
   if (!same((await data.inventory(profile)).rootIdentity, state.test_profile_identity)) fail('CANDIDATE_UNINSTALL_DATA_CHANGED')
   absent(path.join(state.install_dir, 'Trellis.exe'))
@@ -166,7 +228,7 @@ async function uninstallAfterFailure() {
   await installed()
   const profile = await data.inventory()
   const result = await managed(process.execPath, [__filename, 'child-uninstall'])
-  state.failure_uninstall = { ...JSON.parse(result.output.trim()), job_empty: result.job_empty }
+  state.failure_uninstall = { ...JSON.parse(result.output.trim()), job_empty: result.job_empty }; save(state)
   if (await registry() !== 0) fail('CANDIDATE_UNINSTALL_REGISTRATION_REMAINS')
   await data.inventory(profile)
   absent(path.join(state.install_dir, 'Trellis.exe'))
@@ -176,9 +238,13 @@ async function uninstallAfterFailure() {
 }
 async function child(operation) {
   approved()
-  const state = read(), installing = operation === 'child-install'
+  const previous = operation === 'child-previous-uninstall'
+  const state = previous ? { install_dir: process.argv[3] } : read(), installing = operation === 'child-install'
+  if (previous && (!/^[1-9][0-9]{0,19}$/.test(process.argv[4] ?? '') || state.install_dir !== path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + process.argv[4] + '-1'))) fail('CANDIDATE_PREVIOUS_INSTALL_PATH_UNCONFIRMED')
   const executable = installing ? state.installer : path.join(state.install_dir, 'Uninstall Trellis.exe')
-  const args = installing ? ['/S', '/currentuser', '/D=' + state.install_dir] : ['/S', '/currentuser']
+  // Like electron-builder's own ExecWait, _?= is last and suppresses the
+  // self-copy launcher. The supervised process now owns the real uninstall.
+  const args = installing ? ['/S', '/currentuser', '/D=' + state.install_dir] : ['/S', '/currentuser', '/KEEP_APP_DATA', '_?=' + state.install_dir]
   const result = await new Promise((resolve, reject) => {
     const process = spawn(executable, args, { argv0: '"' + executable + '"', env: environment(), windowsHide: true, windowsVerbatimArguments: true, stdio: 'ignore' })
     process.once('error', reject); process.once('close', (exit, signal) => resolve({ started: true, exit, signal }))
@@ -192,6 +258,6 @@ if (require.main === module) (async () => {
   if (action === 'install') await install()
   else if (action === 'reinstall') await reinstall()
   else if (action === 'uninstall-after-failure') await uninstallAfterFailure()
-  else if (['child-install', 'child-uninstall'].includes(action)) await child(action)
+  else if (['child-install', 'child-uninstall', 'child-previous-uninstall'].includes(action)) await child(action)
   else fail('CANDIDATE_ACTION_INVALID')
 })().catch(error => { console.error(clean(error)); process.exitCode = 1 })

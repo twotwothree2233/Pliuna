@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { readFile, writeFile, mkdtemp } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/model-server'
@@ -24,7 +24,23 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
   const reinstalled = process.env.TRELLIS_CANDIDATE_REINSTALLED === '1'
   const previousProof = reinstalled ? JSON.parse(await readFile(proofFile, 'utf8')) : undefined
   const report: Record<string, any> = { stage: 'launch', passed: false, installed: true, reinstalled,
-    application_launches: 0, real_api_requests: 0, directory_cleanup_performed: false, exits: [] }
+    application_launches: 0, real_api_requests: 0, directory_cleanup_performed: false, exits: [], node_protocol_errors: [] }
+  // Playwright 1.56.1 replaces every unexpected CDP error with "context
+  // destroyed". Keep only bounded error categories, never protocol arguments.
+  const playwrightRequire = createRequire(createRequire(require.resolve('@playwright/test')).resolve('playwright'))
+  const { CRSession } = require(join(dirname(playwrightRequire.resolve('playwright-core/package.json')), 'lib/server/chromium/crConnection.js'))
+  const originalSend = CRSession.prototype.send
+  CRSession.prototype.send = async function (method: string, parameters: unknown) {
+    try { return await originalSend.call(this, method, parameters) }
+    catch (error) {
+      if (!this._sessionId && ['Runtime.evaluate', 'Runtime.callFunctionOn'].includes(method) && report.node_protocol_errors.length < 8) {
+        const message = String((error as Error).message)
+        const categories = ['Invalid parameters', 'Cannot find context', 'Could not find object', 'Promise was collected', 'Target closed']
+        report.node_protocol_errors.push({ method, category: categories.find(value => message.includes(value)) ?? 'unknown' })
+      }
+      throw error
+    }
+  }
   const cwd = await mkdtemp(join(tmpdir(), 'trellis-candidate-business-'))
   let app: ElectronApplication | undefined, page: Page | undefined, mainPid: number | undefined
   let utilityPids: number[] = [], mode: 'pdf' | 'view' = 'pdf', surface: any, capability = ''
@@ -95,14 +111,14 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
       report.task = task
       report.stage = 'material'
       const source = join(cwd, 'synthetic.pdf'); await writeFile(source, pdfFixture())
-      await app!.evaluate(({ dialog }, source) => { (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [source] }) }, source)
+      expect(await app!.evaluate(({ dialog }, source) => { (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [source] }); return true }, source)).toBe(true)
       const imported = await call({ type: 'material.pick', task_id: task })
       const operation = imported.items[0].operation_id
       await expect.poll(async () => (await call({ type: 'material.status', task_id: task, operation_id: operation })).state).toBe('success')
       report.source_resource = (await call({ type: 'material.status', task_id: task, operation_id: operation })).resource.id
       report.material_imported = true
       report.stage = 'plugin'
-      await app!.evaluate(({ dialog }, plugin) => { (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [plugin] }) }, paths.plugin)
+      expect(await app!.evaluate(({ dialog }, plugin) => { (dialog as any).showOpenDialog = async () => ({ canceled: false, filePaths: [plugin] }); return true }, paths.plugin)).toBe(true)
       await openSettings(page!, '插件与主流程')
       const panel = page!.getByRole('dialog', { name: '应用设置', exact: true })
       await panel.getByRole('button', { name: '从文件夹导入固定包' }).click()
@@ -132,7 +148,7 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
       const prepared = await call({ type: 'export.prepare', task_id: task, answer_ids: [] })
       await expect.poll(async () => (await call({ type: 'export.status', task_id: task, operation_id: prepared.id })).phase).toBe('preview')
       const target = join(cwd, 'synthetic-export.html')
-      await app!.evaluate(({ dialog }, target) => { (dialog as any).showSaveDialog = async () => ({ canceled: false, filePath: target }) }, target)
+      expect(await app!.evaluate(({ dialog }, target) => { (dialog as any).showSaveDialog = async () => ({ canceled: false, filePath: target }); return true }, target)).toBe(true)
       await call({ type: 'export.save', task_id: task, operation_id: prepared.id, partial: false })
       expect((await call({ type: 'export.status', task_id: task, operation_id: prepared.id })).phase).toBe('saved')
       const html = await readFile(target, 'utf8')
@@ -178,6 +194,7 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
       report.failure_exit = { main_pid: mainPid ?? null, main_exit_confirmed: mainPid ? absent(mainPid) : null, utility_exit_confirmed: utilityPids.length ? utilityPids.every(absent) : null }
     }
     report.acl_errors = aclErrors
+    CRSession.prototype.send = originalSend
     await server.close()
     await writeFile(test.info().outputPath('candidate-business.json'), JSON.stringify(report, null, 2) + '\n')
   }
