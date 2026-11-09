@@ -21,7 +21,11 @@
 该轮仍未执行依赖、构建或应用测试。
 后续完整入口42564610043因Python缺项在依赖前停止。
 其入口头为0ba9ec169e7fd130240933e354d9d2d9e44d195a。
-当前标准账户VS/SDK只读门禁通过，应用仍为0。
+该轮标准账户VS/SDK门禁通过，应用为0。
+Python补齐后42572230985已执行一次完整入口。
+入口头为31e5450518c935639de969fd993a7abb52c1a344。
+Python准备通过，Portable符号链接自检因EPERM失败。
+部分独立测试通过，完整文件/生命周期/包内验收仍未完成。
 
 工程阶段 A、B 建立测试入口与统一资产描述。
 C 统一文件操作、权限与持久化接口。
@@ -769,7 +773,8 @@ standard-toolchain.json等脱敏附件已实际下载核对。
 已有其他明确可访问安装时，可先只读验证该位置。
 否则建议既有官方actions/python-versions分发的3.12.10 x64。
 固定asset244701309，python-3.12.10-win32-x64.zip。
-元数据uploaded，大小26672655字节，未下载内容。
+实现前元数据为uploaded、26672655字节。
+本轮已按固定来源实际下载并安装，原生结果见下文。
 仅提取python-3.12.10-amd64.exe，不运行setup.ps1。
 
 目标为本账户LOCALAPPDATA/Programs/Trellis-Toolchain/Python312。
@@ -785,7 +790,7 @@ AssociateFiles=0、Shortcuts=0，关闭可选集成。
 不复制旧账户安装，不改服务、DACL、账户或持久PATH。
 不联动Git、VS、SDK，不使用总工具安装开关。
 用户已明确批准本方案及成功后一次完整复验。
-准备入口仅在显式开关开启时执行，原生结果按本轮另记。
+准备入口仅在显式开关开启时执行，本轮结果见下文。
 
 安装子进程只继承必要环境允许列表，不带GitHub凭据。
 原始日志仅留本机临时目录，附件只留脱敏阶段和结果。
@@ -820,6 +825,80 @@ Installer使用必要环境允许列表，不继承GitHub凭据。
 包含超时、3010、冲突、注册竞态和版本验证拒绝。
 YAML/7个内联JS与256组原输入条件核对通过。
 新开关的255组无效组合均拒绝，普通模式命令保持。
+
+### Python准备成功后的标准账户验收结果
+
+[42572230985](https://github.com/twotwothree2233/Trellis/actions/runs/42572230985) completed/failure。
+运行入口头为31e5450518c935639de969fd993a7abb52c1a344。
+仅only+standard_user+prepare_python=true，其余六开关false。
+失败保留，不追加dispatch；后续文档提交不改变运行头。
+
+host仍为Win11 Pro26300/X64、session2真实标准账户。
+interactive=true，elevated/admin组/SYSTEM均false。
+Python真实installed3.12.10，pip25.0.1，退出0。
+无超时或重启要求，准备57秒，独立工具门禁4秒。
+
+原生附件确认PATH/固定位置/HKCU均发现同一合格Python。
+机器级3.12注册仍未配置；只暴露当次PYTHON及必要PATH。
+Git复用，VS/MSVC/SDK检查通过，没有重装其他工具。
+后续常规测试保持prepare_python=false，直接复用工具。
+
+| 本轮入口 | 实际结果 |
+| --- | --- |
+| 构建、生成合同漂移、合同验证 | success |
+| Node与Electron最小Job | 两者均通过 |
+| Node与Electron原生ACL | 四组语义检查各通过 |
+| 20目录ACL性能 | 21 passed，20目录全部初始化 |
+| Portable | 自检EPERM，Vitest用例0 |
+| Windows核心进程 | 15 passed / 3 skipped |
+| 完整文件套件 | skipped，受Portable门禁阻断 |
+| 完整进程与恢复关闭 | skipped，受Portable门禁阻断 |
+| 生产载荷与打包结构检查 | skipped，受Portable门禁阻断 |
+| Electron生命周期 | 5 passed / 3 skipped |
+| 源码GUI首启与重启 | 1 passed，11.0秒 |
+| 目录包/包内ACL/RPC/整树/PDF/GUI | skipped，上游打包前置未通过 |
+| 其他平台baseline | skipped |
+
+三项Monty原生计算用例仍按runtimeVerified门槛跳过。
+Windows没有开放计算能力，binding探针未启动计算。
+最小Job附加失败日志来自显式负向测试，后续汇总全true。
+完整生命周期未执行，D阶段完整验收仍未关闭。
+
+ACL性能共200次调用，均值551.610ms。
+p95为587.680ms，最大599.514ms，目标仍5000ms。
+原10000ms hook与15000ms调用预算未改。
+源码GUI截图已实看，状态idle、error=null、gc_enabled=true。
+
+Portable在scripts/check-test-environment.mjs:9失败。
+Node22.23.1的文件symlinkSync返回EPERM。
+临时源文件已可创建，创建文件符号链接被系统拒绝。
+当前令牌/系统策略未满足测试夹具要求，具体策略来源未取证。
+
+这次失败发生在Portable用例启动之前。
+没有跳过符号链接覆盖、改continue-on-error或放宽门禁。
+文件及完整恢复/插件/包内链路尚无本轮标准账户结果。
+原恢复/插件初始拒绝未被本轮解释，旧清理停滞仍unknown。
+
+### 待用户本机准备：文件符号链接能力
+
+下一步无需再安装Python、Git、VS或SDK。
+需要让同一标准账户能够创建测试用文件符号链接。
+这是测试夹具能力条件，当前没有修改系统配置。
+
+1. 用户在指定Win11主机的Windows设置搜索开发者模式。
+   若未开启，由用户本机启用并完成管理员确认。
+   开发者模式是允许非提升创建链接的一种准备方式。
+   若已开启或策略受管仍EPERM，具体原因保持unknown。
+2. Runner继续使用原真实标准账户和交互会话。
+   不改为管理员、不放宽组门禁、不修改旧目录DACL。
+   若系统要求重新登录或重启，由用户安排，不自动执行。
+3. 准备后先在同一账户核对原自检命令：
+   node scripts/check-test-environment.mjs。
+   它仅创建并清理自身临时夹具，不读旧数据目录。
+   若仍EPERM，先定位权限/策略，不重复全套CI。
+4. 自检通过并获得复验指令后，仅单次完整标准入口。
+   only+standard_user=true，其余开关false，复用现有工具。
+   原A隔离目录、超时和全部失败门禁继续保持。
 
 ### Windows 11 工具与依赖准备
 
@@ -1145,3 +1224,31 @@ Windows 跳过 macOS framework 与 Linux 桌面步骤。
 
 这些事项继续保留为独立授权与验收门槛。
 纯状态文档提交使用 `[skip ci]`，不重复整套 CI。
+
+
+### 最小符号链接探针与依赖前门禁：待审方案
+
+探针先沿用现有指定主机/真实标准账户门禁。
+只复用已有Node22.23.1/x64，不调用setup-node下载。
+只检查已知Runner工具缓存，缺失或未知即停止。
+不改变TEMP/TMP，保持与本轮相同账户和临时目录条件。
+
+节点发现放独立只读进程，最多5秒。
+版本验证3秒，原真实文件自检10秒，总限25秒，步骤1分钟。
+运行原scripts/check-test-environment.mjs，不另造替代逻辑。
+实际创建文件symlink并核对realpath，不以junction代替。
+
+附件仅host布尔事实、Node版本、started/exit/timeout/错误类别。
+stderr只在内存解析EPERM等有限code，不上传路径或完整环境。
+没有系统变更、下载、账户切换或原生执行，草稿仅在系统临时目录。
+
+拟新增默认关闭的明确symlink-probe-only手动模式。
+须only+standard_user，其余安装/诊断模式false。
+该模式全部pnpm/依赖/构建/应用步骤跳过，应用0。
+待本机准备反馈后，再决定是否实施及单次执行。
+
+后续full可在原工具门禁之前加入同一有界原自检。
+自检失败令standard_tools不执行，现有35入口继续关闭。
+通过后原工具门禁与依赖正常继续，不重装任何已成功工具。
+Portable及packaging命令里的原自检仍保留，作为最终门禁。
+原应用截止、标准账户约束与所有失败条件保持。
