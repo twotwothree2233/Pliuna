@@ -16,7 +16,9 @@
 标准账户已在 42550357622 通过令牌门禁。
 该轮停在旧检出目录清理，随后正常取消。
 应用测试为 0，标准账户完整应用结果尚未取得。
-新的 checkout 诊断入口只验证准备阶段。
+42562024272 的 Git 准备与新目录检出已 success。
+其验证入口头为 35bce222e7f0f77310d48ceeb7c0b1e881b80ccb。
+该轮仍未执行依赖、构建或应用测试。
 
 工程阶段 A、B 建立测试入口与统一资产描述。
 C 统一文件操作、权限与持久化接口。
@@ -672,7 +674,25 @@ LOCALAPPDATA/Programs/Git 与 Trellis-Toolchain/Git。
 原 42556311102 为正常诊断取得的环境缺项。
 其四类候选未发现 Git，不能扩写为整机没有 Git。
 原 42550357622 的清理停滞原因仍 unknown。
-新入口的原生结果在执行后补记，完整应用另行决定。
+[42562024272](https://github.com/twotwothree2233/Trellis/actions/runs/42562024272) 已 success。
+验证入口头为 35bce222e7f0f77310d48ceeb7c0b1e881b80ccb。
+本节后续文档提交不改变该轮验证头。
+完整标准账户应用复验尚未派发，仍需另行决定。
+
+host.json 确认 Win11 Pro26300/X64、session2。
+interactive=true、elevated=false、admin组=false、SYSTEM=false。
+两个本账户目标原均 ABSENT，随后实际安装成功。
+Git 版本为 2.56.0.windows.4，退出码 0，无超时或重启要求。
+
+原 PATH 发现步骤随后真实启动 Git，退出 0。
+checkout 使用本轮全新受控子目录，HEAD 匹配本轮提交。
+准备步骤 77 秒，发现 1 秒，checkout 15 秒，HEAD 核对 1 秒。
+日志没有进入旧根 Deleting contents 阶段。
+
+三个常见固定诊断候选仍 ENOENT，未改写为成功。
+35 个依赖及应用步骤全部 skipped，baseline skipped。
+应用测试数为 0，JSON 附件已实际下载核对。
+当前账户 Python/VS/SDK 仍未经验证，本轮没有联动安装。
 
 ### Windows 11 工具与依赖准备
 
