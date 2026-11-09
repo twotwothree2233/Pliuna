@@ -13,6 +13,11 @@
 `c8d61fe7db89010b036b57cdb2f0d545435d19db`。
 [查看指定主机运行](https://github.com/twotwothree2233/Trellis/actions/runs/42496582992)。
 
+标准账户已在 42550357622 通过令牌门禁。
+该轮停在旧检出目录清理，随后正常取消。
+应用测试为 0，标准账户完整应用结果尚未取得。
+新的 checkout 诊断入口只验证准备阶段。
+
 工程阶段 A、B 建立测试入口与统一资产描述。
 C 统一文件操作、权限与持久化接口。
 D 统一进程树与 Monty 生命周期。
@@ -578,6 +583,57 @@ system_account=false，user_interactive=true。
 在本机准备前停止 dispatch，不重复管理员矩阵。
 恢复时先重新核对真实令牌，再进入同一完整入口。
 默认 HOME、格式启用和旧目录 B 均保持现状。
+
+#### 标准账户已通过与检出准备诊断
+
+[运行 42550357622](https://github.com/twotwothree2233/Trellis/actions/runs/42550357622)最终 completed/cancelled。
+host.json 为 session2，非提升且无 Administrators 组。
+非 SYSTEM、交互桌面成立，标准账户门禁已通过。
+35 个后续步骤与 baseline 跳过，应用测试为 0。
+
+checkout 的实际版本为 4.3.0，提交 11d5960。
+Git 管理器初始化异常在 lfs=false 时被静默捕获。
+无 Git 时会先清理已有目录，再进入 REST 下载。
+缺少 .git、URL 不符或清理异常也可进入删除分支。
+
+本轮日志在 Git 版本分组结束后进入 Deleting contents。
+没有 Git 命令或下载开始记录，直到正常取消。
+具体 Git 初始化错误及旧目录清理停滞原因仍未知。
+旧目录停止进一步清理，不修改权限或恢复未知项。
+
+新增默认关闭的 windows11_checkout_probe_only。
+它要求 windows11_only 与 windows11_standard_user 同开。
+安装和其他定向模式关闭，原标准令牌条件不变。
+只做 Git 诊断、全新目录检出与 HEAD 核对。
+
+Git 发现使用独立有界进程，只读元数据，无网络。
+候选最多四个，版本每个 3 秒，内部总预算 20 秒。
+诊断步骤硬截止 1 分钟，不输出原路径、配置或环境。
+只保留类别、可访问性、started/exit/timeout 与脱敏错误。
+
+只有 PATH 中发现且版本不低于 2.18 的 Git 才继续。
+仅固定候选合格时也失败，不自行添加 GITHUB_PATH。
+不执行包装脚本，不跟随重解析或网络候选路径。
+任何超时、无法判断或异常输出均保留失败。
+
+标准模式以 run_id/attempt 生成全新受控 source 子目录。
+先检查未越界且不存在，已存在或未知时失败。
+不删除、覆盖或复用旧 workspace，原目录保持现状。
+诊断 checkout 固定已审查提交，最多 3 分钟。
+
+成功后只读核对 HEAD 等于本轮 GITHUB_SHA。
+依赖、构建、性能、文件、进程及 GUI 步骤全部跳过。
+always 保存 host.json 和 checkout-preparation.json。
+准备通过也只代表检出可用，应用数仍为 0。
+
+所有 shell 命令显式使用同一 source 工作目录。
+pnpm 清单、Node 版本和锁文件输入同步加目录前缀。
+标准模式关闭 setup-node 自动缓存，避免探测旧根。
+普通模式仍使用原路径与缓存，应用测试超时不变。
+
+原生诊断结果在实际运行后补记，不自动重复派发。
+完整应用复验在本次诊断结果之后单独决定。
+不变产品、格式、默认 HOME、旧目录 B 或计算门槛。
 
 ### Windows 11 工具与依赖准备
 

@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics' || inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -17,6 +17,10 @@ on:
         default: false
       windows11_standard_user:
         description: Require a genuine standard-user interactive token; use with windows11_only and all other modes off
+        type: boolean
+        default: false
+      windows11_checkout_probe_only:
+        description: Only diagnose bounded Git discovery and a new isolated checkout; requires windows11_only and windows11_standard_user
         type: boolean
         default: false
       install_windows11_tools:
@@ -37,7 +41,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -170,8 +174,8 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
-    name: ${{ inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    name: ${{ inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -195,6 +199,9 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
             const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (context.payload.inputs?.windows11_checkout_probe_only === 'true' && !standardUser) {
+              throw Error('CHECKOUT_DIAGNOSTICS_REQUIRE_STANDARD_USER_MODE');
+            }
             if (standardUser && (context.payload.inputs?.windows11_only !== 'true' ||
                 ['install_windows11_tools', 'windows11_startup_probe_only', 'windows11_process_package_only', 'windows11_acl_probe_only'].some(key => context.payload.inputs?.[key] === 'true'))) {
               throw Error('WINDOWS11_STANDARD_USER_REQUIRES_FULL_MODE_WITHOUT_INSTALLATION');
@@ -243,46 +250,253 @@ jobs:
               throw Error('STANDARD_USER_INTERACTIVE_SESSION_REQUIRED: application tests were not started');
             }
             core.exportVariable('TRELLIS_WIN11_DESKTOP', String(facts.user_interactive && facts.session_id > 0));
-      - uses: actions/checkout@v4
+            if (standardUser && !/^[0-9]+-[0-9]+$/.test(suffix)) throw Error('SOURCE_PATH_INVALID');
+            core.exportVariable('TRELLIS_WIN11_SOURCE', standardUser ? 'trellis-standard-' + suffix : '.');
+      - name: Bound Git discovery and reserve a new source path
+        id: precheckout
+        if: "!cancelled() && inputs.windows11_standard_user && steps.host.outcome == 'success'"
+        timeout-minutes: 1
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { spawn } = require('node:child_process');
+            const { performance } = require('node:perf_hooks');
+            const reportFile = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'checkout-preparation.json');
+            const deadline = performance.now() + 20000;
+            const report = { stage: 'discovery', ...(context.payload.inputs?.windows11_checkout_probe_only === 'true' ? { application_tests: 0 } : {}), candidates: [] };
+            const cleanCode = error => /^[A-Z0-9_]{1,48}$/.test(error?.code ?? '') ? error.code : 'UNAVAILABLE';
+            const childEnv = {};
+            for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'PATH', 'PATHEXT', 'ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA']) {
+              if (process.env[key]) childEnv[key] = process.env[key];
+            }
+            Object.assign(childEnv, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' });
+            function run(executable, args, budget, ipc = false, extraEnv = {}) {
+              return new Promise(resolve => {
+                const result = { started: false, exit: null, timeout: false, error: null };
+                let child, timer, output = '', message, done = false;
+                const finish = () => {
+                  if (done) return;
+                  done = true; clearTimeout(timer);
+                  child?.stdout?.destroy(); child?.stderr?.destroy();
+                  if (child?.connected) child.disconnect();
+                  child?.unref();
+                  resolve({ ...result, output, message });
+                };
+                const stop = () => {
+                  if (child && !child.kill()) result.error = 'TERMINATION_UNCONFIRMED';
+                  finish();
+                };
+                try {
+                  child = spawn(executable, args, { cwd: process.env.RUNNER_TEMP, env: { ...childEnv, ...extraEnv }, windowsHide: true,
+                    stdio: ['ignore', ipc ? 'ignore' : 'pipe', 'ignore', ...(ipc ? ['ipc'] : [])] });
+                  child.once('spawn', () => { result.started = true; });
+                  child.once('error', error => { result.error = cleanCode(error); finish(); });
+                  child.on('message', value => { message = value; });
+                  child.stdout?.on('data', bytes => {
+                    output += bytes.toString('utf8');
+                    if (Buffer.byteLength(output) > 256) { result.error = 'OUTPUT_LIMIT'; output = ''; stop(); }
+                  });
+                  child.once('close', code => { result.exit = code; finish(); });
+                  timer = setTimeout(() => { result.timeout = true; result.error = 'PROCESS_TIMEOUT'; stop(); }, Math.max(1, budget));
+                } catch (error) { result.error = cleanCode(error); finish(); }
+              });
+            }
+            // Discovery only reads metadata. It runs in a separate, bounded Node process,
+            // never starts descendants, and does not inspect credentials or file contents.
+            function discover() {
+              const fs = require('node:fs'), path = require('node:path').win32;
+              const code = error => /^[A-Z0-9_]{1,48}$/.test(error?.code ?? '') ? error.code : 'UNAVAILABLE';
+              const fail = value => { const error = new Error(); error.code = value; throw error; };
+              const boot = path.parse(process.env.SystemRoot ?? '').root.toLowerCase();
+              if (!/^[a-z]:\\$/.test(boot)) fail('LOCAL_SYSTEM_ROOT_REQUIRED');
+              function metadata(file, kind) {
+                if (!path.isAbsolute(file) || path.parse(file).root.toLowerCase() !== boot) fail('NONLOCAL_PATH');
+                const absolute = path.resolve(file), root = path.parse(absolute).root;
+                const parts = absolute.slice(root.length).split(path.sep).filter(Boolean);
+                let current = root, stat = fs.lstatSync(root);
+                if (!stat.isDirectory() || stat.isSymbolicLink()) fail('REPARSE_PATH');
+                for (let index = 0; index < parts.length; index++) {
+                  current = path.join(current, parts[index]); stat = fs.lstatSync(current);
+                  if (stat.isSymbolicLink()) fail('REPARSE_PATH');
+                  if (index < parts.length - 1 && !stat.isDirectory()) fail('INVALID_PATH');
+                }
+                if (kind === 'directory' ? !stat.isDirectory() : !stat.isFile()) fail('INVALID_PATH');
+                fs.accessSync(absolute, fs.constants.R_OK);
+                return absolute;
+              }
+              const workspace = metadata(process.env.GITHUB_WORKSPACE ?? '', 'directory');
+              const relative = process.env.TRELLIS_WIN11_SOURCE ?? '';
+              if (!/^trellis-standard-[0-9]+-[0-9]+$/.test(relative)) fail('SOURCE_PATH_INVALID');
+              const source = path.resolve(workspace, relative);
+              if (path.dirname(source).toLowerCase() !== workspace.toLowerCase() || path.relative(workspace, source) !== relative) fail('SOURCE_PATH_INVALID');
+              try { fs.lstatSync(source); fail('SOURCE_ALREADY_EXISTS'); }
+              catch (error) { if (error.code !== 'ENOENT') throw error; }
+              function candidate(category, file) {
+                if (!file) return { category, accessible: false, error: 'NOT_CONFIGURED' };
+                try { return { category, file: metadata(file, 'file'), accessible: true, error: null }; }
+                catch (error) { return { category, accessible: false, error: code(error) }; }
+              }
+              function fromPath() {
+                const directories = (process.env.PATH ?? '').split(';').filter(Boolean);
+                if (directories.length > 64) return { category: 'path', accessible: false, error: 'DISCOVERY_LIMIT' };
+                const extensions = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+                if (extensions.length > 16 || extensions.some(value => !/^\.[A-Za-z0-9]+$/.test(value))) return { category: 'path', accessible: false, error: 'PATHEXT_INVALID' };
+                for (let directory of directories) {
+                  directory = directory.replace(/^"|"$/g, '');
+                  try { metadata(directory, 'directory'); }
+                  catch (error) {
+                    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+                    return { category: 'path', accessible: false, error: code(error) };
+                  }
+                  for (const extension of ['', ...extensions]) {
+                    const value = candidate('path', path.join(directory, 'git' + extension));
+                    if (!value.accessible) {
+                      if (value.error === 'ENOENT' || value.error === 'ENOTDIR') continue;
+                      return value;
+                    }
+                    if (extension.toLowerCase() !== '.exe') return { category: 'path', accessible: false, error: 'PATH_WRAPPER_UNSUPPORTED' };
+                    return value;
+                  }
+                }
+                return { category: 'path', accessible: false, error: 'NOT_FOUND' };
+              }
+              const candidates = [fromPath(),
+                candidate('program_files', process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Git', 'cmd', 'git.exe')),
+                candidate('program_files_x86', process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Git', 'cmd', 'git.exe')),
+                candidate('local_appdata', process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd', 'git.exe'))];
+              process.send({ source_ready: true, candidates }, () => process.disconnect());
+            }
+            try {
+              const worker = `try { (${discover.toString()})(); } catch (error) { process.send({error:/^[A-Z0-9_]{1,48}$/.test(error.code||'')?error.code:'DISCOVERY_FAILED'},()=>process.disconnect()); process.exitCode=1; }`;
+              const discovery = await run(process.execPath, ['-e', worker], Math.min(5000, deadline - performance.now()), true,
+                { GITHUB_WORKSPACE: process.env.GITHUB_WORKSPACE, TRELLIS_WIN11_SOURCE: process.env.TRELLIS_WIN11_SOURCE });
+              report.discovery = { started: discovery.started, exit: discovery.exit, timeout: discovery.timeout, error: discovery.error };
+              if (discovery.error || discovery.exit !== 0 || discovery.message?.source_ready !== true || discovery.message.candidates?.length !== 4) {
+                report.error = discovery.error ?? discovery.message?.error ?? 'DISCOVERY_FAILED';
+              } else {
+                report.stage = 'versions';
+                for (const candidate of discovery.message.candidates) {
+                  if (candidate.file) { core.setSecret(candidate.file); core.setSecret(candidate.file.toLowerCase()); core.setSecret(candidate.file.replace(/git\.exe$/i, 'git.EXE')); }
+                  const value = { category: candidate.category, accessible: candidate.accessible, started: false, exit: null, timeout: false, version: null, error: candidate.error };
+                  if (candidate.accessible) {
+                    const remaining = deadline - performance.now();
+                    if (remaining <= 0) { value.timeout = true; value.error = 'TOTAL_DEADLINE'; }
+                    else {
+                      const execution = await run(candidate.file, ['--version'], Math.min(3000, remaining));
+                      Object.assign(value, { started: execution.started, exit: execution.exit, timeout: execution.timeout, error: execution.error });
+                      const match = execution.output.trim().match(/^git version ([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:\.windows\.[0-9]+)?)$/);
+                      if (!value.error && execution.exit === 0 && match) {
+                        const [major, minor] = match[1].split('.').map(Number);
+                        if (major > 2 || major === 2 && minor >= 18) value.version = match[1];
+                        else value.error = 'VERSION_TOO_OLD';
+                      } else if (!value.error) value.error = execution.exit === 0 ? 'VERSION_INVALID' : 'VERSION_EXIT';
+                    }
+                  }
+                  report.candidates.push(value);
+                }
+                if (performance.now() > deadline) report.error = 'TOTAL_DEADLINE';
+                else if (!report.candidates[0]?.version || report.candidates[0]?.error) report.error = 'PATH_GIT_UNAVAILABLE';
+                else { report.stage = 'source_ready'; core.setOutput('ready', 'true'); }
+              }
+            } catch (error) { report.error = cleanCode(error); }
+            fs.writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');
+            console.log(JSON.stringify(report));
+            if (report.error) core.setFailed('CHECKOUT_PREPARATION_' + report.error);
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        id: source_checkout
+        if: "!cancelled() && steps.host.outcome == 'success' && (!inputs.windows11_standard_user || steps.precheckout.outcome == 'success')"
+        timeout-minutes: ${{ inputs.windows11_checkout_probe_only && 3 || 120 }}
+        with:
+          path: ${{ env.TRELLIS_WIN11_SOURCE }}
+          persist-credentials: ${{ !inputs.windows11_checkout_probe_only }}
+      - name: Verify the isolated checkout commit
+        if: "!cancelled() && inputs.windows11_checkout_probe_only && steps.source_checkout.outcome == 'success'"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { execFileSync } = require('node:child_process');
+            const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'checkout-preparation.json');
+            const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+            try {
+              const relative = process.env.TRELLIS_WIN11_SOURCE;
+              if (!/^trellis-standard-[0-9]+-[0-9]+$/.test(relative)) throw Error();
+              const source = path.resolve(process.env.GITHUB_WORKSPACE, relative);
+              const stat = fs.lstatSync(source);
+              if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error();
+              const env = { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' };
+              for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'PATH', 'PATHEXT']) if (process.env[key]) env[key] = process.env[key];
+              const head = execFileSync('git.exe', ['rev-parse', 'HEAD'], { cwd: source, env, windowsHide: true, timeout: 3000, maxBuffer: 256, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+              if (!/^[0-9a-f]{40}$/.test(head) || head !== process.env.GITHUB_SHA) throw Error();
+              report.stage = 'checkout_verified'; report.head_matches = true;
+            } catch {
+              report.stage = 'head_verification_failed'; report.head_matches = false;
+              core.setFailed('CHECKOUT_HEAD_UNCONFIRMED');
+            }
+            fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
+            console.log(JSON.stringify({ stage: report.stage, head_matches: report.head_matches, application_tests: 0 }));
       - uses: pnpm/action-setup@v4
+        if: "!inputs.windows11_checkout_probe_only"
         with:
           version: 10.20.0
+          package_json_file: ${{ format('{0}/package.json', env.TRELLIS_WIN11_SOURCE) }}
       - uses: actions/setup-node@v4
+        if: "!inputs.windows11_checkout_probe_only"
         with:
-          node-version-file: .node-version
-          cache: pnpm
+          node-version-file: ${{ format('{0}/.node-version', env.TRELLIS_WIN11_SOURCE) }}
+          cache: ${{ !inputs.windows11_standard_user && 'pnpm' || '' }}
+          cache-dependency-path: ${{ format('{0}/pnpm-lock.yaml', env.TRELLIS_WIN11_SOURCE) }}
       - name: Inspect or install the approved Windows 11 toolchain
+        if: "!inputs.windows11_checkout_probe_only"
         id: tools
         env:
           TRELLIS_INSTALL_WINDOWS11_TOOLS: ${{ inputs.install_windows11_tools && '1' || '0' }}
           GITHUB_TOKEN: ${{ github.token }}
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/windows11-toolchain.cjs
       - name: Read bounded Runner shutdown evidence
-        if: "!cancelled() && inputs.windows11_startup_probe_only && steps.tools.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && inputs.windows11_startup_probe_only && steps.tools.outcome == 'success')"
         env:
           TRELLIS_RUNNER_INCIDENT_UTC: '2026-11-08T11:14:28Z'
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/windows11-runner-evidence.cjs
       - name: Save the generated contract source baseline
+        if: "!inputs.windows11_checkout_probe_only"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node -e "require('node:fs').copyFileSync('src/shared/contracts.generated.ts', require('node:path').join(process.env.TRELLIS_WIN11_EVIDENCE, 'contracts.generated.before.ts'))"
       - name: Materialize pinned dependencies before native builds
+        if: "!inputs.windows11_checkout_probe_only"
         # Resolve the lockfile's node-gyp before any dependency lifecycle runs.
         # pnpm 10.20.0 bundles tar 7.5.1; the lockfile pins tar 7.5.22.
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm install --frozen-lockfile --ignore-scripts --config.side-effects-cache=false
       - name: Select the lockfile native build toolchain
+        if: "!inputs.windows11_checkout_probe_only"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/windows11-dependencies.cjs
       - name: Build pinned Node dependencies
+        if: "!inputs.windows11_checkout_probe_only"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm rebuild better-sqlite3 esbuild --config.side-effects-cache=false
       - name: Cache the official Electron distribution through GitHub API
+        if: "!inputs.windows11_checkout_probe_only"
         env:
           GITHUB_TOKEN: ${{ github.token }}
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/windows11-electron.cjs
       - name: Install pinned dependencies
+        if: "!inputs.windows11_checkout_probe_only"
         id: install
         # The unmodified installer still validates and extracts its distribution.
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm rebuild electron --config.side-effects-cache=false
       - name: Install isolated contract validation dependency
         id: contracts
-        if: "!inputs.windows11_acl_probe_only"
+        if: "!inputs.windows11_checkout_probe_only && (!inputs.windows11_acl_probe_only)"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: |
           python -m venv "%RUNNER_TEMP%\trellis-contracts-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%"
           if errorlevel 1 exit /b %errorlevel%
@@ -290,95 +504,136 @@ jobs:
           if errorlevel 1 exit /b %errorlevel%
           echo %RUNNER_TEMP%\trellis-contracts-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\Scripts>>"%GITHUB_PATH%"
       - name: Windows 11 Job Object minimal acceptance (Node)
-        if: "!cancelled() && steps.install.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && steps.install.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm verify:windows-job
       - name: Build native ACL technical validation assets
         id: acl_build
-        if: "!cancelled() && inputs.windows11_acl_probe_only && steps.install.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && inputs.windows11_acl_probe_only && steps.install.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/build-windows-acl.mjs
       - name: Native ACL identity and security semantics (Node)
-        if: "!cancelled() && inputs.windows11_acl_probe_only && steps.acl_build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && inputs.windows11_acl_probe_only && steps.acl_build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/verify-windows-acl.mjs
       - name: Native ACL identity and security semantics (Electron)
-        if: "!cancelled() && inputs.windows11_acl_probe_only && steps.acl_build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && inputs.windows11_acl_probe_only && steps.acl_build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node -e "require('node:child_process').execFileSync(require('electron'), ['scripts/verify-windows-acl.mjs'], {env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},stdio:'inherit',windowsHide:true})"
       - name: Build and check generated types
         id: build
-        if: "!cancelled() && !inputs.windows11_acl_probe_only && steps.install.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_acl_probe_only && steps.install.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm build
       - name: Check generated contract drift
-        if: "!cancelled() && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && steps.build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node -e "const fs=require('node:fs'), path=require('node:path'), text=p=>fs.readFileSync(p,'utf8').replace(/\r\n/g,'\n'); if(text(path.join(process.env.TRELLIS_WIN11_EVIDENCE,'contracts.generated.before.ts'))!==text('src/shared/contracts.generated.ts')) throw Error('GENERATED_CONTRACT_DRIFT');"
       - name: Validate contracts
-        if: "!cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm verify:contracts
       - name: Verify integrated native ACL safety (Node)
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/verify-windows-acl.mjs
       - name: Measure twenty isolated Windows 11 startups
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && !inputs.windows11_process_package_only && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && !inputs.windows11_process_package_only && steps.build.outcome == 'success')"
         env:
           TRELLIS_WINDOWS11_ACL_PERFORMANCE: '1'
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec vitest run --config vitest.windows11-acl-performance.config.ts
       - name: Diagnose isolated Windows 11 file startup
         env:
           TRELLIS_WINDOWS11_STARTUP_PROBE: '1'
-        if: "!cancelled() && (inputs.windows11_startup_probe_only || inputs.windows11_process_package_only) && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && (inputs.windows11_startup_probe_only || inputs.windows11_process_package_only) && steps.build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec vitest run --config vitest.windows11-probe.config.ts
       - name: Portable tests (Node ABI)
         id: portable
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm test:portable
       - name: Windows 11 core process lifecycle (Node ABI)
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec vitest run --config vitest.process.config.ts tests/unit/platform-process-tree.test.ts tests/unit/monty-lifecycle.test.ts
       - name: Filesystem behavior (synthetic integrity, Node ABI)
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && !inputs.windows11_process_package_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && !inputs.windows11_process_package_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec vitest run --config vitest.files.config.ts
       - name: Process trees and lifecycle (synthetic integrity, Node ABI)
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec vitest run --config vitest.process.config.ts
       - name: Production payload and desktop platform checks
         id: packaging_checks
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.portable.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm test:packaging
       - name: Probe installed Node bindings
         id: node_native
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/check-native.mjs
       - name: Probe installed Electron bindings and Job Object
         id: electron_native
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.node_native.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.node_native.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm verify:native:electron
       - name: Verify integrated native ACL safety (Electron)
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node -e "require('node:child_process').execFileSync(require('electron'), ['scripts/verify-windows-acl.mjs'], {env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},stdio:'inherit',windowsHide:true})"
       - name: Process control with Electron runtime
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/check-electron-process.mjs
       - name: Require an interactive desktop for GUI acceptance
         id: desktop
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.electron_native.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: |
           if not "%TRELLIS_WIN11_DESKTOP%"=="true" (
             echo INTERACTIVE_DESKTOP_REQUIRED: GUI acceptance remains unverified
             exit /b 1
           )
       - name: Windows 11 desktop startup and restart
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.desktop.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.desktop.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/source-desktop"
       - name: Build local directory package
         id: directory_package
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/package-desktop.mjs --output "%TRELLIS_DESKTOP_OUTPUT%" --format dir
       - name: Probe packaged native modules, process trees and offline PDF
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success')"
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/check-desktop-runtime.mjs "%TRELLIS_DESKTOP_OUTPUT%"
       - name: Windows 11 packaged desktop startup and restart
-        if: "!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success'"
+        if: "!inputs.windows11_checkout_probe_only && (!cancelled() && !inputs.windows11_startup_probe_only && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success')"
         env:
           TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
+        working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: pnpm exec playwright test platform-smoke.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/packaged-desktop"
+      - name: Keep the checkout diagnostic stage
+        if: "always() && inputs.windows11_checkout_probe_only && steps.host.outcome == 'success'"
+        uses: actions/github-script@v7
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.source_checkout.outcome }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'checkout-preparation.json');
+            const report = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { stage: 'precheck_unavailable', candidates: [] };
+            const outcomes = new Set(['success', 'failure', 'cancelled', 'skipped']);
+            report.checkout = outcomes.has(process.env.CHECKOUT_OUTCOME) ? process.env.CHECKOUT_OUTCOME : 'unknown';
+            report.application_tests = 0;
+            if (report.checkout !== 'success' && report.stage === 'source_ready') report.stage = 'checkout_' + report.checkout;
+            fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
+            console.log(JSON.stringify({ stage: report.stage, checkout: report.checkout, application_tests: 0 }));
       - name: Keep Windows 11 environment and desktop evidence
         if: always()
         uses: actions/upload-artifact@v4
