@@ -27,6 +27,10 @@ on:
         description: Prepare current-standard-user Git only, then diagnose isolated checkout; requires windows11_only, windows11_standard_user and windows11_checkout_probe_only
         type: boolean
         default: false
+      windows11_prepare_python:
+        description: Prepare approved current-standard-user Python only, then run full acceptance; requires windows11_only and windows11_standard_user
+        type: boolean
+        default: false
       install_windows11_tools:
         description: Install approved missing Git, Python 3.12 and VS2022 C++ tools on DESKTOP-SFE95TP
         type: boolean
@@ -45,7 +49,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -179,7 +183,7 @@ jobs:
 
   windows11:
     name: ${{ inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -203,6 +207,11 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
             const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (context.payload.inputs?.windows11_prepare_python === 'true' &&
+                (!standardUser || context.payload.inputs?.windows11_only !== 'true' ||
+                 ['windows11_checkout_probe_only', 'windows11_prepare_git', 'install_windows11_tools', 'windows11_startup_probe_only', 'windows11_process_package_only', 'windows11_acl_probe_only'].some(key => context.payload.inputs?.[key] === 'true'))) {
+              throw Error('PYTHON_PREPARATION_REQUIRES_STANDARD_FULL_MODE');
+            }
             if (context.payload.inputs?.windows11_prepare_git === 'true' &&
                 (!standardUser || context.payload.inputs?.windows11_only !== 'true' || context.payload.inputs?.windows11_checkout_probe_only !== 'true')) {
               throw Error('GIT_PREPARATION_REQUIRES_STANDARD_CHECKOUT_DIAGNOSTICS');
@@ -649,9 +658,23 @@ jobs:
             }
             fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
             console.log(JSON.stringify({ stage: report.stage, head_matches: report.head_matches, application_tests: 0 }));
+      - name: Prepare approved current-standard-user Python only
+        id: python_prepare
+        if: "!cancelled() && inputs.windows11_prepare_python && inputs.windows11_standard_user && steps.source_checkout.outcome == 'success'"
+        timeout-minutes: 12
+        uses: actions/github-script@v7
+        env:
+          TRELLIS_PREPARE_PYTHON_APPROVED: ${{ inputs.windows11_prepare_python && '1' || '0' }}
+        with:
+          script: |
+            const path = require('node:path');
+            const relative = process.env.TRELLIS_WIN11_SOURCE;
+            if (!/^trellis-standard-[0-9]+-[0-9]+$/.test(relative)) throw Error('SOURCE_PATH_INVALID');
+            const source = path.resolve(process.env.GITHUB_WORKSPACE, relative);
+            await require(path.join(source, 'scripts', 'windows11-python.cjs'))(core);
       - name: Require existing standard-user Python, VS and SDK before dependencies
         id: standard_tools
-        if: "!cancelled() && inputs.windows11_standard_user && !inputs.windows11_checkout_probe_only && steps.source_checkout.outcome == 'success'"
+        if: "!cancelled() && inputs.windows11_standard_user && !inputs.windows11_checkout_probe_only && steps.source_checkout.outcome == 'success' && (!inputs.windows11_prepare_python || steps.python_prepare.outcome == 'success')"
         timeout-minutes: 1
         uses: actions/github-script@v7
         with:

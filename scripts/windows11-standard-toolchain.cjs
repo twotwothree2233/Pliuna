@@ -171,7 +171,7 @@ function inspectTools() {
   } finally { if (process.connected) process.disconnect() }
 }
 
-module.exports = async function verifyStandardToolchain(core) {
+module.exports = async function verifyStandardToolchain(core, { expose = true } = {}) {
   if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('DESIGNATED_WINDOWS_X64_RUNNER_REQUIRED')
   const evidence = process.env.TRELLIS_WIN11_EVIDENCE
   const host = JSON.parse(fs.readFileSync(path.join(evidence, 'host.json'), 'utf8'))
@@ -210,12 +210,16 @@ module.exports = async function verifyStandardToolchain(core) {
   })
   if (report.stage !== 'ready' || report.error || !selected) {
     core.setFailed('WINDOWS11_STANDARD_TOOLCHAIN_' + (report.missing?.join('_') || report.error || 'UNCONFIRMED'))
-    return
+    return { report, python: selected }
   }
   core.setSecret(selected); core.setSecret(path.dirname(selected))
-  core.addPath(path.dirname(selected)); core.exportVariable('PYTHON', selected)
-  core.setOutput('ready', 'true')
-  report.job_python_selected = true; save()
+  if (expose) {
+    core.addPath(path.dirname(selected)); core.exportVariable('PYTHON', selected)
+    core.setOutput('ready', 'true')
+    report.job_python_selected = true
+  }
+  save()
+  return { report, python: selected }
 }
 
 if (require.main === module) {
