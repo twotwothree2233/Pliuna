@@ -19,6 +19,9 @@
 42562024272 的 Git 准备与新目录检出已 success。
 其验证入口头为 35bce222e7f0f77310d48ceeb7c0b1e881b80ccb。
 该轮仍未执行依赖、构建或应用测试。
+后续完整入口42564610043因Python缺项在依赖前停止。
+其入口头为0ba9ec169e7fd130240933e354d9d2d9e44d195a。
+当前标准账户VS/SDK只读门禁通过，应用仍为0。
 
 工程阶段 A、B 建立测试入口与统一资产描述。
 C 统一文件操作、权限与持久化接口。
@@ -677,7 +680,8 @@ LOCALAPPDATA/Programs/Git 与 Trellis-Toolchain/Git。
 [42562024272](https://github.com/twotwothree2233/Trellis/actions/runs/42562024272) 已 success。
 验证入口头为 35bce222e7f0f77310d48ceeb7c0b1e881b80ccb。
 本节后续文档提交不改变该轮验证头。
-完整标准账户应用复验尚未派发，仍需另行决定。
+该轮没有派发完整入口。
+后续42564610043已派发，但在Python工具门禁停止。
 
 host.json 确认 Win11 Pro26300/X64、session2。
 interactive=true、elevated=false、admin组=false、SYSTEM=false。
@@ -692,7 +696,8 @@ checkout 使用本轮全新受控子目录，HEAD 匹配本轮提交。
 三个常见固定诊断候选仍 ENOENT，未改写为成功。
 35 个依赖及应用步骤全部 skipped，baseline skipped。
 应用测试数为 0，JSON 附件已实际下载核对。
-当前账户 Python/VS/SDK 仍未经验证，本轮没有联动安装。
+该轮未验证当前账户Python/VS/SDK，也没有联动安装。
+后续工具只读结果见下一节。
 
 ### 标准账户完整验收的只读工具门禁
 
@@ -725,6 +730,69 @@ SDK 按本机注册核对x64头、库和资源工具。
 原10秒hook、15秒ACL预算与GUI截止保持。
 文件、恢复关闭、完整进程、Electron和包内GUI逐项取证。
 继续使用A新隔离目录，结果以实际运行提交与计数为准。
+
+### 标准账户工具门禁的原生结果
+
+[42564610043](https://github.com/twotwothree2233/Trellis/actions/runs/42564610043) completed/failure。
+运行入口头为0ba9ec169e7fd130240933e354d9d2d9e44d195a。
+此轮是环境工具缺项，应用测试数为0。
+后续纯文档提交不改变该运行头或应用计数。
+
+host仍为Win11 Pro26300/X64、session2真实标准账户。
+interactive=true，elevated/admin组/SYSTEM均false。
+Git只复用2.56.0.windows.4，新受控目录检出成功。
+Git准备和总安装开关均false，没有安装工具。
+
+只读工具门禁用时2秒，missing仅python。
+PATH候选因REPARSE_PATH被拒绝，未执行版本进程。
+两个本账户固定位置与两个机器常见位置均ENOENT。
+HKCU/HKLM的3.12注册均未配置，不判整机没有Python。
+
+VS2022为17.14.37827.9，MSVC为14.44.35207。
+目标x64组件、MSBuild、工具和运行库均通过只读检查。
+SDK10.0.26100.0的x64头、库、资源工具检查通过。
+注册查询和vswhere退出0，无超时。
+
+35个依赖及应用步骤全部skipped，baseline skipped。
+另外两个诊断专用步骤skipped，总步骤跳过数37。
+文件、恢复关闭、Node/Electron进程和Job均未执行。
+源码/包内GUI、包内ACL/RPC/整树/PDF也均未执行。
+
+standard-toolchain.json等脱敏附件已实际下载核对。
+原失败与取消保留，旧检出清理停滞原因仍unknown。
+本次停止，不自动重派或将缺项改成setup下载。
+原应用超时、格式/B、A隔离目录和产品行为不变。
+
+### 最小Python补齐方案：尚未执行
+
+当前只需补齐本账户可用的Python3.12 x64。
+已有其他明确可访问安装时，可先只读验证该位置。
+否则建议既有官方actions/python-versions分发的3.12.10 x64。
+固定asset244701309，python-3.12.10-win32-x64.zip。
+元数据uploaded，大小26672655字节，未下载内容。
+仅提取python-3.12.10-amd64.exe，不运行setup.ps1。
+
+目标为本账户LOCALAPPDATA/Programs/Trellis-Toolchain/Python312。
+参数采用InstallAllUsers=0、PrependPath=0、Include_launcher=0。
+AssociateFiles=0、Shortcuts=0，关闭可选集成。
+保留venv/ensurepip/ssl，Include_pip=1。
+禁用测试、文档和快捷方式，使用quiet/norestart。
+
+安装前重查本账户候选、注册与目标，合格安装可复用。
+未知注册或目录均拒绝，不覆盖其他安装。
+仅提取固定ZIP条目，不执行分发包的账户注册清理脚本。
+这会新增当前账户Python文件及必要HKCU/卸载登记。
+不复制旧账户安装，不改服务、DACL、账户或持久PATH。
+不联动Git、VS、SDK，不使用总工具安装开关。
+此方案尚未获本轮安装授权，当前没有下载或安装。
+
+安装子进程只继承必要环境允许列表，不带GitHub凭据。
+原始日志仅留本机临时目录，附件只留脱敏阶段和结果。
+后续若获授权，下载限180秒、安装限5分钟，整体有界。
+安装退出0后，以3秒隔离探针复验3.12/x64及必要模块。
+3010记录需重启后停止，不自动重启；其他错误均停止。
+只在job中指定PYTHON和必要临时PATH。
+准备成功后的一次同主机标准账户完整入口也待用户批准。
 
 ### Windows 11 工具与依赖准备
 
