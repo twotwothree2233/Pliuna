@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -13,6 +13,10 @@ on:
         default: false
       windows11_only:
         description: Only test Windows 11 on DESKTOP-SFE95TP
+        type: boolean
+        default: false
+      windows11_standard_user:
+        description: Require a genuine standard-user interactive token; use with windows11_only and all other modes off
         type: boolean
         default: false
       install_windows11_tools:
@@ -33,7 +37,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -166,8 +170,8 @@ jobs:
           if-no-files-found: ignore
 
   windows11:
-    name: ${{ inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    name: ${{ inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -190,6 +194,11 @@ jobs:
             fs.mkdirSync(evidence, { recursive: true });
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
+            const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (standardUser && (context.payload.inputs?.windows11_only !== 'true' ||
+                ['install_windows11_tools', 'windows11_startup_probe_only', 'windows11_process_package_only', 'windows11_acl_probe_only'].some(key => context.payload.inputs?.[key] === 'true'))) {
+              throw Error('WINDOWS11_STANDARD_USER_REQUIRES_FULL_MODE_WITHOUT_INSTALLATION');
+            }
             if (['windows11_startup_probe_only', 'windows11_process_package_only', 'windows11_acl_probe_only'].filter(key => context.payload.inputs?.[key] === 'true').length > 1) throw Error('WINDOWS11_MODES_ARE_EXCLUSIVE');
             if (process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('UNEXPECTED_RUNNER');
             if (process.platform !== 'win32' || process.arch !== 'x64') throw Error('WINDOWS_X64_REQUIRED');
@@ -199,7 +208,18 @@ jobs:
               $ErrorActionPreference = 'Stop';
               [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false;
               $os = Get-CimInstance Win32_OperatingSystem;
-              $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent());
+              $identity = [Security.Principal.WindowsIdentity]::GetCurrent();
+              $principal = New-Object Security.Principal.WindowsPrincipal($identity);
+              $trellisAdminGroupPresent = $null;
+              if (${standardUser ? '$true' : '$false'}) {
+                # whoami includes deny-only groups. IsInRole alone would also
+                # accept a filtered token belonging to an administrator.
+                $trellisGroupLines = & (Join-Path $env:SystemRoot 'System32\\whoami.exe') /groups /fo csv /nh;
+                if ($LASTEXITCODE -ne 0) { throw 'TOKEN_GROUP_QUERY_FAILED' };
+                $trellisGroups = @($trellisGroupLines | ConvertFrom-Csv -Header 'name','type','sid','attributes');
+                if ($trellisGroups.Count -eq 0 -or @($trellisGroups | Where-Object { $_.sid -notmatch '^S-[0-9]+(-[0-9]+)+$' }).Count -ne 0) { throw 'TOKEN_GROUP_QUERY_INVALID' };
+                $trellisAdminGroupPresent = @($trellisGroups | Where-Object { $_.sid -eq 'S-1-5-32-544' }).Count -ne 0;
+              };
               [ordered]@{
                 caption = $os.Caption; version = $os.Version;
                 build = [int]$os.BuildNumber; product_type = [int]$os.ProductType;
@@ -207,14 +227,20 @@ jobs:
                 powershell = $PSVersionTable.PSVersion.ToString();
                 user_interactive = [Environment]::UserInteractive;
                 session_id = (Get-Process -Id $PID).SessionId;
-                elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);
+                administrators_group_present = $trellisAdminGroupPresent;
+                system_account = $identity.IsSystem
               } | ConvertTo-Json -Compress
             `;
-            const facts = { runner: process.env.RUNNER_NAME, ...JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' }).replace(/^\uFEFF/, '')) };
+            const facts = { runner: process.env.RUNNER_NAME, standard_user_required: standardUser, ...JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', maxBuffer: 65536 }).replace(/^\uFEFF/, '')) };
             fs.writeFileSync(path.join(evidence, 'host.json'), JSON.stringify(facts, null, 2) + '\n');
             console.log(JSON.stringify(facts));
             if (facts.product_type !== 1 || facts.build < 22000 || !facts.caption.includes('Windows 11') || facts.architecture !== 'X64') {
               throw Error('WINDOWS_11_CLIENT_REQUIRED: no tests were started');
+            }
+            if (standardUser && (facts.elevated !== false || facts.administrators_group_present !== false || facts.system_account !== false ||
+                facts.user_interactive !== true || !Number.isInteger(facts.session_id) || facts.session_id <= 0)) {
+              throw Error('STANDARD_USER_INTERACTIVE_SESSION_REQUIRED: application tests were not started');
             }
             core.exportVariable('TRELLIS_WIN11_DESKTOP', String(facts.user_interactive && facts.session_id > 0));
       - uses: actions/checkout@v4
