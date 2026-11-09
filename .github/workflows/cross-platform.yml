@@ -796,10 +796,13 @@ jobs:
             }
             const options = { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
             const oldHead = cp.execFileSync('git.exe', ['rev-parse', 'HEAD'], { ...options, cwd: previous }).trim();
-            const parent = cp.execFileSync('git.exe', ['rev-parse', 'HEAD^'], { ...options, cwd: source }).trim();
-            if (!/^[0-9a-f]{40}$/.test(oldHead) || oldHead !== parent) throw Error('CANDIDATE_REUSE_HEAD_MISMATCH');
+            if (!/^[0-9a-f]{40}$/.test(oldHead)) throw Error('CANDIDATE_REUSE_HEAD_MISMATCH');
             const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: prior });
             if (run.status !== 'completed' || run.head_sha !== oldHead || run.head_branch !== context.ref.replace('refs/heads/', '') || run.event !== 'workflow_dispatch') throw Error('CANDIDATE_REUSE_RUN_UNCONFIRMED');
+            // Checkout is intentionally depth=1. Read the immutable first
+            // parent through GitHub, preserving the original HEAD^ relation.
+            const { data: commit } = await github.rest.repos.getCommit({ ...context.repo, ref: process.env.GITHUB_SHA });
+            if (commit.sha !== process.env.GITHUB_SHA || commit.parents?.[0]?.sha !== oldHead) throw Error('CANDIDATE_REUSE_PARENT_UNCONFIRMED');
             const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({ ...context.repo, run_id: prior, per_page: 100 });
             const job = jobs.jobs.find(job => job.runner_name === 'DESKTOP-SFE95TP');
             if (!job || !['Prepare the existing Electron ABI for default-startup acceptance', 'Build local directory package'].every(name => job.steps.some(step => step.name === name && step.conclusion === 'success'))) throw Error('CANDIDATE_REUSE_ABI_UNCONFIRMED');
