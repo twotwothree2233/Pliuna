@@ -23,6 +23,10 @@ on:
         description: Only diagnose bounded Git discovery and a new isolated checkout; requires windows11_only and windows11_standard_user
         type: boolean
         default: false
+      windows11_prepare_git:
+        description: Prepare current-standard-user Git only, then diagnose isolated checkout; requires windows11_only, windows11_standard_user and windows11_checkout_probe_only
+        type: boolean
+        default: false
       install_windows11_tools:
         description: Install approved missing Git, Python 3.12 and VS2022 C++ tools on DESKTOP-SFE95TP
         type: boolean
@@ -41,7 +45,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -175,7 +179,7 @@ jobs:
 
   windows11:
     name: ${{ inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -199,6 +203,10 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
             const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (context.payload.inputs?.windows11_prepare_git === 'true' &&
+                (!standardUser || context.payload.inputs?.windows11_only !== 'true' || context.payload.inputs?.windows11_checkout_probe_only !== 'true')) {
+              throw Error('GIT_PREPARATION_REQUIRES_STANDARD_CHECKOUT_DIAGNOSTICS');
+            }
             if (context.payload.inputs?.windows11_checkout_probe_only === 'true' && !standardUser) {
               throw Error('CHECKOUT_DIAGNOSTICS_REQUIRE_STANDARD_USER_MODE');
             }
@@ -252,9 +260,212 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_DESKTOP', String(facts.user_interactive && facts.session_id > 0));
             if (standardUser && !/^[0-9]+-[0-9]+$/.test(suffix)) throw Error('SOURCE_PATH_INVALID');
             core.exportVariable('TRELLIS_WIN11_SOURCE', standardUser ? 'trellis-standard-' + suffix : '.');
+      - name: Prepare or select current-standard-user Git only
+        id: git_prepare
+        if: "!cancelled() && inputs.windows11_standard_user && steps.host.outcome == 'success'"
+        timeout-minutes: 10
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { spawn, execFile } = require('node:child_process');
+            const { performance } = require('node:perf_hooks');
+            const approved = context.payload.inputs?.windows11_prepare_git === 'true';
+            const reportFile = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'git-preparation.json');
+            const source = 'https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/Git-2.56.0.4-64-bit.exe';
+            const report = { approved_installation: approved, application_tests: 0, source, asset_id: 677312539,
+              stage: 'inspect', candidates: [], exit_code: null, timeout: false, restart_required: false };
+            function save() { fs.writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n'); }
+            const env = {};
+            // Explicit allowlist: no GitHub authorization, runner credentials, proxy credentials,
+            // model keys, NODE_OPTIONS, or inherited Git configuration enters the child/installer.
+            for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+              'LOCALAPPDATA', 'APPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles',
+              'CommonProgramFiles(x86)', 'PUBLIC', 'RUNNER_TRACKING_ID']) {
+              if (process.env[key]) env[key] = process.env[key];
+            }
+            env.PATH = path.join(env.SystemRoot, 'System32') + ';' + env.SystemRoot;
+            env.ComSpec = path.join(env.SystemRoot, 'System32', 'cmd.exe');
+            Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' });
+            // All synchronous metadata/versions are isolated so even an inaccessible path
+            // cannot block the action thread. Only the two current-user locations are read.
+            async function prepare(config) {
+              const fs = require('node:fs'), path = require('node:path').win32;
+              const { execFileSync, spawn, execFile } = require('node:child_process');
+              const { Readable, Transform } = require('node:stream');
+              const { pipeline } = require('node:stream/promises');
+              const state = { candidates: [], exit_code: null, timeout: false, restart_required: false };
+              const fail = code => { const error = new Error(); error.code = code; throw error; };
+              const code = error => /^[A-Z0-9_]{1,60}$/.test(error?.code ?? '') ? error.code : 'PREPARATION_FAILED';
+              const send = (stage, extra = {}) => process.send({ stage, ...state, ...extra });
+              const boot = path.parse(process.env.SystemRoot ?? '').root.toLowerCase();
+              function inspect(file, kind, missing = false) {
+                if (!path.isAbsolute(file) || path.parse(file).root.toLowerCase() !== boot || !/^[a-z]:\\$/.test(boot)) fail('NONLOCAL_PATH');
+                const absolute = path.resolve(file), root = path.parse(absolute).root;
+                let current = root, stat = fs.lstatSync(root);
+                if (!stat.isDirectory() || stat.isSymbolicLink()) fail('REPARSE_PATH');
+                const parts = absolute.slice(root.length).split(path.sep).filter(Boolean);
+                for (let index = 0; index < parts.length; index++) {
+                  current = path.join(current, parts[index]);
+                  try { stat = fs.lstatSync(current); }
+                  catch (error) { if (missing && error.code === 'ENOENT') return null; throw error; }
+                  if (stat.isSymbolicLink()) fail('REPARSE_PATH');
+                  if (index < parts.length - 1 && !stat.isDirectory()) fail('INVALID_PATH');
+                }
+                if (kind === 'directory' ? !stat.isDirectory() : !stat.isFile()) fail('INVALID_PATH');
+                fs.accessSync(absolute, fs.constants.R_OK);
+                return absolute;
+              }
+              function version(candidate, exact = false) {
+                candidate.started = false; candidate.exit = null; candidate.timeout = false;
+                // Read only the PE header, never a file digest. Accept AMD64 executables only.
+                const descriptor = fs.openSync(candidate.file, 'r'), header = Buffer.alloc(64), coff = Buffer.alloc(6);
+                try {
+                  if (fs.readSync(descriptor, header, 0, 64, 0) !== 64 || header.toString('ascii', 0, 2) !== 'MZ') fail('GIT_FORMAT_INVALID');
+                  const offset = header.readUInt32LE(60);
+                  if (offset > 1048576 || fs.readSync(descriptor, coff, 0, 6, offset) !== 6 || coff.readUInt32LE(0) !== 0x4550 || coff.readUInt16LE(4) !== 0x8664) fail('GIT_AMD64_REQUIRED');
+                } finally { fs.closeSync(descriptor); }
+                try {
+                  // execFileSync is bounded to three seconds, with no shell or inherited credentials.
+                  const text = execFileSync(candidate.file, ['--version'], { cwd: process.env.TEMP, env: process.env,
+                    windowsHide: true, timeout: 3000, maxBuffer: 256, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+                  candidate.started = true; candidate.exit = 0;
+                  const match = text.match(/^git version ([0-9]+\.[0-9]+\.[0-9]+\.windows\.[0-9]+)$/);
+                  if (!match) fail('GIT_VERSION_INVALID');
+                  const [major, minor] = match[1].split('.').map(Number);
+                  if (!(major > 2 || major === 2 && minor >= 18) || exact && match[1] !== '2.56.0.windows.4') fail('GIT_VERSION_UNSUPPORTED');
+                  candidate.version = match[1];
+                } catch (error) {
+                  if (error.pid) candidate.started = true;
+                  if (Number.isInteger(error.status)) candidate.exit = error.status;
+                  candidate.timeout = error.code === 'ETIMEDOUT';
+                  candidate.error = code(error); throw error;
+                }
+              }
+              const publicCandidates = () => state.candidates.map(({ file, directory, ...value }) => value);
+              try {
+                send('inspect');
+                const profile = inspect(process.env.USERPROFILE ?? '', 'directory');
+                const local = inspect(process.env.LOCALAPPDATA ?? '', 'directory');
+                const relative = path.relative(profile, local);
+                if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) fail('CURRENT_USER_LOCALAPPDATA_REQUIRED');
+                const roots = [path.join(local, 'Programs', 'Git'), path.join(local, 'Programs', 'Trellis-Toolchain', 'Git')];
+                for (const [index, directory] of roots.entries()) {
+                  const candidate = { category: index ? 'current_user_toolchain' : 'current_user_git', accessible: false,
+                    started: false, exit: null, timeout: false, version: null, error: null, directory };
+                  state.candidates.push(candidate);
+                  if (!inspect(directory, 'directory', true)) { candidate.error = 'ABSENT'; continue; }
+                  const file = inspect(path.join(directory, 'cmd', 'git.exe'), 'file', true);
+                  if (!file) {
+                    if (fs.readdirSync(directory).length) fail('NONEMPTY_GIT_TARGET_CONFLICT');
+                    candidate.error = 'EMPTY'; continue;
+                  }
+                  candidate.accessible = true; candidate.file = file;
+                }
+                send('versions', { candidates: publicCandidates() });
+                for (const candidate of state.candidates) if (candidate.accessible) version(candidate);
+                let selected = state.candidates.find(candidate => candidate.version);
+                if (selected) {
+                  send('ready', { candidates: publicCandidates(), result: 'reused', version: selected.version, selected_directory: path.dirname(selected.file) });
+                } else if (!config.approved) {
+                  send('ready', { candidates: publicCandidates(), result: 'not_selected' });
+                } else {
+                  const target = roots[1];
+                  // Recheck before installation; never replace unknown or nonempty contents.
+                  if (inspect(target, 'directory', true) && fs.readdirSync(target).length) fail('NONEMPTY_GIT_TARGET_CONFLICT');
+                  const temp = inspect(config.temp, 'directory');
+                  if (!/^[0-9]+-[0-9]+$/.test(config.suffix)) fail('WORK_PATH_INVALID');
+                  const work = path.join(temp, 'trellis-git-' + config.suffix);
+                  if (inspect(work, 'directory', true)) fail('WORK_ALREADY_EXISTS');
+                  fs.mkdirSync(work);
+                  const installer = path.join(work, 'Git-2.56.0.4-64-bit.exe');
+                  send('download', { candidates: publicCandidates() });
+                  const response = await fetch(config.source, { headers: { 'User-Agent': 'Trellis-Windows11-Git-preparation', Accept: 'application/octet-stream' }, credentials: 'omit', signal: AbortSignal.timeout(180000) });
+                  if (!response.ok) fail('DOWNLOAD_HTTP_' + response.status);
+                  if (!['github.com', 'release-assets.githubusercontent.com'].includes(new URL(response.url).hostname)) fail('DOWNLOAD_SOURCE_INVALID');
+                  const expected = 66850032;
+                  if (response.headers.has('content-length') && Number(response.headers.get('content-length')) !== expected) fail('INSTALLER_SIZE_INVALID');
+                  let size = 0;
+                  const limit = new Transform({ transform(chunk, encoding, callback) { size += chunk.length; callback(size > expected ? Object.assign(new Error(), { code: 'INSTALLER_SIZE_INVALID' }) : null, chunk); } });
+                  await pipeline(Readable.fromWeb(response.body), limit, fs.createWriteStream(installer, { flags: 'wx' }));
+                  if (size !== expected) fail('INSTALLER_SIZE_INVALID');
+                  const descriptor = fs.openSync(installer, 'r'), magic = Buffer.alloc(2);
+                  try { if (fs.readSync(descriptor, magic, 0, 2, 0) !== 2 || magic.toString('ascii') !== 'MZ') fail('INSTALLER_FORMAT_INVALID'); }
+                  finally { fs.closeSync(descriptor); }
+                  if (inspect(target, 'directory', true) && fs.readdirSync(target).length) fail('NONEMPTY_GIT_TARGET_CONFLICT');
+                  fs.mkdirSync(target, { recursive: true });
+                  inspect(target, 'directory');
+                  send('install', { candidates: publicCandidates() });
+                  const args = ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER', '/DIR=' + target,
+                    '/o:PathOption=BashOnly', '/COMPONENTS=', '/NOICONS', '/LOG=' + path.join(work, 'installer-raw.log')];
+                  state.exit_code = await new Promise((resolve, reject) => {
+                    const child = spawn(installer, args, { cwd: work, env: process.env, windowsHide: true, stdio: 'ignore' });
+                    let timer, timedOut = false;
+                    child.once('error', error => { clearTimeout(timer); reject(error); });
+                    child.once('exit', value => { clearTimeout(timer); if (!timedOut) resolve(value); });
+                    timer = setTimeout(() => {
+                      timedOut = true; state.timeout = true;
+                      execFile(path.join(process.env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'],
+                        { timeout: 3000, windowsHide: true, env: process.env }, error => reject(Object.assign(new Error(), { code: error ? 'INSTALL_TIMEOUT_TERMINATION_UNKNOWN' : 'INSTALL_TIMEOUT' })));
+                    }, 300000);
+                  });
+                  state.restart_required = state.exit_code === 3010;
+                  if (state.restart_required) fail('RESTART_REQUIRED');
+                  if (state.exit_code !== 0) fail('INSTALLER_EXIT_FAILED');
+                  send('verify', { candidates: publicCandidates() });
+                  selected = { category: 'current_user_toolchain', accessible: true, file: inspect(path.join(target, 'cmd', 'git.exe'), 'file'), version: null, error: null };
+                  version(selected, true);
+                  send('ready', { candidates: publicCandidates(), result: 'installed', version: selected.version, selected_directory: path.dirname(selected.file) });
+                }
+              } catch (error) {
+                state.timeout ||= ['TimeoutError', 'AbortError'].includes(error?.name) || state.candidates.some(value => value.timeout);
+                send('failed', { candidates: publicCandidates(), error: code(error) }); process.exitCode = 1;
+              } finally { if (process.connected) process.disconnect(); }
+            }
+            const config = { approved, source, temp: process.env.RUNNER_TEMP, suffix: process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT };
+            const deadline = performance.now() + (approved ? 535000 : 25000);
+            save();
+            const outcome = await new Promise(resolve => {
+              let child, timer, finished = false, selected;
+              const limits = { inspect: 15000, versions: 8000, download: 185000, install: 310000, verify: 10000, ready: 1000, failed: 1000 };
+              const finish = error => {
+                if (finished) return; finished = true; clearTimeout(timer);
+                if (error) { report.error = error; report.stage = 'failed'; }
+                if (child?.connected) child.disconnect();
+                child?.unref(); save(); resolve(selected);
+              };
+              const terminate = () => {
+                report.timeout = true;
+                execFile(path.join(env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'],
+                  { timeout: 3000, windowsHide: true, env }, error => finish(error ? 'PREPARATION_TIMEOUT_TERMINATION_UNKNOWN' : 'PREPARATION_TIMEOUT'));
+              };
+              child = spawn(process.execPath, ['-e', `(${prepare.toString()})(${JSON.stringify(config)})`],
+                { cwd: process.env.RUNNER_TEMP, env, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+              child.once('error', () => finish('WORKER_START_FAILED'));
+              child.on('message', message => {
+                if (!Object.hasOwn(limits, message?.stage)) return;
+                const { selected_directory, ...publicMessage } = message;
+                if (message.stage === 'failed') report.failure_phase = report.stage;
+                Object.assign(report, publicMessage); selected = selected_directory;
+                save(); console.log(JSON.stringify(report));
+                clearTimeout(timer);
+                timer = setTimeout(terminate, Math.max(1, Math.min(limits[message.stage], deadline - performance.now())));
+              });
+              child.once('close', code => finish(code === 0 && report.stage === 'ready' ? null : report.error ?? 'WORKER_INCOMPLETE'));
+              timer = setTimeout(terminate, 15000);
+            });
+            if (report.error || report.stage !== 'ready') core.setFailed('GIT_PREPARATION_' + (report.error ?? 'UNCONFIRMED'));
+            else if (outcome) {
+              core.setSecret(outcome); core.setSecret(outcome.toLowerCase());
+              core.setSecret(path.join(outcome, 'git.exe')); core.setSecret(path.join(outcome, 'git.EXE'));
+              core.addPath(outcome);
+              report.job_path_selected = true; save();
+            }
+            console.log(JSON.stringify(report));
       - name: Bound Git discovery and reserve a new source path
         id: precheckout
-        if: "!cancelled() && inputs.windows11_standard_user && steps.host.outcome == 'success'"
+        if: "!cancelled() && inputs.windows11_standard_user && steps.host.outcome == 'success' && steps.git_prepare.outcome == 'success'"
         timeout-minutes: 1
         uses: actions/github-script@v7
         with:
