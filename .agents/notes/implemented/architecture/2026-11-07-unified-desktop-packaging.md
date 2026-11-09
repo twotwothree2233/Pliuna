@@ -533,3 +533,34 @@ Git复用、新目录检出和HEAD核对通过，无工具安装。
 37步骤skip，含35依赖应用；baseline skip，应用0。
 当前标准会话原链接前置已具备，完整矩阵结果另行绑定运行头。
 旧EPERM及恢复/插件和旧根清理unknown原因不改写。
+
+
+### 指定Win11标准账户完整入口的实际边界
+
+42587842121在验证头45883cf4f9cf19a9ef358b433d73f510b9fc1a18结束success。
+仅指定Win11 Pro26300/X64/session2真标准账户和新A隔离目录。
+有界原symlink/realpath297ms通过，现有全部工具复用。
+50步骤为41 success/9模式skip，其他平台baseline skip。
+
+Portable94通过，完整文件559通过/1项POSIX条件skip。
+完整进程118通过/3项计算门槛skip，含恢复关闭8。
+核心15为完整进程子集，不重复加总；Electron5通过/3同类skip。
+包结构21通过/4种POSIX闭包skip，Windows拒绝检查实际执行。
+
+Node/Electron各4组ACL与最小Job汇总均通过。
+包内直接ACL、SQLite、RPC、整树清理、合成单页PDF均true。
+源码GUI1通过/9.2s，包内GUI1通过/13.3s。
+两截图已查看，两状态JSON均idle/无恢复错误/GC可用。
+
+原生日志无WINDOWS_ACL_FAILURE、Job未空或未处理错误。
+3次Job延迟归零，等待79.664/17.223/9.441ms，预算不变。
+Node/Electron两附加失败堆栈来自明确负向用例。
+性能20/20目录、200 ACL；均424.333/p95=505.384/max547.562ms。
+
+旧recovery/plugin初始拒绝未复现，具体先前原因仍unknown。
+原EPERM与旧检出取消及全部原失败保留，不回写。
+PDF可选渲染依赖告警保留，文字提取通过，渲染/OCR未验收。
+默认HOME/其他账户/安装器/签名/断电/旧目录B未新增验收。
+
+本轮仅入口与说明变更，不改产品、格式或计算门槛。
+收尾只提交必要文档[skip ci]，不为状态重跑CI。

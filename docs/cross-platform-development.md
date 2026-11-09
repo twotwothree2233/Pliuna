@@ -1,5 +1,15 @@
 # 跨平台开发与验证
 
+指定Win11标准账户完整入口已通过。
+[42587842121](https://github.com/twotwothree2233/Trellis/actions/runs/42587842121)为completed/success。
+精确验证头为：
+`45883cf4f9cf19a9ef358b433d73f510b9fc1a18`。
+
+范围限DESKTOP-SFE95TP/Win11专业版26300/X64/session2。
+该会话非提升、无管理员组且具备真实file-symlink能力。
+完整文件、生命周期、恢复关闭、源码及目录包GUI通过。
+使用新A隔离目录，默认HOME与旧目录B仍未验收。
+
 第十轮四平台基线 CI 全部通过。
 该基线已验证代码提交为：
 `bc79bd422c2a306347d33a57c55c16f973b030ef`。
@@ -15,7 +25,7 @@
 
 标准账户已在 42550357622 通过令牌门禁。
 该轮停在旧检出目录清理，随后正常取消。
-应用测试为 0，标准账户完整应用结果尚未取得。
+该轮应用测试为0，未取得完整应用结果。
 42562024272 的 Git 准备与新目录检出已 success。
 其验证入口头为 35bce222e7f0f77310d48ceeb7c0b1e881b80ccb。
 该轮仍未执行依赖、构建或应用测试。
@@ -25,7 +35,7 @@
 Python补齐后42572230985已执行一次完整入口。
 入口头为31e5450518c935639de969fd993a7abb52c1a344。
 Python准备通过，Portable符号链接自检因EPERM失败。
-部分独立测试通过，完整文件/生命周期/包内验收仍未完成。
+当轮独立测试部分通过，完整文件/生命周期/包内入口跳过。
 用户本机准备后的链接探针42586965647已success。
 运行头为b864a1a20848dd48b98675302414887b413e33f2。
 同一标准会话的原file symlink与realpath自检通过。
@@ -1276,5 +1286,94 @@ Node22.23.1缓存复用，原TEMP/TMP保持，总用时281ms。
 
 新目录checkout与HEAD通过，Git2.56.0.windows.4继续复用。
 35个依赖应用、Python准备、标准工具门禁共37步骤跳过。
-baseline跳过，应用0；完整矩阵待下一次单次复验。
+该探针baseline跳过、应用0；后续完整结果见下。
 旧EPERM及此前unknown原因保留，未改写原失败结论。
+
+
+### 42587842121：指定标准账户完整入口通过
+
+[42587842121](https://github.com/twotwothree2233/Trellis/actions/runs/42587842121) completed/success。
+精确验证头为：
+`45883cf4f9cf19a9ef358b433d73f510b9fc1a18`。
+相较探针头b864a1a，仅开发说明和原笔记变化。
+
+Win11 job于08:42:03Z开始，08:56:54Z结束。
+50个步骤为41 success、9个预期模式步骤skipped。
+其他平台baseline skipped，未运行其他版本或系统。
+原10秒hook、15秒ACL预算及GUI截止未改。
+
+host实际为DESKTOP-SFE95TP/Win11专业版10.0.26300/X64。
+session2/interactive=true/elevated=false。
+administrators_group_present=false/system_account=false。
+范围限此标准会话与具备file-symlink能力的新A隔离目录。
+
+| 入口 | 实际结果 | 计数边界 |
+| --- | --- | --- |
+| 原symlink/realpath前置 | passed，297ms | Node22.23.1缓存，原TEMP/TMP |
+| Python/VS/SDK/Git | 门禁通过，全部复用 | 无工具安装 |
+| 构建/合同漂移/合同验证 | success | 原有门禁 |
+| 20目录性能 | 21 passed；20/20初始化；200 ACL | 独立性能套件 |
+| Portable | 10文件，94 passed | 无跳过 |
+| 核心进程子集 | 2文件，15 passed/3 skipped | 已包含于完整进程，不重复加总 |
+| 完整文件 | 23文件，559 passed/1 skipped | 含recovery39、restore30 |
+| 完整进程 | 8文件，118 passed/3 skipped | 含恢复关闭8、插件进程24 |
+| 插件业务与RPC | calls35、queries7、rpc15通过 | 已包含于完整进程 |
+| Node/Electron原生ACL | 各4组检查passed=true | 文件/目录身份、owner/DACL/继承、ctime、等价零写和拒绝路径 |
+| Node/Electron最小Job | 各5个汇总字段true | 与完整生命周期分别记录 |
+| Electron生命周期 | 1文件，5 passed/3 skipped | 单独Electron运行时 |
+| 包结构 | 3文件，21 passed/4 skipped | 仅Windows生产闭包及通用拒绝检查 |
+| 源码GUI | 1 passed，9.2秒 | 创建、重启恢复、窗口关闭及Utility退出 |
+| 本地目录包 | success | 2173文件、22依赖、format=dir/published=false |
+| 包内直接ACL | privateAcl=true | 两次保护，Job归零、身份与重复ctime检查 |
+| 包内进程与PDF | SQLite/Monty绑定/RPC/后代清理/PDF均true | 合成单页文字PDF，不执行Monty计算 |
+| 包内GUI | 1 passed，13.3秒 | 同源码GUI场景 |
+
+跳过项均保留既有能力或平台条件：
+
+- 文件1项为POSIX目录fsync失败注入，Windows不运行。
+- 核心/完整进程/Electron各3项为同三种真实Monty计算场景。
+  Windows的runtimeVerified仍false，没有开放新计算目标。
+- 包结构4项为darwin-arm64、darwin-x64及两种Linux生产闭包。
+  Windows不能保持POSIX执行位；对应Windows拒绝检查实际通过。
+- 9个workflow步骤是检出诊断2项、工具安装2项、ACL技术-only3项。
+  另有Runner关闭取证和startup-only各1项。
+  完整文件、进程、恢复关闭和包内应用入口均实际执行。
+
+标准工具JSON的missing为空，approved_installation=false。
+Python3.12.10由当前账户固定位置及HKCU验证后选择。
+PATH内应用别名仍REPARSE_PATH拒绝，未放宽未知路径边界。
+VS17.14.37827.9/MSVC14.44.35207、SDK10.0.26100.0有效。
+
+ACL性能平均424.333ms，p95=505.384ms，最大547.562ms。
+20目录均低于原10秒hook，p95低于5000ms目标。
+Node与Electron文件/目录的精确dev/ino/ctime与句柄一致。
+继承、owner、DACL、拒绝路径和重复零写检查通过。
+
+捕获日志与afterEach门禁已核对，真实WINDOWS_ACL_FAILURE为0。
+WINDOWS_ACL_JOB_NOT_EMPTY/DEADLINE及未处理错误均未出现。
+3次观察到Job短暂非空，随后均确认active=0。
+对应等待79.664ms、17.223ms、9.441ms，未放宽预算。
+
+Node/Electron各一处PROCESS_JOB_ATTACH_FAILED是预期负向用例。
+两份堆栈各出现message/code，不计作四次实际故障。
+它们后续最小Job汇总均true，完整进程亦独立通过。
+日志中ETIMEDOUT仅为Git准备入口回显的错误分类代码。
+
+源码与包内platform-smoke.png均已实际查看。
+两份desktop-status.json均ok=true/phase=idle/error=null。
+restore.error=null，gc.enabled=true/gc.error=null。
+截图显示运行时连接正常，重启后的任务及缩放断言通过。
+
+包内PDF.js有可选canvas/DOMMatrix/Path2D告警。
+本轮合成单页文字提取通过，图片渲染和OCR未验收。
+旧recovery/plugin初始拒绝未复现，具体先前原因仍unknown。
+原EPERM、旧检出清理取消及全部先前失败记录保留。
+
+本轮只增加测试入口和说明，未改产品或持久化格式。
+精确身份方案A继续限新隔离目录，旧目录升级B冻结。
+默认HOME、其他账户/策略/Win11构建和其他平台未新增验收。
+安装/卸载/升级、签名/SmartScreen、UNC/SMB、断电仍待验收。
+
+无需为同一缺口再派发测试或重装工具。
+仅允许范围内文档[skip ci]收尾，代码验证头与文档头分开记录。
+不主动计算摘要、不创建PR、不合并或发布安装包。
