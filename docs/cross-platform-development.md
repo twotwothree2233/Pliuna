@@ -1,8 +1,15 @@
 # 跨平台开发与验证
 
 默认目录定向验收尚未通过。
-42600636612失败于测试PATH断言，具体PATH类型unknown。
-最小测试修正尚未原生复验，默认目录按可能已创建保留。
+[42618317969](https://github.com/twotwothree2233/Trellis/actions/runs/42618317969)前检报`DEFAULT_DIRECTORY_EXISTS`。
+精确运行头为`09f8286b90e59fd178321d35d2a9b77093fa6e86`。
+本轮只读前检拒绝，应用0，依赖及应用步骤全部跳过。
+现有默认目标保留，不删除、移动或复用为fresh。
+
+09f8286的PATH、真实PID及退出修正仍未原生执行。
+42600636612失败及具体PATH类型unknown的原结论保留。
+下一批需先确认默认目标保留方式及格式边界。
+安装器执行和内建摘要范围仍待明确授权。
 
 指定Win11标准账户的A隔离目录完整入口已通过。
 [42587842121](https://github.com/twotwothree2233/Trellis/actions/runs/42587842121)为completed/success。
