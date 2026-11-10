@@ -32,7 +32,7 @@ on:
         type: string
         default: ''
       windows11_candidate_previous_run:
-        description: Resume only approved candidate 42649802869 with fresh dependencies and the fixed 01039e72 to 2bed119 parent chain
+        description: Resume only candidate 42649802869 with fresh dependencies and the fixed 01039e72 to 2bed119 to 2a62afb parent chain
         type: string
         default: ''
       windows11_candidate_acceptance:
@@ -797,26 +797,90 @@ jobs:
             const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'candidate-provenance.json');
             const ownerHead = '01039e72cab284491fcd1a812add0ec79c8e2488';
             const bridgeHead = '2bed119f8df96ec81992d755bf81769cdfd27c4f';
+            const resumeHead = '2a62afb20223fc850d22c625a905d0f2bd4ece2f';
             const report = { stage: 'local_inputs', passed: false, prior_run: prior, source_head: process.env.GITHUB_SHA,
-              dependencies_reused: false, retry_limit: 1, request_deadline_ms: 10000, requests: [] };
+              dependencies_reused: false, retry_limit: previousInput ? 0 : 1, request_deadline_ms: 10000,
+              transport: previousInput ? 'windows_system_curl' : 'official_octokit', requests: [] };
             const save = () => fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
             const fail = code => { throw Object.assign(Error(code), { code }); };
+            let curl, curlEnvironment;
+            function systemHttpsClient() {
+              report.stage = 'system_https_client';
+              report.https_client = { category: 'windows_system_curl', available: false };
+              save();
+              const root = process.env.SystemRoot;
+              if (!root || !/^[a-z]:\\/i.test(root)) fail('CANDIDATE_SYSTEM_HTTPS_CLIENT_UNAVAILABLE');
+              curl = path.join(root, 'System32', 'curl.exe');
+              for (const directory of [root, path.dirname(curl)]) {
+                const stat = fs.lstatSync(directory);
+                if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CANDIDATE_SYSTEM_HTTPS_CLIENT_UNSAFE');
+              }
+              const stat = fs.lstatSync(curl);
+              if (!stat.isFile() || stat.isSymbolicLink()) fail('CANDIDATE_SYSTEM_HTTPS_CLIENT_UNSAFE');
+              curlEnvironment = {};
+              // Keep the existing route, including existing proxy settings,
+              // without forwarding GitHub inputs, credentials or all env keys.
+              for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'RUNNER_TRACKING_ID', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
+                if (process.env[key]) curlEnvironment[key] = process.env[key];
+              }
+              const version = cp.execFileSync(curl, ['--disable', '--version'], { env: curlEnvironment, encoding: 'utf8',
+                timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+              const match = version.match(/^curl ([0-9]+\.[0-9]+\.[0-9]+)(?:\s|[-+])/);
+              if (!match || !/^Protocols:.*\bhttps\b/m.test(version)) fail('CANDIDATE_SYSTEM_HTTPS_CLIENT_UNSUPPORTED');
+              report.https_client = { category: 'windows_system_curl', available: true, version: match[1], tls_validation_enabled: true, config_files_disabled: true };
+              save();
+            }
+            function nativeRequest(entry, route) {
+              const prefix = 'GET /repos/twotwothree2233/Trellis/';
+              const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs', 'commits/' + resumeHead, 'commits/' + bridgeHead];
+              if (!route.startsWith(prefix) || !allowed.includes(route.slice(prefix.length))) { entry.cause_code = 'UNAPPROVED_ROUTE'; fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED'); }
+              const token = core.getInput('github-token', { required: true });
+              if (!/^[A-Za-z0-9_]{20,300}$/.test(token)) { entry.cause_code = 'TOKEN_INPUT_UNSUPPORTED'; fail('CANDIDATE_HTTPS_TOKEN_UNSUPPORTED'); }
+              // --disable is first: no user curlrc, redirect, insecure TLS,
+              // netrc or command-line credential can change this fixed GET.
+              const config = ['url = ' + JSON.stringify('https://api.github.com' + route.slice(4)), 'request = "GET"',
+                'header = ' + JSON.stringify('Authorization: Bearer ' + token), 'header = "Accept: application/vnd.github+json"',
+                'user-agent = "Trellis-Windows11-candidate-provenance"', 'silent', 'retry = 0', 'max-time = 10',
+                'connect-timeout = 5', 'proto = "=https"', 'write-out = "\\nTRELLIS_HTTP_STATUS:%{http_code}\\n"'].join('\n') + '\n';
+              let output;
+              try {
+                output = cp.execFileSync(curl, ['--disable', '--config', '-'], { input: config, env: curlEnvironment,
+                  encoding: 'utf8', timeout: 10000, maxBuffer: 1048576, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+                entry.exit_code = 0;
+              } catch (error) {
+                entry.exit_code = Number.isInteger(error.status) && error.status >= 0 && error.status <= 255 ? error.status : null;
+                const causes = { 5: 'PROXY_RESOLUTION_FAILED', 6: 'HOST_RESOLUTION_FAILED', 7: 'CONNECT_FAILED', 28: 'TIMEOUT',
+                  35: 'TLS_HANDSHAKE_FAILED', 51: 'TLS_CERTIFICATE_FAILED', 52: 'EMPTY_REPLY', 55: 'SEND_FAILED', 56: 'RECEIVE_FAILED',
+                  58: 'TLS_CERTIFICATE_FAILED', 60: 'TLS_CERTIFICATE_FAILED', 77: 'TLS_CA_FILE_FAILED', 92: 'HTTP2_STREAM_FAILED' };
+                entry.timeout = error.code === 'ETIMEDOUT' || entry.exit_code === 28;
+                entry.cause_code = entry.timeout ? 'TIMEOUT' : error.code === 'ENOBUFS' ? 'OUTPUT_LIMIT' : error.code === 'EACCES' ? 'CLIENT_ACCESS_DENIED' : causes[entry.exit_code] ?? 'CURL_PROCESS_FAILED';
+                // Never forward raw stderr, response bodies, config or error objects.
+                fail('CANDIDATE_SYSTEM_HTTPS_REQUEST_FAILED');
+              }
+              const status = output.match(/\nTRELLIS_HTTP_STATUS:([0-9]{3})\s*$/);
+              if (!status || Number(status[1]) < 100 || Number(status[1]) > 599) { entry.cause_code = 'HTTP_STATUS_MISSING'; fail('CANDIDATE_SYSTEM_HTTPS_RESPONSE_INVALID'); }
+              entry.status = Number(status[1]); entry.status_source = 'http_response';
+              if (entry.status !== 200) { entry.cause_code = 'HTTP_ERROR'; fail('CANDIDATE_SYSTEM_HTTPS_HTTP_REJECTED'); }
+              try { return JSON.parse(output.slice(0, status.index)); }
+              catch { entry.cause_code = 'RESPONSE_JSON_INVALID'; fail('CANDIDATE_SYSTEM_HTTPS_RESPONSE_INVALID'); }
+            }
             async function request(stage, route, operation) {
               report.stage = stage;
-              const entry = { stage, route, status: null, cause_code: null, timeout: false, completed: false };
+              const entry = { stage, route, transport: report.transport, status: null, status_source: null, cause_code: null, timeout: false, completed: false };
               report.requests.push(entry); save();
               const controller = new AbortController();
-              const timer = setTimeout(() => { entry.timeout = true; controller.abort(); }, 10000);
+              const timer = previousInput ? undefined : setTimeout(() => { entry.timeout = true; controller.abort(); }, 10000);
               try {
+                if (previousInput) { const data = nativeRequest(entry, route); entry.completed = true; save(); return data; }
                 const result = await operation(controller.signal);
-                entry.status = result.status;
+                entry.status = result.status; entry.status_source = 'official_client_response';
                 if (result.status !== 200 || entry.timeout) fail('CANDIDATE_PROVENANCE_HTTP_UNEXPECTED');
                 entry.completed = true; save(); return result.data;
               } catch (error) {
-                entry.status = Number.isInteger(error.status) && error.status >= 100 && error.status <= 599 ? error.status : entry.status;
+                if (!previousInput && Number.isInteger(error.status) && error.status >= 100 && error.status <= 599) { entry.status = error.status; entry.status_source = 'official_client_error_field'; }
                 const allowed = ['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'DEPTH_ZERO_SELF_SIGNED_CERT'];
                 const code = error.cause?.code ?? error.cause?.cause?.code ?? error.code;
-                entry.cause_code = allowed.includes(code) ? code : entry.timeout ? 'ABORTED' : /fetch failed/i.test(String(error.message)) ? 'FETCH_FAILED' : 'UNKNOWN';
+                entry.cause_code ??= allowed.includes(code) ? code : entry.timeout ? 'ABORTED' : /fetch failed/i.test(String(error.message)) ? 'FETCH_FAILED' : 'UNKNOWN';
                 save(); fail('CANDIDATE_PROVENANCE_API_' + stage.toUpperCase() + '_FAILED');
               } finally { clearTimeout(timer); }
             }
@@ -840,20 +904,25 @@ jobs:
               if (previousInput) {
                 const raw = cp.execFileSync('git.exe', ['cat-file', 'commit', 'HEAD'], { ...options, cwd: source });
                 const parents = raw.split(/\r?\n\r?\n/, 1)[0].split(/\r?\n/).filter(line => line.startsWith('parent '));
-                if (oldHead !== ownerHead || parents.length !== 1 || parents[0] !== 'parent ' + bridgeHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain = [{ child: currentHead, parent: bridgeHead, evidence: 'checked_out_git_object' }];
+                if (oldHead !== ownerHead || parents.length !== 1 || parents[0] !== 'parent ' + resumeHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                report.parent_chain = [{ child: currentHead, parent: resumeHead, evidence: 'checked_out_git_object' }];
+                systemHttpsClient();
               }
               const repoRoute = '/repos/' + encodeURIComponent(context.repo.owner) + '/' + encodeURIComponent(context.repo.repo);
               const run = await request('getWorkflowRun', 'GET ' + repoRoute + '/actions/runs/' + prior, signal =>
                 github.rest.actions.getWorkflowRun({ ...context.repo, run_id: prior, request: { signal } }));
               if (run.status !== 'completed' || run.head_sha !== oldHead || run.head_branch !== context.ref.replace('refs/heads/', '') || run.event !== 'workflow_dispatch') fail('CANDIDATE_REUSE_RUN_UNCONFIRMED');
               report.online_run = { id: run.id, attempt: run.run_attempt, status: run.status, event: run.event, head: run.head_sha, branch: run.head_branch };
-              const commitRef = previousInput ? bridgeHead : currentHead;
+              const commitRef = previousInput ? resumeHead : currentHead;
               const commit = await request('getCommit', 'GET ' + repoRoute + '/commits/' + commitRef, signal =>
-                github.rest.repos.getCommit({ ...context.repo, ref: previousInput ? bridgeHead : currentHead, request: { signal } }));
+                github.rest.repos.getCommit({ ...context.repo, ref: commitRef, request: { signal } }));
               if (previousInput) {
-                if (commit.sha !== bridgeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== ownerHead || String(run.id) !== prior || run.run_attempt !== 1 ||
+                if (commit.sha !== resumeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== bridgeHead || String(run.id) !== prior || run.run_attempt !== 1 ||
                     run.path !== '.github/workflows/cross-platform.yml' || run.display_title !== 'Windows 11 local candidate acceptance') fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                report.parent_chain.push({ child: resumeHead, parent: bridgeHead, evidence: 'online_getCommit' });
+                const bridge = await request('getCommit', 'GET ' + repoRoute + '/commits/' + bridgeHead, signal =>
+                  github.rest.repos.getCommit({ ...context.repo, ref: bridgeHead, request: { signal } }));
+                if (bridge.sha !== bridgeHead || bridge.parents?.length !== 1 || bridge.parents[0].sha !== ownerHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
                 report.parent_chain.push({ child: bridgeHead, parent: ownerHead, evidence: 'online_getCommit' });
               } else if (commit.sha !== currentHead || commit.parents?.[0]?.sha !== oldHead) fail('CANDIDATE_REUSE_PARENT_UNCONFIRMED');
               const jobs = await request('listJobsForWorkflowRun', 'GET ' + repoRoute + '/actions/runs/' + prior + '/jobs', signal =>

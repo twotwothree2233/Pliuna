@@ -78,12 +78,16 @@ async function removePreviousCandidate(current) {
   if (!prior) return
   if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) fail('CANDIDATE_PREVIOUS_RUN_INVALID')
   const proof = readEvidence(path.join(evidence(), 'candidate-provenance.json'))
+  const operations = prior === '42649802869' ? ['getWorkflowRun', 'getCommit', 'getCommit', 'listJobsForWorkflowRun'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
   if (proof.passed !== true || proof.stage !== 'ready' || proof.prior_run !== prior || proof.source_head !== process.env.GITHUB_SHA ||
-      proof.locked_inputs_equal !== true || proof.native_stages_verified !== true || !Array.isArray(proof.requests) || proof.requests.length !== 3 ||
-      proof.requests.some((request, index) => request.stage !== ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun'][index] || request.status !== 200 || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
+      proof.locked_inputs_equal !== true || proof.native_stages_verified !== true || !Array.isArray(proof.requests) || proof.requests.length !== operations.length ||
+      proof.requests.some((request, index) => request.stage !== operations[index] || request.status !== 200 || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
   if (prior === '42649802869' && (proof.prior_head !== '01039e72cab284491fcd1a812add0ec79c8e2488' || proof.fixed_parent_chain_verified !== true ||
-      proof.parent_chain?.length !== 2 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
-      proof.parent_chain[1].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[1].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
+      proof.transport !== 'windows_system_curl' || proof.https_client?.tls_validation_enabled !== true || proof.https_client?.config_files_disabled !== true ||
+      proof.requests.some(request => request.transport !== 'windows_system_curl' || request.status_source !== 'http_response' || request.exit_code !== 0) ||
+      proof.parent_chain?.length !== 3 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' ||
+      proof.parent_chain[1].child !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' || proof.parent_chain[1].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
+      proof.parent_chain[2].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[2].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
   const folder = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1')
   identity(folder)
   const previous = readEvidence(path.join(folder, 'candidate.json'))
