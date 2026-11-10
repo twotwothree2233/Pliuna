@@ -55,7 +55,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await page.keyboard.press('ArrowLeft')
     await expect(page.getByRole('radio', { name: '125%', exact: true })).toBeChecked()
     await page.getByRole('radio', { name: '140%', exact: true }).check()
-    await page.screenshot({ path: '/tmp/trellis-text-size-desktop.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-text-size-desktop.png') })
     await closeSettings(page)
     for (const name of ['你的想法', '想从哪里开始？']) {
       await expect(page.getByLabel(name)).toHaveAttribute('data-retained-editor', 'yes')
@@ -70,7 +70,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     expect(await page.locator('.settings-content').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.getByRole('radio', { name: '140%', exact: true }).scrollIntoViewIfNeeded()
-    await page.screenshot({ path: '/tmp/trellis-text-size-mobile.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-text-size-mobile.png') })
     await closeSettings(page)
     await expect(page.getByRole('status').filter({ hasText: /^已保存$/ })).toBeVisible()
     expect(errors).toEqual([])

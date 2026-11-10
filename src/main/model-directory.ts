@@ -1,15 +1,16 @@
-import { mkdirSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { lstatSync,mkdirSync,unlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHash, randomUUID } from 'node:crypto'
-import { directoryCandidate, officialProviders } from '../runtime/model/metadata'
+import { assertDirectorySync,atomicWriteFileSync,managedFile,readRegularFileSync } from '../platform/files'
+import { directoryCandidate,officialProviders } from '../runtime/model/metadata'
 
 const maximum = 16 * 1024 * 1024
 export class ModelDirectory {
   constructor(private root: string, private transport: typeof fetch = fetch) {}
-  private file(): string { return join(this.root, 'cache', 'model-directory.json') }
+  private file(): string { return managedFile(this.root, 'cache', 'model-directory.json') }
   private cacheDirectory(): void {
     const path = join(this.root, 'cache'); mkdirSync(path, { recursive: true, mode: 0o700 })
-    const stat = lstatSync(path); if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error('DIRECTORY_INVALID')
+    try { assertDirectorySync(path) } catch { throw Error('DIRECTORY_INVALID') }
   }
   async lookup(base: string, provider: string, wire: string, refresh = false): Promise<unknown> {
     if (officialProviders[base.replace(/\/$/, '')] !== provider) return { source: 'models.dev', fetched_at: null, candidate: null, notice: 'Custom proxy or unknown provider cannot inherit directory capacities' }
@@ -17,7 +18,7 @@ export class ModelDirectory {
     let cache: { fetched_at: string; sha256: string; payload: unknown } | undefined
     if (!refresh) try {
       const st = lstatSync(this.file()); if (!st.isFile() || st.isSymbolicLink() || st.size > maximum) throw Error()
-      cache = JSON.parse(readFileSync(this.file(), 'utf8'))
+      cache = JSON.parse(readRegularFileSync(this.file(), maximum).toString('utf8'))
       if (!cache || !Number.isFinite(Date.parse(cache.fetched_at)) || createHash('sha256').update(JSON.stringify(cache.payload)).digest('hex') !== cache.sha256) cache = undefined
     } catch { /* A missing or invalid public cache does not alter saved settings. */ }
     if (!cache && refresh) {
@@ -31,8 +32,7 @@ export class ModelDirectory {
       cache = { fetched_at: new Date().toISOString(), sha256: createHash('sha256').update(JSON.stringify(payload)).digest('hex'), payload }
       const body = JSON.stringify(cache); if (Buffer.byteLength(body) > maximum) throw Error('DIRECTORY_LIMIT')
       mkdirSync(join(this.root, 'cache'), { recursive: true, mode: 0o700 })
-      const temp = this.file() + '.' + randomUUID() + '.tmp'
-      try { writeFileSync(temp, body, { mode: 0o600, flag: 'wx' }); renameSync(temp, this.file()) } finally { try { unlinkSync(temp) } catch {} }
+      atomicWriteFileSync(this.file(), body)
     }
     return { source: 'models.dev', fetched_at: cache?.fetched_at ?? null, sha256: cache?.sha256 ?? null, provider_id: provider, candidate: cache ? directoryCandidate(cache.payload, base, provider, wire) : null, notice: 'Public reference only; not account availability or tested capability' }
   }

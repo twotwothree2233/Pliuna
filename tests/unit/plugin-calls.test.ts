@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -11,12 +12,13 @@ let root: string, store: RuntimeStore, task: string, db: Database.Database
 const call = (type: string, extra: Record<string, unknown> = {}): any => store.handle({ type, ...extra })
 const backend = `
 const rl=require('node:readline').createInterface({input:process.stdin});
-const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');let sequence=0;const pending=new Map();
+const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');let sequence=0;const pending=new Map(),independent=[];
 const request=(method,params,done)=>{const id='independent:'+sequence++;pending.set(id,done);send({jsonrpc:'2.0',id,method,params})};
 rl.on('line',line=>{
  const m=JSON.parse(line);if(!m.method){const done=pending.get(m.id);pending.delete(m.id);if(done)done(m);return}
  if(!m.id)return;
  if(m.method==='initialize'){send({jsonrpc:'2.0',id:m.id,result:{protocol_version:'0.1',plugin_id:m.params.plugin_id,capabilities:m.params.capabilities}});return}
+ if(m.method==='fixture.release'){const next=independent.shift();send({jsonrpc:'2.0',id:m.id,result:{released:!!next}});if(next)next();return}
  if(m.method!=='tools.execute')return;
  const value=m.params.arguments.value;
  let waitingError;const finish=value=>send({jsonrpc:'2.0',id:m.id,result:{value,...(waitingError?{waiting_error:waitingError}:{})}});
@@ -32,18 +34,18 @@ rl.on('line',line=>{
   });return;
  }
  if(value&&value.upload){
-  const bytes=Buffer.from(value.upload),sha256=require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const bytes=Buffer.from(value.upload),sha256=value.sha256;
   request('upload.begin',{task_id:m.params.task_id,owner_id:m.params.call_id,byte_length:bytes.length,sha256,media_type:'text/plain',display_name:'fixture upload'},r=>{
    if(r.error){finish({rpc_error:r.error});return}
    const id=r.result.upload_id;
    request('upload.chunk',{upload_id:id,offset:0,base64:bytes.toString('base64')},c=>{if(c.error){finish({rpc_error:c.error});return}request('upload.finish',{upload_id:id},f=>finish(f.result||{rpc_error:f.error}))});
   });return;
  }
- if(value&&(value.submit||value.surface||value.invocation)){setTimeout(()=>{
+ if(value&&(value.submit||value.surface||value.invocation)){independent.push(()=>{
   if(value.surface)request('surface.stage',{task_id:m.params.task_id,mutation:value.surface},r=>{if(r.result)request('actions.submit',{task_id:m.params.task_id,action:{type:'surface.commit',draft_id:r.result.draft_id}},()=>{})});
   else if(value.invocation)request('actions.submit',{task_id:m.params.task_id,invocation:value.invocation},()=>{});
   else request('actions.submit',{task_id:m.params.task_id,mutation:value.submit},()=>{});
- },60)}
+ })}
  send({jsonrpc:'2.0',id:m.id,result:{value:value&&(value.submit||value.surface||value.invocation)?'scheduled':value}})
 });`
 
@@ -69,7 +71,7 @@ it('keeps Run and task in cleanup until the ordinary child exits, including kill
  const p=await plugin(),r=await run(p.capability,{delay:1000})
  await until(()=>db.prepare("SELECT id FROM calls WHERE dispatch='sent'").get()!==undefined)
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
  call('task.stop',{task_id:task})
  expect(store.snapshot(task).task.state).toBe('stopping')
  expect(db.prepare('SELECT state,wait_reason,commit_valid FROM runs WHERE id=?').get(r.id)).toEqual({state:'waiting',wait_reason:'ending_cleanup',commit_valid:0})
@@ -89,7 +91,7 @@ it('does not close storage or acknowledge shutdown before exit and Call settleme
  const p=await plugin(),r=await run(p.capability,{delay:1000})
  await until(()=>db.prepare("SELECT id FROM calls WHERE dispatch='sent'").get()!==undefined)
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
  const shutdown=manager.shutdown.bind(manager)
  vi.spyOn(manager,'shutdown').mockImplementation(()=>shutdown('fixture',20))
  let closed=false;const shutting=store.shutdown().then(()=>{closed=true})
@@ -105,7 +107,7 @@ it('holds stopped task cleanup even when the plugin is idle and no Run remains a
  const p=await plugin(),r=await run(p.capability,'idle');await r.result
  call('run.cancel',{task_id:task,run_id:r.id})
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false)
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false)
  call('task.stop',{task_id:task})
  expect(store.snapshot(task).task.state).toBe('stopping')
  expect(()=>call('maintenance.begin')).toThrow(expect.objectContaining({code:'MAINTENANCE_EXECUTION_ACTIVE'}))
@@ -121,7 +123,7 @@ it('does not switch databases until an idle plugin exits',async()=>{
  const point=await call('maintenance.create',{token,inputs_saved:true,replace_id:null})
  token=call('maintenance.begin').reservation.token
  const manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false),epoch=store.epoch
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false),epoch=store.epoch
  let restored=false
  const restoring=call('maintenance.restore',{token,point_id:point.active.id,database_sha256:point.active.database_sha256,inputs_saved:true,confirm_replace_newer_data:true}).then(()=>{restored=true})
  await until(()=>manager.cleaning())
@@ -135,7 +137,7 @@ it('keeps shutdown pending through beforeRebind and lets repeated shutdown retry
  call('run.cancel',{task_id:task,run_id:r.id})
  const point=await call('maintenance.create',{token:call('maintenance.begin').reservation.token,inputs_saved:true,replace_id:null})
  const token=call('maintenance.begin').reservation.token,manager=(store as any).pluginProcesses,instance=[...manager.children][0] as any
- const kill=vi.spyOn(instance.process,'kill').mockReturnValue(false),epoch=store.epoch
+ const kill=vi.spyOn(instance.tree,'terminate').mockReturnValue(false),epoch=store.epoch
  const restoring=call('maintenance.restore',{token,point_id:point.active.id,database_sha256:point.active.database_sha256,inputs_saved:true,confirm_replace_newer_data:true})
  await until(()=>manager.cleaning())
  let closed=false;const shutting=store.shutdown().then(()=>{closed=true})
@@ -200,7 +202,8 @@ it('startup preserves dispatched unknown facts without replaying calls',async()=
 })
 
 const dataSchema={type:'object',properties:{stage:{type:'string'}},required:['stage'],additionalProperties:false}
-async function schedule(capability:string,mutation:unknown):Promise<void>{const r=await run(capability,{submit:mutation});expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id})}
+async function release(capability:string):Promise<void>{const instance=[...(store as any).pluginProcesses.children].find((i:any)=>pluginCapabilityId(i.copy.digest,'echo')===capability);expect(instance).toBeDefined();expect(await instance.rpc.request('fixture.release',{}, {timeout:2000})).toEqual({released:true})}
+async function schedule(capability:string,mutation:unknown,beforeResult:()=>Promise<void>=async()=>{}):Promise<void>{const r=await run(capability,{submit:mutation});await beforeResult();expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id});await release(capability)}
 async function until(check:()=>boolean):Promise<void>{for(let i=0;i<150;i++){if(check())return;await new Promise(r=>setTimeout(r,10))}throw Error('condition not reached')}
 it('accepts an independent no-Run creation and does not manufacture a Run',async()=>{
  const p=await plugin();await schedule(p.capability,{type:'task_data.create',data:{schema:dataSchema,value:{stage:'initial'},references:[]}})
@@ -229,12 +232,16 @@ it('commits an independently approved replacement without borrowing the earlier 
 function viewBundle(initial = 'initial', compatibility = 'fixture-1'): Bundle {
  return {profile:'managed-v1',html:'<section><textarea id="answer"></textarea></section>',css:'',state:{schema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},initial:{answer:initial},compatibility_version:compatibility},forms:[],behaviors:[{type:'input',element_id:'answer',field:'/answer',control:'textarea'}],references:[],export:[]}
 }
-async function surface(capability:string,input:unknown):Promise<void>{const r=await run(capability,{surface:input});expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id})}
+async function surface(capability:string,input:unknown):Promise<void>{const r=await run(capability,{surface:input});expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id});await release(capability)}
 async function createView(capability:string):Promise<void>{const s=store.snapshot(task);await surface(capability,{type:'surface.update',surface_id:s.surface.id,expected_revision:s.surface.revision,operations:[{type:'view.create',client_ref:'first',slot_id:'main',bundle:{type:'inline',bundle:viewBundle()}}]});await until(()=>store.snapshot(task).views.length===1)}
 function replacement(reset=false):unknown{const s=store.snapshot(task),v=s.views[0]!;return {type:'surface.update',surface_id:s.surface.id,expected_revision:s.surface.revision,operations:[{type:'view.replace',view_id:v.id,expected_view_revision:v.revision,bundle:{type:'inline',bundle:viewBundle('new',reset?'fixture-2':'fixture-1')},state_transition:reset?{type:'reset',expected_state_revision:v.state_revision,initial:{answer:'new'}}:{type:'preserve',expected_state_revision:v.state_revision,compatibility_version:'fixture-1'}}]}}
 function saveAnswer(answer:string):void{const v=store.snapshot(task).views[0]!;call('draft.save',{task_id:task,view_id:v.id,view_revision:v.revision,expected_state_revision:v.state_revision,fields:[{path:'/answer',value:answer}]})}
-it('publishes independent inline resources through an actual staging owner',async()=>{
- const p=await plugin();await schedule(p.capability,{type:'resource.create',display_name:'fixture text',content:{type:'text',text:'independent resource'}})
+it('publishes independent inline resources through an actual staging owner after buffered tool output',async()=>{
+ const p=await plugin(),warm=await run(p.capability,'warm');await warm.result;call('run.cancel',{task_id:task,run_id:warm.id})
+ const instance=[...(store as any).pluginProcesses.children][0] as any
+ instance.process.stdout.pause()
+ try { await schedule(p.capability,{type:'resource.create',display_name:'fixture text',content:{type:'text',text:'independent resource'}},async()=>{await new Promise(r=>setTimeout(r,200));instance.process.stdout.resume()}) }
+ finally { instance.process.stdout.resume() }
  await until(()=>(db.prepare('SELECT count(*) AS n FROM task_resources').get() as any).n===1)
  expect(db.prepare('SELECT run_id,result FROM actions').get()).toEqual({run_id:null,result:'success'})
  expect(db.prepare('SELECT state FROM staging').get()).toEqual({state:'committed'})
@@ -261,7 +268,7 @@ it('keeps plugin reset input on cancellation and rejects a saved-input conflict 
 })
 it('registers an independent read invocation with no fabricated Run or approval',async()=>{
  const caller=await plugin(),target=await plugin('read','fixture.target'),r=await run(caller.capability,{invocation:{capability:target.capability,arguments:{value:'independent'},references:[]}})
- expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id})
+ expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id});await release(caller.capability)
  await until(()=>(db.prepare('SELECT count(*) AS n FROM calls WHERE run_id IS NULL AND state=\'ended\'').get() as any).n===1)
  expect(db.prepare('SELECT run_id,kind,result FROM actions').get()).toEqual({run_id:null,kind:'invocation',result:'success'})
  expect(store.snapshot(task).approvals).toHaveLength(0)
@@ -270,7 +277,7 @@ it('registers an independent read invocation with no fabricated Run or approval'
 })
 it('gates an independent external invocation and records dispatch separately from execution',async()=>{
  const caller=await plugin(),target=await plugin('external-write','fixture.target'),r=await run(caller.capability,{invocation:{capability:target.capability,arguments:{value:'approved'},references:[]}})
- expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id})
+ expect(await r.result).toMatchObject({execution:'success'});call('run.cancel',{task_id:task,run_id:r.id});await release(caller.capability)
  const a=await approval();expect(a.run_id).toBeNull();expect(db.prepare('SELECT dispatch FROM calls WHERE run_id IS NULL').get()).toEqual({dispatch:'not_sent'})
  call('approval.decide',{task_id:task,approval_id:a.id,decision:'approve'})
  await until(()=>(db.prepare('SELECT state FROM calls WHERE run_id IS NULL').get() as any)?.state==='ended')
@@ -291,7 +298,7 @@ it('rejects actual self reentry without creating or dispatching a second Call',a
  expect(db.prepare('SELECT id FROM calls').all()).toHaveLength(1)
 })
 it('receives actual plugin upload and atomically publishes it with the successful original Call',async()=>{
- const caller=await plugin(),text='bounded upload '.repeat(1000),r=await run(caller.capability,{upload:text}),result=await r.result
+ const caller=await plugin(),text='bounded upload '.repeat(1000),r=await run(caller.capability,{upload:text,sha256:createHash('sha256').update(Buffer.from(text)).digest('hex')}),result=await r.result
  expect(result).toMatchObject({execution:'success',data:{value:{state:'prepared',published:false}},resources:[{byte_length:Buffer.byteLength(text)}]})
  expect(db.prepare('SELECT state FROM staging').get()).toEqual({state:'committed'})
  expect(db.prepare('SELECT result FROM actions').get()).toEqual({result:'success'})

@@ -27,9 +27,10 @@ it('packages without repository documents and includes only an explicit guide sn
 })
 
 it('accepts only explicit output and optional external guide arguments', () => {
-  expect(parsePackageArgs(['--output', '/new/candidate'])).toEqual({ output: '/new/candidate', guide: undefined })
-  expect(parsePackageArgs(['--output', '/new/candidate', '--guide', '/external/guide'])).toEqual({ output: '/new/candidate', guide: '/external/guide' })
-  for (const args of [[], ['--output', 'relative'], ['--output', '/new', '--guide', 'relative'], ['--output', '/new', '--unknown', '/guide'], ['--output', '/new', '--guide']]) expect(() => parsePackageArgs(args)).toThrow('Usage')
+  const output = join(tmpdir(), 'new', 'candidate'), guide = join(tmpdir(), 'external', 'guide')
+  expect(parsePackageArgs(['--output', output])).toEqual({ output, guide: undefined })
+  expect(parsePackageArgs(['--output', output, '--guide', guide])).toEqual({ output, guide })
+  for (const args of [[], ['--output', 'relative'], ['--output', output, '--guide', 'relative'], ['--output', output, '--unknown', guide], ['--output', output, '--guide']]) expect(() => parsePackageArgs(args)).toThrow('Usage')
 })
 
 it('records runtime assets but does not enumerate repository prose', () => {

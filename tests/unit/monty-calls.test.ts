@@ -5,7 +5,6 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RuntimeStore } from '../../src/runtime/store'
 import { MontyCalls } from '../../src/runtime/monty/calls'
-import { montyAssets } from '../../src/runtime/monty/assets'
 import { MONTY_ID } from '../../src/runtime/monty/contract'
 import { ContractError } from '../../src/shared/validation'
 import type { MontyRunner,MontyOutput } from '../../src/runtime/monty/runner'
@@ -14,7 +13,7 @@ beforeEach(()=>{vi.useFakeTimers();manager=undefined as any;root=mkdtempSync(joi
 afterEach(async()=>{await manager?.shutdown();store.close();vi.useRealTimers()})
 function setup(output:MontyOutput,custom?:MontyRunner){
  const runner:MontyRunner=custom??((_a,_i,_s,_r,started)=>{started(123);return{result:Promise.resolve(output),stop:async()=>{}}})
- manager=new MontyCalls(db,root,(store as any).storage,()=>{const value=db.prepare('SELECT commit_valid,state FROM runs WHERE id=?').get(run) as any;if(!value.commit_valid||!['running','waiting'].includes(value.state))throw new ContractError('SOURCE_INVALID','source ended')},(t,refs)=>(store as any).validateDataReferences(t,refs),(t,k,v)=>(store as any).record(t,k,v),process.execPath,true,runner,()=>montyAssets(join(process.cwd(),'out/main/monty-worker.js')))
+ manager=new MontyCalls(db,root,(store as any).storage,()=>{const value=db.prepare('SELECT commit_valid,state FROM runs WHERE id=?').get(run) as any;if(!value.commit_valid||!['running','waiting'].includes(value.state))throw new ContractError('SOURCE_INVALID','source ended')},(t,refs)=>(store as any).validateDataReferences(t,refs),(t,k,v)=>(store as any).record(t,k,v),process.execPath,true,runner,()=>({binary:'fixture-binary',native:'fixture-native',binary_sha256:'0'.repeat(64),runner:'fixture-runner'}))
  return (signal=new AbortController().signal)=>manager.call(task,run,{code:'result=1',inputs:{}},[],signal) as Promise<any>
 }
 const ok:MontyOutput={ok:true,value:{type:'json',value:{answer:17}},stdout:'done\n',stderr:''}
@@ -67,11 +66,21 @@ it('revokes commit before cancellation and rejects a late successful result',asy
  deliver(ok);expect(await pending).toMatchObject({execution:'cancelled'});expect(db.prepare('SELECT count(*) n FROM resources').get()).toEqual({n:0})
 })
 it('keeps cleanup-unknown work busy and refuses shutdown rather than claiming destroyed',async()=>{
- const invoke=setup(ok,(_a,_i,_s,_r,started)=>{started(123);return{result:Promise.reject(new ContractError('MONTY_CLEANUP_UNCONFIRMED','injected')),stop:async()=>{}}})
+ const invoke=setup(ok,(_a,_i,_s,_r,started)=>{started(123);return{result:Promise.reject(new ContractError('MONTY_CLEANUP_UNCONFIRMED','injected')),stop:async()=>{throw new ContractError('MONTY_CLEANUP_UNCONFIRMED','still occupied')}}})
  expect(await invoke()).toMatchObject({error:{code:'MONTY_CLEANUP_UNCONFIRMED'}});expect(manager.busy()).toBe(true)
  await expect(manager.shutdown()).rejects.toMatchObject({code:'MONTY_CLEANUP_UNCONFIRMED'})
  // Test fixture only: discard manager after asserting the conservative production state.
  manager=undefined as any
+})
+it('retries cleanup without rewriting or replaying the original unknown Call',async()=>{
+ let confirmed=false
+ const invoke=setup(ok,(_a,_i,_s,_r,started)=>{started(123);return{result:Promise.reject(new ContractError('MONTY_CLEANUP_UNCONFIRMED','injected')),stop:async()=>{if(!confirmed)throw new ContractError('MONTY_CLEANUP_UNCONFIRMED','still occupied')}}})
+ const original=await invoke()
+ await expect(manager.shutdown()).rejects.toMatchObject({code:'MONTY_CLEANUP_UNCONFIRMED'})
+ expect(manager.busy()).toBe(true)
+ confirmed=true;await manager.shutdown();expect(manager.busy()).toBe(false)
+ expect(db.prepare('SELECT count(*) n FROM calls').get()).toEqual({n:1})
+ expect(JSON.parse((db.prepare('SELECT result_json FROM calls').get() as any).result_json)).toEqual(original)
 })
 it('rejects invalid or cross-task references before registration and never replays a failed computation',async()=>{
  const invoke=setup({ok:false,execution:'failure',error:'MONTY_EXECUTION_FAILED'})

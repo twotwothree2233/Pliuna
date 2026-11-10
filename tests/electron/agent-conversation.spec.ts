@@ -88,7 +88,7 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     expect((await call({ type: 'task.snapshot', task_id: task })).records.findLast((record: any) => record.kind === 'message.assistant').payload.truncated).toBe(true)
     expect(await page.evaluate(() => (window as any).AGENT_EXECUTED)).toBeUndefined()
     expect(await page.locator('.agent-state-scroll').innerText()).not.toContain('中文解释')
-    await page.screenshot({ path: '/tmp/trellis-agent-status-implemented.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-agent-status-implemented.png') })
     for (const theme of ['graphite', 'paper', 'midnight', 'dusk', 'moss', 'blueprint']) {
       await chooseTheme(page, theme)
       for (const width of [1440, 720, 390]) {
@@ -186,7 +186,7 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
       expect(await page.locator('.agent').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     }
     await page.setViewportSize({ width: 1440, height: 960 })
-    await page.screenshot({ path: '/tmp/trellis-agent-dynamic-activity.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-agent-dynamic-activity.png') })
     await page.getByRole('button', { name: '＋ 新建', exact: true }).click()
     await page.getByLabel('任务名称').fill('另一个任务')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()

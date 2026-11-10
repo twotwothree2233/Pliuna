@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { assertContract, ContractError } from '../../shared/validation'
-import { lstatSync } from 'node:fs'
+import { fileLstatSync as lstatSync } from '../../platform/files'
 import { join } from 'node:path'
 import { verifyPluginFile, pluginFileIdentity } from './resource-reader'
 

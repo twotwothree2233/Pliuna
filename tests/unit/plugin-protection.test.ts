@@ -15,7 +15,7 @@ const status = (): any => store!.handle({ type: 'maintenance.status' })
 const begin = (): string => (store!.handle({ type: 'maintenance.begin' }) as any).reservation.token
 const point = async (): Promise<any> => store!.handle({ type: 'maintenance.create', token: begin(), inputs_saved: true, replace_id: status().active?.id ?? null })
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'trellis-plugin-protection-')) })
-afterEach(() => { vi.restoreAllMocks(); store?.close(); store = undefined; plugins?.close(); plugins = undefined; rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); store?.close(); store = undefined; plugins?.close(); plugins = undefined; rmSync(root, { recursive: true, force: true }) })
 async function setup(): Promise<string> {
   const source = join(root, 'fixture'); mkdirSync(source)
   writeFileSync(join(source, 'backend.cjs'), 'throw Error("not executed")')
@@ -54,6 +54,7 @@ it('managed copy corruption blocks startup recovery use without modifying bytes'
   store = new RuntimeStore(root); expect(status().phase).toBe('blocked'); expect(readFileSync(file, 'utf8')).toBe('damaged')
 })
 it('upgrades validated legacy empty controls without fabricating plugin history', () => {
+  vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', '')
   store = new RuntimeStore(root); store.close(); store = undefined
   const db = new Database(join(root, 'recovery-control.sqlite')); db.prepare('UPDATE control SET manifest=?').run(JSON.stringify({ version: 1, active: null, candidates: [], retired: [], invalidated: [] })); db.close()
   const restore = new Database(join(root, 'restore-control.sqlite')); restore.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify({ version: 3, selected: 'trellis.sqlite', deleted_tasks: [], operations: [], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] })); restore.close(); writeFileSync(join(root, 'restore-established'), 'restore-v3\n')

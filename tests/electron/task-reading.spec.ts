@@ -188,7 +188,7 @@ test('windowed answer actions use the selected answer independently of segmented
     expect(requests).toHaveLength(beforeCancel)
     expect((await call({ type: 'task.snapshot', task_id: taskId })).runs).toHaveLength(1)
     await continueAnswer.scrollIntoViewIfNeeded()
-    await page.screenshot({ path: '/tmp/trellis-windowed-answer-actions.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-windowed-answer-actions.png') })
     await returnToContent.click()
     await expect(page.getByLabel('长作答内容', { exact: true })).toHaveValue('最新的短作答')
     await page.getByRole('tab', { name: /作答记录/ }).click()

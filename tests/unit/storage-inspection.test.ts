@@ -18,7 +18,7 @@ function logical(): string { const files=['trellis.sqlite','restore-control.sqli
 const inspect=(scope:'growth'|'resources'|'resource'='growth',extra={})=>inspectStorage(root,{scope,...extra},()=>{})
 it('growth reports counts and sizes without hashing files or mutating logical facts',async()=>{
   resource();const before=logical();vi.spyOn(fs,'readSync').mockImplementation(()=>{throw Error('must not read resource bodies')})
-  const r=await inspect();expect(r.complete).toBe(true);expect(r.controls).toMatchObject({format:5,resource_records:0,records_pruned:0});expect(r.business.counts.resources).toBe(1);expect(r.protection.files_not_scanned).toBe(true);expect(logical()).toBe(before);expect(JSON.stringify(r)).not.toMatch(/private name|storage_key|\/Users\//)
+  const r=await inspect();expect(r.complete).toBe(true);expect(r.controls).toMatchObject({format:process.platform==='win32'&&process.env.TRELLIS_TEST_FILE_IDENTITIES==='decimal-v2'?6:5,resource_records:0,records_pruned:0});expect(r.business.counts.resources).toBe(1);expect(r.protection.files_not_scanned).toBe(true);expect(logical()).toBe(before);expect(JSON.stringify(r)).not.toMatch(/private name|storage_key|\/Users\//)
 })
 it('resource diagnostics verify bytes without changing database/control/source files',async()=>{
   const id=resource(),before=logical(),body=fs.readFileSync(join(root,'resources',id));const r=await inspect('resource',{resource_id:id});expect(r).toMatchObject({complete:true,readonly:true,deletion_authority:false});expect(r.items[0]).toMatchObject({resource_id:id,state:'verified',bytes_read:8});expect(logical()).toBe(before);expect(fs.readFileSync(join(root,'resources',id))).toEqual(body)

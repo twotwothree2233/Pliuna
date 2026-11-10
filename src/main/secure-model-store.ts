@@ -1,6 +1,6 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync,mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { atomicWriteFileSync,managedFile,readRegularFileSync } from '../platform/files'
 
 export interface SecureStorageBackend {
   isEncryptionAvailable(): boolean
@@ -32,7 +32,7 @@ export class SecureModelStore {
     if (!existsSync(this.file)) return { ...status, records: [] }
     if (!status.available) { this.readError = 'SECURE_STORAGE_UNAVAILABLE'; return { ...status, error: this.readError, records: [] } }
     try {
-      const bytes = readFileSync(this.file)
+      const bytes = readRegularFileSync(managedFile(this.directory, 'model-connections.secure'), limit)
       if (bytes.length > limit) throw new Error()
       const value: unknown = JSON.parse(this.secure.decryptString(bytes))
       if (!value || typeof value !== 'object' || (value as any).version !== 1 || !Array.isArray((value as any).records) || (value as any).records.length > 100) throw new Error()
@@ -43,7 +43,6 @@ export class SecureModelStore {
   save(records: unknown[]): void {
     if (this.readError) throw new Error(this.readError)
     if (!this.status().available) throw new Error('SECURE_STORAGE_UNAVAILABLE')
-    const temporary = this.file + '.' + randomUUID() + '.tmp'
     try {
       if (records.length > 100) throw new Error()
       const text = JSON.stringify({ version: 1, records })
@@ -51,11 +50,8 @@ export class SecureModelStore {
       const encrypted = this.secure.encryptString(text)
       if (encrypted.length > limit) throw new Error()
       mkdirSync(this.directory, { recursive: true, mode: 0o700 })
-      const fd = openSync(temporary, 'wx', 0o600)
-      try { writeFileSync(fd, encrypted); fsyncSync(fd) } finally { closeSync(fd) }
-      renameSync(temporary, this.file)
+      atomicWriteFileSync(managedFile(this.directory, 'model-connections.secure'), encrypted)
     } catch {
-      try { unlinkSync(temporary) } catch {}
       throw new Error('SECURE_STORAGE_WRITE_FAILED')
     }
   }

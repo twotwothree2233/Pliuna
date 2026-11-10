@@ -1,3 +1,6 @@
+import { newTestIdentityEncoding } from './file-format'
+import { assertDirectorySync, managedRegularFile } from '../platform/files'
+import { protectPrivatePath } from '../platform/permissions'
 import { MontyCalls } from './monty/calls'
 import { MONTY_ID, montyContract } from './monty/contract'
 import { deadline } from './model/limits'
@@ -118,15 +121,17 @@ export class RuntimeStore {
     this.exportChecks = new ExportChecks(checkRunner)
     this.root = directory
     mkdirSync(directory, { recursive: true, mode: 0o700 })
+    const createEncoding = newTestIdentityEncoding(directory)
     this.owner = ownDirectory(directory)
     try {
-    mkdirSync(join(directory, 'resources'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(directory, 'resources'), { recursive: true, mode: 0o700 }); assertDirectorySync(join(directory, 'resources'))
     this.plugins = new PluginControl(directory)
     if (this.plugins.error) fail('PLUGIN_CONTROL_INVALID', 'Plugin authority requires inspection; startup is closed')
-    this.journal = new RestoreJournal(directory)
+    this.journal = new RestoreJournal(directory, createEncoding)
     this.journal.selected()
-    this.exports = new ExportControl(directory, true)
-    this.db = new Database(join(directory, this.journal.selected()))
+    this.exports = new ExportControl(directory, true, true, this.journal.identityEncoding)
+    this.db = new Database(managedRegularFile(directory, this.journal.selected()))
+    protectPrivatePath(managedRegularFile(directory, this.journal.selected()), 'file')
     this.db.pragma('foreign_keys = ON')
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('synchronous = FULL')
@@ -136,7 +141,7 @@ export class RuntimeStore {
     if (versions.length !== 1 || versions[0]?.version !== 1) { fail('SCHEMA_VERSION', 'Unsupported database version; migration required') }
     this.storage = new StorageLifecycle(this.db, this.root, this.epoch, (action, task) => this.pluginActions?.owner(action, task) || this.pluginUploads?.owns(action, task) || false)
     this.recovery = new RecoveryManager(this.db, this.root, () => this.executionBusy(), held => this.storage.pause(held), () => ({ models: this.models.recoverySettings(), approval: { mode: this.approvalMode, model_id: this.approvalModel }, features: { ...this.features } }), this.journal, file => this.rebindDatabase(file), () => this.plugins.list(), () => this.pluginProcesses.stopForRebind())
-    this.gc = new RestrictedGc(this.root, () => this.db, () => this.journal.selected(), () => this.journal.retainedDatabases(), key => this.exports.protects(key) || this.journal.resourceRetired(key) || this.recovery.protects(key), () => this.recovery.retainedPointIds(), file => this.journal.retired(file), file => this.journal.released(file))
+    this.gc = new RestrictedGc(this.root, () => this.db, () => this.journal.selected(), () => this.journal.retainedDatabases(), key => this.exports.protects(key) || this.journal.resourceRetired(key) || this.recovery.protects(key), () => this.recovery.retainedPointIds(), file => this.journal.retired(file), file => this.journal.released(file), this.journal.identityEncoding)
     this.resourceCleanup = new ResourceCleanupManager(this.root, () => this.db, this.journal, this.recovery, this.gc)
     this.replicas = new ReplicaRetirement(this.root, this.journal, this.recovery, (exclude?: string) => this.gc.assertDependencies(exclude))
     this.materials = new MaterialImports(this.db, this.root, this.epoch, this.storage, this.journal, (task, kind, data) => { this.record(task, kind, data) })
@@ -435,7 +440,7 @@ export class RuntimeStore {
     this.pluginDrafts.close(); for (const pending of this.pluginIndependentCalls.values()) pending.controller.abort(); this.pluginIndependentCalls.clear(); this.pluginUploads.close(); this.pluginActions.close(); this.pluginCalls.close(); this.pluginProcesses.close()
     this.storage.close()
     if (this.db.open) this.db.close()
-    this.db = new Database(join(this.root, file), { fileMustExist: true })
+    this.db = new Database(managedRegularFile(this.root, file), { fileMustExist: true })
     this.db.pragma('foreign_keys=ON'); this.db.pragma('journal_mode=WAL'); this.db.pragma('synchronous=FULL')
     this.epoch = id(); this.sync.clear(); this.syncFacts.clear()
     this.storage = new StorageLifecycle(this.db, this.root, this.epoch, (action, task) => this.pluginActions?.owner(action, task) || this.pluginUploads?.owns(action, task) || false)
