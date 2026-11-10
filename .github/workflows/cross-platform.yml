@@ -797,7 +797,8 @@ jobs:
             const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'candidate-provenance.json');
             const ownerHead = '01039e72cab284491fcd1a812add0ec79c8e2488';
             const bridgeHead = '2bed119f8df96ec81992d755bf81769cdfd27c4f';
-            const resumeHead = '73e906cb3ec752653242ddf5e004ab4b625217fa';
+            const resumeHead = 'ef0286f179790e83acd70b147fc8dd99b3278246';
+            const evidenceHead = '73e906cb3ec752653242ddf5e004ab4b625217fa';
             const transportHead = '2a62afb20223fc850d22c625a905d0f2bd4ece2f';
             const report = { stage: 'local_inputs', passed: false, prior_run: prior, source_head: process.env.GITHUB_SHA,
               dependencies_reused: false, retry_limit: previousInput ? 0 : 1, request_deadline_ms: 10000,
@@ -834,7 +835,7 @@ jobs:
             function nativeRequest(entry, route, kind = 'json', location) {
               const prefix = 'GET /repos/twotwothree2233/Trellis/';
               const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs', 'commits/' + resumeHead,
-                'commits/' + transportHead, 'commits/' + bridgeHead, 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip'];
+                'commits/' + evidenceHead, 'commits/' + transportHead, 'commits/' + bridgeHead, 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip'];
               const storage = kind === 'archive' && route === 'GET official_artifact_storage';
               let url, token;
               if (storage) {
@@ -860,7 +861,7 @@ jobs:
               let output;
               try {
                 output = cp.execFileSync(curl, ['--disable', '--config', '-'], { input: config, env: curlEnvironment,
-                  encoding: 'buffer', timeout: 10000, maxBuffer: 1048576, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+                  encoding: null, timeout: 10000, maxBuffer: 1048576, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
                 entry.exit_code = 0;
               } catch (error) {
                 entry.exit_code = Number.isInteger(error.status) && error.status >= 0 && error.status <= 255 ? error.status : null;
@@ -868,7 +869,7 @@ jobs:
                   35: 'TLS_HANDSHAKE_FAILED', 51: 'TLS_CERTIFICATE_FAILED', 52: 'EMPTY_REPLY', 55: 'SEND_FAILED', 56: 'RECEIVE_FAILED',
                   58: 'TLS_CERTIFICATE_FAILED', 60: 'TLS_CERTIFICATE_FAILED', 77: 'TLS_CA_FILE_FAILED', 92: 'HTTP2_STREAM_FAILED' };
                 entry.timeout = error.code === 'ETIMEDOUT' || entry.exit_code === 28;
-                entry.cause_code = entry.timeout ? 'TIMEOUT' : error.code === 'ENOBUFS' ? 'OUTPUT_LIMIT' : error.code === 'EACCES' ? 'CLIENT_ACCESS_DENIED' : causes[entry.exit_code] ?? 'CURL_PROCESS_FAILED';
+                entry.cause_code = error.code === 'ERR_UNKNOWN_ENCODING' ? 'CLIENT_ENCODING_INVALID' : entry.timeout ? 'TIMEOUT' : error.code === 'ENOBUFS' ? 'OUTPUT_LIMIT' : error.code === 'EACCES' ? 'CLIENT_ACCESS_DENIED' : causes[entry.exit_code] ?? 'CURL_PROCESS_FAILED';
                 // Never forward raw stderr, response bodies, config or error objects.
                 fail('CANDIDATE_SYSTEM_HTTPS_REQUEST_FAILED');
               }
@@ -940,9 +941,12 @@ jobs:
               const commit = await request('getCommit', 'GET ' + repoRoute + '/commits/' + commitRef, signal =>
                 github.rest.repos.getCommit({ ...context.repo, ref: commitRef, request: { signal } }));
               if (previousInput) {
-                if (commit.sha !== resumeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== transportHead || String(run.id) !== prior || run.run_attempt !== 1 ||
+                if (commit.sha !== resumeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== evidenceHead || String(run.id) !== prior || run.run_attempt !== 1 ||
                     run.path !== '.github/workflows/cross-platform.yml' || run.display_title !== 'Windows 11 local candidate acceptance') fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain.push({ child: resumeHead, parent: transportHead, evidence: 'online_getCommit' });
+                report.parent_chain.push({ child: resumeHead, parent: evidenceHead, evidence: 'online_getCommit' });
+                const evidence = await request('getCommit', 'GET ' + repoRoute + '/commits/' + evidenceHead);
+                if (evidence.sha !== evidenceHead || evidence.parents?.length !== 1 || evidence.parents[0].sha !== transportHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                report.parent_chain.push({ child: evidenceHead, parent: transportHead, evidence: 'online_getCommit' });
                 const transport = await request('getCommit', 'GET ' + repoRoute + '/commits/' + transportHead);
                 if (transport.sha !== transportHead || transport.parents?.length !== 1 || transport.parents[0].sha !== bridgeHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
                 report.parent_chain.push({ child: transportHead, parent: bridgeHead, evidence: 'online_getCommit' });

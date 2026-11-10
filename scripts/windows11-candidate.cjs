@@ -78,17 +78,18 @@ async function removePreviousCandidate(current) {
   if (!prior) return
   if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) fail('CANDIDATE_PREVIOUS_RUN_INVALID')
   const proof = readEvidence(path.join(evidence(), 'candidate-provenance.json'))
-  const operations = prior === '42649802869' ? ['getWorkflowRun', 'getCommit', 'getCommit', 'getCommit', 'listJobsForWorkflowRun', 'getArtifact', 'getArtifactRedirect', 'downloadArtifact'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
+  const operations = prior === '42649802869' ? ['getWorkflowRun', 'getCommit', 'getCommit', 'getCommit', 'getCommit', 'listJobsForWorkflowRun', 'getArtifact', 'getArtifactRedirect', 'downloadArtifact'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
   if (proof.passed !== true || proof.stage !== 'ready' || proof.prior_run !== prior || proof.source_head !== process.env.GITHUB_SHA ||
       proof.locked_inputs_equal !== true || proof.native_stages_verified !== true || !Array.isArray(proof.requests) || proof.requests.length !== operations.length ||
       proof.requests.some((request, index) => request.stage !== operations[index] || request.status !== (operations[index] === 'getArtifactRedirect' ? 302 : 200) || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
   if (prior === '42649802869' && (proof.prior_head !== '01039e72cab284491fcd1a812add0ec79c8e2488' || proof.fixed_parent_chain_verified !== true ||
       proof.transport !== 'windows_system_curl' || proof.https_client?.tls_validation_enabled !== true || proof.https_client?.config_files_disabled !== true ||
       proof.requests.some(request => request.transport !== 'windows_system_curl' || request.status_source !== 'http_response' || request.exit_code !== 0) ||
-      proof.parent_chain?.length !== 4 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== '73e906cb3ec752653242ddf5e004ab4b625217fa' ||
-      proof.parent_chain[1].child !== '73e906cb3ec752653242ddf5e004ab4b625217fa' || proof.parent_chain[1].parent !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' ||
-      proof.parent_chain[2].child !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' || proof.parent_chain[2].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
-      proof.parent_chain[3].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[3].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
+      proof.parent_chain?.length !== 5 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== 'ef0286f179790e83acd70b147fc8dd99b3278246' ||
+      proof.parent_chain[1].child !== 'ef0286f179790e83acd70b147fc8dd99b3278246' || proof.parent_chain[1].parent !== '73e906cb3ec752653242ddf5e004ab4b625217fa' ||
+      proof.parent_chain[2].child !== '73e906cb3ec752653242ddf5e004ab4b625217fa' || proof.parent_chain[2].parent !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' ||
+      proof.parent_chain[3].child !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' || proof.parent_chain[3].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
+      proof.parent_chain[4].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[4].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
   const restored = prior === '42649802869'
   const artifact = proof.original_evidence
   const folder = restored ? artifact?.directory : path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1')
