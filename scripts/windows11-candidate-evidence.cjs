@@ -6,6 +6,7 @@ const cp = require('node:child_process')
 const fail = code => { throw Object.assign(Error(code), { code }) }
 // Only these reviewed first-parent edges can authorize this fixed original run.
 const fixedParents = Object.freeze([
+  '0f39ff15140fb663c679a5995ec9efaf5d4a9994',
   'ef06b7aca370a1d92dbfd9d79c0e8dc9b37cfa68',
   'aa096628052e5cdfd15b924785856dccdee42f7b',
   '19bacd1576fe0dfcf4f75e5a33b407245add0443',
@@ -30,6 +31,33 @@ const entries = [
   'dependency-toolchain.json', 'electron-download.json', 'file-symlink-probe.json',
   'git-preparation.json', 'host.json', 'installed-runtime.json', 'standard-toolchain.json'
 ]
+// Check the entire pinned text, permitting only Git's CRLF checkout transform.
+// Never loosen this into a selected-version or parsed-manifest comparison.
+function verifyLockedInputs(source, previous, record) {
+  const version = value => typeof value === 'string' && value.length <= 80 && /^(?:pnpm@)?[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(value) ? value : null
+  function read(directory, name) {
+    const file = path.join(directory, name), stat = fs.lstatSync(file)
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2097152) fail('CANDIDATE_REUSE_INPUT_UNSAFE')
+    const bytes = fs.readFileSync(file), text = bytes.toString('utf8')
+    if (!Buffer.from(text, 'utf8').equals(bytes)) fail('CANDIDATE_REUSE_INPUT_ENCODING_INVALID')
+    const canonical = text.replace(/\r\n/g, '\n')
+    let versions
+    if (name === 'package.json') {
+      let value
+      try { value = JSON.parse(text) } catch { fail('CANDIDATE_REUSE_MANIFEST_INVALID') }
+      versions = { application: version(value.version), package_manager: version(value.packageManager), electron: version(value.devDependencies?.electron) }
+    } else if (name === '.node-version') versions = { node: version(text.trim()) }
+    else versions = { lockfile: version(canonical.match(/^lockfileVersion: ['"]?([0-9]+\.[0-9]+)['"]?$/m)?.[1]) }
+    return { bytes, canonical, versions, eol: /\r(?!\n)/.test(text) ? 'lone_cr' : /\r\n/.test(text) ? /(?<!\r)\n/.test(text) ? 'mixed' : 'crlf' : 'lf' }
+  }
+  for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) {
+    const expected = read(previous, name), actual = read(source, name)
+    const result = { file: name, byte_equal: expected.bytes.equals(actual.bytes), canonical_equal: expected.canonical === actual.canonical,
+      expected: { eol: expected.eol, versions: expected.versions }, actual: { eol: actual.eol, versions: actual.versions } }
+    record(result) // Only fixed filenames, newline categories and public versions.
+    if (!result.canonical_equal) fail('CANDIDATE_REUSE_VERSION_CHANGED')
+  }
+}
 function validateMetadata(value, branch) {
   if (value?.id !== 13691230073 || value.name !== name || value.expired !== false || value.size_in_bytes !== 98036 ||
       value.workflow_run?.id !== prior || value.workflow_run.head_sha !== head || value.workflow_run.head_branch !== branch ||
@@ -97,4 +125,4 @@ function restore(archive, artifact, branch, environment) {
   return { id: artifact.id, name, run_id: prior, head, branch, directory, identity: { dev: String(stat.dev), ino: String(stat.ino) },
     archive_bytes: archive.length, files: ['host.json', 'candidate.json', 'default-startup.json'], source: 'fixed_original_run_artifact', facts_verified: true }
 }
-module.exports = { fixedParents, validateMetadata, validateFacts, restore }
+module.exports = { fixedParents, verifyLockedInputs, validateMetadata, validateFacts, restore }

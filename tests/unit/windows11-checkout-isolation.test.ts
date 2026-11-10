@@ -73,7 +73,7 @@ it('binds the finite reviewed chain to actual single first-parent edges', () => 
   const require = createRequire(import.meta.url)
   const { fixedParents } = require('../../scripts/windows11-candidate-evidence.cjs') as { fixedParents: string[] }
   expect(Object.isFrozen(fixedParents)).toBe(true)
-  expect(fixedParents).toHaveLength(10)
+  expect(fixedParents).toHaveLength(11)
   for (let index = 0; index < fixedParents.length - 1; index++) {
     const child = fixedParents[index]
     if (!child) throw Error('FIXED_CHILD_REQUIRED')

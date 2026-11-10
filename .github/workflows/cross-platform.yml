@@ -992,7 +992,7 @@ jobs:
             const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
             const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'candidate-provenance.json');
             const ownerHead = '01039e72cab284491fcd1a812add0ec79c8e2488';
-            const fixedParents = require(path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE, 'scripts/windows11-candidate-evidence.cjs')).fixedParents;
+            const { fixedParents, verifyLockedInputs } = require(path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE, 'scripts/windows11-candidate-evidence.cjs'));
             const resumeHead = fixedParents[0];
             const report = { stage: 'local_inputs', passed: false, prior_run: prior, source_head: process.env.GITHUB_SHA,
               dependencies_reused: false, retry_limit: previousInput ? 0 : 1, request_deadline_ms: 10000,
@@ -1111,9 +1111,8 @@ jobs:
                 const stat = fs.lstatSync(folder);
                 if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CANDIDATE_REUSE_PATH_UNSAFE');
               }
-              for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) {
-                if (!fs.readFileSync(path.join(source, name)).equals(fs.readFileSync(path.join(previous, name)))) fail('CANDIDATE_REUSE_VERSION_CHANGED');
-              }
+              report.locked_inputs = [];
+              verifyLockedInputs(source, previous, entry => { report.locked_inputs.push(entry); save(); });
               report.locked_inputs_equal = true;
               const options = { encoding: 'utf8', timeout: 3000, maxBuffer: 16384, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
               const oldHead = cp.execFileSync('git.exe', ['rev-parse', 'HEAD'], { ...options, cwd: previous }).trim();
@@ -1183,7 +1182,8 @@ jobs:
                   const stat = fs.lstatSync(folder);
                   if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CANDIDATE_REUSE_PATH_UNSAFE');
                 }
-                for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) if (!fs.readFileSync(path.join(source, name)).equals(fs.readFileSync(path.join(path.dirname(modules), name)))) fail('CANDIDATE_REUSE_VERSION_CHANGED');
+                report.cached_locked_inputs = [];
+                verifyLockedInputs(source, path.dirname(modules), entry => { report.cached_locked_inputs.push(entry); save(); });
                 const destination = path.join(source, 'node_modules');
                 try { fs.lstatSync(destination); fail('CANDIDATE_REUSE_TARGET_EXISTS'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
                 fs.symlinkSync(modules, destination, 'junction');
