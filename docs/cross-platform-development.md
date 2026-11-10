@@ -13,6 +13,22 @@
 没有原生码时保留受控的具体错误词，不退化为单一TLS失败分类。
 原始错误、环境、代理值、凭据及证书材料均不上传。
 
+单次原生TLS取证已完成：[42757878083](https://github.com/twotwothree2233/Trellis/actions/runs/42757878083)。
+执行代码头19bacd1576fe0dfcf4f75e5a33b407245add0443，整体failure保留。
+同一curl8.21.0/Schannel，无凭据公开GET返回exit35、无HTTP响应。
+具体原生码为CRYPT_E_NO_REVOCATION_CHECK / 0x80092012。
+错误阶段为next InitializeSecurityContext；请求99ms、传输44ms、总178ms。
+这是无法完成证书链吊销检查，未取得证据认定为吊销服务器离线。
+具体证书、HTTPS解密或系统策略原因仍未核实。
+
+Win11专业版26300/X64/session1，真标准交互令牌门禁通过。
+Git和隔离checkout/HEAD成功，baseline skipped，51个后续步骤skipped。
+应用0；未访问默认数据根、原备份或安装，未修改网络/证书/系统设置。
+保留默认TLS和吊销验证，无原始stderr/响应体/代理值/凭据附件。
+下一步由用户本机修复当前HTTPS证书链的吊销检查能力。
+须核对链的有效吊销信息及当前账户可访问性，不能绕过校验。
+在严格访问恢复前停止接续，合成业务及卸载重装继续待验。
+
 本批接续将可选依赖缓存与旧安装归属分开。
 `windows11_candidate_previous_run` 默认空，仅接受原运行42649802869。
 该入口须关闭 reuse，按锁文件 fresh 准备，并实际重验 Electron ABI。

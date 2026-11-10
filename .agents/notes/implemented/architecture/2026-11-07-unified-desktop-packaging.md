@@ -729,6 +729,22 @@ TLS取证复用既有checkout_probe_only，不新增应用模式。
 无原生码时仍保留决定错误阶段的词汇，避免再次丢失具体故障。
 原响应体、代理值、私有路径及未知token不保存。
 归属和数据目录操作完全排除，HTTP恢复后再决定接续。
+
+单次原生TLS取证已完成：[42757878083](https://github.com/twotwothree2233/Trellis/actions/runs/42757878083)。
+执行代码头19bacd1576fe0dfcf4f75e5a33b407245add0443，整体failure保留。
+同一curl8.21.0/Schannel，无凭据公开GET返回exit35、无HTTP响应。
+具体原生码为CRYPT_E_NO_REVOCATION_CHECK / 0x80092012。
+错误阶段为next InitializeSecurityContext；请求99ms、传输44ms、总178ms。
+这是无法完成证书链吊销检查，未取得证据认定为吊销服务器离线。
+具体证书、HTTPS解密或系统策略原因仍未核实。
+
+Win11专业版26300/X64/session1，真标准交互令牌门禁通过。
+Git和隔离checkout/HEAD成功，baseline skipped，51个后续步骤skipped。
+应用0；未访问默认数据根、原备份或安装，未修改网络/证书/系统设置。
+保留默认TLS和吊销验证，无原始stderr/响应体/代理值/凭据附件。
+下一步由用户本机修复当前HTTPS证书链的吊销检查能力。
+须核对链的有效吊销信息及当前账户可访问性，不能绕过校验。
+在严格访问恢复前停止接续，合成业务及卸载重装继续待验。
 只清理已确认的本批安装；新合成根另行保留，不覆盖原备份。
 直接清空reuse会丢失原安装识别，因此不把关闭缓存当作归属核验替代。
 
