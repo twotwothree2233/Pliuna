@@ -72,11 +72,18 @@ function readEvidence(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
 async function removePreviousCandidate(current) {
-  // This variable is exported only after the workflow has verified the exact
-  // first-parent run, host, pinned inputs and completed ABI/package stages.
+  // Fresh dependencies and cache reuse both require independent online
+  // provenance before this variable may authorize the prior installation.
   const prior = process.env.TRELLIS_CANDIDATE_PREVIOUS_RUN
   if (!prior) return
   if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) fail('CANDIDATE_PREVIOUS_RUN_INVALID')
+  const proof = readEvidence(path.join(evidence(), 'candidate-provenance.json'))
+  if (proof.passed !== true || proof.stage !== 'ready' || proof.prior_run !== prior || proof.source_head !== process.env.GITHUB_SHA ||
+      proof.locked_inputs_equal !== true || proof.native_stages_verified !== true || !Array.isArray(proof.requests) || proof.requests.length !== 3 ||
+      proof.requests.some((request, index) => request.stage !== ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun'][index] || request.status !== 200 || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
+  if (prior === '42649802869' && (proof.prior_head !== '01039e72cab284491fcd1a812add0ec79c8e2488' || proof.fixed_parent_chain_verified !== true ||
+      proof.parent_chain?.length !== 2 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
+      proof.parent_chain[1].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[1].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
   const folder = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1')
   identity(folder)
   const previous = readEvidence(path.join(folder, 'candidate.json'))

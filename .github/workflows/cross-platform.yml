@@ -31,6 +31,10 @@ on:
         description: Optional completed candidate run whose identical pinned dependencies may be reused on this host
         type: string
         default: ''
+      windows11_candidate_previous_run:
+        description: Resume only approved candidate 42649802869 with fresh dependencies and the fixed 01039e72 to 2bed119 parent chain
+        type: string
+        default: ''
       windows11_candidate_acceptance:
         description: Approved current-user NSIS install, preserved default root and synthetic business acceptance; requires only + standard_user + default_startup_only
         type: boolean
@@ -65,7 +69,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_previous_run || inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -202,7 +206,7 @@ jobs:
       contents: read
       actions: read
     name: ${{ inputs.windows11_candidate_acceptance && 'Windows 11 local candidate / DESKTOP-SFE95TP' || inputs.windows11_default_startup_only && 'Windows 11 default startup / DESKTOP-SFE95TP' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics / DESKTOP-SFE95TP' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_previous_run || inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -227,6 +231,8 @@ jobs:
             core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
             core.exportVariable('TRELLIS_DESKTOP_OUTPUT', path.join(process.env.RUNNER_TEMP, 'trellis-win11-package-' + suffix));
             const standardUser = context.payload.inputs?.windows11_standard_user === 'true';
+            if (context.payload.inputs?.windows11_candidate_previous_run &&
+                (context.payload.inputs.windows11_candidate_previous_run !== '42649802869' || context.payload.inputs?.windows11_candidate_acceptance !== 'true' || context.payload.inputs?.windows11_candidate_reuse_run)) throw Error('CANDIDATE_FIXED_PREVIOUS_RUN_REQUIRED_WITHOUT_CACHE_REUSE');
             if (context.payload.inputs?.windows11_candidate_reuse_run && context.payload.inputs?.windows11_candidate_acceptance !== 'true') throw Error('DEPENDENCY_REUSE_REQUIRES_CANDIDATE_MODE');
             if (context.payload.inputs?.windows11_candidate_acceptance === 'true' && (!standardUser || context.payload.inputs?.windows11_only !== 'true' || context.payload.inputs?.windows11_default_startup_only !== 'true')) throw Error('CANDIDATE_REQUIRES_STANDARD_DEFAULT_MODE');
             if (context.payload.inputs?.windows11_default_startup_only === 'true' &&
@@ -771,48 +777,136 @@ jobs:
         if: "!inputs.windows11_default_startup_only && (!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success'))"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node -e "require('node:fs').copyFileSync('src/shared/contracts.generated.ts', require('node:path').join(process.env.TRELLIS_WIN11_EVIDENCE, 'contracts.generated.before.ts'))"
-      - name: Reuse only identical pinned dependencies from a completed candidate run
+      - name: Verify prior candidate ownership and optionally reuse pinned dependencies
         id: candidate_dependencies
         if: "!cancelled() && inputs.windows11_candidate_acceptance && steps.standard_tools.outcome == 'success'"
+        timeout-minutes: 2
         uses: actions/github-script@v7
         with:
+          debug: false
+          retries: 1
+          retry-exempt-status-codes: 400,401,403,404,422
           script: |
-            const prior = context.payload.inputs?.windows11_candidate_reuse_run;
+            const previousInput = context.payload.inputs?.windows11_candidate_previous_run;
+            const reuseInput = context.payload.inputs?.windows11_candidate_reuse_run;
+            core.exportVariable('TRELLIS_CANDIDATE_PREVIOUS_RUN', '');
+            core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '0');
+            const prior = previousInput || reuseInput;
             if (!prior) return;
-            if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) throw Error('CANDIDATE_REUSE_ID_INVALID');
             const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
-            const source = path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE);
-            const previous = path.join(process.env.GITHUB_WORKSPACE, 'trellis-standard-' + prior + '-1');
-            const modules = fs.realpathSync(path.join(previous, 'node_modules'));
-            const relativeModules = path.relative(process.env.GITHUB_WORKSPACE, modules);
-            if (!/^trellis-standard-[0-9]+-1[\\/]node_modules$/.test(relativeModules)) throw Error('CANDIDATE_REUSE_MODULE_PATH_UNSAFE');
-            for (const folder of [previous, path.dirname(modules), modules]) {
-              const stat = fs.lstatSync(folder);
-              if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error('CANDIDATE_REUSE_PATH_UNSAFE');
+            const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'candidate-provenance.json');
+            const ownerHead = '01039e72cab284491fcd1a812add0ec79c8e2488';
+            const bridgeHead = '2bed119f8df96ec81992d755bf81769cdfd27c4f';
+            const report = { stage: 'local_inputs', passed: false, prior_run: prior, source_head: process.env.GITHUB_SHA,
+              dependencies_reused: false, retry_limit: 1, request_deadline_ms: 10000, requests: [] };
+            const save = () => fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
+            const fail = code => { throw Object.assign(Error(code), { code }); };
+            async function request(stage, route, operation) {
+              report.stage = stage;
+              const entry = { stage, route, status: null, cause_code: null, timeout: false, completed: false };
+              report.requests.push(entry); save();
+              const controller = new AbortController();
+              const timer = setTimeout(() => { entry.timeout = true; controller.abort(); }, 10000);
+              try {
+                const result = await operation(controller.signal);
+                entry.status = result.status;
+                if (result.status !== 200 || entry.timeout) fail('CANDIDATE_PROVENANCE_HTTP_UNEXPECTED');
+                entry.completed = true; save(); return result.data;
+              } catch (error) {
+                entry.status = Number.isInteger(error.status) && error.status >= 100 && error.status <= 599 ? error.status : entry.status;
+                const allowed = ['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'DEPTH_ZERO_SELF_SIGNED_CERT'];
+                const code = error.cause?.code ?? error.cause?.cause?.code ?? error.code;
+                entry.cause_code = allowed.includes(code) ? code : entry.timeout ? 'ABORTED' : /fetch failed/i.test(String(error.message)) ? 'FETCH_FAILED' : 'UNKNOWN';
+                save(); fail('CANDIDATE_PROVENANCE_API_' + stage.toUpperCase() + '_FAILED');
+              } finally { clearTimeout(timer); }
             }
-            for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) {
-              const expected = fs.readFileSync(path.join(source, name));
-              for (const owner of [previous, path.dirname(modules)]) if (!fs.readFileSync(path.join(owner, name)).equals(expected)) throw Error('CANDIDATE_REUSE_VERSION_CHANGED');
+            try {
+              if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID ||
+                  (previousInput && (previousInput !== '42649802869' || reuseInput))) fail('CANDIDATE_PROVENANCE_INPUT_INVALID');
+              const source = path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE);
+              const previous = path.join(process.env.GITHUB_WORKSPACE, 'trellis-standard-' + prior + '-1');
+              for (const folder of [source, previous]) {
+                const stat = fs.lstatSync(folder);
+                if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CANDIDATE_REUSE_PATH_UNSAFE');
+              }
+              for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) {
+                if (!fs.readFileSync(path.join(source, name)).equals(fs.readFileSync(path.join(previous, name)))) fail('CANDIDATE_REUSE_VERSION_CHANGED');
+              }
+              report.locked_inputs_equal = true;
+              const options = { encoding: 'utf8', timeout: 3000, maxBuffer: 16384, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
+              const oldHead = cp.execFileSync('git.exe', ['rev-parse', 'HEAD'], { ...options, cwd: previous }).trim();
+              const currentHead = cp.execFileSync('git.exe', ['rev-parse', 'HEAD'], { ...options, cwd: source }).trim();
+              if (!/^[0-9a-f]{40}$/.test(oldHead) || currentHead !== process.env.GITHUB_SHA) fail('CANDIDATE_REUSE_HEAD_MISMATCH');
+              if (previousInput) {
+                const raw = cp.execFileSync('git.exe', ['cat-file', 'commit', 'HEAD'], { ...options, cwd: source });
+                const parents = raw.split(/\r?\n\r?\n/, 1)[0].split(/\r?\n/).filter(line => line.startsWith('parent '));
+                if (oldHead !== ownerHead || parents.length !== 1 || parents[0] !== 'parent ' + bridgeHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                report.parent_chain = [{ child: currentHead, parent: bridgeHead, evidence: 'checked_out_git_object' }];
+              }
+              const repoRoute = '/repos/' + encodeURIComponent(context.repo.owner) + '/' + encodeURIComponent(context.repo.repo);
+              const run = await request('getWorkflowRun', 'GET ' + repoRoute + '/actions/runs/' + prior, signal =>
+                github.rest.actions.getWorkflowRun({ ...context.repo, run_id: prior, request: { signal } }));
+              if (run.status !== 'completed' || run.head_sha !== oldHead || run.head_branch !== context.ref.replace('refs/heads/', '') || run.event !== 'workflow_dispatch') fail('CANDIDATE_REUSE_RUN_UNCONFIRMED');
+              report.online_run = { id: run.id, attempt: run.run_attempt, status: run.status, event: run.event, head: run.head_sha, branch: run.head_branch };
+              const commitRef = previousInput ? bridgeHead : currentHead;
+              const commit = await request('getCommit', 'GET ' + repoRoute + '/commits/' + commitRef, signal =>
+                github.rest.repos.getCommit({ ...context.repo, ref: previousInput ? bridgeHead : currentHead, request: { signal } }));
+              if (previousInput) {
+                if (commit.sha !== bridgeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== ownerHead || String(run.id) !== prior || run.run_attempt !== 1 ||
+                    run.path !== '.github/workflows/cross-platform.yml' || run.display_title !== 'Windows 11 local candidate acceptance') fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                report.parent_chain.push({ child: bridgeHead, parent: ownerHead, evidence: 'online_getCommit' });
+              } else if (commit.sha !== currentHead || commit.parents?.[0]?.sha !== oldHead) fail('CANDIDATE_REUSE_PARENT_UNCONFIRMED');
+              const jobs = await request('listJobsForWorkflowRun', 'GET ' + repoRoute + '/actions/runs/' + prior + '/jobs', signal =>
+                github.rest.actions.listJobsForWorkflowRun({ ...context.repo, run_id: prior, per_page: 100, request: { signal } }));
+              const matches = jobs.jobs.filter(job => job.runner_name === 'DESKTOP-SFE95TP');
+              if (matches.length !== 1) fail('CANDIDATE_REUSE_ABI_UNCONFIRMED');
+              const job = matches[0];
+              const required = ['Prepare the existing Electron ABI for default-startup acceptance', 'Build local directory package'];
+              if (previousInput) required.push('Require the designated Windows 11 x64 host', 'Verify the isolated checkout commit',
+                'Read-only default target and instance preflight', 'Verify existing Node and real file symlinks before dependencies',
+                'Require existing standard-user Python, VS and SDK before dependencies', 'Preserve prior default data and install the current-user NSIS candidate',
+                'Verify installed ACL, Job, RPC, descendant cleanup and PDF', 'Require the actual default-startup result and all exit confirmations');
+              if (!required.every(name => job.steps.some(step => step.name === name && step.conclusion === 'success')) ||
+                  (previousInput && (job.runner_id !== 23 || job.status !== 'completed'))) fail('CANDIDATE_REUSE_ABI_UNCONFIRMED');
+              report.online_job = { id: job.id, runner_id: job.runner_id, runner_name: job.runner_name, status: job.status, verified_steps: required };
+              if (previousInput) {
+                const hostFile = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1', 'host.json');
+                const directory = fs.lstatSync(path.dirname(hostFile));
+                if (!directory.isDirectory() || directory.isSymbolicLink()) fail('CANDIDATE_PREVIOUS_HOST_UNCONFIRMED');
+                const stat = fs.lstatSync(hostFile);
+                if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8192) fail('CANDIDATE_PREVIOUS_HOST_UNCONFIRMED');
+                const host = JSON.parse(fs.readFileSync(hostFile, 'utf8'));
+                if (host.runner !== 'DESKTOP-SFE95TP' || host.standard_user_required !== true || host.elevated !== false || host.administrators_group_present !== false ||
+                    host.system_account !== false || host.user_interactive !== true || !Number.isInteger(host.session_id) || host.session_id <= 0 ||
+                    host.product_type !== 1 || host.architecture !== 'X64' || !host.caption?.includes('Windows 11') || !Number.isInteger(host.build) || host.build < 22000) fail('CANDIDATE_PREVIOUS_HOST_UNCONFIRMED');
+                report.prior_host = { build: host.build, session_id: host.session_id, standard_user_required: true, elevated: false, administrators_group_present: false };
+                report.fixed_parent_chain_verified = true;
+              }
+              if (reuseInput) {
+                const modules = fs.realpathSync(path.join(previous, 'node_modules'));
+                const relative = path.relative(process.env.GITHUB_WORKSPACE, modules);
+                if (!/^trellis-standard-[0-9]+-1[\\/]node_modules$/.test(relative)) fail('CANDIDATE_REUSE_MODULE_PATH_UNSAFE');
+                for (const folder of [path.dirname(modules), modules]) {
+                  const stat = fs.lstatSync(folder);
+                  if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CANDIDATE_REUSE_PATH_UNSAFE');
+                }
+                for (const name of ['package.json', 'pnpm-lock.yaml', '.node-version']) if (!fs.readFileSync(path.join(source, name)).equals(fs.readFileSync(path.join(path.dirname(modules), name)))) fail('CANDIDATE_REUSE_VERSION_CHANGED');
+                const destination = path.join(source, 'node_modules');
+                try { fs.lstatSync(destination); fail('CANDIDATE_REUSE_TARGET_EXISTS'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+                fs.symlinkSync(modules, destination, 'junction');
+                report.dependencies_reused = true;
+              }
+              report.prior_head = oldHead; report.native_stages_verified = true;
+              report.stage = 'ready'; report.passed = true; save();
+              core.exportVariable('TRELLIS_CANDIDATE_PREVIOUS_RUN', prior);
+              if (report.dependencies_reused) core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '1');
+              core.setOutput('reused', String(report.dependencies_reused));
+              console.log(JSON.stringify(report));
+            } catch (error) {
+              report.failed_stage = report.stage; report.stage = 'failed';
+              report.error = /^[A-Z0-9_]{1,100}$/.test(error.code ?? '') ? error.code : 'CANDIDATE_PROVENANCE_FAILED';
+              save(); console.log(JSON.stringify(report)); core.setFailed(report.error);
             }
-            const options = { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] };
-            const oldHead = cp.execFileSync('git.exe', ['rev-parse', 'HEAD'], { ...options, cwd: previous }).trim();
-            if (!/^[0-9a-f]{40}$/.test(oldHead)) throw Error('CANDIDATE_REUSE_HEAD_MISMATCH');
-            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: prior });
-            if (run.status !== 'completed' || run.head_sha !== oldHead || run.head_branch !== context.ref.replace('refs/heads/', '') || run.event !== 'workflow_dispatch') throw Error('CANDIDATE_REUSE_RUN_UNCONFIRMED');
-            // Checkout is intentionally depth=1. Read the immutable first
-            // parent through GitHub, preserving the original HEAD^ relation.
-            const { data: commit } = await github.rest.repos.getCommit({ ...context.repo, ref: process.env.GITHUB_SHA });
-            if (commit.sha !== process.env.GITHUB_SHA || commit.parents?.[0]?.sha !== oldHead) throw Error('CANDIDATE_REUSE_PARENT_UNCONFIRMED');
-            const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({ ...context.repo, run_id: prior, per_page: 100 });
-            const job = jobs.jobs.find(job => job.runner_name === 'DESKTOP-SFE95TP');
-            if (!job || !['Prepare the existing Electron ABI for default-startup acceptance', 'Build local directory package'].every(name => job.steps.some(step => step.name === name && step.conclusion === 'success'))) throw Error('CANDIDATE_REUSE_ABI_UNCONFIRMED');
-            const destination = path.join(source, 'node_modules');
-            try { fs.lstatSync(destination); throw Error('CANDIDATE_REUSE_TARGET_EXISTS'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-            fs.symlinkSync(modules, destination, 'junction');
-            core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '1');
-            core.exportVariable('TRELLIS_CANDIDATE_PREVIOUS_RUN', prior);
-            core.setOutput('reused', 'true');
-            console.log(JSON.stringify({ reused: true, source_run: prior, pinned_inputs_equal: true, installation: false }));
       - name: Materialize pinned dependencies before native builds
         if: "!inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && (!inputs.windows11_standard_user || steps.standard_tools.outcome == 'success') && steps.candidate_dependencies.outputs.reused != 'true'"
         # Resolve the lockfile's node-gyp before any dependency lifecycle runs.
