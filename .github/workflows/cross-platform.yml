@@ -20,7 +20,7 @@ on:
         type: boolean
         default: false
       windows11_checkout_probe_only:
-        description: Only diagnose bounded Git discovery, isolated checkout and public TLS; requires windows11_only and windows11_standard_user
+        description: Only diagnose bounded public Git and API transport before checkout; requires windows11_only and windows11_standard_user
         type: boolean
         default: false
       windows11_symlink_probe_only:
@@ -656,15 +656,180 @@ jobs:
                 }
                 if (performance.now() > deadline) report.error = 'TOTAL_DEADLINE';
                 else if (!report.candidates[0]?.version || report.candidates[0]?.error) report.error = 'PATH_GIT_UNAVAILABLE';
-                else { report.stage = 'source_ready'; core.setOutput('ready', 'true'); }
+                else {
+                  report.stage = 'source_ready'; core.setOutput('ready', 'true');
+                  if (context.payload.inputs?.windows11_checkout_probe_only === 'true') core.exportVariable('TRELLIS_WIN11_GIT_PROBE', discovery.message.candidates[0].file);
+                }
               }
             } catch (error) { report.error = cleanCode(error); }
             fs.writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');
             console.log(JSON.stringify(report));
             if (report.error) core.setFailed('CHECKOUT_PREPARATION_' + report.error);
+      - name: Bound same-session public Git and API diagnostics
+        id: public_tls
+        if: "!cancelled() && inputs.windows11_only && inputs.windows11_standard_user && inputs.windows11_checkout_probe_only && !inputs.windows11_prepare_git && !inputs.windows11_prepare_python && !inputs.install_windows11_tools && steps.precheckout.outcome == 'success'"
+        timeout-minutes: 1
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs')
+            const path = require('node:path')
+            const { spawn, execFile } = require('node:child_process')
+            const { performance } = require('node:perf_hooks')
+
+            const securityCodes = new Set([
+              'SEC_E_ILLEGAL_MESSAGE', 'SEC_E_INTERNAL_ERROR', 'SEC_E_INVALID_TOKEN', 'SEC_E_INCOMPLETE_MESSAGE',
+              'SEC_E_UNTRUSTED_ROOT', 'SEC_E_WRONG_PRINCIPAL', 'SEC_E_CERT_EXPIRED', 'SEC_E_ALGORITHM_MISMATCH',
+              'SEC_E_NO_CREDENTIALS', 'SEC_E_MESSAGE_ALTERED', 'SEC_E_CONTEXT_EXPIRED', 'SEC_E_APPLICATION_PROTOCOL_MISMATCH',
+              'CRYPT_E_REVOCATION_OFFLINE', 'CRYPT_E_NO_REVOCATION_CHECK', 'CERT_E_UNTRUSTEDROOT', 'CERT_E_EXPIRED',
+              'CERT_E_CN_NO_MATCH', 'CERT_E_REVOKED', 'CERT_E_REVOCATION_FAILURE',
+              'WSAECONNRESET', 'WSAETIMEDOUT', 'WSAECONNREFUSED', 'WSAHOST_NOT_FOUND', 'WSATRY_AGAIN', 'WSAENETUNREACH'
+            ])
+            const safeWords = new Set(('curl schannel openssl ssl tls ssl_tls connection connect connecting handshake failed failure error unknown ' +
+              'initial next initializesecuritycontext acquirecredentialshandle certgetcertificatechain unexpected malformed message received receive recv ' +
+              'send sending data reset closed aborted eof timeout timed out expired certificate certificates chain trust root issuer local unable get ' +
+              'revocation offline algorithm mismatch protocol unsupported invalid incomplete internal wrong principal credentials resolve host proxy ' +
+              'tunnel response rejected refused network unreachable while reading writing peer remote server socket syscall ssl_error_syscall ' +
+              'to the a an not could was be has with git fatal empty reply access from authentication returned url').split(' '))
+            function summarizeError(stderr) {
+              const line = stderr.split(/\r?\n/).find(value => /^curl:\s*\([0-9]{1,3}\)/.test(value)) ?? stderr.split(/\r?\n/).find(value => /schannel|handshake|SSL|TLS/i.test(value)) ?? stderr.split(/\r?\n/).find(value => /^(?:fatal:|error:)/i.test(value)) ?? ''
+              // Only a finite vocabulary survives. Never retain a URL, proxy value,
+              // certificate subject, account path or unknown token from the error text.
+              const privateFree = line.slice(0, 2048).replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' [redacted] ')
+                .replace(/\b[a-z]:[\\/][^\s]*/gi, ' [redacted] ').replace(/(['"])[^\r\n]*?\1/g, ' [redacted] ')
+                .replace(/\b(?:[a-z0-9_-]+\.)+[a-z]{2,}(?::[0-9]+)?\b/gi, ' [redacted] ')
+                .replace(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?\b/g, ' [redacted] ')
+              const codes = [...new Set((privateFree.match(/\b(?:SEC_E|CRYPT_E|CERT_E|WSA)[A-Z0-9_]{2,64}\b/g) ?? []).filter(value => securityCodes.has(value)))].slice(0, 6)
+              const hexadecimal = [...new Set((privateFree.match(/\b0x(?:8009|800b|8007)[0-9a-f]{4}\b/gi) ?? []).map(value => '0x' + value.slice(2).toUpperCase()))].slice(0, 6)
+              const words = privateFree.match(/[A-Za-z_][A-Za-z0-9_]*|0x[0-9a-f]+/gi) ?? []
+              const phrase = words.map(value => securityCodes.has(value) || /^0x(?:8009|800b|8007)[0-9a-f]{4}$/i.test(value) ? value :
+                safeWords.has(value.toLowerCase()) ? value : '[redacted]').join(' ').replace(/(?:\[redacted\]\s*)+/g, '[redacted] ').trim().slice(0, 240)
+              return { native_codes: codes, native_hex_codes: hexadecimal, error_phrase: phrase || null }
+            }
+
+            const configuration = [
+              'url = "https://api.github.com"', 'request = "GET"', 'output = "NUL"', 'silent', 'show-error',
+              'retry = 0', 'connect-timeout = 10', 'max-time = 20', 'proto = "=https"',
+              'write-out = "TRELLIS_TLS_STATUS:%{http_code}\\nTRELLIS_TLS_SECONDS:%{time_total}\\n"'
+            ].join('\n') + '\n'
+
+            async function probe(core) {
+              const startedAt = performance.now(), deadline = startedAt + 55000
+              const report = { stage: 'host', application_tests: 0, private_checkout_verified: false, credentials_sent: false, tls_verification_enabled: true,
+                curl_config_disabled: true, environment_policy: 'same_candidate_network_allowlist', budgets_ms: { git: 20000, version: 3000, connect: 10000, request: 20000, total: 55000 }, passed: false,
+                git: { started: false, passed: false, error: 'NOT_STARTED' }, request: { started: false, passed: false, error: 'NOT_STARTED' } }
+              const fail = code => { throw Object.assign(Error(code), { code }) }
+              const clean = error => ['ENOENT', 'EACCES', 'EPERM', 'EINVAL', 'EPIPE', 'ENOBUFS'].includes(error?.code) ? error.code : 'TLS_PROBE_FAILED'
+              const env = {}
+              // The candidate's current Windows/network environment is preserved. No
+              // GitHub inputs, token, model configuration or user curlrc enters the child.
+              for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'RUNNER_TRACKING_ID', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
+                if (process.env[key]) env[key] = process.env[key]
+              }
+              function run(executable, args, budget, input, tree = false, extraEnv = {}) {
+                return new Promise(resolve => {
+                  const result = { started: false, exit: null, timeout: false, error: null, stdout: '', stderr: '' }
+                  let child, timer, done = false, stopping = false
+                  const finish = () => {
+                    if (done) return
+                    done = true; clearTimeout(timer)
+                    child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref()
+                    resolve(result)
+                  }
+                  const stop = (error, timeout = false) => {
+                    if (done || stopping) return
+                    stopping = true; result.error = error; result.timeout = timeout
+                    if (tree && child?.pid) {
+                      // Only this probe's Git subtree is terminated. Never the Runner.
+                      execFile(path.join(env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'],
+                        { env, windowsHide: true, timeout: 3000 }, error => { result.cleanup = error ? 'unknown' : 'terminated'; finish() })
+                    } else { try { child?.kill() } catch {}; finish() }
+                  }
+                  const remaining = Math.min(budget, deadline - performance.now())
+                  if (remaining <= 0) { stop('TOTAL_DEADLINE', true); return }
+                  try {
+                    child = spawn(executable, args, { cwd: process.env.RUNNER_TEMP, env: { ...env, ...extraEnv }, windowsHide: true, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+                    result.started = Boolean(child.pid)
+                    timer = setTimeout(() => stop('PROCESS_TIMEOUT', true), remaining)
+                    child.once('error', error => { result.error = clean(error); finish() })
+                    for (const [stream, limit] of [['stdout', 8192], ['stderr', 16384]]) child[stream].on('data', value => {
+                      result[stream] += value.toString('utf8')
+                      if (Buffer.byteLength(result[stream]) > limit) { result[stream] = ''; stop('OUTPUT_LIMIT') }
+                    })
+                    child.once('close', exit => { result.exit = exit; if (!stopping) finish() })
+                    if (input) { child.stdin.on('error', error => stop(clean(error))); child.stdin.end(input) }
+                  } catch (error) { result.error = clean(error); finish() }
+                })
+              }
+              try {
+                const host = JSON.parse(fs.readFileSync(path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'host.json'), 'utf8'))
+                if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP' || host.runner !== 'DESKTOP-SFE95TP' ||
+                    host.standard_user_required !== true || host.elevated !== false || host.administrators_group_present !== false || host.system_account !== false ||
+                    host.user_interactive !== true || !Number.isInteger(host.session_id) || host.session_id <= 0 || host.product_type !== 1 ||
+                    host.architecture !== 'X64' || !host.caption?.includes('Windows 11') || !Number.isInteger(host.build) || host.build < 22000) fail('STANDARD_WINDOWS11_HOST_REQUIRED')
+                if (!env.SystemRoot || !/^[a-z]:\\/i.test(env.SystemRoot)) fail('SYSTEM_CURL_PATH_UNCONFIRMED')
+                for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+                  if (env[key] && /(?:^|\/\/)[^/\s]*@/.test(env[key])) fail('NETWORK_ENVIRONMENT_HAS_EMBEDDED_CREDENTIALS')
+                }
+                // Public Git proves this client's transport only. It never proves the
+                // private Trellis checkout, its HEAD, or candidate ownership.
+                report.stage = 'public_git'
+                const gitStartedAt = performance.now(), git = process.env.TRELLIS_WIN11_GIT_PROBE
+                const gitEnv = { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' }
+                if (!git || !path.isAbsolute(git) || !/\\git\.exe$/i.test(git)) {
+                  report.git = { started: false, exit: null, timeout: false, error: 'DISCOVERED_GIT_REQUIRED', passed: false }
+                } else {
+                  const result = await run(git, ['-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'http.extraHeader=',
+                    '-c', 'http.sslVerify=true', '-c', 'http.followRedirects=false', '-c', 'http.lowSpeedLimit=1', '-c', 'http.lowSpeedTime=20',
+                    'ls-remote', '--exit-code', 'https://github.com/actions/checkout.git', 'HEAD'], 20000, undefined, true, gitEnv)
+                  const head = /^[0-9a-f]{40}\s+HEAD\s*$/.test(result.stdout.trim())
+                  const http = result.stderr.match(/(?:HTTP\/[12](?:\.[01])?\s+|returned error:\s*)([1-5][0-9]{2})/i)
+                  report.git = { started: result.started, exit: result.exit, timeout: result.timeout, error: result.error, cleanup: result.cleanup ?? null,
+                    duration_ms: Math.round(performance.now() - gitStartedAt), http_status: http ? Number(http[1]) : null,
+                    head_received: head, git_config_isolated: true, ...summarizeError(result.stderr),
+                    passed: result.exit === 0 && !result.error && head }
+                }
+                // Always collect API evidence even when public Git failed.
+                const executable = path.join(env.SystemRoot, 'System32', 'curl.exe')
+                report.stage = 'version'
+                const version = await run(executable, ['--disable', '--version'], 3000)
+                if (version.error || version.exit !== 0) fail(version.error ?? 'SYSTEM_CURL_VERSION_FAILED')
+                const match = version.stdout.match(/^curl ([0-9]+\.[0-9]+\.[0-9]+)(?:\s|[-+])/)
+                if (!match || !/^Protocols:.*\bhttps\b/m.test(version.stdout)) fail('SYSTEM_CURL_HTTPS_UNCONFIRMED')
+                report.curl_version = match[1]
+                report.tls_backend = version.stdout.match(/\b(?:Schannel|OpenSSL\/[0-9A-Za-z.+-]+|LibreSSL\/[0-9A-Za-z.+-]+|BoringSSL|wolfSSL\/[0-9A-Za-z.+-]+)\b/)?.[0] ?? 'unknown'
+                if (report.tls_backend !== 'Schannel') fail('SYSTEM_SCHANNEL_REQUIRED')
+                report.stage = 'public_api_tls'
+                const requestStartedAt = performance.now()
+                const result = await run(executable, ['--disable', '--config', '-'], 20000, configuration)
+                report.request = { started: result.started, exit: result.exit, timeout: result.timeout, error: result.error,
+                  duration_ms: Math.round(performance.now() - requestStartedAt), http_status: null, transfer_ms: null, passed: false, ...summarizeError(result.stderr) }
+                const status = result.stdout.match(/^TRELLIS_TLS_STATUS:([0-9]{3})\r?\nTRELLIS_TLS_SECONDS:([0-9]+(?:\.[0-9]+)?)\r?\n?$/)
+                if (status) {
+                  const value = Number(status[1])
+                  report.request.http_status = value >= 100 && value <= 599 ? value : null
+                  report.request.transfer_ms = Math.round(Number(status[2]) * 1000)
+                }
+                if (result.error || result.exit !== 0) fail(result.error ?? 'PUBLIC_TLS_REQUEST_FAILED')
+                if (report.request.http_status !== 200) fail('PUBLIC_TLS_HTTP_NOT_200')
+                report.request.passed = true
+                if (!report.git.passed) fail('PUBLIC_GIT_REQUEST_FAILED')
+                if (performance.now() > deadline) fail('TOTAL_DEADLINE')
+                report.passed = true; report.stage = 'ready'
+              } catch (error) {
+                report.failed_stage = report.stage; report.stage = 'blocked_environment'
+                report.error = /^[A-Z0-9_]{1,80}$/.test(error?.code ?? '') ? error.code : 'TLS_PROBE_FAILED'
+              }
+              report.duration_ms = Math.round(performance.now() - startedAt)
+              fs.writeFileSync(path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'tls-probe.json'), JSON.stringify(report, null, 2) + '\n')
+              console.log(JSON.stringify(report))
+              if (!report.passed) core.setFailed(report.error)
+              return report
+            }
+            await probe(core);
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         id: source_checkout
-        if: "!cancelled() && steps.host.outcome == 'success' && (!inputs.windows11_standard_user || steps.precheckout.outcome == 'success')"
+        if: "!cancelled() && (!inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git) && steps.host.outcome == 'success' && (!inputs.windows11_standard_user || steps.precheckout.outcome == 'success')"
         timeout-minutes: ${{ (inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_default_startup_only) && 3 || 120 }}
         with:
           path: ${{ env.TRELLIS_WIN11_SOURCE }}
@@ -697,18 +862,6 @@ jobs:
             }
             fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
             console.log(JSON.stringify({ stage: report.stage, head_matches: report.head_matches, application_tests: 0 }));
-      - name: Bound unauthenticated public TLS diagnostics
-        id: public_tls
-        if: "!cancelled() && inputs.windows11_only && inputs.windows11_standard_user && inputs.windows11_checkout_probe_only && !inputs.windows11_prepare_git && !inputs.windows11_prepare_python && !inputs.install_windows11_tools && steps.checkout_head.outcome == 'success'"
-        timeout-minutes: 1
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const path = require('node:path');
-            const relative = process.env.TRELLIS_WIN11_SOURCE;
-            if (!/^trellis-standard-[0-9]+-[0-9]+$/.test(relative)) throw Error('SOURCE_PATH_INVALID');
-            const source = path.resolve(process.env.GITHUB_WORKSPACE, relative);
-            await require(path.join(source, 'scripts', 'windows11-tls-probe.cjs'))(core);
       - name: Read-only default target and instance preflight
         id: default_data
         if: "!cancelled() && inputs.windows11_default_startup_only && steps.checkout_head.outcome == 'success'"
@@ -1248,6 +1401,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           CHECKOUT_OUTCOME: ${{ steps.source_checkout.outcome }}
+          NETWORK_OUTCOME: ${{ steps.public_tls.outcome }}
         with:
           script: |
             const fs = require('node:fs');
@@ -1257,7 +1411,8 @@ jobs:
             const outcomes = new Set(['success', 'failure', 'cancelled', 'skipped']);
             report.checkout = outcomes.has(process.env.CHECKOUT_OUTCOME) ? process.env.CHECKOUT_OUTCOME : 'unknown';
             report.application_tests = 0;
-            if (report.checkout !== 'success' && report.stage === 'source_ready') report.stage = 'checkout_' + report.checkout;
+            if (['success', 'failure'].includes(process.env.NETWORK_OUTCOME)) report.stage = 'network_diagnostics_' + process.env.NETWORK_OUTCOME;
+            else if (report.checkout !== 'success' && report.stage === 'source_ready') report.stage = 'checkout_' + report.checkout;
             fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
             console.log(JSON.stringify({ stage: report.stage, checkout: report.checkout, application_tests: 0 }));
       - name: Keep Windows 11 environment and desktop evidence

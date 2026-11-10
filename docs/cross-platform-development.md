@@ -1,17 +1,18 @@
 # 跨平台开发与验证
 
-当前最小TLS取证复用`windows11_checkout_probe_only`。
-只打开only、standard_user、checkout_probe_only，其他输入关闭或留空。
-指定主机标准交互门禁、Git及新隔离checkout/HEAD通过后才运行。
-该入口不执行依赖、应用、默认根、卸载或安装步骤。
+当前网络取证复用`windows11_checkout_probe_only`，在源码检出之前运行。
+仅only、standard_user、checkout_probe_only为true，其他关闭或留空。
+指定标准交互门禁及真实Git发现通过后，同会话分别检查两项。
+公开官方Git仓库HEAD读取限20秒；系统Schannel API请求限20秒。
+Git禁凭据helper/交互/配置重写，保留已有代理环境，不携带仓库token。
+Git失败仍记录严格API结果；总55秒，步骤1分钟。
+Git超时只终止本探针子树，不能终止Runner。
 
-同一系统curl仅无凭据GET公开`https://api.github.com`。
-连接10秒、请求20秒、总25秒、步骤1分钟，版本检查3秒。
-保留候选现有网络环境允许列表，不改代理/TLS/系统设置。
-禁用curl配置文件；响应体丢弃，stderr仅在内存筛选。
-附件只留版本/后端、退出/HTTP/耗时及有限原生码和脱敏短句。
-没有原生码时保留受控的具体错误词，不退化为单一TLS失败分类。
-原始错误、环境、代理值、凭据及证书材料均不上传。
+探针内联执行，不依赖源码checkout，不加载旧工作区脚本。
+本次私库checkout、依赖、应用、数据目录及安装步骤全部跳过。
+公开Git仅证明该客户端传输，不替代私库真实checkout/HEAD/归属。
+两项同次成功才允许接续原c9候选，全部原门禁保持。
+只保存实际退出/HTTP/耗时及有限脱敏错误，不保存凭据或网络配置。
 
 单次原生TLS取证已完成：[42757878083](https://github.com/twotwothree2233/Trellis/actions/runs/42757878083)。
 执行代码头19bacd1576fe0dfcf4f75e5a33b407245add0443，整体failure保留。

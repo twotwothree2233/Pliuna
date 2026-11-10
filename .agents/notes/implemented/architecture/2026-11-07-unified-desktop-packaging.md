@@ -721,14 +721,14 @@ Node拒绝encoding:buffer并抛ERR_UNKNOWN_ENCODING。
 还核对本账户唯一安装路径、精确目录身份和固定 HKCU 命令。
 当前默认根须匹配前次真实首启证据，原备份身份须保持。
 
-TLS取证复用既有checkout_probe_only，不新增应用模式。
-只对指定标准交互账户使用同一系统curl访问公开API根。
-连接10秒、请求20秒、总25秒、步骤1分钟；不发Authorization。
-保留当前网络环境允许列表及默认TLS/吊销验证。
-错误原文仅在内存；有限安全码及受控词汇短句才能进入附件。
-无原生码时仍保留决定错误阶段的词汇，避免再次丢失具体故障。
-原响应体、代理值、私有路径及未知token不保存。
-归属和数据目录操作完全排除，HTTP恢复后再决定接续。
+网络取证复用checkout_probe_only，内联于私库源码检出之前。
+避免取码失败使API探针无法运行，不依赖旧工作区代码。
+已发现Git无凭据读固定官方公开仓库HEAD，Schannel无凭据GET公开API。
+两项独立各20秒，总55秒、步骤1分钟；Git失败仍保存API结果。
+禁Git交互/helper/配置重写，不携带仓库token，保留代理环境。
+Git超时只终止自身子树；原始错误仅内存筛选，不保存网络配置。
+公开Git成功不替代私库检出、HEAD或在线归属。
+本次排除私库checkout及全部应用/数据/安装，双成功后再接续原c9。
 
 单次原生TLS取证已完成：[42757878083](https://github.com/twotwothree2233/Trellis/actions/runs/42757878083)。
 执行代码头19bacd1576fe0dfcf4f75e5a33b407245add0443，整体failure保留。
