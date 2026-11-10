@@ -160,27 +160,28 @@ async function removePreviousCandidate(current) {
 }
 async function continueUninstalled(current, proof, originalFolder) {
   const a = proof.continuation_evidence
-  if (a?.id !== 13749679230 || a.name !== 'windows11-evidence-42779040248-2' || a.run_id !== 42779040248 || a.attempt !== 2 ||
-      a.head !== '3c56ebceb257d60cf5c44d7d2aca0a8e251c7eaa' || a.archive_bytes !== 97812 || a.branch !== 'ao/trellis-12/cross-platform-ci' ||
+  if (a?.id !== 13752368936 || a.name !== 'windows11-evidence-42793967624-1' || a.run_id !== 42793967624 || a.attempt !== 1 ||
+      a.head !== '25f69a64ca64abbd9f291fedcac7d1b29101b893' || a.archive_bytes !== 70232 || a.branch !== 'ao/trellis-12/cross-platform-ci' ||
       a.source !== 'fixed_uninstalled_attempt_artifact' || a.facts_verified !== true || typeof a.directory !== 'string' || path.dirname(a.directory) !== process.env.RUNNER_TEMP ||
-      !/^trellis-continuation-42779040248-2-[A-Za-z0-9]+$/.test(path.basename(a.directory)) || !same(identity(a.directory), a.identity) ||
+      !/^trellis-continuation-42793967624-1-[A-Za-z0-9]+$/.test(path.basename(a.directory)) || !same(identity(a.directory), a.identity) ||
       JSON.stringify(a.files) !== JSON.stringify(['host.json', 'candidate.json', 'default-startup.json', 'candidate-provenance.json'])) fail('CANDIDATE_CONTINUATION_ARTIFACT_UNCONFIRMED')
   const original = Object.fromEntries(['host.json', 'candidate.json', 'default-startup.json'].map(name => [name, readEvidence(path.join(originalFolder, name))]))
   const values = Object.fromEntries(a.files.map(name => [name, readEvidence(path.join(a.directory, name))]))
   require('./windows11-candidate-evidence.cjs').validateContinuationFacts(values, original)
   const c = values['candidate.json'], d = values['default-startup.json'], o = original['candidate.json']
+  const syntheticBackup = { path: c.continuation.synthetic_backup, identity: c.continuation.synthetic_backup_identity }
   if (current.absent || current.root !== c.default.root || !same(current.homeIdentity, d.identity.home) || !same(current.rootIdentity, d.identity.directory) ||
       o.backup.path !== path.join(os.homedir(), '.trellis.ao-preserved-42649802869-1') ||
-      c.backup.path !== path.join(os.homedir(), '.trellis.ao-preserved-42779040248-2')) fail('CANDIDATE_CONTINUATION_DEFAULT_CHANGED')
+      syntheticBackup.path !== path.join(os.homedir(), '.trellis.ao-preserved-42779040248-2')) fail('CANDIDATE_CONTINUATION_DEFAULT_CHANGED')
   const expectedParents = []
   let cursor = path.parse(process.env.LOCALAPPDATA).root
   for (const part of process.env.LOCALAPPDATA.slice(cursor.length).split(path.sep).filter(Boolean)) { cursor = path.join(cursor, part); expectedParents.push(cursor) }
   if (c.parents.length !== expectedParents.length || c.parents.some((parent, index) => parent.path !== expectedParents[index] || !same(identity(parent.path), parent.identity))) fail('CANDIDATE_INSTALL_PARENT_CHANGED')
-  const guarded = [[current.root, current.rootIdentity], [o.backup.path, o.backup.identity], [c.backup.path, c.backup.identity]]
+  const guarded = [[current.root, current.rootIdentity], [o.backup.path, o.backup.identity], [syntheticBackup.path, syntheticBackup.identity]]
   const checkIdentities = () => { for (const [file, expected] of guarded) if (!same(identity(file), expected)) fail('CANDIDATE_CONTINUATION_IDENTITY_CHANGED') }
   checkIdentities()
   if (await registry() !== 0) fail('CANDIDATE_CONTINUATION_REGISTRATION_PRESENT')
-  for (const [directory, expected] of [[o.install_dir, '42649802869-1'], [c.install_dir, '42779040248-2']]) {
+  for (const [directory, expected] of [[o.install_dir, '42649802869-1'], [path.join(process.env.LOCALAPPDATA, 'Trellis 验收 42779040248-2'), '42779040248-2'], [c.install_dir, '42793967624-1']]) {
     if (directory !== path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + expected)) fail('CANDIDATE_CONTINUATION_INSTALL_PATH_UNCONFIRMED')
     try { identity(directory) } catch (error) { if (error.code !== 'ENOENT') throw error }
     absent(path.join(directory, 'Trellis.exe'))
@@ -195,7 +196,7 @@ async function continueUninstalled(current, proof, originalFolder) {
   await data.inventory(current); checkIdentities()
   const result = { stage: 'continued_uninstalled_data_retained', passed: true, continued_uninstalled: true,
     run_id: a.run_id, attempt: a.attempt, artifact_id: a.id, head: a.head, prior_backup: o.backup.path, prior_backup_identity: o.backup.identity,
-    synthetic_backup: c.backup.path, synthetic_backup_identity: c.backup.identity, current_root_identity: current.rootIdentity,
+    synthetic_backup: syntheticBackup.path, synthetic_backup_identity: syntheticBackup.identity, current_root_identity: current.rootIdentity,
     registration_absent: true, candidate_executables_absent: true, owners_current_user: true, owner_job_empty: true }
   fs.writeFileSync(path.join(evidence(), 'candidate-continuation.json'), JSON.stringify(result, null, 2) + '\n')
   return result
