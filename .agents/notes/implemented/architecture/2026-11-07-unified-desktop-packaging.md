@@ -854,3 +854,17 @@ Git fetch前两次Empty reply from server，末次github.com:443连接失败。
 本轮未触及数据/安装；上次已卸载状态及三处保留目录沿旧证明保持。
 停止同故障重派，需指定Runner私库Git链路恢复后继续。
 文档头与本次执行头分开，纯说明更新不重复CI。
+
+
+用户要求编译Win11 x64候选，改由用户手动运行。
+`windows11_build_only`默认关闭，仅手动派发。
+须同时only/standard_user，其他输入关闭或空。
+该模式仅选择独立build job，原baseline和验收job跳过。
+指定DESKTOP-SFE95TP，保留Win11/真标准令牌与源码HEAD门禁。
+复用现有Git、Node22.23.1、Python/VS/SDK和官方组件缓存。
+全新源码和输出目录拒绝覆盖，不访问默认业务数据或旧备份。
+编译应用、Job/ACL助手及Electron ABI，目标win32-x64-msvc。
+现有打包器生成未签名NSIS和win-unpacked，不执行安装器或应用。
+仅上传私库Actions附件供手动下载，publish=never，保留7天。
+不运行测试、GUI/原生运行探针或旧候选接续，不改变任何验收结论。
+不改产品/格式/B/能力门槛，不合并或正式发布。

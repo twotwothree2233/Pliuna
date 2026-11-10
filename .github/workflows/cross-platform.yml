@@ -1,5 +1,5 @@
 name: Cross-platform baseline
-run-name: ${{ inputs.windows11_candidate_acceptance && 'Windows 11 local candidate acceptance' || inputs.windows11_default_startup_only && 'Windows 11 default startup acceptance' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics' || inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
+run-name: ${{ inputs.windows11_build_only && 'Windows 11 x64 manual candidate build' || inputs.windows11_candidate_acceptance && 'Windows 11 local candidate acceptance' || inputs.windows11_default_startup_only && 'Windows 11 default startup acceptance' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics' || inputs.windows11_standard_user && 'Windows 11 standard user acceptance' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics' || inputs.windows11_process_package_only && 'Windows 11 process and package verification' || (inputs.windows11_only || inputs.install_windows11_tools) && 'Windows 11 native acceptance' || 'Cross-platform baseline' }}
 
 on:
   push:
@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      windows11_build_only:
+        description: Build an unsigned Windows 11 x64 installer and unpacked app for manual use; no tests or application launches
+        type: boolean
+        default: false
       windows11_acl_probe_only:
         description: Only verify native ACL identity, permission semantics and Job containment before product activation
         type: boolean
@@ -69,7 +73,7 @@ permissions:
 
 jobs:
   baseline:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_previous_run || inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows11_build_only || inputs.windows11_candidate_previous_run || inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only)) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # Native Windows file and process suites took the full 30-minute job budget.
@@ -206,7 +210,7 @@ jobs:
       contents: read
       actions: read
     name: ${{ inputs.windows11_candidate_acceptance && 'Windows 11 local candidate / DESKTOP-SFE95TP' || inputs.windows11_default_startup_only && 'Windows 11 default startup / DESKTOP-SFE95TP' || inputs.windows11_symlink_probe_only && 'Windows 11 file symlink diagnostics / DESKTOP-SFE95TP' || inputs.windows11_checkout_probe_only && 'Windows 11 checkout diagnostics / DESKTOP-SFE95TP' || inputs.windows11_standard_user && 'Windows 11 standard user / DESKTOP-SFE95TP' || inputs.windows11_acl_probe_only && 'Windows 11 ACL technical acceptance / DESKTOP-SFE95TP' || inputs.windows11_startup_probe_only && 'Windows 11 startup diagnostics / DESKTOP-SFE95TP' || inputs.windows11_process_package_only && 'Windows 11 process and package verification / DESKTOP-SFE95TP' || 'Windows 11 x64 / DESKTOP-SFE95TP' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_previous_run || inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
+    if: ${{ !inputs.windows11_build_only && github.event_name == 'workflow_dispatch' && (inputs.windows11_candidate_previous_run || inputs.windows11_candidate_reuse_run || inputs.windows11_candidate_acceptance || inputs.windows11_only || inputs.windows11_standard_user || inputs.windows11_default_startup_only || inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_prepare_git || inputs.windows11_prepare_python || inputs.install_windows11_tools || inputs.windows11_startup_probe_only || inputs.windows11_process_package_only || inputs.windows11_acl_probe_only) }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
@@ -1468,3 +1472,185 @@ jobs:
           name: windows11-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/trellis-win11-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
+
+  windows11_build:
+    name: Windows 11 x64 manual candidate build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows11_build_only }}
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: cmd
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Require the designated standard-user host and reserve fresh build paths
+        uses: actions/github-script@v7
+        timeout-minutes: 1
+        with:
+          script: |
+            const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
+            const input = context.payload.inputs ?? {};
+            if (input.windows11_only !== 'true' || input.windows11_standard_user !== 'true' ||
+                Object.entries(input).some(([key, value]) => !['windows11_build_only', 'windows11_only', 'windows11_standard_user'].includes(key) && value !== 'false' && value !== '')) throw Error('BUILD_ONLY_INPUTS_REQUIRED');
+            if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('DESIGNATED_WINDOWS_X64_RUNNER_REQUIRED');
+            const command = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);
+              $os=Get-CimInstance Win32_OperatingSystem; $identity=[Security.Principal.WindowsIdentity]::GetCurrent();
+              $principal=[Security.Principal.WindowsPrincipal]::new($identity);
+              $lines=& (Join-Path $env:SystemRoot 'System32/whoami.exe') /groups /fo csv /nh;
+              if($LASTEXITCODE -ne 0){throw 'TOKEN_GROUP_QUERY_FAILED'};
+              $groups=@($lines|ConvertFrom-Csv -Header 'name','type','sid','attributes');
+              if($groups.Count -eq 0 -or @($groups|Where-Object {$_.sid -notmatch '^S-[0-9]+(-[0-9]+)+$'}).Count -ne 0){throw 'TOKEN_GROUP_QUERY_INVALID'};
+              [ordered]@{caption=$os.Caption;build=[int]$os.BuildNumber;product_type=[int]$os.ProductType;
+                architecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();
+                elevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);
+                administrators_group_present=@($groups|Where-Object {$_.sid -eq 'S-1-5-32-544'}).Count -ne 0;
+                system_account=$identity.IsSystem;user_interactive=[Environment]::UserInteractive;
+                session_id=(Get-Process -Id $PID).SessionId}|ConvertTo-Json -Compress`;
+            const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+            const host = { runner: process.env.RUNNER_NAME, standard_user_required: true, ...JSON.parse(cp.execFileSync(powershell,
+              ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 15000, maxBuffer: 16384, windowsHide: true })) };
+            if (host.product_type !== 1 || host.build < 22000 || !host.caption.includes('Windows 11') || host.architecture !== 'X64' ||
+                host.elevated !== false || host.administrators_group_present !== false || host.system_account !== false || host.user_interactive !== true ||
+                !Number.isInteger(host.session_id) || host.session_id <= 0) throw Error('STANDARD_WINDOWS11_INTERACTIVE_HOST_REQUIRED');
+            const suffix = process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT;
+            if (!/^[0-9]+-[0-9]+$/.test(suffix)) throw Error('BUILD_SUFFIX_INVALID');
+            function inspect(file, kind) {
+              const absolute = path.resolve(file), root = path.parse(absolute).root;
+              let current = root, stat = fs.lstatSync(root);
+              if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error('BUILD_PATH_UNSAFE');
+              for (const part of absolute.slice(root.length).split(path.sep).filter(Boolean)) {
+                current = path.join(current, part); stat = fs.lstatSync(current);
+                if (stat.isSymbolicLink() || current !== absolute && !stat.isDirectory()) throw Error('BUILD_PATH_UNSAFE');
+              }
+              if (kind === 'file' ? !stat.isFile() : !stat.isDirectory()) throw Error('BUILD_PATH_UNSAFE');
+              return absolute;
+            }
+            const git = inspect(path.join(process.env.LOCALAPPDATA, 'Programs/Trellis-Toolchain/Git/cmd/git.exe'), 'file');
+            const toolEnv = Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP'].filter(key => process.env[key]).map(key => [key, process.env[key]]));
+            const gitVersion = cp.execFileSync(git, ['--version'], { env: toolEnv, encoding: 'utf8', timeout: 3000, maxBuffer: 512, windowsHide: true }).trim();
+            if (!/^git version 2\.56\.0\.windows\.4$/.test(gitVersion)) throw Error('EXISTING_GIT_VERSION_REQUIRED');
+            const node = inspect(path.join(process.env.RUNNER_TOOL_CACHE, 'node/22.23.1/x64/node.exe'), 'file');
+            if (cp.execFileSync(node, ['--version'], { env: toolEnv, encoding: 'utf8', timeout: 3000, maxBuffer: 512, windowsHide: true }).trim() !== 'v22.23.1') throw Error('EXISTING_NODE_VERSION_REQUIRED');
+            const workspace = inspect(process.env.GITHUB_WORKSPACE, 'directory');
+            const temp = inspect(process.env.RUNNER_TEMP, 'directory');
+            const relative = 'trellis-manual-source-' + suffix, source = path.join(workspace, relative);
+            const output = path.join(temp, 'trellis-manual-package-' + suffix);
+            for (const file of [source, output]) {
+              try { fs.lstatSync(file); throw Error('BUILD_TARGET_ALREADY_EXISTS'); }
+              catch (error) { if (error.code !== 'ENOENT') throw error; }
+            }
+            fs.mkdirSync(source);
+            const expected = fs.lstatSync(source, { bigint: true });
+            const encoded = Buffer.from(source, 'utf8').toString('base64');
+            const ownerCommand = `$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'));
+              $item=Get-Item -Force -LiteralPath $p; if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'SOURCE_UNSAFE'};
+              (Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]) -eq [Security.Principal.WindowsIdentity]::GetCurrent().User`;
+            const owner = cp.execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ownerCommand],
+              { env: toolEnv, encoding: 'utf8', timeout: 5000, maxBuffer: 512, windowsHide: true }).trim();
+            const actual = fs.lstatSync(source, { bigint: true });
+            if (owner !== 'True' || !actual.isDirectory() || actual.isSymbolicLink() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw Error('BUILD_SOURCE_OWNER_UNCONFIRMED');
+            const evidence = fs.mkdtempSync(path.join(temp, 'trellis-manual-build-evidence-'));
+            fs.writeFileSync(path.join(evidence, 'host.json'), JSON.stringify(host, null, 2) + '\n', { flag: 'wx' });
+            core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
+            core.exportVariable('TRELLIS_MANUAL_SOURCE', relative);
+            core.exportVariable('TRELLIS_MANUAL_OUTPUT', output);
+            core.addPath(path.dirname(git)); core.addPath(path.dirname(node));
+            console.log(JSON.stringify({ host, git: gitVersion, node: '22.23.1', build_only: true, application_tests: 0 }));
+      - name: Checkout the exact private source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 3
+        env:
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: NUL
+          GIT_TERMINAL_PROMPT: '0'
+          GCM_INTERACTIVE: Never
+        with:
+          path: ${{ env.TRELLIS_MANUAL_SOURCE }}
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Require the dispatched commit and existing build tools
+        uses: actions/github-script@v7
+        timeout-minutes: 1
+        with:
+          script: |
+            const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
+            const relative = process.env.TRELLIS_MANUAL_SOURCE;
+            if (!/^trellis-manual-source-[0-9]+-[0-9]+$/.test(relative)) throw Error('BUILD_SOURCE_INVALID');
+            const source = path.join(process.env.GITHUB_WORKSPACE, relative);
+            const head = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', timeout: 3000 }).trim();
+            if (head !== process.env.GITHUB_SHA || fs.readFileSync(path.join(source, '.node-version'), 'utf8').trim() !== '22.23.1') throw Error('BUILD_SOURCE_COMMIT_UNCONFIRMED');
+            await require(path.join(source, 'scripts/windows11-standard-toolchain.cjs'))(core);
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+          run_install: false
+          package_json_file: ${{ format('{0}/package.json', env.TRELLIS_MANUAL_SOURCE) }}
+      - name: Materialize pinned dependencies without lifecycle scripts
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: pnpm install --frozen-lockfile --ignore-scripts --config.side-effects-cache=false
+      - name: Select the pinned native compiler entry
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: node scripts/windows11-dependencies.cjs
+      - name: Build pinned Node dependencies
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: pnpm rebuild better-sqlite3 esbuild --config.side-effects-cache=false
+      - name: Reuse the official Electron cache
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/windows11-electron.cjs
+      - name: Extract pinned Electron
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: pnpm rebuild electron --config.side-effects-cache=false
+      - name: Compile application and native Windows helpers
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: pnpm build
+      - name: Compile SQLite for the packaged Electron ABI
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: pnpm rebuild:electron
+      - name: Build the unsigned installer and unpacked application
+        id: package
+        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        run: node scripts/package-desktop.mjs --target win32-x64-msvc --output "%TRELLIS_MANUAL_OUTPUT%" --format default
+      - name: Record manual build provenance
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs'), path = require('node:path');
+            const source = path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_MANUAL_SOURCE);
+            const version = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8')).version;
+            const lines = ['Trellis Windows 11 x64 manual candidate', 'Version: ' + version, 'Commit: ' + process.env.GITHUB_SHA,
+              'Run: ' + process.env.GITHUB_RUN_ID + ' attempt ' + process.env.GITHUB_RUN_ATTEMPT,
+              'Build only: no tests, application launches, installer execution or publication.', 'Unsigned local candidate; existing platform capability gates remain.'];
+            fs.writeFileSync(path.join(process.env.TRELLIS_MANUAL_OUTPUT, 'BUILD-INFO.txt'), lines.join('\r\n') + '\r\n', { flag: 'wx' });
+            await core.summary.addRaw(lines.join('\n')).write();
+      - name: Upload the current-user installer for manual use
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trellis-Windows11-x64-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.TRELLIS_MANUAL_OUTPUT }}/Trellis-*-win32-x64-msvc.exe
+            ${{ env.TRELLIS_MANUAL_OUTPUT }}/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Upload the unpacked application for manual use
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trellis-Windows11-x64-unpacked-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.TRELLIS_MANUAL_OUTPUT }}/win-unpacked/**
+            ${{ env.TRELLIS_MANUAL_OUTPUT }}/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Keep build preparation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows11-manual-build-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TRELLIS_WIN11_EVIDENCE }}
+          if-no-files-found: ignore
+          retention-days: 7
