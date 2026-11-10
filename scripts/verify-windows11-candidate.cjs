@@ -38,4 +38,11 @@ for (const [index, report] of [business, reinstalled].entries()) {
       !Array.isArray(report.exits) || report.exits.length !== report.application_launches ||
       report.exits.some(exit => exit.main_exit_confirmed !== true || exit.utility_exit_confirmed !== true || exit.utility_count < 1 || exit.wrapper_exit_code !== 0)) throw Error('CANDIDATE_BUSINESS_OR_EXIT_INCOMPLETE')
 }
-console.log(JSON.stringify({ passed: true, installed_runtime: true, default_startup: true, synthetic_business: true, uninstall_data_retained: true, same_version_reinstall: true, published: false }))
+if (process.env.TRELLIS_CANDIDATE_DEFAULT_REUSED === '1') {
+  const kept = state.continuation
+  for (const [file, expected] of [[kept.prior_backup, kept.prior_backup_identity], [kept.synthetic_backup, kept.synthetic_backup_identity], [state.default.root, kept.current_root_identity]]) {
+    const stat = fs.lstatSync(file, { bigint: true })
+    if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.dev) !== expected.dev || String(stat.ino) !== expected.ino) throw Error('CANDIDATE_PRESERVED_DIRECTORY_CHANGED')
+  }
+}
+console.log(JSON.stringify({ passed: true, installed_runtime: true, default_startup: true, default_startup_source: process.env.TRELLIS_CANDIDATE_DEFAULT_REUSED === '1' ? '42779040248-attempt2' : 'current_run', synthetic_business: true, uninstall_data_retained: true, same_version_reinstall: true, published: false }))

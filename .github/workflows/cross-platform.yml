@@ -987,6 +987,7 @@ jobs:
             const reuseInput = context.payload.inputs?.windows11_candidate_reuse_run;
             core.exportVariable('TRELLIS_CANDIDATE_PREVIOUS_RUN', '');
             core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '0');
+            core.exportVariable('TRELLIS_CANDIDATE_DEFAULT_REUSED', '0');
             const prior = previousInput || reuseInput;
             if (!prior) return;
             const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
@@ -1029,7 +1030,9 @@ jobs:
             function nativeRequest(entry, route, kind = 'json', location) {
               const prefix = 'GET /repos/twotwothree2233/Trellis/';
               const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs',
-                ...fixedParents.slice(0, -1).map(head => 'commits/' + head), 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip'];
+                ...fixedParents.slice(0, -1).map(head => 'commits/' + head), 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip',
+                'actions/runs/42779040248/attempts/2', 'actions/runs/42779040248/attempts/2/jobs',
+                'actions/artifacts/13749679230', 'actions/artifacts/13749679230/zip'];
               const storage = kind === 'archive' && route === 'GET official_artifact_storage';
               let url, token;
               if (storage) {
@@ -1038,7 +1041,7 @@ jobs:
                     url.port || url.username || url.password || url.hash) fail('CANDIDATE_ARTIFACT_REDIRECT_UNSAFE');
               } else {
                 if (!route.startsWith(prefix) || !allowed.includes(route.slice(prefix.length))) { entry.cause_code = 'UNAPPROVED_ROUTE'; fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED'); }
-                if ((kind === 'redirect') !== route.endsWith('/13691230073/zip')) fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED');
+                if ((kind === 'redirect') !== ['/13691230073/zip', '/13749679230/zip'].some(suffix => route.endsWith(suffix))) fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED');
                 url = new URL('https://api.github.com' + route.slice(4));
                 token = core.getInput('github-token', { required: true });
                 // Bearer tokens are opaque; reject injection without guessing
@@ -1172,6 +1175,23 @@ jobs:
                     host.system_account !== false || host.user_interactive !== true || !Number.isInteger(host.session_id) || host.session_id <= 0 ||
                     host.product_type !== 1 || host.architecture !== 'X64' || !host.caption?.includes('Windows 11') || !Number.isInteger(host.build) || host.build < 22000) fail('CANDIDATE_PREVIOUS_HOST_UNCONFIRMED');
                 report.prior_host = { build: host.build, session_id: host.session_id, standard_user_required: true, elevated: false, administrators_group_present: false };
+                const continuedRun = await request('getContinuationRun', 'GET ' + repoRoute + '/actions/runs/42779040248/attempts/2');
+                const continuedJobs = await request('getContinuationJobs', 'GET ' + repoRoute + '/actions/runs/42779040248/attempts/2/jobs');
+                recovery.validateContinuationRun(continuedRun, continuedJobs, context.ref.replace('refs/heads/', ''));
+                const continuedArtifact = await request('getContinuationArtifact', 'GET ' + repoRoute + '/actions/artifacts/13749679230');
+                recovery.validateContinuationMetadata(continuedArtifact, context.ref.replace('refs/heads/', ''));
+                const continuedLocation = await request('getContinuationRedirect', 'GET ' + repoRoute + '/actions/artifacts/13749679230/zip', undefined, 'redirect');
+                const continuedArchive = await request('downloadContinuationArtifact', 'GET official_artifact_storage', undefined, 'archive', continuedLocation);
+                const original = Object.fromEntries(['host.json', 'candidate.json', 'default-startup.json'].map(name =>
+                  [name, JSON.parse(fs.readFileSync(path.join(report.original_evidence.directory, name), 'utf8'))]));
+                report.continuation_evidence = recovery.restoreContinuation(continuedArchive, continuedArtifact, context.ref.replace('refs/heads/', ''), curlEnvironment, original);
+                const defaultRoot = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'default-desktop');
+                fs.mkdirSync(defaultRoot); // A fresh evidence destination, never overwrite or reuse.
+                const defaultFolder = path.join(defaultRoot, 'verified-42779040248-2'); fs.mkdirSync(defaultFolder);
+                fs.writeFileSync(path.join(defaultFolder, 'default-startup.json'),
+                  fs.readFileSync(path.join(report.continuation_evidence.directory, 'default-startup.json')), { flag: 'wx' });
+                report.default_proof_reused = { run_id: 42779040248, attempt: 2, head: recovery.continuation.head, artifact_id: 13749679230 };
+
                 report.fixed_parent_chain_verified = true;
               }
               if (reuseInput) {
@@ -1194,6 +1214,7 @@ jobs:
               core.exportVariable('TRELLIS_CANDIDATE_PREVIOUS_RUN', prior);
               if (report.dependencies_reused) core.exportVariable('TRELLIS_CANDIDATE_DEPENDENCIES_REUSED', '1');
               core.setOutput('reused', String(report.dependencies_reused));
+              if (report.continuation_evidence) { core.exportVariable('TRELLIS_CANDIDATE_DEFAULT_REUSED', '1'); core.setOutput('default_reused', 'true'); }
               console.log(JSON.stringify(report));
             } catch (error) {
               report.failed_stage = report.stage; report.stage = 'failed';
@@ -1383,7 +1404,7 @@ jobs:
         run: node scripts/check-desktop-runtime.mjs --installed
       - name: Windows 11 fresh default startup and restart
         id: default_desktop
-        if: "!cancelled() && inputs.windows11_default_startup_only && steps.default_data.outcome == 'success' && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success' && (!inputs.windows11_candidate_acceptance || steps.installed_runtime.outcome == 'success')"
+        if: "!cancelled() && inputs.windows11_default_startup_only && steps.default_data.outcome == 'success' && steps.directory_package.outcome == 'success' && steps.desktop.outcome == 'success' && steps.candidate_dependencies.outputs.default_reused != 'true' && (!inputs.windows11_candidate_acceptance || steps.installed_runtime.outcome == 'success')"
         env:
           TRELLIS_WINDOWS11_DEFAULT_STARTUP: '1'
           TRELLIS_PACKAGED_OUTPUT: ${{ env.TRELLIS_DESKTOP_OUTPUT }}
@@ -1391,7 +1412,7 @@ jobs:
         run: pnpm exec playwright test default-startup.spec.ts --output "%TRELLIS_WIN11_EVIDENCE%/default-desktop"
       - name: Require the actual default-startup result and all exit confirmations
         id: default_result
-        if: "!cancelled() && inputs.windows11_default_startup_only && steps.default_desktop.outcome != 'skipped'"
+        if: "!cancelled() && inputs.windows11_default_startup_only && (steps.default_desktop.outcome != 'skipped' || (steps.candidate_dependencies.outputs.default_reused == 'true' && steps.installed_runtime.outcome == 'success'))"
         working-directory: ${{ env.TRELLIS_WIN11_SOURCE }}
         run: node scripts/verify-default-startup-result.cjs
       - name: Installed candidate synthetic materials, plugin, export and recovery

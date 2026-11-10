@@ -1,6 +1,6 @@
 import { expect, type Page } from '@playwright/test'
 export async function openSettings(page: Page, section: '外观'|'模型服务'|'权限与审批'|'插件与主流程'|'存储与恢复'='模型服务') {
-  if (!await page.getByRole('dialog',{name:'应用设置',exact:true}).count()) await page.getByRole('button',{name:/^设置(?: ⌘ ,)?$/}).click()
+  if (!await page.getByRole('dialog',{name:'应用设置',exact:true}).count()) await page.getByRole('button',{name:/^设置(?: (?:⌘ ,|Ctrl\+,))?$/}).click()
   await expect(page.getByRole('dialog',{name:'应用设置',exact:true})).toBeVisible()
   await page.getByRole('button',{name:section,exact:true}).click()
 }

@@ -79,10 +79,11 @@ async function removePreviousCandidate(current) {
   if (!prior) return
   if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) fail('CANDIDATE_PREVIOUS_RUN_INVALID')
   const proof = readEvidence(path.join(evidence(), 'candidate-provenance.json'))
-  const operations = prior === '42649802869' ? ['getWorkflowRun', ...fixedParents.slice(0, -1).map(() => 'getCommit'), 'listJobsForWorkflowRun', 'getArtifact', 'getArtifactRedirect', 'downloadArtifact'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
+  const operations = prior === '42649802869' ? ['getWorkflowRun', ...fixedParents.slice(0, -1).map(() => 'getCommit'), 'listJobsForWorkflowRun', 'getArtifact', 'getArtifactRedirect', 'downloadArtifact',
+    'getContinuationRun', 'getContinuationJobs', 'getContinuationArtifact', 'getContinuationRedirect', 'downloadContinuationArtifact'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
   if (proof.passed !== true || proof.stage !== 'ready' || proof.prior_run !== prior || proof.source_head !== process.env.GITHUB_SHA ||
       proof.locked_inputs_equal !== true || proof.native_stages_verified !== true || !Array.isArray(proof.requests) || proof.requests.length !== operations.length ||
-      proof.requests.some((request, index) => request.stage !== operations[index] || request.status !== (operations[index] === 'getArtifactRedirect' ? 302 : 200) || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
+      proof.requests.some((request, index) => request.stage !== operations[index] || request.status !== (operations[index].endsWith('Redirect') ? 302 : 200) || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
   if (prior === '42649802869' && (proof.prior_head !== '01039e72cab284491fcd1a812add0ec79c8e2488' || proof.fixed_parent_chain_verified !== true ||
       proof.transport !== 'windows_system_curl' || proof.https_client?.tls_validation_enabled !== true || proof.https_client?.config_files_disabled !== true ||
       proof.requests.some(request => request.transport !== 'windows_system_curl' || request.status_source !== 'http_response' || request.exit_code !== 0) ||
@@ -99,6 +100,10 @@ async function removePreviousCandidate(current) {
   const folderIdentity = identity(folder)
   if (restored && !same(folderIdentity, artifact.identity)) fail('CANDIDATE_ORIGINAL_ARTIFACT_CHANGED')
   const previous = readEvidence(path.join(folder, 'candidate.json'))
+  if (restored) {
+    if (!proof.continuation_evidence) fail('CANDIDATE_CONTINUATION_ARTIFACT_REQUIRED')
+    return continueUninstalled(current, proof, folder)
+  }
   const expectedDirectory = path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + prior + '-1')
   if (previous.stage !== 'installed' || previous.passed !== true || previous.install_dir !== expectedDirectory ||
       previous.install?.exit !== 0 || previous.install?.job_empty !== true || current.absent ||
@@ -153,6 +158,49 @@ async function removePreviousCandidate(current) {
   recovery.stage = 'removed_data_retained'; recovery.passed = true; record()
   return recovery
 }
+async function continueUninstalled(current, proof, originalFolder) {
+  const a = proof.continuation_evidence
+  if (a?.id !== 13749679230 || a.name !== 'windows11-evidence-42779040248-2' || a.run_id !== 42779040248 || a.attempt !== 2 ||
+      a.head !== '3c56ebceb257d60cf5c44d7d2aca0a8e251c7eaa' || a.archive_bytes !== 97812 || a.branch !== 'ao/trellis-12/cross-platform-ci' ||
+      a.source !== 'fixed_uninstalled_attempt_artifact' || a.facts_verified !== true || typeof a.directory !== 'string' || path.dirname(a.directory) !== process.env.RUNNER_TEMP ||
+      !/^trellis-continuation-42779040248-2-[A-Za-z0-9]+$/.test(path.basename(a.directory)) || !same(identity(a.directory), a.identity) ||
+      JSON.stringify(a.files) !== JSON.stringify(['host.json', 'candidate.json', 'default-startup.json', 'candidate-provenance.json'])) fail('CANDIDATE_CONTINUATION_ARTIFACT_UNCONFIRMED')
+  const original = Object.fromEntries(['host.json', 'candidate.json', 'default-startup.json'].map(name => [name, readEvidence(path.join(originalFolder, name))]))
+  const values = Object.fromEntries(a.files.map(name => [name, readEvidence(path.join(a.directory, name))]))
+  require('./windows11-candidate-evidence.cjs').validateContinuationFacts(values, original)
+  const c = values['candidate.json'], d = values['default-startup.json'], o = original['candidate.json']
+  if (current.absent || current.root !== c.default.root || !same(current.homeIdentity, d.identity.home) || !same(current.rootIdentity, d.identity.directory) ||
+      o.backup.path !== path.join(os.homedir(), '.trellis.ao-preserved-42649802869-1') ||
+      c.backup.path !== path.join(os.homedir(), '.trellis.ao-preserved-42779040248-2')) fail('CANDIDATE_CONTINUATION_DEFAULT_CHANGED')
+  const expectedParents = []
+  let cursor = path.parse(process.env.LOCALAPPDATA).root
+  for (const part of process.env.LOCALAPPDATA.slice(cursor.length).split(path.sep).filter(Boolean)) { cursor = path.join(cursor, part); expectedParents.push(cursor) }
+  if (c.parents.length !== expectedParents.length || c.parents.some((parent, index) => parent.path !== expectedParents[index] || !same(identity(parent.path), parent.identity))) fail('CANDIDATE_INSTALL_PARENT_CHANGED')
+  const guarded = [[current.root, current.rootIdentity], [o.backup.path, o.backup.identity], [c.backup.path, c.backup.identity]]
+  const checkIdentities = () => { for (const [file, expected] of guarded) if (!same(identity(file), expected)) fail('CANDIDATE_CONTINUATION_IDENTITY_CHANGED') }
+  checkIdentities()
+  if (await registry() !== 0) fail('CANDIDATE_CONTINUATION_REGISTRATION_PRESENT')
+  for (const [directory, expected] of [[o.install_dir, '42649802869-1'], [c.install_dir, '42779040248-2']]) {
+    if (directory !== path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + expected)) fail('CANDIDATE_CONTINUATION_INSTALL_PATH_UNCONFIRMED')
+    try { identity(directory) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    absent(path.join(directory, 'Trellis.exe'))
+  }
+  const encoded = Buffer.from(JSON.stringify(guarded.map(([file]) => file)), 'utf8').toString('base64')
+  const command = `$ErrorActionPreference='Stop'; $paths=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))|ConvertFrom-Json); ` +
+    `$user=[Security.Principal.WindowsIdentity]::GetCurrent().User; $owned=$true; foreach($p in $paths){ $item=Get-Item -Force -LiteralPath $p; ` +
+    `if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'REPARSE'}; ` +
+    `if((Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]) -ne $user){$owned=$false} }; [ordered]@{owned=$owned}|ConvertTo-Json -Compress`
+  const owner = await managed(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], 10000)
+  if (JSON.parse(owner.output.trim()).owned !== true || owner.job_empty !== true) fail('CANDIDATE_CONTINUATION_OWNER_UNCONFIRMED')
+  await data.inventory(current); checkIdentities()
+  const result = { stage: 'continued_uninstalled_data_retained', passed: true, continued_uninstalled: true,
+    run_id: a.run_id, attempt: a.attempt, artifact_id: a.id, head: a.head, prior_backup: o.backup.path, prior_backup_identity: o.backup.identity,
+    synthetic_backup: c.backup.path, synthetic_backup_identity: c.backup.identity, current_root_identity: current.rootIdentity,
+    registration_absent: true, candidate_executables_absent: true, owners_current_user: true, owner_job_empty: true }
+  fs.writeFileSync(path.join(evidence(), 'candidate-continuation.json'), JSON.stringify(result, null, 2) + '\n')
+  return result
+}
+
 async function install() {
   approved()
   const preflight = JSON.parse(fs.readFileSync(path.join(evidence(), 'candidate-preflight.json'), 'utf8'))
@@ -183,6 +231,9 @@ async function install() {
     const probe = await managed(helper, ['probe', fixture], 10000)
     report.preservation_probe = JSON.parse(probe.output.trim())
     if (!['probe', 'no_overwrite', 'identity_refusal', 'same_identity', 'security_preserved'].every(key => report.preservation_probe[key] === true)) fail('CANDIDATE_PRESERVATION_PROBE_FAILED')
+    if (previousCleanup?.continued_uninstalled === true) {
+      report.continuation = previousCleanup; await data.inventory(current)
+    } else {
     report.stage = 'preserve_default'; save(report)
     if (!current.absent) {
       const leaf = '.trellis.ao-preserved-' + suffix
@@ -199,6 +250,7 @@ async function install() {
       if (!report.backup.performed || report.preservation.security_preserved !== true || !same(identity(backup), current.rootIdentity)) fail('CANDIDATE_PRESERVATION_UNCONFIRMED')
     }
     await data.beforeFirstLaunch()
+    }
     report.stage = 'installing'; save(report)
     const result = await managed(process.execPath, [__filename, 'child-install'])
     report.install = JSON.parse(result.output.trim()); report.install.job_empty = result.job_empty
@@ -206,7 +258,8 @@ async function install() {
     if (await registry() !== 1) fail('CANDIDATE_INSTALL_REGISTRATION_UNCONFIRMED')
     report.stage = 'installed'; save(report)
     await installed()
-    await data.beforeFirstLaunch()
+    if (previousCleanup?.continued_uninstalled === true) await data.inventory(current)
+    else await data.beforeFirstLaunch()
     report.passed = true; save(report)
     console.log(JSON.stringify({ stage: report.stage, passed: true, prior_default_preserved: Boolean(report.backup?.performed), install_exit: report.install.exit, job_empty: report.install.job_empty }))
   } catch (error) {

@@ -104,10 +104,11 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
       report.stage = 'synthetic_model'
       await call({ type: 'model.configure', configuration: { id: 'candidate-local', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 1000000, max_output_tokens: 4096, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true })
       await call({ type: 'model.test', model_id: 'candidate-local', role: 'main', confirm_cost: true })
+      const taskTitle = '整批合成验收 ' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT
       await page!.getByRole('button', { name: '＋ 新建', exact: true }).click()
-      await page!.getByLabel('任务名称').fill('整批合成验收')
+      await page!.getByLabel('任务名称').fill(taskTitle)
       await page!.getByRole('button', { name: '创建任务', exact: true }).click()
-      const task = (await call({ type: 'host.tasks' })).find((value: any) => value.title === '整批合成验收').id
+      const task = (await call({ type: 'host.tasks' })).find((value: any) => value.title === taskTitle).id
       report.task = task
       report.stage = 'material'
       const source = join(cwd, 'synthetic.pdf'); await writeFile(source, pdfFixture())
