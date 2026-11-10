@@ -78,18 +78,27 @@ async function removePreviousCandidate(current) {
   if (!prior) return
   if (!/^[1-9][0-9]{0,19}$/.test(prior) || prior === process.env.GITHUB_RUN_ID) fail('CANDIDATE_PREVIOUS_RUN_INVALID')
   const proof = readEvidence(path.join(evidence(), 'candidate-provenance.json'))
-  const operations = prior === '42649802869' ? ['getWorkflowRun', 'getCommit', 'getCommit', 'listJobsForWorkflowRun'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
+  const operations = prior === '42649802869' ? ['getWorkflowRun', 'getCommit', 'getCommit', 'getCommit', 'listJobsForWorkflowRun', 'getArtifact', 'getArtifactRedirect', 'downloadArtifact'] : ['getWorkflowRun', 'getCommit', 'listJobsForWorkflowRun']
   if (proof.passed !== true || proof.stage !== 'ready' || proof.prior_run !== prior || proof.source_head !== process.env.GITHUB_SHA ||
       proof.locked_inputs_equal !== true || proof.native_stages_verified !== true || !Array.isArray(proof.requests) || proof.requests.length !== operations.length ||
-      proof.requests.some((request, index) => request.stage !== operations[index] || request.status !== 200 || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
+      proof.requests.some((request, index) => request.stage !== operations[index] || request.status !== (operations[index] === 'getArtifactRedirect' ? 302 : 200) || request.completed !== true || request.timeout !== false)) fail('CANDIDATE_PREVIOUS_PROVENANCE_UNCONFIRMED')
   if (prior === '42649802869' && (proof.prior_head !== '01039e72cab284491fcd1a812add0ec79c8e2488' || proof.fixed_parent_chain_verified !== true ||
       proof.transport !== 'windows_system_curl' || proof.https_client?.tls_validation_enabled !== true || proof.https_client?.config_files_disabled !== true ||
       proof.requests.some(request => request.transport !== 'windows_system_curl' || request.status_source !== 'http_response' || request.exit_code !== 0) ||
-      proof.parent_chain?.length !== 3 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' ||
-      proof.parent_chain[1].child !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' || proof.parent_chain[1].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
-      proof.parent_chain[2].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[2].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
-  const folder = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1')
-  identity(folder)
+      proof.parent_chain?.length !== 4 || proof.parent_chain[0].child !== process.env.GITHUB_SHA || proof.parent_chain[0].parent !== '73e906cb3ec752653242ddf5e004ab4b625217fa' ||
+      proof.parent_chain[1].child !== '73e906cb3ec752653242ddf5e004ab4b625217fa' || proof.parent_chain[1].parent !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' ||
+      proof.parent_chain[2].child !== '2a62afb20223fc850d22c625a905d0f2bd4ece2f' || proof.parent_chain[2].parent !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' ||
+      proof.parent_chain[3].child !== '2bed119f8df96ec81992d755bf81769cdfd27c4f' || proof.parent_chain[3].parent !== proof.prior_head)) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED')
+  const restored = prior === '42649802869'
+  const artifact = proof.original_evidence
+  const folder = restored ? artifact?.directory : path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1')
+  if (restored && (artifact?.id !== 13691230073 || artifact.name !== 'windows11-evidence-42649802869-1' || artifact.run_id !== 42649802869 ||
+      artifact.head !== proof.prior_head || artifact.source !== 'fixed_original_run_artifact' || artifact.facts_verified !== true || artifact.archive_bytes !== 98036 ||
+      artifact.branch !== 'ao/trellis-12/cross-platform-ci' || typeof folder !== 'string' || path.dirname(folder) !== process.env.RUNNER_TEMP ||
+      !/^trellis-prior-42649802869-[A-Za-z0-9]+$/.test(path.basename(folder)) ||
+      JSON.stringify(artifact.files) !== JSON.stringify(['host.json', 'candidate.json', 'default-startup.json']))) fail('CANDIDATE_ORIGINAL_ARTIFACT_UNCONFIRMED')
+  const folderIdentity = identity(folder)
+  if (restored && !same(folderIdentity, artifact.identity)) fail('CANDIDATE_ORIGINAL_ARTIFACT_CHANGED')
   const previous = readEvidence(path.join(folder, 'candidate.json'))
   const expectedDirectory = path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + prior + '-1')
   if (previous.stage !== 'installed' || previous.passed !== true || previous.install_dir !== expectedDirectory ||
@@ -98,21 +107,31 @@ async function removePreviousCandidate(current) {
       previous.backup?.performed !== true || previous.backup.path !== path.join(os.homedir(), '.trellis.ao-preserved-' + prior + '-1') ||
       !same(previous.backup.identity, previous.default.rootIdentity) ||
       !same(identity(previous.backup.path), previous.backup.identity) || !same(identity(expectedDirectory), previous.install_identity)) fail('CANDIDATE_PREVIOUS_IDENTITY_UNCONFIRMED')
-  const defaults = path.join(folder, 'default-desktop')
-  identity(defaults)
-  const matches = []
-  const entries = fs.readdirSync(defaults, { withFileTypes: true })
-  if (entries.length > 32) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
-    if (entry.isDirectory()) {
-      identity(path.join(defaults, entry.name))
-      const file = path.join(defaults, entry.name, 'default-startup.json')
-      try { matches.push(readEvidence(file)) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  let defaults
+  if (restored) {
+    const values = { 'host.json': readEvidence(path.join(folder, 'host.json')), 'candidate.json': previous,
+      'default-startup.json': readEvidence(path.join(folder, 'default-startup.json')) }
+    require('./windows11-candidate-evidence.cjs').validateFacts(values)
+    defaults = values['default-startup.json']
+  } else {
+    const directory = path.join(folder, 'default-desktop')
+    identity(directory)
+    const matches = []
+    const entries = fs.readdirSync(directory, { withFileTypes: true })
+    if (entries.length > 32) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) fail('CANDIDATE_PREVIOUS_EVIDENCE_UNSAFE')
+      if (entry.isDirectory()) {
+        identity(path.join(directory, entry.name))
+        const file = path.join(directory, entry.name, 'default-startup.json')
+        try { matches.push(readEvidence(file)) } catch (error) { if (error.code !== 'ENOENT') throw error }
+      }
     }
+    if (matches.length !== 1) fail('CANDIDATE_PREVIOUS_DEFAULT_UNCONFIRMED')
+    defaults = matches[0]
   }
-  if (matches.length !== 1 || matches[0].passed !== true || matches[0].installed_candidate !== true ||
-      !same(matches[0].identity?.directory, current.rootIdentity)) fail('CANDIDATE_PREVIOUS_DEFAULT_UNCONFIRMED')
+  if (defaults.passed !== true || defaults.installed_candidate !== true ||
+      (restored && !same(defaults.identity?.home, current.homeIdentity)) || !same(defaults.identity?.directory, current.rootIdentity)) fail('CANDIDATE_PREVIOUS_DEFAULT_UNCONFIRMED')
   const parents = []
   let cursor = path.parse(process.env.LOCALAPPDATA).root
   for (const part of process.env.LOCALAPPDATA.slice(cursor.length).split(path.sep).filter(Boolean)) { cursor = path.join(cursor, part); parents.push(cursor) }

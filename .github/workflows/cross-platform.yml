@@ -797,7 +797,8 @@ jobs:
             const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'candidate-provenance.json');
             const ownerHead = '01039e72cab284491fcd1a812add0ec79c8e2488';
             const bridgeHead = '2bed119f8df96ec81992d755bf81769cdfd27c4f';
-            const resumeHead = '2a62afb20223fc850d22c625a905d0f2bd4ece2f';
+            const resumeHead = '73e906cb3ec752653242ddf5e004ab4b625217fa';
+            const transportHead = '2a62afb20223fc850d22c625a905d0f2bd4ece2f';
             const report = { stage: 'local_inputs', passed: false, prior_run: prior, source_head: process.env.GITHUB_SHA,
               dependencies_reused: false, retry_limit: previousInput ? 0 : 1, request_deadline_ms: 10000,
               transport: previousInput ? 'windows_system_curl' : 'official_octokit', requests: [] };
@@ -830,22 +831,36 @@ jobs:
               report.https_client = { category: 'windows_system_curl', available: true, version: match[1], tls_validation_enabled: true, config_files_disabled: true };
               save();
             }
-            function nativeRequest(entry, route) {
+            function nativeRequest(entry, route, kind = 'json', location) {
               const prefix = 'GET /repos/twotwothree2233/Trellis/';
-              const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs', 'commits/' + resumeHead, 'commits/' + bridgeHead];
-              if (!route.startsWith(prefix) || !allowed.includes(route.slice(prefix.length))) { entry.cause_code = 'UNAPPROVED_ROUTE'; fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED'); }
-              const token = core.getInput('github-token', { required: true });
-              if (!/^[A-Za-z0-9_]{20,300}$/.test(token)) { entry.cause_code = 'TOKEN_INPUT_UNSUPPORTED'; fail('CANDIDATE_HTTPS_TOKEN_UNSUPPORTED'); }
-              // --disable is first: no user curlrc, redirect, insecure TLS,
-              // netrc or command-line credential can change this fixed GET.
-              const config = ['url = ' + JSON.stringify('https://api.github.com' + route.slice(4)), 'request = "GET"',
-                'header = ' + JSON.stringify('Authorization: Bearer ' + token), 'header = "Accept: application/vnd.github+json"',
+              const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs', 'commits/' + resumeHead,
+                'commits/' + transportHead, 'commits/' + bridgeHead, 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip'];
+              const storage = kind === 'archive' && route === 'GET official_artifact_storage';
+              let url, token;
+              if (storage) {
+                try { url = new URL(location); } catch { fail('CANDIDATE_ARTIFACT_REDIRECT_UNSAFE'); }
+                if (url.protocol !== 'https:' || !/^productionresultssa[0-9]+\.blob\.core\.windows\.net$/.test(url.hostname) ||
+                    url.port || url.username || url.password || url.hash) fail('CANDIDATE_ARTIFACT_REDIRECT_UNSAFE');
+              } else {
+                if (!route.startsWith(prefix) || !allowed.includes(route.slice(prefix.length))) { entry.cause_code = 'UNAPPROVED_ROUTE'; fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED'); }
+                if ((kind === 'redirect') !== route.endsWith('/13691230073/zip')) fail('CANDIDATE_HTTPS_ROUTE_UNAPPROVED');
+                url = new URL('https://api.github.com' + route.slice(4));
+                token = core.getInput('github-token', { required: true });
+                // Bearer tokens are opaque; reject injection without guessing
+                // their prefix or length. Never record their representation.
+                if (!/^[A-Za-z0-9._~+\/-]+=*$/.test(token)) { entry.cause_code = 'TOKEN_INPUT_UNSUPPORTED'; fail('CANDIDATE_HTTPS_TOKEN_UNSUPPORTED'); }
+              }
+              // --disable is first; redirects are handled without forwarding
+              // Authorization to storage. Both token and signed URL use stdin.
+              const config = ['url = ' + JSON.stringify(url.href), 'request = "GET"',
+                ...(storage ? [] : ['header = ' + JSON.stringify('Authorization: Bearer ' + token), 'header = "Accept: application/vnd.github+json"']),
+                ...(kind === 'redirect' ? ['dump-header = "-"', 'output = "NUL"'] : []),
                 'user-agent = "Trellis-Windows11-candidate-provenance"', 'silent', 'retry = 0', 'max-time = 10',
                 'connect-timeout = 5', 'proto = "=https"', 'write-out = "\\nTRELLIS_HTTP_STATUS:%{http_code}\\n"'].join('\n') + '\n';
               let output;
               try {
                 output = cp.execFileSync(curl, ['--disable', '--config', '-'], { input: config, env: curlEnvironment,
-                  encoding: 'utf8', timeout: 10000, maxBuffer: 1048576, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+                  encoding: 'buffer', timeout: 10000, maxBuffer: 1048576, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
                 entry.exit_code = 0;
               } catch (error) {
                 entry.exit_code = Number.isInteger(error.status) && error.status >= 0 && error.status <= 255 ? error.status : null;
@@ -857,21 +872,29 @@ jobs:
                 // Never forward raw stderr, response bodies, config or error objects.
                 fail('CANDIDATE_SYSTEM_HTTPS_REQUEST_FAILED');
               }
-              const status = output.match(/\nTRELLIS_HTTP_STATUS:([0-9]{3})\s*$/);
+              const marker = output.lastIndexOf(Buffer.from('\nTRELLIS_HTTP_STATUS:'));
+              const status = marker < 0 ? null : output.subarray(marker).toString('ascii').match(/^\nTRELLIS_HTTP_STATUS:([0-9]{3})\s*$/);
               if (!status || Number(status[1]) < 100 || Number(status[1]) > 599) { entry.cause_code = 'HTTP_STATUS_MISSING'; fail('CANDIDATE_SYSTEM_HTTPS_RESPONSE_INVALID'); }
               entry.status = Number(status[1]); entry.status_source = 'http_response';
-              if (entry.status !== 200) { entry.cause_code = 'HTTP_ERROR'; fail('CANDIDATE_SYSTEM_HTTPS_HTTP_REJECTED'); }
-              try { return JSON.parse(output.slice(0, status.index)); }
+              if (entry.status !== (kind === 'redirect' ? 302 : 200)) { entry.cause_code = 'HTTP_ERROR'; fail('CANDIDATE_SYSTEM_HTTPS_HTTP_REJECTED'); }
+              const body = output.subarray(0, marker);
+              if (kind === 'archive') return body;
+              if (kind === 'redirect') {
+                const locations = body.toString('utf8').split(/\r?\n/).filter(line => /^location:/i.test(line));
+                if (locations.length !== 1) fail('CANDIDATE_ARTIFACT_REDIRECT_UNSAFE');
+                return locations[0].slice(9).trim();
+              }
+              try { return JSON.parse(body.toString('utf8')); }
               catch { entry.cause_code = 'RESPONSE_JSON_INVALID'; fail('CANDIDATE_SYSTEM_HTTPS_RESPONSE_INVALID'); }
             }
-            async function request(stage, route, operation) {
+            async function request(stage, route, operation, kind, location) {
               report.stage = stage;
               const entry = { stage, route, transport: report.transport, status: null, status_source: null, cause_code: null, timeout: false, completed: false };
               report.requests.push(entry); save();
               const controller = new AbortController();
               const timer = previousInput ? undefined : setTimeout(() => { entry.timeout = true; controller.abort(); }, 10000);
               try {
-                if (previousInput) { const data = nativeRequest(entry, route); entry.completed = true; save(); return data; }
+                if (previousInput) { const data = nativeRequest(entry, route, kind, location); entry.completed = true; save(); return data; }
                 const result = await operation(controller.signal);
                 entry.status = result.status; entry.status_source = 'official_client_response';
                 if (result.status !== 200 || entry.timeout) fail('CANDIDATE_PROVENANCE_HTTP_UNEXPECTED');
@@ -912,14 +935,17 @@ jobs:
               const run = await request('getWorkflowRun', 'GET ' + repoRoute + '/actions/runs/' + prior, signal =>
                 github.rest.actions.getWorkflowRun({ ...context.repo, run_id: prior, request: { signal } }));
               if (run.status !== 'completed' || run.head_sha !== oldHead || run.head_branch !== context.ref.replace('refs/heads/', '') || run.event !== 'workflow_dispatch') fail('CANDIDATE_REUSE_RUN_UNCONFIRMED');
-              report.online_run = { id: run.id, attempt: run.run_attempt, status: run.status, event: run.event, head: run.head_sha, branch: run.head_branch };
+              report.online_run = { id: run.id, attempt: run.run_attempt, status: run.status, conclusion: run.conclusion, event: run.event, head: run.head_sha, branch: run.head_branch };
               const commitRef = previousInput ? resumeHead : currentHead;
               const commit = await request('getCommit', 'GET ' + repoRoute + '/commits/' + commitRef, signal =>
                 github.rest.repos.getCommit({ ...context.repo, ref: commitRef, request: { signal } }));
               if (previousInput) {
-                if (commit.sha !== resumeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== bridgeHead || String(run.id) !== prior || run.run_attempt !== 1 ||
+                if (commit.sha !== resumeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== transportHead || String(run.id) !== prior || run.run_attempt !== 1 ||
                     run.path !== '.github/workflows/cross-platform.yml' || run.display_title !== 'Windows 11 local candidate acceptance') fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain.push({ child: resumeHead, parent: bridgeHead, evidence: 'online_getCommit' });
+                report.parent_chain.push({ child: resumeHead, parent: transportHead, evidence: 'online_getCommit' });
+                const transport = await request('getCommit', 'GET ' + repoRoute + '/commits/' + transportHead);
+                if (transport.sha !== transportHead || transport.parents?.length !== 1 || transport.parents[0].sha !== bridgeHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                report.parent_chain.push({ child: transportHead, parent: bridgeHead, evidence: 'online_getCommit' });
                 const bridge = await request('getCommit', 'GET ' + repoRoute + '/commits/' + bridgeHead, signal =>
                   github.rest.repos.getCommit({ ...context.repo, ref: bridgeHead, request: { signal } }));
                 if (bridge.sha !== bridgeHead || bridge.parents?.length !== 1 || bridge.parents[0].sha !== ownerHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
@@ -939,11 +965,15 @@ jobs:
                   (previousInput && (job.runner_id !== 23 || job.status !== 'completed'))) fail('CANDIDATE_REUSE_ABI_UNCONFIRMED');
               report.online_job = { id: job.id, runner_id: job.runner_id, runner_name: job.runner_name, status: job.status, verified_steps: required };
               if (previousInput) {
-                const hostFile = path.join(process.env.RUNNER_TEMP, 'trellis-win11-' + prior + '-1', 'host.json');
-                const directory = fs.lstatSync(path.dirname(hostFile));
-                if (!directory.isDirectory() || directory.isSymbolicLink()) fail('CANDIDATE_PREVIOUS_HOST_UNCONFIRMED');
-                const stat = fs.lstatSync(hostFile);
-                if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8192) fail('CANDIDATE_PREVIOUS_HOST_UNCONFIRMED');
+                report.stage = 'restore_original_artifact'; save();
+                const artifact = await request('getArtifact', 'GET ' + repoRoute + '/actions/artifacts/13691230073');
+                const recovery = require(path.join(source, 'scripts/windows11-candidate-evidence.cjs'));
+                recovery.validateMetadata(artifact, context.ref.replace('refs/heads/', ''));
+                const location = await request('getArtifactRedirect', 'GET ' + repoRoute + '/actions/artifacts/13691230073/zip', undefined, 'redirect');
+                const archive = await request('downloadArtifact', 'GET official_artifact_storage', undefined, 'archive', location);
+                report.stage = 'restore_original_artifact'; save();
+                report.original_evidence = recovery.restore(archive, artifact, context.ref.replace('refs/heads/', ''), curlEnvironment);
+                const hostFile = path.join(report.original_evidence.directory, 'host.json');
                 const host = JSON.parse(fs.readFileSync(hostFile, 'utf8'));
                 if (host.runner !== 'DESKTOP-SFE95TP' || host.standard_user_required !== true || host.elevated !== false || host.administrators_group_present !== false ||
                     host.system_account !== false || host.user_interactive !== true || !Number.isInteger(host.session_id) || host.session_id <= 0 ||
