@@ -20,7 +20,7 @@ on:
         type: boolean
         default: false
       windows11_checkout_probe_only:
-        description: Only diagnose bounded Git discovery and a new isolated checkout; requires windows11_only and windows11_standard_user
+        description: Only diagnose bounded Git discovery, isolated checkout and public TLS; requires windows11_only and windows11_standard_user
         type: boolean
         default: false
       windows11_symlink_probe_only:
@@ -697,6 +697,18 @@ jobs:
             }
             fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
             console.log(JSON.stringify({ stage: report.stage, head_matches: report.head_matches, application_tests: 0 }));
+      - name: Bound unauthenticated public TLS diagnostics
+        id: public_tls
+        if: "!cancelled() && inputs.windows11_only && inputs.windows11_standard_user && inputs.windows11_checkout_probe_only && !inputs.windows11_prepare_git && !inputs.windows11_prepare_python && !inputs.install_windows11_tools && steps.checkout_head.outcome == 'success'"
+        timeout-minutes: 1
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const path = require('node:path');
+            const relative = process.env.TRELLIS_WIN11_SOURCE;
+            if (!/^trellis-standard-[0-9]+-[0-9]+$/.test(relative)) throw Error('SOURCE_PATH_INVALID');
+            const source = path.resolve(process.env.GITHUB_WORKSPACE, relative);
+            await require(path.join(source, 'scripts', 'windows11-tls-probe.cjs'))(core);
       - name: Read-only default target and instance preflight
         id: default_data
         if: "!cancelled() && inputs.windows11_default_startup_only && steps.checkout_head.outcome == 'success'"

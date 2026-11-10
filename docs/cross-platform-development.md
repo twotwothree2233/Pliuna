@@ -1,5 +1,18 @@
 # 跨平台开发与验证
 
+当前最小TLS取证复用`windows11_checkout_probe_only`。
+只打开only、standard_user、checkout_probe_only，其他输入关闭或留空。
+指定主机标准交互门禁、Git及新隔离checkout/HEAD通过后才运行。
+该入口不执行依赖、应用、默认根、卸载或安装步骤。
+
+同一系统curl仅无凭据GET公开`https://api.github.com`。
+连接10秒、请求20秒、总25秒、步骤1分钟，版本检查3秒。
+保留候选现有网络环境允许列表，不改代理/TLS/系统设置。
+禁用curl配置文件；响应体丢弃，stderr仅在内存筛选。
+附件只留版本/后端、退出/HTTP/耗时及有限原生码和脱敏短句。
+没有原生码时保留受控的具体错误词，不退化为单一TLS失败分类。
+原始错误、环境、代理值、凭据及证书材料均不上传。
+
 本批接续将可选依赖缓存与旧安装归属分开。
 `windows11_candidate_previous_run` 默认空，仅接受原运行42649802869。
 该入口须关闭 reuse，按锁文件 fresh 准备，并实际重验 Electron ABI。
