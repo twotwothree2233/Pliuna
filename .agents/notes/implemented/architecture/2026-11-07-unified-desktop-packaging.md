@@ -771,3 +771,12 @@ Git和隔离checkout/HEAD成功，baseline skipped，51个后续步骤skipped。
 Playwright 的通用 context destroyed 文案不直接归因应用崩溃。
 同版协议取证只记录 Runtime 方法及有限错误类别，不记录参数。
 驱动修正目前仅有静态验证，实际效果由后续指定 Win11 复验判定。
+
+候选接续42779040248/3c56ebc最终failure，原生版本契约尚未执行。
+指定标准Win11 26300/session1与新源根owner/精确身份门禁通过。
+私库fetch先连接重置，再两次443连接失败，Git exit128。
+归属API、依赖及应用0；最终candidate.json缺失是连带结果。
+本机14项回归通过，原生逐文件expected/actual仍待取得。
+保留0f39前轮私库checkout/HEAD通过，未据此宣称API全部恢复。
+原备份、默认合成根及原本批安装未改动；停止同故障重派。
+合成业务与卸载重装待私库连接恢复后接续，不重复A full。
