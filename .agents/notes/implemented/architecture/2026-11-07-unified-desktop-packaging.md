@@ -75,6 +75,19 @@ macOS 保留现有标题栏与 Command 文案。
 
 ## CI isolation and distribution links
 
+候选 checkout 对齐公开探针的 Git 配置读取边界。
+只在当前标准账户新建且owner/精确身份确认的源码根隔离配置。
+候选步骤禁global/system读取与交互，关闭该步骤safe.directory写入。
+其他模式返回空env映射，保留实际global/system配置读取。
+不复制或输出用户配置，也不修改系统、代理、TLS或HOME。
+短期token本地认证、persist=false、真实私库HEAD及归属门禁保留。
+固定父链共享有限常量并逐边核验，不接受任意祖先。
+公开双探针成功后私库仍exit128，因此此项是待原生验证的差异实验。
+实际Git合成配置回归确认普通读取保持，候选读取被隔离。
+直接设置空字符串无法表达变量未设置，故不采用。
+候选仍开启safe.directory会与NUL全局目标冲突，故仅对新根关闭。
+
+
 四平台 CI 禁用 pnpm 构建副作用缓存。
 依赖源码缓存继续使用，Electron 正常安装。
 macOS 在签名前检查 framework 三处链接。

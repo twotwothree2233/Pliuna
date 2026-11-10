@@ -1603,3 +1603,14 @@ GUI安全3分支、TypeScript及必要文档检查通过。
 
 产品/格式/schema/settings-auth/B/超时及计算门槛均未改。
 不主动计算摘要，不合并、不创建PR或发布。
+
+候选私库 checkout 仅在新源码根归属确认后隔离 Git 配置。
+前检创建唯一新目录，拒绝已有路径和重解析，复核 owner与精确身份。
+候选步骤设置 GIT_CONFIG_NOSYSTEM=1、GIT_CONFIG_GLOBAL=NUL。
+同时禁交互；仅该步骤关闭 safe.directory 全局写入。
+短期 token 本地认证、persist=false与真实私库HEAD核对保留。
+其他模式 env 返回空映射，不设置空值隔离键。
+真实Git使用合成global/system配置核对普通读取与候选隔离。
+固定父链集中声明，每个已知节点只接受指定唯一父节点。
+该改动对齐公开探针与私库配置；实际根因待原生复验。
+42753785861 attempt4私库exit128保留，应用0，未操作数据或安装。

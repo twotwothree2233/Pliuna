@@ -4,6 +4,19 @@ const fs = require('node:fs')
 const path = require('node:path')
 const cp = require('node:child_process')
 const fail = code => { throw Object.assign(Error(code), { code }) }
+// Only these reviewed first-parent edges can authorize this fixed original run.
+const fixedParents = Object.freeze([
+  'ef06b7aca370a1d92dbfd9d79c0e8dc9b37cfa68',
+  'aa096628052e5cdfd15b924785856dccdee42f7b',
+  '19bacd1576fe0dfcf4f75e5a33b407245add0443',
+  '40d29f9bbe9148d02054ca74ca58c836949cfe09',
+  'c9c91917ceb704eedf37a83f7c4b1173cbcb8ec3',
+  'ef0286f179790e83acd70b147fc8dd99b3278246',
+  '73e906cb3ec752653242ddf5e004ab4b625217fa',
+  '2a62afb20223fc850d22c625a905d0f2bd4ece2f',
+  '2bed119f8df96ec81992d755bf81769cdfd27c4f',
+  '01039e72cab284491fcd1a812add0ec79c8e2488',
+])
 const prior = 42649802869
 const head = '01039e72cab284491fcd1a812add0ec79c8e2488'
 const name = 'windows11-evidence-42649802869-1'
@@ -84,4 +97,4 @@ function restore(archive, artifact, branch, environment) {
   return { id: artifact.id, name, run_id: prior, head, branch, directory, identity: { dev: String(stat.dev), ino: String(stat.ino) },
     archive_bytes: archive.length, files: ['host.json', 'candidate.json', 'default-startup.json'], source: 'fixed_original_run_artifact', facts_verified: true }
 }
-module.exports = { validateMetadata, validateFacts, restore }
+module.exports = { fixedParents, validateMetadata, validateFacts, restore }

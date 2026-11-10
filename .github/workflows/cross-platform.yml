@@ -624,12 +624,20 @@ jobs:
                 candidate('program_files', process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Git', 'cmd', 'git.exe')),
                 candidate('program_files_x86', process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Git', 'cmd', 'git.exe')),
                 candidate('local_appdata', process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd', 'git.exe'))];
-              process.send({ source_ready: true, candidates }, () => process.disconnect());
+              let sourceIdentity;
+              if (process.env.TRELLIS_CREATE_CANDIDATE_SOURCE === '1') {
+                fs.mkdirSync(source); // No recursive creation, reuse, overwrite or cleanup.
+                metadata(source, 'directory');
+                const stat = fs.lstatSync(source, { bigint: true });
+                sourceIdentity = { dev: String(stat.dev), ino: String(stat.ino) };
+              }
+              process.send({ source_ready: true, candidates, source_identity: sourceIdentity }, () => process.disconnect());
             }
             try {
               const worker = `try { (${discover.toString()})(); } catch (error) { process.send({error:/^[A-Z0-9_]{1,48}$/.test(error.code||'')?error.code:'DISCOVERY_FAILED'},()=>process.disconnect()); process.exitCode=1; }`;
               const discovery = await run(process.execPath, ['-e', worker], Math.min(5000, deadline - performance.now()), true,
-                { GITHUB_WORKSPACE: process.env.GITHUB_WORKSPACE, TRELLIS_WIN11_SOURCE: process.env.TRELLIS_WIN11_SOURCE });
+                { GITHUB_WORKSPACE: process.env.GITHUB_WORKSPACE, TRELLIS_WIN11_SOURCE: process.env.TRELLIS_WIN11_SOURCE,
+                  TRELLIS_CREATE_CANDIDATE_SOURCE: context.payload.inputs?.windows11_candidate_acceptance === 'true' ? '1' : '0' });
               report.discovery = { started: discovery.started, exit: discovery.exit, timeout: discovery.timeout, error: discovery.error };
               if (discovery.error || discovery.exit !== 0 || discovery.message?.source_ready !== true || discovery.message.candidates?.length !== 4) {
                 report.error = discovery.error ?? discovery.message?.error ?? 'DISCOVERY_FAILED';
@@ -657,6 +665,27 @@ jobs:
                 if (performance.now() > deadline) report.error = 'TOTAL_DEADLINE';
                 else if (!report.candidates[0]?.version || report.candidates[0]?.error) report.error = 'PATH_GIT_UNAVAILABLE';
                 else {
+                  if (context.payload.inputs?.windows11_candidate_acceptance === 'true') {
+                    report.stage = 'source_owner';
+                    report.source_identity = discovery.message.source_identity;
+                    if (!/^[0-9]+$/.test(report.source_identity?.dev ?? '') || !/^[1-9][0-9]*$/.test(report.source_identity?.ino ?? '')) throw Object.assign(Error(), { code: 'SOURCE_IDENTITY_UNCONFIRMED' });
+                    const source = path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE);
+                    const command = "$ErrorActionPreference='Stop'; $item=Get-Item -Force -LiteralPath $env:TRELLIS_CANDIDATE_SOURCE; " +
+                      "if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'SOURCE_UNSAFE'}; " +
+                      "$owner=(Get-Acl -LiteralPath $env:TRELLIS_CANDIDATE_SOURCE).GetOwner([Security.Principal.SecurityIdentifier]); " +
+                      "[Console]::Write(($owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().User).ToString())";
+                    const owner = await run(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+                      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], Math.min(5000, deadline - performance.now()), false,
+                      { TRELLIS_CANDIDATE_SOURCE: source });
+                    report.source_owner = { started: owner.started, exit: owner.exit, timeout: owner.timeout, owned: owner.output === 'True', error: owner.error };
+                    if (!owner.started || owner.timeout || owner.error || owner.exit !== 0 || owner.output !== 'True') throw Object.assign(Error(), { code: 'SOURCE_OWNER_UNCONFIRMED' });
+                    const check = "const fs=require('node:fs'); const s=fs.lstatSync(process.env.TRELLIS_CANDIDATE_SOURCE,{bigint:true}); " +
+                      "if(!s.isDirectory()||s.isSymbolicLink()||String(s.dev)!==process.env.EXPECTED_DEV||String(s.ino)!==process.env.EXPECTED_INO)process.exit(1);";
+                    const checked = await run(process.execPath, ['-e', check], Math.min(1000, deadline - performance.now()), false,
+                      { TRELLIS_CANDIDATE_SOURCE: source, EXPECTED_DEV: report.source_identity.dev, EXPECTED_INO: report.source_identity.ino });
+                    if (!checked.started || checked.timeout || checked.error || checked.exit !== 0 || performance.now() > deadline) throw Object.assign(Error(), { code: 'SOURCE_IDENTITY_UNCONFIRMED' });
+                    report.source_created_and_owned = true; core.setOutput('owned', 'true');
+                  }
                   report.stage = 'source_ready'; core.setOutput('ready', 'true');
                   if (context.payload.inputs?.windows11_checkout_probe_only === 'true') core.exportVariable('TRELLIS_WIN11_GIT_PROBE', discovery.message.candidates[0].file);
                 }
@@ -829,10 +858,12 @@ jobs:
             await probe(core);
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         id: source_checkout
-        if: "!cancelled() && (!inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git) && steps.host.outcome == 'success' && (!inputs.windows11_standard_user || steps.precheckout.outcome == 'success')"
+        env: ${{ inputs.windows11_candidate_acceptance && steps.precheckout.outputs.owned == 'true' && fromJSON('{"GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"NUL","GIT_TERMINAL_PROMPT":"0","GCM_INTERACTIVE":"Never"}') || fromJSON('{}') }}
+        if: "!cancelled() && (!inputs.windows11_checkout_probe_only || inputs.windows11_prepare_git) && steps.host.outcome == 'success' && (!inputs.windows11_standard_user || steps.precheckout.outcome == 'success') && (!inputs.windows11_candidate_acceptance || steps.precheckout.outputs.owned == 'true')"
         timeout-minutes: ${{ (inputs.windows11_checkout_probe_only || inputs.windows11_symlink_probe_only || inputs.windows11_default_startup_only) && 3 || 120 }}
         with:
           path: ${{ env.TRELLIS_WIN11_SOURCE }}
+          set-safe-directory: ${{ !(inputs.windows11_candidate_acceptance && steps.precheckout.outputs.owned == 'true') }}
           persist-credentials: ${{ !inputs.windows11_checkout_probe_only && !inputs.windows11_symlink_probe_only && !inputs.windows11_default_startup_only }}
       - name: Verify the isolated checkout commit
         id: checkout_head
@@ -961,10 +992,8 @@ jobs:
             const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
             const file = path.join(process.env.TRELLIS_WIN11_EVIDENCE, 'candidate-provenance.json');
             const ownerHead = '01039e72cab284491fcd1a812add0ec79c8e2488';
-            const bridgeHead = '2bed119f8df96ec81992d755bf81769cdfd27c4f';
-            const resumeHead = 'ef0286f179790e83acd70b147fc8dd99b3278246';
-            const evidenceHead = '73e906cb3ec752653242ddf5e004ab4b625217fa';
-            const transportHead = '2a62afb20223fc850d22c625a905d0f2bd4ece2f';
+            const fixedParents = require(path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_WIN11_SOURCE, 'scripts/windows11-candidate-evidence.cjs')).fixedParents;
+            const resumeHead = fixedParents[0];
             const report = { stage: 'local_inputs', passed: false, prior_run: prior, source_head: process.env.GITHUB_SHA,
               dependencies_reused: false, retry_limit: previousInput ? 0 : 1, request_deadline_ms: 10000,
               transport: previousInput ? 'windows_system_curl' : 'official_octokit', requests: [] };
@@ -999,8 +1028,8 @@ jobs:
             }
             function nativeRequest(entry, route, kind = 'json', location) {
               const prefix = 'GET /repos/twotwothree2233/Trellis/';
-              const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs', 'commits/' + resumeHead,
-                'commits/' + evidenceHead, 'commits/' + transportHead, 'commits/' + bridgeHead, 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip'];
+              const allowed = ['actions/runs/42649802869', 'actions/runs/42649802869/jobs',
+                ...fixedParents.slice(0, -1).map(head => 'commits/' + head), 'actions/artifacts/13691230073', 'actions/artifacts/13691230073/zip'];
               const storage = kind === 'archive' && route === 'GET official_artifact_storage';
               let url, token;
               if (storage) {
@@ -1106,19 +1135,15 @@ jobs:
               const commit = await request('getCommit', 'GET ' + repoRoute + '/commits/' + commitRef, signal =>
                 github.rest.repos.getCommit({ ...context.repo, ref: commitRef, request: { signal } }));
               if (previousInput) {
-                if (commit.sha !== resumeHead || commit.parents?.length !== 1 || commit.parents[0].sha !== evidenceHead || String(run.id) !== prior || run.run_attempt !== 1 ||
-                    run.path !== '.github/workflows/cross-platform.yml' || run.display_title !== 'Windows 11 local candidate acceptance') fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain.push({ child: resumeHead, parent: evidenceHead, evidence: 'online_getCommit' });
-                const evidence = await request('getCommit', 'GET ' + repoRoute + '/commits/' + evidenceHead);
-                if (evidence.sha !== evidenceHead || evidence.parents?.length !== 1 || evidence.parents[0].sha !== transportHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain.push({ child: evidenceHead, parent: transportHead, evidence: 'online_getCommit' });
-                const transport = await request('getCommit', 'GET ' + repoRoute + '/commits/' + transportHead);
-                if (transport.sha !== transportHead || transport.parents?.length !== 1 || transport.parents[0].sha !== bridgeHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain.push({ child: transportHead, parent: bridgeHead, evidence: 'online_getCommit' });
-                const bridge = await request('getCommit', 'GET ' + repoRoute + '/commits/' + bridgeHead, signal =>
-                  github.rest.repos.getCommit({ ...context.repo, ref: bridgeHead, request: { signal } }));
-                if (bridge.sha !== bridgeHead || bridge.parents?.length !== 1 || bridge.parents[0].sha !== ownerHead) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
-                report.parent_chain.push({ child: bridgeHead, parent: ownerHead, evidence: 'online_getCommit' });
+                if (String(run.id) !== prior || run.run_attempt !== 1 || run.path !== '.github/workflows/cross-platform.yml' ||
+                    run.display_title !== 'Windows 11 local candidate acceptance') fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                // A finite list of reviewed first-parent edges; never walk arbitrary ancestors.
+                for (let index = 0; index < fixedParents.length - 1; index++) {
+                  const child = fixedParents[index], parent = fixedParents[index + 1];
+                  const edge = index === 0 ? commit : await request('getCommit', 'GET ' + repoRoute + '/commits/' + child);
+                  if (edge.sha !== child || edge.parents?.length !== 1 || edge.parents[0].sha !== parent) fail('CANDIDATE_FIXED_PARENT_CHAIN_UNCONFIRMED');
+                  report.parent_chain.push({ child, parent, evidence: 'online_getCommit' });
+                }
               } else if (commit.sha !== currentHead || commit.parents?.[0]?.sha !== oldHead) fail('CANDIDATE_REUSE_PARENT_UNCONFIRMED');
               const jobs = await request('listJobsForWorkflowRun', 'GET ' + repoRoute + '/actions/runs/' + prior + '/jobs', signal =>
                 github.rest.actions.listJobsForWorkflowRun({ ...context.repo, run_id: prior, per_page: 100, request: { signal } }));
