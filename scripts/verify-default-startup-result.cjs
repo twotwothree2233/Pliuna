@@ -54,7 +54,7 @@ if (process.env.TRELLIS_CANDIDATE_DEFAULT_REUSED === '1') {
   const source = provenance.continuation_evidence, verified = state.continuation, origin = provenance.default_proof_reused
   const sourceStat = typeof source?.directory === 'string' ? fs.lstatSync(source.directory, { bigint: true }) : undefined
   if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink() || String(sourceStat.dev) !== source.identity?.dev || String(sourceStat.ino) !== source.identity?.ino ||
-      source?.id !== 13752368936 || source.run_id !== 42793967624 || source.attempt !== 1 || source.head !== '25f69a64ca64abbd9f291fedcac7d1b29101b893' ||
+      source?.id !== 13756281910 || source.run_id !== 42800178995 || source.attempt !== 1 || source.head !== 'a6b7c9d7be7ae29a19ce80b3fc230fceee8a4969' ||
       source.facts_verified !== true || source.source !== 'fixed_uninstalled_attempt_artifact' || verified?.passed !== true || verified.continued_uninstalled !== true ||
       verified.artifact_id !== source.id || verified.run_id !== source.run_id || verified.attempt !== source.attempt || verified.head !== source.head ||
       verified.registration_absent !== true || verified.candidate_executables_absent !== true || verified.owners_current_user !== true || verified.owner_job_empty !== true ||

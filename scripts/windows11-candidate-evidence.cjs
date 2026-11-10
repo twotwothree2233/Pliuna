@@ -6,6 +6,7 @@ const cp = require('node:child_process')
 const fail = code => { throw Object.assign(Error(code), { code }) }
 // Only these reviewed first-parent edges can authorize this fixed original run.
 const fixedParents = Object.freeze([
+  'a6b7c9d7be7ae29a19ce80b3fc230fceee8a4969',
   '25f69a64ca64abbd9f291fedcac7d1b29101b893',
   'a0c6ad87b5ee4fe8a00b46344d0e371388ac269a',
   '3c56ebceb257d60cf5c44d7d2aca0a8e251c7eaa',
@@ -140,8 +141,9 @@ function restore(archive, artifact, branch, environment) {
 }
 
 const defaultOrigin = Object.freeze({ id: 13749679230, run: 42779040248, attempt: 2, head: '3c56ebceb257d60cf5c44d7d2aca0a8e251c7eaa' })
-const continuation = Object.freeze({ id: 13752368936, run: 42793967624, attempt: 1,
-  head: '25f69a64ca64abbd9f291fedcac7d1b29101b893', name: 'windows11-evidence-42793967624-1', bytes: 70232 })
+const predecessor = Object.freeze({ id: 13752368936, run: 42793967624, attempt: 1, head: '25f69a64ca64abbd9f291fedcac7d1b29101b893' })
+const continuation = Object.freeze({ id: 13756281910, run: 42800178995, attempt: 1,
+  head: 'a6b7c9d7be7ae29a19ce80b3fc230fceee8a4969', name: 'windows11-evidence-42800178995-1', bytes: 75506 })
 const continuationRequired = ['host.json', 'candidate.json', 'default-desktop/verified-42779040248-2/default-startup.json', 'candidate-provenance.json']
 const continuationEntries = ["candidate-business/candidate-business-install-025f7-across-restart-or-reinstall/candidate-business.json", "candidate-business/candidate-business-install-025f7-across-restart-or-reinstall/candidate-failure.png", "candidate-continuation.json", "candidate-preflight.json", "candidate-provenance.json", "candidate.json", "checkout-preparation.json", "default-desktop/verified-42779040248-2/default-startup.json", "dependency-toolchain.json", "electron-download.json", "file-symlink-probe.json", "git-preparation.json", "host.json", "installed-runtime.json", "standard-toolchain.json"]
 function validateContinuationMetadata(value, branch) {
@@ -178,18 +180,18 @@ function validateContinuationFacts(values, original) {
       p.requests?.length !== operations.length || p.requests.some((request, index) => request.stage !== operations[index] || request.transport !== 'windows_system_curl' ||
         request.status !== (operations[index].endsWith('Redirect') ? 302 : 200) || request.exit_code !== 0 || request.completed !== true || request.timeout !== false || request.status_source !== 'http_response')) fail('CANDIDATE_CONTINUATION_PROVENANCE_UNCONFIRMED')
   const kept = c?.continuation
-  if (p.continuation_evidence?.id !== defaultOrigin.id || p.continuation_evidence.run_id !== defaultOrigin.run || p.continuation_evidence.attempt !== defaultOrigin.attempt ||
-      p.continuation_evidence.head !== defaultOrigin.head || p.continuation_evidence.facts_verified !== true ||
+  if (p.continuation_evidence?.id !== predecessor.id || p.continuation_evidence.run_id !== predecessor.run || p.continuation_evidence.attempt !== predecessor.attempt ||
+      p.continuation_evidence.head !== predecessor.head || p.continuation_evidence.facts_verified !== true ||
       p.default_proof_reused?.run_id !== defaultOrigin.run || p.default_proof_reused.attempt !== defaultOrigin.attempt || p.default_proof_reused.head !== defaultOrigin.head || p.default_proof_reused.artifact_id !== defaultOrigin.id ||
       c?.stage !== 'uninstalled_after_failure' || c.passed !== false || c.default_data_retained !== true || !exited(c.install) || !exited(c.failure_uninstall) ||
       c.default?.absent !== false || c.default.root !== o.default.root || !same(c.default.homeIdentity, o.default.homeIdentity) || !same(c.default.rootIdentity, d.identity.directory) ||
       kept?.stage !== 'continued_uninstalled_data_retained' || kept.passed !== true || kept.continued_uninstalled !== true ||
-      kept.run_id !== defaultOrigin.run || kept.attempt !== defaultOrigin.attempt || kept.artifact_id !== defaultOrigin.id || kept.head !== defaultOrigin.head ||
+      kept.run_id !== predecessor.run || kept.attempt !== predecessor.attempt || kept.artifact_id !== predecessor.id || kept.head !== predecessor.head ||
       kept.prior_backup !== o.backup.path || !same(kept.prior_backup_identity, o.backup.identity) ||
       kept.synthetic_backup !== path.win32.join(path.win32.dirname(c.default.root), '.trellis.ao-preserved-42779040248-2') || !same(kept.synthetic_backup_identity, original['default-startup.json'].identity.directory) ||
       !same(kept.current_root_identity, d.identity.directory) || kept.registration_absent !== true || kept.candidate_executables_absent !== true || kept.owners_current_user !== true || kept.owner_job_empty !== true ||
       JSON.stringify(c.previous_cleanup) !== JSON.stringify(kept) || c.backup !== undefined ||
-      c.install_dir !== path.win32.join(path.win32.dirname(o.install_dir), 'Trellis 验收 42793967624-1') || !exactIdentity(c.install_identity) ||
+      c.install_dir !== path.win32.join(path.win32.dirname(o.install_dir), 'Trellis 验收 42800178995-1') || !exactIdentity(c.install_identity) ||
       c.parents?.length !== o.parents.length || c.parents.some((parent, index) => parent.path !== o.parents[index].path || !same(parent.identity, o.parents[index].identity)) ||
       !['probe', 'no_overwrite', 'identity_refusal', 'same_identity', 'security_preserved'].every(key => c.preservation_probe?.[key] === true) ||
       !same(d.identity.home, c.default.homeIdentity)) fail('CANDIDATE_CONTINUATION_UNINSTALLED_UNCONFIRMED')
@@ -199,8 +201,8 @@ function restoreContinuation(archive, artifact, branch, environment, original) {
   const { values, extracted } = readFixedArchive(archive, artifact, environment, continuationEntries, continuationRequired)
   validateContinuationFacts(values, original)
   return { id: artifact.id, name: continuation.name, run_id: continuation.run, attempt: continuation.attempt, head: continuation.head, branch,
-    ...persistFixedEvidence(extracted, continuationRequired, 'trellis-continuation-42793967624-1-'), archive_bytes: archive.length,
+    ...persistFixedEvidence(extracted, continuationRequired, 'trellis-continuation-42800178995-1-'), archive_bytes: archive.length,
     files: ['host.json', 'candidate.json', 'default-startup.json', 'candidate-provenance.json'], source: 'fixed_uninstalled_attempt_artifact', facts_verified: true }
 }
 
-module.exports = { fixedParents, verifyLockedInputs, validateMetadata, validateFacts, restore, defaultOrigin, continuation, validateContinuationMetadata, validateContinuationRun, validateContinuationFacts, restoreContinuation }
+module.exports = { fixedParents, verifyLockedInputs, validateMetadata, validateFacts, restore, defaultOrigin, predecessor, continuation, validateContinuationMetadata, validateContinuationRun, validateContinuationFacts, restoreContinuation }

@@ -39,15 +39,15 @@ function fixture() {
       parent_chain: parentsAtAttempt.map((parent: string, index: number) => ({ child: index ? parentsAtAttempt[index - 1] : evidence.continuation.head, parent })),
       requests: operations.map(stage => ({ stage, transport: 'windows_system_curl', status: stage.endsWith('Redirect') ? 302 : 200,
         exit_code: 0, completed: true, timeout: false, status_source: 'http_response' })) } }
-  const kept = { stage: 'continued_uninstalled_data_retained', passed: true, continued_uninstalled: true, run_id: 42779040248, attempt: 2, artifact_id: 13749679230,
-    head: '3c56ebceb257d60cf5c44d7d2aca0a8e251c7eaa', prior_backup: originalCandidate.backup.path, prior_backup_identity: id(2),
+  const kept = { stage: 'continued_uninstalled_data_retained', passed: true, continued_uninstalled: true, run_id: evidence.predecessor.run, attempt: evidence.predecessor.attempt, artifact_id: evidence.predecessor.id,
+    head: evidence.predecessor.head, prior_backup: originalCandidate.backup.path, prior_backup_identity: id(2),
     synthetic_backup: home + '\\.trellis.ao-preserved-42779040248-2', synthetic_backup_identity: id(3), current_root_identity: id(4),
     registration_absent: true, candidate_executables_absent: true, owners_current_user: true, owner_job_empty: true }
   values['candidate.json'].continuation = kept; values['candidate.json'].previous_cleanup = structuredClone(kept)
   values['candidate.json'].default.rootIdentity = id(4); delete values['candidate.json'].backup
-  values['candidate.json'].install_dir = local + '\\Trellis 验收 42793967624-1'
-  values['candidate-provenance.json'].continuation_evidence = { id: 13749679230, run_id: 42779040248, attempt: 2, head: kept.head, facts_verified: true }
-  values['candidate-provenance.json'].default_proof_reused = { run_id: 42779040248, attempt: 2, head: kept.head, artifact_id: 13749679230 }
+  values['candidate.json'].install_dir = local + '\\Trellis 验收 42800178995-1'
+  values['candidate-provenance.json'].continuation_evidence = { id: evidence.predecessor.id, run_id: evidence.predecessor.run, attempt: evidence.predecessor.attempt, head: evidence.predecessor.head, facts_verified: true }
+  values['candidate-provenance.json'].default_proof_reused = { run_id: evidence.defaultOrigin.run, attempt: evidence.defaultOrigin.attempt, head: evidence.defaultOrigin.head, artifact_id: evidence.defaultOrigin.id }
   return { original, values }
 }
 it('accepts only the proven uninstalled attempt and retains its link to the original backup', () => {
@@ -62,6 +62,9 @@ it.each([
   (x: any) => { x['candidate.json'].continuation.synthetic_backup_identity = id(99) },
   (x: any) => { x['default-startup.json'].identity.directory = id(3) },
   (x: any) => { x['candidate-provenance.json'].source_head = 'a'.repeat(40) },
+  (x: any) => { x['candidate-provenance.json'].continuation_evidence.run_id = evidence.defaultOrigin.run },
+  (x: any) => { x['candidate-provenance.json'].default_proof_reused.head = evidence.predecessor.head },
+  (x: any) => { x['candidate.json'].continuation.head = evidence.defaultOrigin.head },
   (x: any) => { x['candidate-provenance.json'].requests[0].status = 403 },
   (x: any) => { x['candidate-provenance.json'].parent_chain[0].parent = 'b'.repeat(40) },
   (x: any) => { x['host.json'].administrators_group_present = true }
@@ -69,8 +72,8 @@ it.each([
   const { original, values } = fixture(); mutate(values); expect(() => evidence.validateContinuationFacts(values, original)).toThrow()
 })
 it('refuses prior artifacts and unknown current sources', () => {
-  const base = { id: 13752368936, name: evidence.continuation.name, expired: false, size_in_bytes: 70232,
-    workflow_run: { id: 42793967624, head_sha: evidence.continuation.head, head_branch: 'branch', repository_id: 1434252659, head_repository_id: 1434252659 } }
+  const base = { id: 13756281910, name: evidence.continuation.name, expired: false, size_in_bytes: 75506,
+    workflow_run: { id: 42800178995, head_sha: evidence.continuation.head, head_branch: 'branch', repository_id: 1434252659, head_repository_id: 1434252659 } }
   expect(() => evidence.validateContinuationMetadata(base, 'branch')).not.toThrow()
   expect(() => evidence.validateContinuationMetadata({ ...base, id: 13745865245 }, 'branch')).toThrow()
   expect(() => evidence.validateContinuationMetadata({ ...base, name: 'windows11-evidence-42779040248-1' }, 'branch')).toThrow()
@@ -78,7 +81,7 @@ it('refuses prior artifacts and unknown current sources', () => {
 
 it('continues without another uninstall or root rename, and rejects native ownership/identity conflicts', async () => {
   async function run(options: { registered?: boolean; executable?: boolean; owner?: boolean; changedBackup?: boolean; changedRoot?: boolean } = {}) {
-    const { original, values } = fixture(), folder = 'C:\\temp\\trellis-continuation-42793967624-1-fixture', originalFolder = 'C:\\temp\\original'
+    const { original, values } = fixture(), folder = 'C:\\temp\\trellis-continuation-42800178995-1-fixture', originalFolder = 'C:\\temp\\original'
     const files = new Map<string, unknown>()
     for (const [key, value] of Object.entries(original)) files.set(path.join(originalFolder, key), value)
     for (const [key, value] of Object.entries(values)) files.set(path.join(folder, key), value)
@@ -99,8 +102,8 @@ it('continues without another uninstall or root rename, and rejects native owner
     const current = { root, homeIdentity: id(1), rootIdentity: id(4), absent: false }
     runInNewContext(readFileSync('scripts/windows11-candidate.cjs', 'utf8') + '\nglobalThis.continueCheck=continueUninstalled;globalThis.setNative=(m,r)=>{managed=m;registry=r}', box)
     box.setNative(async (_file: string, args: string[]) => { commands.push(args); expect(args.at(-1)).toContain('Get-Acl'); expect(args.at(-1)).not.toContain('Set-Acl'); return { output: JSON.stringify({ owned: options.owner ?? true }), job_empty: true } }, async () => options.registered ? 1 : 0)
-    const proof = { continuation_evidence: { id: 13752368936, name: evidence.continuation.name, run_id: 42793967624, attempt: 1, head: evidence.continuation.head,
-      archive_bytes: 70232, branch: 'ao/trellis-12/cross-platform-ci', directory: folder, identity: id(30), source: 'fixed_uninstalled_attempt_artifact', facts_verified: true,
+    const proof = { continuation_evidence: { id: 13756281910, name: evidence.continuation.name, run_id: 42800178995, attempt: 1, head: evidence.continuation.head,
+      archive_bytes: 75506, branch: 'ao/trellis-12/cross-platform-ci', directory: folder, identity: id(30), source: 'fixed_uninstalled_attempt_artifact', facts_verified: true,
       files: ['host.json', 'candidate.json', 'default-startup.json', 'candidate-provenance.json'] } }
     const result = await box.continueCheck(current, proof, originalFolder)
     return { result, writes, commands }

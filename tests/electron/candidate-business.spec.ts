@@ -6,6 +6,8 @@ import { createRequire } from 'node:module'
 import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/model-server'
 import { pdfFixture } from '../helpers/pdf-fixture'
 import { openSettings } from '../helpers/settings-ui'
+import { performance } from 'node:perf_hooks'
+import { captureCandidateFailure, candidateSnapshotInRenderer } from '../helpers/candidate-failure-snapshot'
 
 const require = createRequire(import.meta.url)
 const candidate = require('../../scripts/windows11-candidate.cjs')
@@ -16,6 +18,7 @@ const absent = (pid: number) => { try { process.kill(pid, 0); return false } cat
 test('installed candidate preserves synthetic plugin, PDF, export and recovery across restart or reinstall', async () => {
   test.skip(process.env.TRELLIS_WINDOWS11_CANDIDATE !== '1', 'Explicit approved designated-host candidate mode only')
   test.setTimeout(90000) // Existing PDF business acceptance deadline.
+  const scenarioStarted = performance.now(), scenarioDeadline = scenarioStarted + 90000
   const paths = await candidate.installed(), owned = await data.inventory()
   const defaultProof = require('../../scripts/verify-default-startup-result.cjs')
   if (owned.absent || !same(owned.rootIdentity, defaultProof.identity.directory) || defaultProof.installed_candidate !== true) throw Error('CANDIDATE_NEW_DEFAULT_REQUIRED')
@@ -24,7 +27,7 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
   const reinstalled = process.env.TRELLIS_CANDIDATE_REINSTALLED === '1'
   const previousProof = reinstalled ? JSON.parse(await readFile(proofFile, 'utf8')) : undefined
   const report: Record<string, any> = { stage: 'launch', passed: false, installed: true, reinstalled,
-    application_launches: 0, real_api_requests: 0, directory_cleanup_performed: false, exits: [], node_protocol_errors: [] }
+    application_launches: 0, real_api_requests: 0, directory_cleanup_performed: false, exits: [], node_protocol_errors: [], scenario_started_monotonic_ms: scenarioStarted, request_timeline: [] }
   // Playwright 1.56.1 replaces every unexpected CDP error with "context
   // destroyed". Keep only bounded error categories, never protocol arguments.
   const playwrightRequire = createRequire(createRequire(require.resolve('@playwright/test')).resolve('playwright'))
@@ -45,7 +48,9 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
   let app: ElectronApplication | undefined, page: Page | undefined, mainPid: number | undefined
   let utilityPids: number[] = [], mode: 'pdf' | 'view' = 'pdf', surface: any, capability = ''
   const errors: string[] = [], aclErrors: string[] = []
+  const modelCounts = { received: 0, responses_finished: 0 }
   const server = await modelServer(({ body }, res) => {
+    modelCounts.received++; res.once('finish', () => { modelCounts.responses_finished++ })
     if (synthetic(body, res)) return
     if (body.messages.at(-1).role === 'tool') return textStream(res, 'CANDIDATE_BUSINESS_DONE')
     if (mode === 'pdf') hostToolStream(res, 'call', { capability, arguments: { resource_id: report.source_resource }, references: [] })
@@ -135,9 +140,26 @@ test('installed candidate preserves synthetic plugin, PDF, export and recovery a
       await panel.getByRole('button', { name: /^返回工作区/ }).click()
       capability = (await call({ type: 'task.query', task_id: task, query: { type: 'list', input: { kind: 'capability' } } })).items.find((item: any) => !item.id.startsWith('builtin:')).id
       const submit = async (text: string) => {
+        const trace: Record<string, any> = { kind: mode, submitted_monotonic_ms: performance.now(), model_at_submit: { ...modelCounts }, samples: [] }
+        report.request_timeline.push(trace)
         const request = await call({ type: 'request.submit', task_id: task, text, model_config_id: 'candidate-local', resource_ids: mode === 'pdf' ? [report.source_resource] : [], import_ids: [] })
-        await expect.poll(async () => (await call({ type: 'request.status', task_id: task, request_id: request.request_id })).run_state).toBe('completed')
+        trace.request_id = request.request_id; trace.accepted_monotonic_ms = performance.now()
+        try {
+          await expect.poll(async () => {
+            const state = await call({ type: 'request.status', task_id: task, request_id: request.request_id })
+            if (trace.samples.length < 16) trace.samples.push({ at_monotonic_ms: performance.now(), state: state.run_state })
+            return state.run_state
+          }).toBe('completed')
+          trace.completed_monotonic_ms = performance.now()
+        } catch (failure) {
+          trace.failed_monotonic_ms = performance.now(); trace.original_failure_saved = true
+          const before = { ...modelCounts }
+          try { await captureCandidateFailure(failure, report, scenarioDeadline,
+            () => page!.evaluate(candidateSnapshotInRenderer, { taskId: task, requestId: request.request_id })) }
+          finally { if (report.failure_snapshot) { report.failure_snapshot.model_before = before; report.failure_snapshot.model_after = { ...modelCounts } } }
+        }
       }
+      report.stage = 'pdf_request'
       await submit('Extract only the synthetic PDF as text.')
       const calls = (await call({ type: 'task.query', task_id: task, query: { type: 'list', input: { kind: 'call' } } })).items
       const result = (await call({ type: 'task.query', task_id: task, query: { type: 'read', input: { target: { kind: 'call', id: calls[0].id } } } })).data.result_data

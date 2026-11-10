@@ -160,10 +160,10 @@ async function removePreviousCandidate(current) {
 }
 async function continueUninstalled(current, proof, originalFolder) {
   const a = proof.continuation_evidence
-  if (a?.id !== 13752368936 || a.name !== 'windows11-evidence-42793967624-1' || a.run_id !== 42793967624 || a.attempt !== 1 ||
-      a.head !== '25f69a64ca64abbd9f291fedcac7d1b29101b893' || a.archive_bytes !== 70232 || a.branch !== 'ao/trellis-12/cross-platform-ci' ||
+  if (a?.id !== 13756281910 || a.name !== 'windows11-evidence-42800178995-1' || a.run_id !== 42800178995 || a.attempt !== 1 ||
+      a.head !== 'a6b7c9d7be7ae29a19ce80b3fc230fceee8a4969' || a.archive_bytes !== 75506 || a.branch !== 'ao/trellis-12/cross-platform-ci' ||
       a.source !== 'fixed_uninstalled_attempt_artifact' || a.facts_verified !== true || typeof a.directory !== 'string' || path.dirname(a.directory) !== process.env.RUNNER_TEMP ||
-      !/^trellis-continuation-42793967624-1-[A-Za-z0-9]+$/.test(path.basename(a.directory)) || !same(identity(a.directory), a.identity) ||
+      !/^trellis-continuation-42800178995-1-[A-Za-z0-9]+$/.test(path.basename(a.directory)) || !same(identity(a.directory), a.identity) ||
       JSON.stringify(a.files) !== JSON.stringify(['host.json', 'candidate.json', 'default-startup.json', 'candidate-provenance.json'])) fail('CANDIDATE_CONTINUATION_ARTIFACT_UNCONFIRMED')
   const original = Object.fromEntries(['host.json', 'candidate.json', 'default-startup.json'].map(name => [name, readEvidence(path.join(originalFolder, name))]))
   const values = Object.fromEntries(a.files.map(name => [name, readEvidence(path.join(a.directory, name))]))
@@ -181,7 +181,7 @@ async function continueUninstalled(current, proof, originalFolder) {
   const checkIdentities = () => { for (const [file, expected] of guarded) if (!same(identity(file), expected)) fail('CANDIDATE_CONTINUATION_IDENTITY_CHANGED') }
   checkIdentities()
   if (await registry() !== 0) fail('CANDIDATE_CONTINUATION_REGISTRATION_PRESENT')
-  for (const [directory, expected] of [[o.install_dir, '42649802869-1'], [path.join(process.env.LOCALAPPDATA, 'Trellis 验收 42779040248-2'), '42779040248-2'], [c.install_dir, '42793967624-1']]) {
+  for (const [directory, expected] of [[o.install_dir, '42649802869-1'], [path.join(process.env.LOCALAPPDATA, 'Trellis 验收 42779040248-2'), '42779040248-2'], [path.join(process.env.LOCALAPPDATA, 'Trellis 验收 42793967624-1'), '42793967624-1'], [c.install_dir, '42800178995-1']]) {
     if (directory !== path.join(process.env.LOCALAPPDATA, 'Trellis 验收 ' + expected)) fail('CANDIDATE_CONTINUATION_INSTALL_PATH_UNCONFIRMED')
     try { identity(directory) } catch (error) { if (error.code !== 'ENOENT') throw error }
     absent(path.join(directory, 'Trellis.exe'))
