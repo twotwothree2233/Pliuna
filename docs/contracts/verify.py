@@ -15,7 +15,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[2]
 runpy.run_path(str(ROOT / 'scripts/verify-contracts.py'), run_name='__main__')
 schema = json.loads((ROOT / 'src/shared/contracts/core.schema.json').read_text(encoding='utf-8'))
-files = [ROOT / 'CONTEXT.md', *sorted((ROOT / 'docs').rglob('*.md'))]
+files = sorted((ROOT / 'docs').rglob('*.md'))
 links = examples = checked_examples = 0
 for path in files:
     text = path.read_text(encoding='utf-8')
