@@ -1,8 +1,9 @@
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
-import { createHash, randomUUID } from 'node:crypto'
-import { join } from 'node:path'
-import type { SavedConnection } from '../runtime/model/persistence'
+import { fileFstatSync as fstatSync, atomicWriteFileSync, entryExistsSync, managedFile, openExclusiveFileSync, readRegularFileSync, removeOwnedFileSync } from '../platform/files'
+import { createHash,randomUUID } from 'node:crypto'
+import { closeSync,mkdirSync } from 'node:fs'
+import { protectPrivatePath } from '../platform/permissions'
 import type { SavedChannel } from '../runtime/model/channels'
+import type { SavedConnection } from '../runtime/model/persistence'
 import type { VaultLoad } from './secure-model-store'
 
 const limit = 2 * 1024 * 1024
@@ -16,13 +17,15 @@ const binding = (record: SavedConnection) => digest({ configuration: record.conf
 export class FileModelStore {
   private snapshot: string | undefined
   private error: string | undefined
+  private protectedFiles = new Set<string>()
   constructor(private directory: string, private fault: (point: 'auth-prepared' | 'settings-committed' | 'auth-pruned') => void = () => {}) {}
   private read(name: string): string | null {
-    const path = join(this.directory, name)
-    let stat: ReturnType<typeof lstatSync>
-    try { stat = lstatSync(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > limit) throw Error('SETTINGS_READ_FAILED')
-    return readFileSync(path, 'utf8')
+    try {
+      const file = managedFile(this.directory, name)
+      if (!this.protectedFiles.has(name) && entryExistsSync(file)) { protectPrivatePath(file, 'file'); this.protectedFiles.add(name) }
+      return readRegularFileSync(file, limit).toString('utf8')
+    }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   }
   private pair(): [string | null, string | null] { return [this.read('settings.json'), this.read('auth.json')] }
   private parse(pair: [string | null, string | null]): { records: SavedConnection[]; auth: Auth; channels?: SavedChannel[] } {
@@ -65,32 +68,27 @@ export class FileModelStore {
   }
   load(): VaultLoad {
     try {
-      if (existsSync(join(this.directory, '.settings-write.lock'))) throw Error('SETTINGS_BUSY')
+      if (entryExistsSync(managedFile(this.directory, '.settings-write.lock'))) throw Error('SETTINGS_BUSY')
       const pair = this.pair(), parsed = this.parse(pair)
       this.snapshot = digest(pair); this.error = undefined
       return { available: true, backend: 'plain-file', records: parsed.records, ...(parsed.channels ? { channels: parsed.channels } : {}) }
     } catch { this.error = 'SETTINGS_READ_FAILED'; return { available: false, backend: 'plain-file', error: this.error, records: [] } }
   }
-  private atomic(name: string, value: unknown): void {
+  private atomic(name: string, value: unknown, onPublished: () => void = () => {}): void {
     const text = JSON.stringify(value, null, 2) + '\n'
     if (Buffer.byteLength(text) > limit) throw Error('SETTINGS_WRITE_FAILED')
-    const target = join(this.directory, name), temporary = target + '.' + randomUUID() + '.tmp'
-    try {
-      const fd = openSync(temporary, 'wx', 0o600)
-      try { writeFileSync(fd, text); fsyncSync(fd) } finally { closeSync(fd) }
-      renameSync(temporary, target)
-      if (process.platform !== 'win32') {
-        const directory = openSync(this.directory, 'r')
-        try { fsyncSync(directory) } finally { closeSync(directory) }
-      }
-    } finally { try { unlinkSync(temporary) } catch {} }
+    atomicWriteFileSync(managedFile(this.directory, name), text, () => {
+      this.protectedFiles.delete(name)
+      onPublished()
+    })
   }
   save(records: SavedConnection[], channels?: SavedChannel[]): void {
     if (this.error || this.snapshot === undefined) throw Error(this.error || 'SETTINGS_READ_FAILED')
     mkdirSync(this.directory, { recursive: true, mode: 0o700 })
-    const lock = join(this.directory, '.settings-write.lock')
+    const lock = managedFile(this.directory, '.settings-write.lock')
     let fd: number
-    try { fd = openSync(lock, 'wx', 0o600) } catch { throw Error('SETTINGS_BUSY') }
+    try { fd = openExclusiveFileSync(lock) } catch { throw Error('SETTINGS_BUSY') }
+    const lockIdentity = fstatSync(fd)
     let committed = false
     try {
       const pair = this.pair()
@@ -114,7 +112,7 @@ export class FileModelStore {
       if (pair[0] === null) this.atomic('settings.json', { version: 3, connections: [] })
       this.atomic('auth.json', { version: 1, credentials: { ...previous.auth, ...auth } })
       this.fault('auth-prepared')
-      this.atomic('settings.json', { version: channels ? 4 : 3, connections, ...(savedChannels ? { channels: savedChannels } : {}) })
+      this.atomic('settings.json', { version: channels ? 4 : 3, connections, ...(savedChannels ? { channels: savedChannels } : {}) }, () => { committed = true })
       committed = true; this.fault('settings-committed')
       this.atomic('auth.json', { version: 1, credentials: auth })
       this.fault('auth-pruned')
@@ -122,6 +120,10 @@ export class FileModelStore {
     } catch (error) {
       this.error = committed ? 'SETTINGS_RESULT_UNKNOWN' : (error instanceof Error && error.message === 'SETTINGS_CONFLICT' ? 'SETTINGS_CONFLICT' : 'SETTINGS_WRITE_FAILED')
       throw Error(this.error)
-    } finally { closeSync(fd); unlinkSync(lock) }
+    } finally {
+      closeSync(fd)
+      try { removeOwnedFileSync(lock, lockIdentity) }
+      catch { this.error = committed ? 'SETTINGS_RESULT_UNKNOWN' : 'SETTINGS_WRITE_FAILED'; throw Error(this.error) }
+    }
   }
 }

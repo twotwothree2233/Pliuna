@@ -13,18 +13,18 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / 'src/shared/contracts'
 FIXTURES = ROOT / 'tests/fixtures/contracts'
-schema = json.loads((BASE / 'core.schema.json').read_text())
+schema = json.loads((BASE / 'core.schema.json').read_text(encoding='utf-8'))
 Draft202012Validator.check_schema(schema)
-fixtures = json.loads((FIXTURES / 'manifest.json').read_text())
+fixtures = json.loads((FIXTURES / 'manifest.json').read_text(encoding='utf-8'))
 for fixture in fixtures:
     selected = {**schema, '$ref': '#/$defs/' + fixture['definition']}
-    value = json.loads((FIXTURES / fixture['file']).read_text())
+    value = json.loads((FIXTURES / fixture['file']).read_text(encoding='utf-8'))
     errors = list(Draft202012Validator(selected).iter_errors(value))
     if bool(errors) == fixture['valid']:
         raise AssertionError((fixture['file'], [e.message for e in errors]))
 
 con = sqlite3.connect(':memory:')
-con.executescript((BASE / '001-core.sql').read_text())
+con.executescript((BASE / '001-core.sql').read_text(encoding='utf-8'))
 con.execute("INSERT INTO tasks VALUES ('task_1','test','active',1,1)")
 con.execute("INSERT INTO runs (id,task_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES ('run_1','task_1','running','epoch_1','{}','{}','now')")
 try:

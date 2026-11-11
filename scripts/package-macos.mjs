@@ -4,10 +4,14 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, re
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { montyTarget } from '../src/shared/native-targets.mjs'
 
+import { productionPackages as collectProductionPackages } from './production-packages.mjs'
+
+export const packageTarget = montyTarget('darwin', 'arm64')
 export const nativeHashes = {
-  monty: 'd9ffb7f1956df45781400991cbea987fc6466a5c1f5fd4f6fbcdf3d157b0afd0',
-  'monty.darwin-arm64.node': '301d4d1b0e4ffec566496220bb71db1350ea4288c08ad426d662c81f24d054f6'
+  [packageTarget.binary]: packageTarget.integrity.binary,
+  [packageTarget.native]: packageTarget.integrity.native
 }
 export const sha256 = file => createHash('sha256').update(readFileSync(file)).digest('hex')
 
@@ -24,39 +28,7 @@ export function assertNewOutput(output, workspace) {
 }
 const isInside = (root, file) => file === root || file.startsWith(root + sep)
 
-function packageManifest(name, from) {
-  const require = createRequire(join(from, 'package.json'))
-  try { return require.resolve(name + '/package.json') } catch {
-    let folder = dirname(require.resolve(name))
-    for (;;) {
-      const file = join(folder, 'package.json')
-      if (existsSync(file) && JSON.parse(readFileSync(file, 'utf8')).name === name) return file
-      const parent = dirname(folder)
-      if (parent === folder) throw Error('Package manifest unavailable: ' + name)
-      folder = parent
-    }
-  }
-}
-
-export function productionPackages(workspace) {
-  const packages = new Map()
-  function collect(name, from) {
-    const manifest = packageManifest(name, from), folder = dirname(manifest)
-    const pkg = JSON.parse(readFileSync(manifest, 'utf8'))
-    if (packages.has(name)) {
-      if (packages.get(name).version !== pkg.version) throw Error('Dependency version conflict: ' + name)
-      return
-    }
-    packages.set(name, { name, version: pkg.version, folder })
-    // SQLite's prebuild installer is not used after its verified native build.
-    const dependencies = name === 'better-sqlite3' ? ['bindings'] : Object.keys(pkg.dependencies ?? {})
-    for (const dependency of dependencies) collect(dependency, folder)
-    if (name === '@pydantic/monty') collect('@pydantic/monty-darwin-arm64', folder)
-    else if (Object.keys(pkg.optionalDependencies ?? {}).length) throw Error('Unaudited optional runtime dependency: ' + name)
-  }
-  for (const name of Object.keys(JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8')).dependencies)) collect(name, workspace)
-  return [...packages.values()].sort((a, b) => a.name.localeCompare(b.name))
-}
+export function productionPackages(workspace) { return collectProductionPackages(workspace, packageTarget) }
 
 export function fileManifest(root) {
   const entries = [], base = realpathSync(root)
@@ -110,7 +82,7 @@ export function parsePackageArgs(args) {
 }
 
 export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(import.meta.url)), '..'), guide) {
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') throw Error('Only macOS arm64 packaging is verified')
+  if (process.platform !== packageTarget.platform || process.arch !== packageTarget.arch) throw Error('Only macOS arm64 packaging is verified')
   // Capture an explicitly supplied guide before creating any output; no repository document is implicit.
   const guideBytes = readGuide(guide), sources = sourceManifest(workspace)
   const base = assertNewOutput(output, workspace), require = createRequire(join(workspace, 'package.json'))
@@ -144,7 +116,7 @@ export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(i
   }
   function verifyMonty() {
     for (const [name, hash] of Object.entries(nativeHashes)) {
-      const file = join(payload, 'node_modules/@pydantic/monty-darwin-arm64', name)
+      const file = join(payload, 'node_modules', packageTarget.package, name)
       if (sha256(file) !== hash) throw Error('Native asset hash mismatch: ' + name)
       command('/usr/bin/codesign', ['--verify', '--strict', file])
     }
@@ -162,7 +134,7 @@ export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(i
   copyGuide(base, guideBytes)
   const plugin = join(workspace, 'reference-plugins/pdf-text')
   if (existsSync(plugin)) cpSync(plugin, join(base, 'PDF Text Plugin'), { recursive: true })
-  writeFileSync(join(base, 'BUILD.json'), JSON.stringify({ version: pkg.version, platform: 'darwin-arm64', electron: electronPkg.version, built_at: new Date().toISOString(), direct_entry: pkg.main, sources, ...(guideBytes === undefined ? {} : { guide: { path: '使用指南.md', sha256: createHash('sha256').update(guideBytes).digest('hex') } }), dependencies: dependencies.map(({ name, version }) => ({ name, version })), signing: { ad_hoc: true, developer_id: false, notarized: false }, native_hashes: nativeHashes, credentials_included: false, bit_identical_zip_claimed: false }, null, 2) + '\n')
+  writeFileSync(join(base, 'BUILD.json'), JSON.stringify({ version: pkg.version, platform: packageTarget.id, electron: electronPkg.version, built_at: new Date().toISOString(), direct_entry: pkg.main, sources, ...(guideBytes === undefined ? {} : { guide: { path: '使用指南.md', sha256: createHash('sha256').update(guideBytes).digest('hex') } }), dependencies: dependencies.map(({ name, version }) => ({ name, version })), signing: { ad_hoc: true, developer_id: false, notarized: false }, native_hashes: nativeHashes, credentials_included: false, bit_identical_zip_claimed: false }, null, 2) + '\n')
   const entries = fileManifest(base)
   assertCleanPayload(entries)
   writeFileSync(join(base, 'FILES.json'), JSON.stringify(entries, null, 2) + '\n')

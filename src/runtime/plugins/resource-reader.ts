@@ -1,7 +1,6 @@
+import { fileHandleStat, fileLstat as lstat, type FileStat, managedFile, openRegularFile } from '../../platform/files'
 import { createHash } from 'node:crypto'
-import { constants } from 'node:fs'
-import { lstat, open, type FileHandle } from 'node:fs/promises'
-import { join } from 'node:path'
+import {type FileHandle } from 'node:fs/promises'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { ContractError } from '../../shared/validation'
 
@@ -9,11 +8,11 @@ export type Resource = { id: string; storage_key: string; byte_length: number; s
 const fail = (): never => { throw new ContractError('RESOURCE_CORRUPT', 'Plugin result resource is missing, changed or not valid UTF-8; it was not repaired') }
 export async function verifiedResource<T>(root: string, resource: Resource, consume: (file: FileHandle) => Promise<T>, valid: () => void = () => {}, utf8 = false): Promise<T> {
   if (!/^[A-Za-z0-9_-]+$/.test(resource.storage_key) || !Number.isSafeInteger(resource.byte_length) || resource.byte_length < 0 || resource.byte_length > defaults.transport.resource_bytes) return fail()
-  const path = join(root, 'resources', resource.storage_key), initial = await lstat(path).catch(fail)
+  const path = managedFile(root, 'resources', resource.storage_key), initial = await lstat(path).catch(fail)
   if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink !== 1 || initial.size !== resource.byte_length) return fail()
-  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  const file = await openRegularFile(path)
   try {
-    const opened = await file.stat(), same = (s: typeof initial) => s.isFile() && s.nlink === 1 && s.ino === initial.ino && s.dev === initial.dev && s.size === initial.size && s.mtimeMs === initial.mtimeMs && s.ctimeMs === initial.ctimeMs
+    const opened = await fileHandleStat(file), same = (s: typeof initial) => s.isFile() && s.nlink === 1 && s.ino === initial.ino && s.dev === initial.dev && s.size === initial.size && s.mtimeMs === initial.mtimeMs && s.ctimeMs === initial.ctimeMs
     if (!same(opened)) return fail()
     const hash = createHash('sha256'), buffer = Buffer.alloc(256 * 1024), decoder = utf8 ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }) : undefined
     for (let position = 0; position < initial.size;) {
@@ -25,9 +24,9 @@ export async function verifiedResource<T>(root: string, resource: Resource, cons
       hash.update(chunk); position += bytesRead
     }
     try { decoder?.decode() } catch { return fail() }
-    if (hash.digest('hex') !== resource.sha256 || !same(await file.stat())) return fail()
+    if (hash.digest('hex') !== resource.sha256 || !same(await fileHandleStat(file))) return fail()
     const result = await consume(file)
-    if (!same(await file.stat()) || !same(await lstat(path))) return fail()
+    if (!same(await fileHandleStat(file)) || !same(await lstat(path))) return fail()
     return result
   } finally { await file.close() }
 }
@@ -70,7 +69,7 @@ export async function readPluginBytes(root: string, resource: Resource, offset: 
   return result
 }
 export async function verifyPluginFile(root: string, resource: Resource): Promise<string> {
-  return verifiedResource(root, resource, async file => pluginFileIdentity(await file.stat()))
+  return verifiedResource(root, resource, async file => pluginFileIdentity(await fileHandleStat(file)))
 }
 export async function readResourceContent(root: string, resource: Resource, start: number, end: number, maxChars: number, valid: () => void): Promise<{ text: string; chars: number; end: number }> {
   if (![start, end, maxChars].every(Number.isSafeInteger) || start < 0 || end < start || end > resource.byte_length || maxChars < 1 || maxChars > defaults.read.content_max_chars) throw new ContractError('RESOURCE_RANGE_INVALID', 'Invalid text range or max_chars; UTF-8 byte boundaries and 1..32000 characters required')
@@ -114,4 +113,4 @@ export async function readResourceContent(root: string, resource: Resource, star
   valid()
   return result
 }
-export const pluginFileIdentity = (stat: import('node:fs').Stats): string => JSON.stringify([stat.isFile(), stat.nlink, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs])
+export const pluginFileIdentity = (stat: FileStat): string => JSON.stringify([stat.isFile(), stat.nlink, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs])

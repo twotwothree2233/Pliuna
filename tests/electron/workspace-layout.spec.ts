@@ -85,7 +85,7 @@ test('resizes real workspace, closes panes completely and retains task input acr
     await page.locator('#toggle-right').click(); await expect(page.locator('#pane-right.drawer')).toBeVisible()
     await expect(page.locator('#pane-left')).toBeHidden()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-    await page.screenshot({ path: '/tmp/trellis-workspace-narrow.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-workspace-narrow.png') })
     await page.getByRole('button', { name: '关闭Agent 栏', exact: true }).click()
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1320, 860))
     await expect(page.locator('#pane-left')).toBeVisible()
@@ -93,7 +93,7 @@ test('resizes real workspace, closes panes completely and retains task input acr
     await page.locator('#toggle-right').click()
     await expect(input).toHaveValue('关闭面板后保留的草稿')
     await expect(input).toHaveAttribute('data-retained-editor', 'yes')
-    await page.screenshot({ path: '/tmp/trellis-workspace-desktop.png' })
+    await page.screenshot({ path: test.info().outputPath('trellis-workspace-desktop.png') })
     for (const theme of ['graphite', 'paper', 'midnight', 'dusk', 'moss', 'blueprint']) {
       await chooseTheme(page, theme)
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme)

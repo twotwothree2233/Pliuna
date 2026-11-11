@@ -1,16 +1,20 @@
+import { fileFstatSync as fstatSync, fileLstatSync as lstatSync, atomicWriteFileSync, entryExistsSync as existsSync, flushDirectorySync, managedFile, managedRegularFile, openRegularFileSync, readRegularFileSync } from '../platform/files'
+import { journalFileIdentity,sameJournalFileIdentity,validJournalFileIdentity,type IdentityEncoding,type JournalFileIdentity } from '../platform/file-identity'
+import { newTestIdentityEncoding } from './file-format'
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import fs, { constants, chmodSync, closeSync, existsSync, fsyncSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import fs,{ closeSync,openSync,readFileSync,readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { protectPrivatePath } from '../platform/permissions'
+import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
 import { digest } from './resources'
 import { flushFile } from './restore-journal'
-import defaults from '../shared/contracts/development-defaults.json'
 
 type Row = Record<string, any>
-type Identity = { dev: number; ino: number; size: number; mtime: number; ctime: number; hash: string }
+type Identity = JournalFileIdentity
 type Item = { stage: Row; temporary: boolean; identity: Identity; state: 'pending' | 'deleting' | 'deleted' | 'absent' | 'skipped' | 'failed'; attempt: number; next_retry_at: string | null; reason: string }
-type Operation = { version: 1; id: string; token: string; selected: string; created_at: string; phase: 'preview' | 'running' | 'settled'; authorized: boolean; items: Item[]; protected: number; reviews: number; next_after: number | null }
+type Operation = { version: IdentityEncoding; id: string; token: string; selected: string; created_at: string; phase: 'preview' | 'running' | 'settled'; authorized: boolean; items: Item[]; protected: number; reviews: number; next_after: number | null }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const managed = (file: string) => file === 'trellis.sqlite' || /^restore-[a-f0-9-]{36}-(target|rollback)\.sqlite$/.test(file)
 const fail = (code: string): never => { throw new ContractError(code, 'GC requires inspection; files are retained. Query the original operation, do not resubmit') }
@@ -19,17 +23,26 @@ const fail = (code: string): never => { throw new ContractError(code, 'GC requir
 export class RestrictedGc {
   private control?: Database.Database
   private error: string | null = null
-  constructor(private root: string, private database: () => Database.Database, private selected: () => string, private retained: () => string[], private protects: (key: string) => boolean, private points: () => string[], private retired: (file: string) => boolean = () => false, private released: (file: string) => boolean = () => false) {
+  private encoding: IdentityEncoding = 1
+  constructor(private root: string, private database: () => Database.Database, private selected: () => string, private retained: () => string[], private protects: (key: string) => boolean, private points: () => string[], private retired: (file: string) => boolean = () => false, private released: (file: string) => boolean = () => false, expectedEncoding?: IdentityEncoding) {
     try {
-      const file = join(root, 'gc-control.sqlite'), marker = join(root, 'gc-established')
-      if (existsSync(marker) && (!lstatSync(marker).isFile() || readFileSync(marker, 'utf8') !== 'gc-v1\n' || !existsSync(file))) fail('GC_CONTROL_INVALID')
+      const createEncoding = expectedEncoding ?? newTestIdentityEncoding(root)
+      const file = managedRegularFile(root, 'gc-control.sqlite'), marker = join(root, 'gc-established')
+      const markerValue = existsSync(marker) ? readRegularFileSync(marker, 32).toString('utf8') : null
+      if (markerValue !== null && (!['gc-v1\n', 'gc-v2\n'].includes(markerValue) || !existsSync(file))) fail('GC_CONTROL_INVALID')
       if (existsSync(file) && !lstatSync(file).isFile()) fail('GC_CONTROL_INVALID')
       const present = existsSync(file)
       if (!present) { const fd = openSync(file, 'wx', 0o600); closeSync(fd) }
       this.control = new Database(file)
-      this.control.pragma('busy_timeout=0'); this.control.pragma('journal_mode=DELETE'); this.control.pragma('synchronous=FULL'); chmodSync(file, 0o600)
-      if (!present) this.control.exec('CREATE TABLE gc_version (version INTEGER NOT NULL); INSERT INTO gc_version VALUES (1); CREATE TABLE gc_operations (id TEXT PRIMARY KEY, manifest TEXT NOT NULL)')
-      if (JSON.stringify(this.control.prepare('SELECT version FROM gc_version').all()) !== '[{"version":1}]') fail('GC_CONTROL_INVALID')
+      this.control.pragma('busy_timeout=0'); this.control.pragma('journal_mode=DELETE'); this.control.pragma('synchronous=FULL'); protectPrivatePath(file, 'file')
+      if (!present) this.control.transaction(() => {
+        this.control!.exec('CREATE TABLE gc_version (version INTEGER NOT NULL); CREATE TABLE gc_operations (id TEXT PRIMARY KEY, manifest TEXT NOT NULL)')
+        this.control!.prepare('INSERT INTO gc_version VALUES (?)').run(createEncoding)
+      })()
+      const versions = this.control.prepare('SELECT version FROM gc_version').all() as { version: number }[]
+      if (versions.length !== 1 || ![1, 2].includes(versions[0]!.version)) fail('GC_CONTROL_INVALID')
+      this.encoding = versions[0]!.version as IdentityEncoding
+      if ((expectedEncoding !== undefined && expectedEncoding !== this.encoding) || (markerValue !== null && markerValue !== `gc-v${this.encoding}\n`)) fail('GC_CONTROL_INVALID')
       let after = 0
       while (true) {
         const rows = this.control.prepare('SELECT rowid AS ordinal,manifest FROM gc_operations WHERE rowid>? ORDER BY rowid LIMIT 50').all(after) as Row[]
@@ -48,14 +61,14 @@ export class RestrictedGc {
         after = rows.at(-1)!.ordinal
       }
       flushFile(root, 'gc-control.sqlite')
-      if (!existsSync(marker)) { writeFileSync(marker, 'gc-v1\n', { flag: 'wx', mode: 0o600 }); flushFile(root, 'gc-established') }
+      if (!existsSync(marker)) { atomicWriteFileSync(marker, `gc-v${this.encoding}\n`) }
     } catch { this.error = 'GC_CONTROL_INVALID' }
   }
   private validate(value: any): Operation {
-    if (!value || value.version !== 1 || !uuid.test(value.id) || !uuid.test(value.token) || !managed(value.selected) || !Number.isFinite(Date.parse(value.created_at)) || !['preview', 'running', 'settled'].includes(value.phase) || typeof value.authorized !== 'boolean' || (value.phase === 'running' && !value.authorized) || !Array.isArray(value.items) || value.items.length > 100 || !Number.isSafeInteger(value.protected) || value.protected < 0 || !Number.isSafeInteger(value.reviews) || value.reviews < 0 || (value.next_after !== null && (!Number.isSafeInteger(value.next_after) || value.next_after < 0))) fail('GC_CONTROL_INVALID')
+    if (!value || ![1, 2].includes(value.version) || (this.encoding === 1 && value.version !== 1) || !uuid.test(value.id) || !uuid.test(value.token) || !managed(value.selected) || !Number.isFinite(Date.parse(value.created_at)) || !['preview', 'running', 'settled'].includes(value.phase) || typeof value.authorized !== 'boolean' || (value.phase === 'running' && !value.authorized) || !Array.isArray(value.items) || value.items.length > 100 || !Number.isSafeInteger(value.protected) || value.protected < 0 || !Number.isSafeInteger(value.reviews) || value.reviews < 0 || (value.next_after !== null && (!Number.isSafeInteger(value.next_after) || value.next_after < 0))) fail('GC_CONTROL_INVALID')
     for (const item of value.items) {
       const s = item?.stage, i = item?.identity
-      if (!s || typeof s.id !== 'string' || typeof s.storage_key !== 'string' || !/^[A-Za-z0-9_-]+$/.test(s.storage_key) || typeof item.temporary !== 'boolean' || !i || ![i.dev, i.ino, i.size, i.mtime, i.ctime].every(Number.isFinite) || i.size < 0 || !/^[a-f0-9]{64}$/.test(i.hash) || !['pending', 'deleting', 'deleted', 'absent', 'skipped', 'failed'].includes(item.state) || !Number.isInteger(item.attempt) || item.attempt < 0 || item.attempt > 4 || (item.next_retry_at !== null && !Number.isFinite(Date.parse(item.next_retry_at))) || typeof item.reason !== 'string') fail('GC_CONTROL_INVALID')
+      if (!s || typeof s.id !== 'string' || typeof s.storage_key !== 'string' || !/^[A-Za-z0-9_-]+$/.test(s.storage_key) || typeof item.temporary !== 'boolean' || !validJournalFileIdentity(i, value.version) || !['pending', 'deleting', 'deleted', 'absent', 'skipped', 'failed'].includes(item.state) || !Number.isInteger(item.attempt) || item.attempt < 0 || item.attempt > 4 || (item.next_retry_at !== null && !Number.isFinite(Date.parse(item.next_retry_at))) || typeof item.reason !== 'string') fail('GC_CONTROL_INVALID')
     }
     if (new Set(value.items.map((item: Item) => this.name(item))).size !== value.items.length) fail('GC_CONTROL_INVALID')
     return value
@@ -76,7 +89,7 @@ export class RestrictedGc {
     for (const record of this.control!.prepare('SELECT manifest FROM gc_operations ORDER BY rowid').iterate() as Iterable<Row>) {
       let old: Operation
       try { old = this.validate(JSON.parse(record.manifest)) } catch { this.error = 'GC_CONTROL_INVALID'; return fail(this.error) }
-      if (old.id !== except && old.authorized && old.items.some(item => item.reason !== 'ORIGINAL_OPERATION_OWNS_FILE' && this.name(item) === this.name({ stage, temporary }) && JSON.stringify(item.identity) === JSON.stringify(identity))) return true
+      if (old.id !== except && old.authorized && old.items.some(item => item.reason !== 'ORIGINAL_OPERATION_OWNS_FILE' && this.name(item) === this.name({ stage, temporary }) && sameJournalFileIdentity(item.identity, identity))) return true
     }
     return false
   }
@@ -86,13 +99,13 @@ export class RestrictedGc {
     if (!lstatSync(directory).isDirectory()) fail('GC_UNSAFE_FILE')
     const file = join(directory, this.name(item)), stat = lstatSync(file)
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > defaults.transport.resource_bytes) fail('GC_UNSAFE_FILE')
-    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const fd = openRegularFileSync(file)
     try {
       const opened = fstatSync(fd)
       if (opened.dev !== stat.dev || opened.ino !== stat.ino) fail('GC_FILE_CHANGED')
       const hash = digest(readFileSync(fd)), end = fstatSync(fd)
       if (end.size !== stat.size || end.mtimeMs !== stat.mtimeMs || end.ctimeMs !== stat.ctimeMs) fail('GC_FILE_CHANGED')
-      return { dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }
+      return journalFileIdentity({ dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs, hash }, this.encoding)
     } finally { closeSync(fd) }
   }
   private formal(db: Database.Database, key: string): boolean {
@@ -162,7 +175,7 @@ export class RestrictedGc {
     let retained: Set<string>
     try { retained = this.retainedProtection() } catch { fail('GC_RETAINED_UNCERTAIN') }
     const rows = this.database().prepare('SELECT rowid AS ordinal,* FROM staging WHERE rowid>? ORDER BY rowid LIMIT 51').all(after) as Row[]
-    const op: Operation = { version: 1, id: randomUUID(), token, selected: this.selected(), created_at: new Date().toISOString(), phase: 'preview', authorized: false, items: [], protected: 0, reviews: 0, next_after: rows.length > 50 ? rows[49]!.ordinal : null }
+    const op: Operation = { version: this.encoding, id: randomUUID(), token, selected: this.selected(), created_at: new Date().toISOString(), phase: 'preview', authorized: false, items: [], protected: 0, reviews: 0, next_after: rows.length > 50 ? rows[49]!.ordinal : null }
     for (const row of rows.slice(0, 50)) {
       const { ordinal: _, ...stage } = row
       if (!this.eligible(stage, retained!)) { op.protected++; continue }
@@ -189,12 +202,12 @@ export class RestrictedGc {
           const retained = this.retainedProtection()
           if (!this.eligible(item.stage, retained)) { item.state = 'skipped'; item.reason = 'PROTECTION_OR_FACTS_CHANGED'; item.next_retry_at = null; this.save(op); continue }
           const identity = this.identity(item)
-          if (JSON.stringify(identity) !== JSON.stringify(item.identity)) { item.state = 'skipped'; item.reason = 'FILE_CHANGED'; item.next_retry_at = null; this.save(op); continue }
+          if (!sameJournalFileIdentity(identity, item.identity)) { item.state = 'skipped'; item.reason = 'FILE_CHANGED'; item.next_retry_at = null; this.save(op); continue }
           item.attempt++; item.state = 'deleting'; item.next_retry_at = null; item.reason = 'DELETE_INTENT'; this.save(op)
           // Recheck after durable intent and immediately before unlink. The runtime writer is still frozen.
-          if (!this.eligible(item.stage, this.retainedProtection()) || JSON.stringify(this.identity(item)) !== JSON.stringify(item.identity)) { item.state = 'skipped'; item.reason = 'FINAL_CHECK_CHANGED'; this.save(op); continue }
-          fs.unlinkSync(join(this.root, 'resources', this.name(item)))
-          if (process.platform !== 'win32') { const fd = openSync(join(this.root, 'resources'), 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } }
+          if (!this.eligible(item.stage, this.retainedProtection()) || !sameJournalFileIdentity(this.identity(item), item.identity)) { item.state = 'skipped'; item.reason = 'FINAL_CHECK_CHANGED'; this.save(op); continue }
+          fs.unlinkSync(managedFile(this.root, 'resources', this.name(item)))
+          flushDirectorySync(managedFile(this.root, 'resources'))
           item.state = 'deleted'; item.reason = 'DELETED'; this.save(op)
         } catch (error) {
           if (this.error) throw error

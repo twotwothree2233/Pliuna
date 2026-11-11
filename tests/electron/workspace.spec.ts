@@ -78,7 +78,7 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await chooseTheme(page, 'graphite')
     await expect(page.locator('.task-number').first()).not.toBeVisible()
     await page.getByLabel('想从哪里开始？').fill('第一任务尚未发送的目标')
-    await page.keyboard.press('Meta+n')
+    await page.keyboard.press('ControlOrMeta+n')
     await expect(page.getByRole('dialog', { name: '新建任务' })).toBeVisible()
     await page.getByLabel('任务名称').fill('版本与权限')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()

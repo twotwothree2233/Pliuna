@@ -1,14 +1,16 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileModelStore } from '../../src/main/file-model-store'
 import { applicationDirectory, prepareApplicationDirectory } from '../../src/main/application-data'
 import { ModelService } from '../../src/runtime/model/service'
+import { fileLstatSync, sameFileIdentity, type FileIdentity } from '../../src/platform/files'
+import * as permissions from '../../src/platform/permissions'
 import type { SavedConnection } from '../../src/runtime/model/persistence'
 
 const roots: string[] = []
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function setup() {
   const parent = mkdtempSync(join(tmpdir(), 'trellis-settings-unit-')); roots.push(parent)
   const root = join(parent, '.trellis'); prepareApplicationDirectory(root)
@@ -21,14 +23,46 @@ const record: SavedConnection = {
 }
 describe('hidden profile file settings', () => {
   it('resolves every normal platform to the same hidden directory without probing legacy paths', () => {
-    expect(applicationDirectory('/synthetic/home')).toBe('/synthetic/home/.trellis')
-    expect(applicationDirectory('/synthetic/home', '/isolated/.trellis')).toBe('/isolated/.trellis')
+    const home = join(tmpdir(), 'synthetic-home'), override = join(tmpdir(), 'isolated', '.trellis')
+    expect(applicationDirectory(home)).toBe(join(home, '.trellis'))
+    expect(applicationDirectory(home, override)).toBe(override)
   })
   it('stores configuration and plaintext credentials separately and restarts without networking', () => {
     const { root, store } = setup(); store.save([record])
     expect(readFileSync(join(root, 'settings.json'), 'utf8')).not.toContain(record.key)
     expect(readFileSync(join(root, 'auth.json'), 'utf8')).toContain(record.key)
     expect(new FileModelStore(root).load()).toMatchObject({ backend: 'plain-file', records: [record] })
+  })
+  it('protects the current file identities after every consecutive save', () => {
+    const { root, store } = setup(), protect = permissions.protectPrivatePath
+    const protectedIdentities = new Map<string, FileIdentity>()
+    vi.spyOn(permissions, 'protectPrivatePath').mockImplementation((file, kind, hidden) => {
+      protect(file, kind, hidden)
+      if (kind === 'file') protectedIdentities.set(file, fileLstatSync(file))
+    })
+    for (const revision of [1, 2, 3]) {
+      const next = { ...record, revision }
+      store.save([next])
+      for (const name of ['settings.json', 'auth.json']) {
+        const file = join(root, name), identity = protectedIdentities.get(file)
+        expect(identity).toBeDefined()
+        expect(sameFileIdentity(identity!, fileLstatSync(file))).toBe(true)
+      }
+      expect(store.load()).toMatchObject({ available: true, records: [next] })
+    }
+  })
+  for (const name of ['settings.json', 'auth.json']) it(`refuses access when replacement ${name} cannot be protected`, () => {
+    const { root, store } = setup(); store.save([record])
+    const protect = permissions.protectPrivatePath, next = { ...record, revision: 2 }
+    const protection = vi.spyOn(permissions, 'protectPrivatePath').mockImplementation((file, kind, hidden) => {
+      if (file === join(root, name)) throw Error('FILE_PERMISSIONS_UNAVAILABLE')
+      protect(file, kind, hidden)
+    })
+    expect(() => store.save([next])).toThrow('SETTINGS_RESULT_UNKNOWN')
+    expect(store.load()).toMatchObject({ available: false, error: 'SETTINGS_READ_FAILED', records: [] })
+    expect(existsSync(join(root, '.settings-write.lock'))).toBe(false)
+    protection.mockRestore()
+    expect(store.load()).toMatchObject({ available: true, records: [next] })
   })
   it('does not open or migrate a legacy credential file', () => {
     const { root } = setup(); writeFileSync(join(root, 'model-connections.secure'), 'legacy-do-not-open')

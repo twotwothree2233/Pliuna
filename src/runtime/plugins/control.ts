@@ -1,10 +1,12 @@
 import Database from 'better-sqlite3'
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { lstatSync,mkdirSync,readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { atomicWriteFileSync,entryExistsSync as existsSync,flushDirectorySync,flushFileSync,managedFile,managedRegularFile,readRegularFileSync } from '../../platform/files'
+import { protectPrivatePath } from '../../platform/permissions'
 import { ContractError } from '../../shared/validation'
-import { copyPluginPackage, validatePluginCopy, verifyPluginCopy, type PluginCopy } from './package'
-import { buildEnablePlan, unavailableDependencies, type Enablement, type EnablePlan, type Workflow } from './selection'
+import { copyPluginPackage,validatePluginCopy,verifyPluginCopy,type PluginCopy } from './package'
 import { pluginCapabilities } from './process'
+import { buildEnablePlan,unavailableDependencies,type Enablement,type EnablePlan,type Workflow } from './selection'
 
 type Trust = { digest: string; granted_at: string; revoked_at: string | null }
 export type PluginControlState = { version: 1; packages: PluginCopy[]; trusts: Trust[]; enabled: Enablement[]; workflows: Workflow[] }
@@ -40,8 +42,8 @@ function regular(file: string): void {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail()
 }
 function flush(root: string, name: string): void {
-  const fd = openSync(join(root, name), 'r'); try { fsyncSync(fd) } finally { closeSync(fd) }
-  if (process.platform !== 'win32') { const dir = openSync(root, 'r'); try { fsyncSync(dir) } finally { closeSync(dir) } }
+  flushFileSync(managedFile(root, name))
+  flushDirectorySync(root)
 }
 
 // This authority lives outside the restorable business database. Callers hold the directory owner lock.
@@ -56,13 +58,13 @@ export class PluginControl {
     try {
       mkdirSync(root, { recursive: true, mode: 0o700 })
       if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) fail()
-      const file = join(root, 'plugin-control.sqlite'), marker = join(root, 'plugin-established'), folder = join(root, 'plugins')
+      const file = managedRegularFile(root, 'plugin-control.sqlite'), marker = join(root, 'plugin-established'), folder = join(root, 'plugins')
       const present = existsSync(file)
-      if (existsSync(marker)) { regular(marker); if (readFileSync(marker, 'utf8') !== 'plugin-v1\n' || !present) fail() }
+      if (existsSync(marker)) { regular(marker); if (readRegularFileSync(marker, 32).toString('utf8') !== 'plugin-v1\n' || !present) fail() }
       if (existsSync(folder)) { if (!lstatSync(folder).isDirectory() || lstatSync(folder).isSymbolicLink()) fail(); if (!present && readdirSync(folder).some(name => !/^pending-[a-f0-9-]{36}$/.test(name))) fail() }
       if (present) regular(file)
       this.db = new Database(file)
-      this.db.pragma('busy_timeout=0'); this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); chmodSync(file, 0o600)
+      this.db.pragma('busy_timeout=0'); this.db.pragma('journal_mode=DELETE'); this.db.pragma('synchronous=FULL'); protectPrivatePath(file, 'file')
       if (!present) {
         this.db.exec('CREATE TABLE plugin_control (id INTEGER PRIMARY KEY CHECK(id=1), manifest TEXT NOT NULL)')
         this.db.prepare('INSERT INTO plugin_control VALUES (1,?)').run(JSON.stringify(this.state))
@@ -73,7 +75,7 @@ export class PluginControl {
       const parsed: unknown = row && JSON.parse(row.manifest)
       validatePluginControl(parsed); this.state = parsed
       flush(root, 'plugin-control.sqlite')
-      if (!existsSync(marker)) { writeFileSync(marker, 'plugin-v1\n', { flag: 'wx', mode: 0o600 }); flush(root, 'plugin-established') }
+      if (!existsSync(marker)) { atomicWriteFileSync(marker, 'plugin-v1\n') }
     } catch { error = 'PLUGIN_CONTROL_INVALID'; this.blocked = true }
     this.error = error
   }
