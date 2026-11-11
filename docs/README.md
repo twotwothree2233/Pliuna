@@ -16,7 +16,7 @@ Trellis 是本地任务工作空间。
 | 查 IPC、模型和插件协议 | [协议入口](protocol-v0.1.md) |
 | 查运行契约和样例 | [契约索引](contracts/README.md) |
 | 修改界面与主题 | [前端规范](design/frontend-design.md) |
-| 统一对象名称 | [领域术语](../CONTEXT.md) |
+| 统一对象名称 | [领域术语](harness/architecture.md#领域术语) |
 
 ## 当前实现
 
