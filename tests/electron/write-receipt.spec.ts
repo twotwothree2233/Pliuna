@@ -7,7 +7,7 @@ import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/m
 
 const executablePath: string = createRequire(import.meta.url)('electron')
 for (const failAfterCommit of [false, true]) test(`completed write receipt, original results and isolated restart: capacity failure ${failAfterCommit}`, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'trellis-write-receipt-desktop-')), inputs: any[] = [], text = 'SYNTHETIC_SAVED_BODY_'.repeat(3000)
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-write-receipt-desktop-')), inputs: any[] = [], text = 'SYNTHETIC_SAVED_BODY_'.repeat(3000)
   const server = await modelServer(async ({ body }, response) => {
     if (synthetic(body, response)) return
     inputs.push(body); expect(body.max_tokens).toBe(128000)
@@ -18,11 +18,11 @@ for (const failAfterCommit of [false, true]) test(`completed write receipt, orig
     if (inputs.length === 2) return hostToolStream(response, 'list', { kind: 'resource' }, failAfterCommit ? 'CAPACITY_INJECTION_'.repeat(15000) : '', 'inspect-after-commit')
     textStream(response, 'RECEIPT_FINAL_COMPLETE')
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch(), page = await app.firstWindow()
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   const call = async (request: any): Promise<any> => {
-    const reply = await page.evaluate(input => window.trellis.request(input), request)
+    const reply = await page.evaluate(input => window.pliuna.request(input), request)
     if (!reply.ok) throw Error(reply.error.code)
     return reply.data
   }
@@ -42,7 +42,7 @@ for (const failAfterCommit of [false, true]) test(`completed write receipt, orig
     const results = await call({ type: 'host.run.results', task_id: task, run_id: submitted.run_id, offset: 0 })
     expect(results).toMatchObject({ total: 1, items: [{ state: 'ended', result: 'success' }] })
     const before = await app.evaluate((_electron, { root }) => {
-      const req = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json'), db = new (req('better-sqlite3'))(root + '/trellis.sqlite')
+      const req = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json'), db = new (req('better-sqlite3'))(root + '/pliuna.sqlite')
       try { return Object.fromEntries(['tasks', 'records', 'actions', 'resources'].map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()])) } finally { db.close() }
     }, { root })
     const diagnostics = before.records.filter((record: any) => record.kind === 'model.context.rejected')
@@ -52,7 +52,7 @@ for (const failAfterCommit of [false, true]) test(`completed write receipt, orig
     await page.getByRole('button', { name: /Receipt desktop acceptance/ }).click()
     expect(await call({ type: 'host.run.results', task_id: task, run_id: submitted.run_id, offset: 0 })).toEqual(results)
     const after = await app.evaluate((_electron, { root }) => {
-      const req = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json'), db = new (req('better-sqlite3'))(root + '/trellis.sqlite')
+      const req = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json'), db = new (req('better-sqlite3'))(root + '/pliuna.sqlite')
       try { return Object.fromEntries(['tasks', 'records', 'actions', 'resources'].map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()])) } finally { db.close() }
     }, { root })
     expect(after).toEqual(before); expect(await readFile(join(root, 'settings.json'))).toEqual(settings); expect(await readFile(join(root, 'auth.json'))).toEqual(auth)

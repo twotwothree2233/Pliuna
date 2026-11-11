@@ -9,7 +9,7 @@ import { attachEvidence, requestEvidence } from '../../src/runtime/model/request
 import { montyContract } from '../../src/runtime/monty/contract'
 import { contractRepresentation } from '../../src/runtime/model/operation-contracts'
 let store: RuntimeStore, task: string, other: string, run: string
-beforeEach(() => { vi.useFakeTimers(); store = new RuntimeStore(mkdtempSync(join(tmpdir(), 'trellis-interface-query-'))); task = store.create('Interface regression').task.id; other = store.create('Other').task.id; run = store.start(task, 'synthetic', 'fixture', []) })
+beforeEach(() => { vi.useFakeTimers(); store = new RuntimeStore(mkdtempSync(join(tmpdir(), 'pliuna-interface-query-'))); task = store.create('Interface regression').task.id; other = store.create('Other').task.id; run = store.start(task, 'synthetic', 'fixture', []) })
 afterEach(() => { store.close(); vi.useRealTimers() })
 async function read(raw: any, owner = task, source = run): Promise<any> {
   return modelToolResult('read', raw, await store.agentTool(owner, source, modelToolRequest('read', raw), new AbortController().signal))

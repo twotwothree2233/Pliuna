@@ -6,11 +6,11 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { modelServer, synthetic, hostToolStream } from '../helpers/model-server'
 const require = createRequire(import.meta.url), electronPath: string = require('electron')
-const repairedPath = process.env.TRELLIS_CANDIDATE_EXECUTABLE || electronPath
-const repairedArgs = process.env.TRELLIS_CANDIDATE_EXECUTABLE ? [] : ['.']
+const repairedPath = process.env.PLIUNA_CANDIDATE_EXECUTABLE || electronPath
+const repairedArgs = process.env.PLIUNA_CANDIDATE_EXECUTABLE ? [] : ['.']
 
 async function sample():Promise<any> {
-  const work=await mkdtemp(join(tmpdir(),'trellis-review-seed-')),entry=join(work,'entry.ts'),output=join(work,'seed.cjs')
+  const work=await mkdtemp(join(tmpdir(),'pliuna-review-seed-')),entry=join(work,'entry.ts'),output=join(work,'seed.cjs')
   await writeFile(entry,`import {reviewRepairSample} from ${JSON.stringify(resolve('tests/helpers/review-repair-sample.ts'))};reviewRepairSample().then(value=>console.log(JSON.stringify(value)))`)
   const esbuild=createRequire(require.resolve('vite'))('esbuild')
   await esbuild.build({entryPoints:[entry],outfile:output,bundle:true,platform:'node',format:'cjs',packages:'external',plugins:[{name:'raw',setup(build:any){build.onResolve({filter:/\?raw$/},(args:any)=>({path:resolve(args.resolveDir,args.path.slice(0,-4)),namespace:'raw'}));build.onLoad({filter:/.*/,namespace:'raw'},async(args:any)=>({contents:await readFile(args.path,'utf8'),loader:'text'}))}}],logLevel:'silent'})
@@ -18,9 +18,9 @@ async function sample():Promise<any> {
 }
 
 test('frozen pre-fix candidate reproduces the top-layer escape in an isolated profile',async()=>{
-  test.skip(!process.env.TRELLIS_REVIEW_BASELINE_EXECUTABLE,'Explicit immutable baseline path required')
+  test.skip(!process.env.PLIUNA_REVIEW_BASELINE_EXECUTABLE,'Explicit immutable baseline path required')
   const fixture=await sample()
-  const app=await electron.launch({executablePath:process.env.TRELLIS_REVIEW_BASELINE_EXECUTABLE!,args:[],env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:fixture.root}})
+  const app=await electron.launch({executablePath:process.env.PLIUNA_REVIEW_BASELINE_EXECUTABLE!,args:[],env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:fixture.root}})
   try{
     const page=await app.firstWindow()
     await page.getByRole('button',{name:/Review repair synthetic/}).click()
@@ -38,7 +38,7 @@ test('frozen pre-fix candidate reproduces the top-layer escape in an isolated pr
 })
 
 test('blocks historical top-layer controls while preserving neighboring controls and restart data',async()=>{
-  const fixture=await sample(),launch=()=>electron.launch({executablePath:repairedPath,args:repairedArgs,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:fixture.root}})
+  const fixture=await sample(),launch=()=>electron.launch({executablePath:repairedPath,args:repairedArgs,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:fixture.root}})
   let app=await launch(),page=await app.firstWindow()
   const errors:string[]=[]
   try{
@@ -51,7 +51,7 @@ test('blocks historical top-layer controls while preserving neighboring controls
     await expect(safe.getByLabel('Note',{exact:true})).toHaveValue('REPAIR_PRESERVED_DRAFT')
     await expect(safe.getByRole('status')).toHaveText('已保存')
     await expect.poll(async()=>{
-      const result=await page.evaluate(task=>window.trellis.request({type:'task.snapshot',task_id:task}),fixture.task)
+      const result=await page.evaluate(task=>window.pliuna.request({type:'task.snapshot',task_id:task}),fixture.task)
       if(!result.ok)throw Error(result.error.code)
       return (result.data as any).views[1].draft.note
     }).toBe('REPAIR_PRESERVED_DRAFT')
@@ -71,9 +71,9 @@ for (const ending of ['cancel', 'quit'] as const) test(`ordinary plugin ${ending
   test.setTimeout(45000)
   const fixture=await sample()
   const server=await modelServer(({body},res)=>{if(synthetic(body,res))return;hostToolStream(res,'call',{capability:fixture.capability,arguments:{},references:[]})})
-  const launch=()=>electron.launch({executablePath:repairedPath,args:repairedArgs,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:fixture.root}})
+  const launch=()=>electron.launch({executablePath:repairedPath,args:repairedArgs,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:fixture.root}})
   let app=await launch(),page=await app.firstWindow()
-  const call=async(request:any):Promise<any>=>{const result=await page.evaluate(r=>window.trellis.request(r),request);if(!result.ok)throw Error(result.error.code);return result.data}
+  const call=async(request:any):Promise<any>=>{const result=await page.evaluate(r=>window.pliuna.request(r),request);if(!result.ok)throw Error(result.error.code);return result.data}
   try{
     await call({type:'model.configure',configuration:{id:'review',base_url:server.url,wire_model_id:'synthetic',context_tokens:100000,compatibility_profile:'chat-max-tokens'},api_key:'synthetic-only',confirm_memory_only:true})
     await call({type:'model.test',model_id:'review',role:'main',confirm_cost:true})

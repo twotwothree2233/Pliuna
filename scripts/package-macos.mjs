@@ -101,7 +101,7 @@ export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(i
     if (!existsSync(join(workspace, 'out/main', name))) throw Error('Build first: missing ' + name)
   }
   mkdirSync(base, { mode: 0o700 })
-  const app = join(base, 'Trellis.app'), payload = join(app, 'Contents/Resources/app')
+  const app = join(base, 'Pliuna.app'), payload = join(app, 'Contents/Resources/app')
   // Preserve framework symlinks rather than resolving links back into the checkout.
   copyPackageTree(sourceApp, app, { recursive: true, verbatimSymlinks: true })
   mkdirSync(payload, { recursive: true })
@@ -115,10 +115,10 @@ export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(i
       for (const name of ['package.json', 'LICENSE', 'lib', 'build/Release/better_sqlite3.node']) copyPackageTree(join(dependency.folder, name), join(dest, name), { recursive: true })
     } else copyPackageTree(dependency.folder, dest, { recursive: true, filter: path => !['node_modules', '.git', 'test', 'tests', 'benchmark'].includes(path.split(sep).at(-1)) })
   }
-  const executable = join(app, 'Contents/MacOS/Trellis')
+  const executable = join(app, 'Contents/MacOS/Pliuna')
   renameSync(join(app, 'Contents/MacOS/Electron'), executable)
   const plist = join(app, 'Contents/Info.plist')
-  for (const [key, value] of Object.entries({ CFBundleIdentifier: 'local.trellis.desktop', CFBundleName: 'Trellis', CFBundleDisplayName: 'Trellis', CFBundleExecutable: 'Trellis', CFBundleShortVersionString: pkg.version, CFBundleVersion: pkg.version })) {
+  for (const [key, value] of Object.entries({ CFBundleIdentifier: 'local.pliuna.desktop', CFBundleName: 'Pliuna', CFBundleDisplayName: 'Pliuna', CFBundleExecutable: 'Pliuna', CFBundleShortVersionString: pkg.version, CFBundleVersion: pkg.version })) {
     command('/usr/libexec/PlistBuddy', ['-c', `Set :${key} ${value}`, plist])
   }
   function verifyMonty() {

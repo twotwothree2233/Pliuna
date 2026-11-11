@@ -1,3 +1,4 @@
+import { isManagedDatabaseFile } from '../shared/branding'
 import { encodeFileIdentity,validStoredFileIdentity,type IdentityEncoding,type IdentityInput,type StoredFileIdentity } from '../platform/file-identity'
 import { newTestIdentityEncoding } from './file-format'
 import Database from 'better-sqlite3'
@@ -59,7 +60,7 @@ export class ExportControl {
     } catch (error) { this.db.close(); throw error }
   }
   static validate(job: ExportJob): void {
-    if (!job || Object.keys(job).sort().join(',') !== 'created_at,destination,epoch,html,id,issues,partial_confirmed,phase,reason,resources,selected,snapshot,task_id,version' || ![1, 2].includes(job.version) || !uuid.test(job.id) || !uuid.test(job.task_id) || !uuid.test(job.epoch) || !Number.isFinite(Date.parse(job.created_at)) || !['preparing', 'preview', 'saving', 'saved', 'cancelled', 'failed', 'interrupted', 'unknown'].includes(job.phase) || typeof job.selected !== 'string' || !/^(trellis|restore-[0-9a-f-]{36}-(target|rollback))\.sqlite$/.test(job.selected) || typeof job.partial_confirmed !== 'boolean' || !Array.isArray(job.resources) || job.resources.length > 1024 || !Array.isArray(job.issues) || job.issues.length > 1024 || job.issues.some(v => typeof v !== 'string' || v.length > 1000) || (job.html !== null && typeof job.html !== 'string') || (job.reason !== null && (typeof job.reason !== 'string' || !/^[a-zA-Z0-9_]+$/.test(job.reason)))) fail()
+    if (!job || Object.keys(job).sort().join(',') !== 'created_at,destination,epoch,html,id,issues,partial_confirmed,phase,reason,resources,selected,snapshot,task_id,version' || ![1, 2].includes(job.version) || !uuid.test(job.id) || !uuid.test(job.task_id) || !uuid.test(job.epoch) || !Number.isFinite(Date.parse(job.created_at)) || !['preparing', 'preview', 'saving', 'saved', 'cancelled', 'failed', 'interrupted', 'unknown'].includes(job.phase) || !isManagedDatabaseFile(job.selected) || typeof job.partial_confirmed !== 'boolean' || !Array.isArray(job.resources) || job.resources.length > 1024 || !Array.isArray(job.issues) || job.issues.length > 1024 || job.issues.some(v => typeof v !== 'string' || v.length > 1000) || (job.html !== null && typeof job.html !== 'string') || (job.reason !== null && (typeof job.reason !== 'string' || !/^[a-zA-Z0-9_]+$/.test(job.reason)))) fail()
     const ids = new Set<string>()
     const snapshot = job.snapshot as any
     if (snapshot && typeof snapshot === 'object' && 'version' in snapshot) {

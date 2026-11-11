@@ -1,3 +1,4 @@
+import { localResourceName } from '../shared/branding'
 import { serialize, type DefaultTreeAdapterMap } from 'parse5'
 import * as css from 'css-tree'
 import Ajv2020 from 'ajv/dist/2020.js'
@@ -172,7 +173,7 @@ export function checkBundle(input: unknown, scope: string, resolve?: (name: stri
         }
         if (a.name === 'class' && !/^[\w\s-]*$/.test(a.value)) reject('Invalid class')
         if (node.tagName === 'img' && a.name === 'src') {
-          const name = a.value.startsWith('trellis-resource:') ? a.value.slice(17) : ''
+          const name = localResourceName(a.value)
           if (!name || !bundle.references.some(r => r.name === name) || !resolve) reject('Image requires a declared local resource')
           a.value = resolve(name)
           if (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(a.value)) reject('Invalid verified image URL')

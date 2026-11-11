@@ -31,7 +31,7 @@ async function parser(body: Buffer): Promise<any> {
   try { return await new Promise((res, rej) => { worker.once('message', res); worker.once('error', rej); worker.once('exit', code => { if (code) rej(Error('worker exit ' + code)) }) }) } finally { await worker.terminate() }
 }
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'trellis-pdf-material-')); store = new RuntimeStore(root, new ModelService(), { viewReplacement: true }, undefined, process.execPath); db = new Database(join(root, 'trellis.sqlite')); task = store.create('synthetic PDF task').task.id
+  root = await mkdtemp(join(tmpdir(), 'pliuna-pdf-material-')); store = new RuntimeStore(root, new ModelService(), { viewReplacement: true }, undefined, process.execPath); db = new Database(join(root, 'pliuna.sqlite')); task = store.create('synthetic PDF task').task.id
   const installed = await host('plugin.internal.install', { source: resolve('reference-plugins/pdf-text') }); capability = pluginCapabilityId(installed.digest, 'extract')
   await host('plugin.trust', { digest: installed.digest, confirm_local_code: true, confirm_cross_task: false })
   const plan = await host('plugin.plan', { task_id: task, digest: installed.digest }); await host('plugin.enable', { task_id: task, digest: installed.digest, fingerprint: plan.fingerprint, confirm_cross_task: false })
@@ -41,7 +41,7 @@ it('extracts real text through binary RPC, commits source and result atomically,
   const id = await input(), result = await execute(id)
   expect(result).toMatchObject({ execution: 'success', delivery: 'delivered', data: { page_count: 2, extracted_pages: 2, partial: false } })
   const output = result.data.resource_id, text = await readFile(join(root, 'resources', output), 'utf8')
-  expect(text).toContain('Trellis PDF text one'); expect(text).toContain('Trellis PDF text two')
+  expect(text).toContain('Pliuna PDF text one'); expect(text).toContain('Pliuna PDF text two')
   const events = db.prepare("SELECT payload_json FROM records WHERE kind='material.derived'").all() as any[]; expect(events).toHaveLength(1)
   const provenance = JSON.parse(events[0].payload_json); expect(provenance).toMatchObject({ version: 1, input: { id, sha256: digest(pdfFixture()) }, output: { id: output, sha256: digest(Buffer.from(text)) }, location_verification: 'tool_reported' }); expect(provenance.pages).toHaveLength(2)
   expect(Buffer.from(text).subarray(provenance.pages[1].start, provenance.pages[1].end).toString()).toContain('Page 2')
@@ -59,7 +59,7 @@ it('extracts real text through binary RPC, commits source and result atomically,
   expect(pageTwo).toMatchObject({ content_selection: true, actual_range: { chars: 5 }, location_verification: 'tool_reported', partial: false, truncated: true })
   let selected = pageTwo.data.text, cursor = pageTwo.next_cursor
   while (cursor) { const next = await host('task.query', { task_id: task, query: { type: 'read', input: { target: { kind: 'resource', id: output }, cursor } } }); selected += next.data.text; cursor = next.next_cursor }
-  expect(selected).toContain('Trellis PDF text two'); expect(selected).not.toContain('Trellis PDF text one')
+  expect(selected).toContain('Pliuna PDF text two'); expect(selected).not.toContain('Pliuna PDF text one')
   await expect(host('task.query', { task_id: task, query: { type: 'read', input: { target: { kind: 'resource', id: output }, content: { pages: { start: 2, end: 3 } } } } })).rejects.toThrow('not present')
   expect(db.prepare('SELECT count(*) n FROM calls').get()).toEqual({ n: 1 }); expect(await readFile(join(root, 'resources', id))).toEqual(pdfFixture())
 }, 20000)

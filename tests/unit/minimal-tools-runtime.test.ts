@@ -9,7 +9,7 @@ import { modelServer, synthetic, textStream, toolStream } from '../helpers/model
 import { modelTools } from '../../src/runtime/model/tools'
 
 it('uses new wire directly for on-demand contracts, writes and Unicode continuation; rejects routing before side effects and retains raw records on restart', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-minimal-tools-')), captured: any[] = [], text = '材料😀'.repeat(3000)
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-minimal-tools-')), captured: any[] = [], text = '材料😀'.repeat(3000)
   let resource = '', data = '', cursor = '', recovered = '', index = 0, contractBytes = 0
   const server = await modelServer(({ body }, res) => {
     if (synthetic(body, res)) return
@@ -59,7 +59,7 @@ it('uses new wire directly for on-demand contracts, writes and Unicode continuat
     while (['running', 'waiting'].includes(store.snapshot(task).runs[0]!.state)) { if (Date.now() > end) throw Error('Run timeout'); await new Promise(resolve => setTimeout(resolve, 5)) }
     expect(store.snapshot(task).runs[0]).toMatchObject({ id: run, state: 'completed' })
     expect(store.snapshot(task).approvals).toHaveLength(0)
-    const db = new Database(join(root, 'trellis.sqlite'))
+    const db = new Database(join(root, 'pliuna.sqlite'))
     const records = db.prepare('SELECT * FROM records ORDER BY sequence').all()
     expect(db.prepare('SELECT count(*) n FROM actions').get()).toEqual({ n: 2 })
     expect(db.prepare('SELECT revision FROM task_data WHERE id=?').get(data)).toEqual({ revision: 1 })
@@ -68,7 +68,7 @@ it('uses new wire directly for on-demand contracts, writes and Unicode continuat
     for (const body of captured) { expect(body).not.toHaveProperty('max_tokens'); expect(body.tools).toEqual(modelTools) }
     const network = server.exchanges.length
     store.close(); store = new RuntimeStore(root)
-    const reopened = new Database(join(root, 'trellis.sqlite'))
+    const reopened = new Database(join(root, 'pliuna.sqlite'))
     expect(reopened.prepare('SELECT * FROM records ORDER BY sequence').all()).toEqual(records); reopened.close()
     expect(server.exchanges).toHaveLength(network)
     console.log(JSON.stringify({ benchmark: 'minimal-tools-on-demand', tools_bytes: Buffer.byteLength(JSON.stringify(modelTools)), contract_response_bytes: contractBytes, request_input_bytes: captured.map(body => Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools }))), real_api_requests: 0 }))

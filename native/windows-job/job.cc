@@ -27,16 +27,17 @@ static Job* argument(napi_env env, napi_callback_info info) {
   return job;
 }
 static std::wstring nameArgument(napi_env env, napi_callback_info info) {
+  const std::wstring prefix = L"Local\\Pliuna-";
   size_t count = 1, length = 0; napi_value args[1];
   if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok || count != 1 ||
-      napi_get_value_string_utf16(env, args[0], nullptr, 0, &length) != napi_ok || length != 50) {
+      napi_get_value_string_utf16(env, args[0], nullptr, 0, &length) != napi_ok || length != prefix.size() + 36) {
     fail(env, "PROCESS_JOB_NAME_INVALID"); return L"";
   }
   std::u16string buffer(length + 1, u'\0');
   napi_get_value_string_utf16(env, args[0], &buffer[0], length + 1, &length);
   std::wstring name(buffer.begin(), buffer.begin() + length);
-  if (name.substr(0, 14) != L"Local\\Trellis-") { fail(env, "PROCESS_JOB_NAME_INVALID"); return L""; }
-  for (size_t i = 14; i < name.size(); i++) {
+  if (name.compare(0, prefix.size(), prefix) != 0) { fail(env, "PROCESS_JOB_NAME_INVALID"); return L""; }
+  for (size_t i = prefix.size(); i < name.size(); i++) {
     wchar_t c = name[i];
     if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || c == L'-')) {
       fail(env, "PROCESS_JOB_NAME_INVALID"); return L"";

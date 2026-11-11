@@ -17,14 +17,14 @@ vi.mock('node:child_process', () => ({ execFileSync: vi.fn(() => { throw Error('
 const roots: string[] = []
 afterEach(() => { vi.clearAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function temporaryRoot() {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-package-agent-files-')); roots.push(root); return root
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-package-agent-files-')); roots.push(root); return root
 }
 function put(root: string, path: string, body = 'synthetic fixture') {
   const file = join(root, path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, body); return file
 }
 
 it.each([
-  'Trellis.app/Contents/Resources/app/out/.agents/notes/audit.md',
+  'Pliuna.app/Contents/Resources/app/out/.agents/notes/audit.md',
   'app/out/.codex/config.toml',
   'app/node_modules/bindings/.claude/settings.local.json',
   'PDF Text Plugin/.ao/session.json',
@@ -54,7 +54,7 @@ it.each([
   'app\\out\\.GITHUB\\Instructions\\review.instructions.md',
   'app/out/aGeNtS.Md',
   'APP/OUT/.CoDeX/config.toml',
-  'Trellis.app\\Contents\\Resources\\app\\out\\.agents\\notes\\audit.md'
+  'Pliuna.app\\Contents\\Resources\\app\\out\\.agents\\notes\\audit.md'
 ])('rejects local agent metadata in the legacy payload: %s', path => {
   expect(() => assertCleanPayload([{ path }])).toThrow('Local agent file rejected')
 })
@@ -93,7 +93,7 @@ it.each(['app/auth.json', 'settings.json', 'app/.env', 'data/runtime.sqlite-wal'
 function legacyWorkspace() {
   const root = temporaryRoot(), workspace = join(root, '.ao/workspace'), output = join(root, 'release')
   const target = nativeTargets.targets[0]!
-  put(workspace, 'package.json', JSON.stringify({ name: 'trellis', version: '0.1.0', type: 'module', main: 'out/main/index.js', dependencies: { '@pydantic/monty': '1.3.0', 'better-sqlite3': '12.4.1' }, devDependencies: { electron: '38.2.2' } }))
+  put(workspace, 'package.json', JSON.stringify({ name: 'pliuna', version: '0.1.0', type: 'module', main: 'out/main/index.js', dependencies: { '@pydantic/monty': '1.3.0', 'better-sqlite3': '12.4.1' }, devDependencies: { electron: '38.2.2' } }))
   for (const path of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'electron.vite.config.ts', 'tsconfig.json', 'src/runtime/model/agent.ts', 'src/runtime/model/prompts/agent-v0.1.txt', 'scripts/build.mjs', 'reference-plugins/pdf-text/manifest.json']) put(workspace, path)
   const manifests = [
     { name: '@pydantic/monty', version: '1.3.0', optionalDependencies: { [target.package]: '1.3.0' } },
@@ -138,8 +138,8 @@ it.runIf(process.platform === 'darwin' && process.arch === 'arm64')('copies appl
   symlinkSync('Versions/Current/Resources', join(workspace, framework, 'Resources'))
   // Stop at the first external command, after the actual payload copies.
   expect(() => packageMacos(output, workspace)).toThrow('Unexpected external command')
-  for (const [path, body] of assets) expect(readFileSync(join(output, 'Trellis.app/Contents/Resources/app', path), 'utf8')).toBe(body)
-  const copied = join(output, 'Trellis.app/Contents/Frameworks/Fixture.framework')
+  for (const [path, body] of assets) expect(readFileSync(join(output, 'Pliuna.app/Contents/Resources/app', path), 'utf8')).toBe(body)
+  const copied = join(output, 'Pliuna.app/Contents/Frameworks/Fixture.framework')
   expect(lstatSync(join(copied, 'Versions/Current')).isSymbolicLink()).toBe(true)
   expect(readlinkSync(join(copied, 'Versions/Current'))).toBe('A')
   expect(readlinkSync(join(copied, 'Resources'))).toBe('Versions/Current/Resources')

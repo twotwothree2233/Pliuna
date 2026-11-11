@@ -10,7 +10,7 @@ const executablePath: string = createRequire(import.meta.url)('electron')
 
 test('uses provider tokens, cancels overflow, compacts and resumes exact batches without replay after restart', async () => {
   test.setTimeout(60000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-provider-recovery-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-provider-recovery-'))
   let requests = 0, summaries = 0
   const inputs: any[] = [], summaryInputs: any[] = []
   const server = await modelServer(({ body }, response) => {
@@ -35,9 +35,9 @@ test('uses provider tokens, cancels overflow, compacts and resumes exact batches
     if (requests <= 3) response.end(frame({ content: 'ROUND_' + requests + ':' + '中'.repeat(5000), tool_calls: [{ index: 0, id: 'list-' + requests, type: 'function', function: { name: 'list', arguments: '{"kind":"capability"}' } }] }) + frame({}, 'tool_calls') + 'data: {"choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":100}}\n\ndata: [DONE]\n\n')
     else response.end(frame({ content: 'FINAL_COMPLETED' }) + frame({}, 'stop') + 'data: {"choices":[],"usage":{"prompt_tokens":3000,"completion_tokens":10}}\n\ndata: [DONE]\n\n')
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch(), page = await app.firstWindow()
-  const call = async (q: any): Promise<any> => { const r = await page.evaluate(q => window.trellis.request(q), q); if (!r.ok) throw Error(r.error.code); return r.data }
+  const call = async (q: any): Promise<any> => { const r = await page.evaluate(q => window.pliuna.request(q), q); if (!r.ok) throw Error(r.error.code); return r.data }
   try {
     await call({ type: 'model.configure', configuration: { id: 'main', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 30000, max_output_tokens: 128000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', remember_connection: true, confirm_plaintext_storage: true, confirm_memory_only: true })
     await call({ type: 'model.test', model_id: 'main', role: 'main', confirm_cost: true })

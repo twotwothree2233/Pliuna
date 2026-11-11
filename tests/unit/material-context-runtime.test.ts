@@ -11,7 +11,7 @@ import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/m
 
 async function until(check: () => boolean) { const end = Date.now() + 8000; while (!check()) { if (Date.now() > end) throw Error('TEST_TIMEOUT'); await new Promise(r => setTimeout(r, 10)) } }
 it.each(['exact-repeat', 'request-compaction'] as const)('real runtime read projection and restart: %s', async scenario => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-material-context-')), text = '中😀'.repeat(16000), resource = randomUUID()
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-material-context-')), text = '中😀'.repeat(16000), resource = randomUUID()
   let business = 0, summaries = 0
   const server = await modelServer(({ body }, res) => {
     if (synthetic(body, res)) return
@@ -39,7 +39,7 @@ it.each(['exact-repeat', 'request-compaction'] as const)('real runtime read proj
   models.configure({ type: 'model.configure', configuration: { id: 'main', base_url: server.url, wire_model_id: 'synthetic', context_tokens: scenario === 'exact-repeat' ? 300000 : 125000, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true })
   let store: RuntimeStore | undefined, db: Database.Database | undefined
   try {
-    await models.test('main', 'main'); store = new RuntimeStore(root, models); db = new Database(join(root, 'trellis.sqlite'))
+    await models.test('main', 'main'); store = new RuntimeStore(root, models); db = new Database(join(root, 'pliuna.sqlite'))
     const task = store.create('Synthetic material context').task.id, bytes = Buffer.from(text), sha = createHash('sha256').update(bytes).digest('hex')
     writeFileSync(join(root, 'resources', resource), bytes)
     db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(resource, resource, sha, bytes.length, 'text/plain; charset=utf-8', 'synthetic', 'now'); db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task, resource)
@@ -52,7 +52,7 @@ it.each(['exact-repeat', 'request-compaction'] as const)('real runtime read proj
     if (scenario === 'exact-repeat') { expect(results.map(r => r.data.data.text)).toEqual([text, text]); expect(results[1].data.data).not.toHaveProperty('context_reuse') }
     else { expect(results[0].data.data.text).toBe(text); expect(results[1].data.actual_range.chars).toBe(1000); expect(summaries).toBeGreaterThanOrEqual(1) }
     const completed = db.prepare("SELECT payload_json FROM records WHERE kind='model.request.accounting' AND json_extract(payload_json,'$.phase')='completed' AND json_extract(payload_json,'$.purpose')='main' ORDER BY sequence").all() as any[]
-    const requests = server.exchanges.filter(e => e.body?.messages[0]?.content.includes('你是 Trellis 的通用学习与任务助手。') && e.body.messages.at(-1)?.content !== instruction)
+    const requests = server.exchanges.filter(e => e.body?.messages[0]?.content.includes('你是 Pliuna 的通用学习与任务助手。') && e.body.messages.at(-1)?.content !== instruction)
     expect(completed).toHaveLength(3)
     for (let n = 0; n < 3; n++) expect(JSON.parse(completed[n]!.payload_json).input_bytes).toBe(Buffer.byteLength(JSON.stringify({ messages: requests[n]!.body.messages, tools: requests[n]!.body.tools })))
     if (scenario === 'exact-repeat') expect(JSON.parse(completed[2].payload_json).input_bytes - JSON.parse(completed[1].payload_json).input_bytes).toBeGreaterThan(100000)

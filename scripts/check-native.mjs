@@ -7,8 +7,8 @@ if (!target) throw Error('No native target for this OS, architecture and libc')
 const require = createRequire(import.meta.url)
 if (process.platform === 'win32') {
   const { randomUUID } = await import('node:crypto')
-  const jobs = require('../out/main/native/trellis_job.node')
-  const job = jobs.create('Local\\Trellis-' + randomUUID())
+  const jobs = require('../out/main/native/pliuna_job.node')
+  const job = jobs.create('Local\\Pliuna-' + randomUUID())
   try { if (jobs.active(job) !== 0) throw Error('Fresh Job was not empty') } finally { jobs.close(job) }
 }
 const Database = require('better-sqlite3')

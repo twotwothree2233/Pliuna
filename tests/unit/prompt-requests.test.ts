@@ -54,7 +54,7 @@ it('captures actual role requests, correction and exact action results without e
   const models = new ModelService(); closes.push(() => models.close())
   for (const id of ['main', 'approval']) models.configure({ type: 'model.configure', configuration: { id, base_url: server.url, wire_model_id: 'synthetic-only', context_tokens: 240000, ...(id === 'main' ? { max_output_tokens: 7777 } : {}), compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true })
   await models.test('main', 'main'); await models.test('approval', 'approval')
-  const store = new RuntimeStore(mkdtempSync(join(tmpdir(), 'trellis-prompt-capture-')), models); closes.push(() => store.close())
+  const store = new RuntimeStore(mkdtempSync(join(tmpdir(), 'pliuna-prompt-capture-')), models); closes.push(() => store.close())
   const task = store.create('Prompt regression').task.id
   store.handle({ type: 'approval.configure', mode: 'assisted', model_id: 'approval', confirm_external_processing: true })
   const wait = async (run: string) => {
@@ -92,5 +92,5 @@ it('captures actual role requests, correction and exact action results without e
   const lastMain = captured.filter(entry => entry.label === 'replacement').at(-1)!.body.messages
   expect(summaryRequest.slice(0, lastMain.length)).toEqual(lastMain)
   expect(summaryRequest.at(-1)).toEqual({ role: 'system', content: summary })
-  if (process.env.TRELLIS_PROMPT_CAPTURE) writeFileSync(process.env.TRELLIS_PROMPT_CAPTURE, JSON.stringify(captured, null, 2))
+  if (process.env.PLIUNA_PROMPT_CAPTURE) writeFileSync(process.env.PLIUNA_PROMPT_CAPTURE, JSON.stringify(captured, null, 2))
 })

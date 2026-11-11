@@ -10,9 +10,9 @@ import type { Snapshot } from '../../src/shared/types'
 
 let root: string, store: RuntimeStore, db: Database.Database, task: Snapshot, run: string, life: StorageLifecycle
 beforeEach(() => {
-  vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'trellis-storage-'))
+  vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'pliuna-storage-'))
   store = new RuntimeStore(root); task = store.create('存储核对'); run = store.start(task.task.id, 'held fixture', 'fixture', [])
-  db = new Database(join(root, 'trellis.sqlite')); life = new StorageLifecycle(db, root, store.epoch)
+  db = new Database(join(root, 'pliuna.sqlite')); life = new StorageLifecycle(db, root, store.epoch)
 })
 afterEach(() => { life.close(); db.close(); store.close(); rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); vi.useRealTimers() })
 const create = (): any => store.modelTool(task.task.id, run, { type: 'write', input: { type: 'resource.create', display_name: '材料', content: { type: 'text', text: 'original' } } })

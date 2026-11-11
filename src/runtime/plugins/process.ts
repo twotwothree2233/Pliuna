@@ -1,3 +1,4 @@
+import { isReferencePdfPlugin } from '../../shared/branding'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
@@ -127,7 +128,7 @@ export class PluginProcesses {
     return instance
   }
   async execute(copy: PluginCopy, task: string, request: PluginExecution): Promise<unknown> {
-    if (copy.manifest.id !== 'trellis.pdf-text') return this.executeOne(copy, task, request)
+    if (!isReferencePdfPlugin(copy.manifest.id)) return this.executeOne(copy, task, request)
     if (this.pdfTasks.has(task) || this.pdfTasks.size >= defaults.pdf.active_app) fail('PDF_CONCURRENCY_LIMIT')
     this.pdfTasks.add(task)
     try { return await this.executeOne(copy, task, request) }
@@ -173,7 +174,7 @@ export class PluginProcesses {
         return request.settle ? await request.settle(result) : result
       } catch (error) {
         if (!request.signal.aborted && !(error instanceof RpcError)) this.terminate(instance, 'PLUGIN_CALL_FAILED')
-        else if (request.signal.aborted && copy.manifest.id === 'trellis.pdf-text') this.terminate(instance, 'PLUGIN_CALL_CANCELLED')
+        else if (request.signal.aborted && isReferencePdfPlugin(copy.manifest.id)) this.terminate(instance, 'PLUGIN_CALL_CANCELLED')
         else if (request.signal.aborted) {
           // An aborted RPC cannot prove the plugin has stopped; do not reuse its serial slot.
           instance.invalid = true

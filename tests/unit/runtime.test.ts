@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 import type { Snapshot } from '../../src/shared/types'
 const paths: string[] = [], stores: RuntimeStore[] = []
-function open(path = mkdtempSync(join(tmpdir(), 'trellis-test-'))) { if (!paths.includes(path)) paths.push(path); const store = new RuntimeStore(path); stores.push(store); return { path, store } }
+function open(path = mkdtempSync(join(tmpdir(), 'pliuna-test-'))) { if (!paths.includes(path)) paths.push(path); const store = new RuntimeStore(path); stores.push(store); return { path, store } }
 function task(store: RuntimeStore) { return store.handle({ type: 'task.create', title: '核心链路' }) as Snapshot }
 async function surface(store: RuntimeStore, taskId: string) {
   store.handle({ type: 'task.submit', task_id: taskId, text: '解释一个概念', model_config_id: 'fixture', attachments: [] })
@@ -17,7 +17,7 @@ afterEach(() => { for (const s of stores.splice(0)) { try { s.close() } catch {}
 describe('runtime persistence and transaction invariants', () => {
   it('bounds desktop data metadata and reads omitted objects only by task and exact revision', () => {
     const { store, path } = open(), t = task(store), other = task(store)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     const insert = db.prepare('INSERT INTO task_data (id,task_id,revision,schema_json,value_json,references_json) VALUES (?,?,1,?,?,?)')
     for (let i = 0; i < 201; i++) insert.run(`data-${i}`, t.task.id, '{"type":"string"}', JSON.stringify(`value-${i}`), '[]')
     db.close()
@@ -94,7 +94,7 @@ describe('runtime persistence and transaction invariants', () => {
   it('rolls back answer and event together on database failure', async () => {
     vi.useFakeTimers(); const { store, path } = open(), t = task(store), s = await surface(store, t.task.id), v = s.views[0]!
     store.handle({ type: 'draft.save', task_id: t.task.id, view_id: v.id, view_revision: 1, expected_state_revision: 1, fields: [{ path: '/response', value: 'answer' }] })
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     db.exec("CREATE TRIGGER fail_answer BEFORE INSERT ON answers BEGIN SELECT RAISE(ABORT,'injected'); END")
     expect(() => store.handle({ type: 'answer.submit', task_id: t.task.id, view_id: v.id, view_revision: 1, expected_state_revision: 2, form_id: 'reflection' })).toThrow('injected')
     expect(store.snapshot(t.task.id).records.some(r => r.kind === 'answer.submitted')).toBe(false)
@@ -102,7 +102,7 @@ describe('runtime persistence and transaction invariants', () => {
   })
   it('publication database failure keeps old surface and traces orphaned files', async () => {
     vi.useFakeTimers(); const { store, path } = open(), t = task(store)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     db.exec("CREATE TRIGGER fail_view BEFORE INSERT ON views BEGIN SELECT RAISE(ABORT,'injected view failure'); END")
     await surface(store, t.task.id)
     expect(store.snapshot(t.task.id).views).toHaveLength(0)
@@ -115,7 +115,7 @@ describe('runtime persistence and transaction invariants', () => {
   it('detects corrupted immutable bundle instead of rendering altered content', async () => {
     vi.useFakeTimers(); const { store, path } = open(), t = task(store)
     await surface(store, t.task.id)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     const resource = db.prepare('SELECT storage_key FROM resources').get() as { storage_key: string }
     writeFileSync(join(path, 'resources', resource.storage_key), 'corrupted')
     expect(() => store.snapshot(t.task.id)).toThrow(expect.objectContaining({ code: 'RESOURCE_CORRUPT' }))

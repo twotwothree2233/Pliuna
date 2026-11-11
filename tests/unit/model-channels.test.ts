@@ -10,7 +10,7 @@ afterEach(async()=>{for(const close of cleanups.splice(0).reverse())await close(
 async function setup() {
   const server=await modelServer(({body,url},res)=>{if(url?.endsWith('/models')){res.writeHead(200,{'content-type':'application/json'});res.end('{"data":[{"id":"wire","context_length":100000}]}')}else if (!synthetic(body,res)) textStream(res,'Synthetic summary')})
   cleanups.push(server.close)
-  const root=mkdtempSync(join(tmpdir(),'trellis-channels-'));cleanups.push(()=>rmSync(root,{recursive:true,force:true}))
+  const root=mkdtempSync(join(tmpdir(),'pliuna-channels-'));cleanups.push(()=>rmSync(root,{recursive:true,force:true}))
   const create=async()=>{const files=new FileModelStore(root),service=new ModelService(undefined,undefined,{async load(){return files.load()},async save(records,channels){files.save(records,channels)}});await service.restore();cleanups.push(()=>service.close());return service}
   const service=await create()
   const channel={id:'channel-a',name:'Shared',base_url:server.url,compatibility_profile:'chat-max-tokens' as const}

@@ -9,7 +9,7 @@ import { MONTY_ID } from '../../src/runtime/monty/contract'
 import { ContractError } from '../../src/shared/validation'
 import type { MontyRunner,MontyOutput } from '../../src/runtime/monty/runner'
 let store:RuntimeStore,db:Database.Database,root:string,task:string,run:string,manager:MontyCalls
-beforeEach(()=>{vi.useFakeTimers();manager=undefined as any;root=mkdtempSync(join(tmpdir(),'trellis-monty-calls-'));store=new RuntimeStore(root);db=(store as any).db;task=store.create('calculation').task.id;run=store.start(task,'synthetic','fixture',[])})
+beforeEach(()=>{vi.useFakeTimers();manager=undefined as any;root=mkdtempSync(join(tmpdir(),'pliuna-monty-calls-'));store=new RuntimeStore(root);db=(store as any).db;task=store.create('calculation').task.id;run=store.start(task,'synthetic','fixture',[])})
 afterEach(async()=>{await manager?.shutdown();store.close();vi.useRealTimers()})
 function setup(output:MontyOutput,custom?:MontyRunner){
  const runner:MontyRunner=custom??((_a,_i,_s,_r,started)=>{started(123);return{result:Promise.resolve(output),stop:async()=>{}}})

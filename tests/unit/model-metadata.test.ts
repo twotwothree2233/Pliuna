@@ -14,7 +14,7 @@ it('preserves manual capacity overrides and unknown capabilities', () => {
   expect(value.context_tokens.source).toBe('service'); expect(value.max_output_tokens.source).toBe('manual'); expect(value.capabilities.tools).toBe('unknown')
 })
 it('caches only public data, restores offline, clears independently and never sends credentials', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-directory-')); const requests: any[] = []
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-directory-')); const requests: any[] = []
   try {
     const cache = new ModelDirectory(root, async (url, options) => { requests.push({ url, options }); return new Response(JSON.stringify(payload)) })
     expect(await cache.lookup('https://api.openai.com/v1', 'openai', 'exact/ID')).toMatchObject({ candidate: null })
@@ -40,6 +40,6 @@ it('binds a separately validated compaction service, locks it and rejects change
   service.configure({type:'model.configure',configuration:{...config,wire_model_id:'changed'},api_key:'synthetic',confirm_memory_only:true});expect(()=>service.acquireCompaction(lease)).toThrow('Compaction service changed');service.close()
 })
 it('does not fetch the public directory for a same-name custom proxy',async()=>{
- const root=mkdtempSync(join(tmpdir(),'trellis-directory-proxy-'));let requests=0
+ const root=mkdtempSync(join(tmpdir(),'pliuna-directory-proxy-'));let requests=0
  try{const cache=new ModelDirectory(root,async()=>{requests++;throw Error('unexpected')});expect(await cache.lookup('https://proxy.invalid/v1','openai','exact/ID',true)).toMatchObject({candidate:null});expect(requests).toBe(0)}finally{rmSync(root,{recursive:true,force:true})}
 })

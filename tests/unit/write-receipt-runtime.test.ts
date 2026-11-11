@@ -16,7 +16,7 @@ async function until(check: () => boolean) {
 }
 
 it.each([false, true, 'diagnostic-disk'] as const)('commits once and retains results across restart; injected post-commit capacity failure: %s', async failAfterCommit => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-receipt-runtime-')), bodyText = 'SAVED_BODY_'.repeat(6000), inputs: any[] = []
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-receipt-runtime-')), bodyText = 'SAVED_BODY_'.repeat(6000), inputs: any[] = []
   const server = await modelServer(({ body }, response) => {
     if (synthetic(body, response)) return
     inputs.push(body)
@@ -49,7 +49,7 @@ it.each([false, true, 'diagnostic-disk'] as const)('commits once and retains res
     const task = store.create('Receipt isolated test').task.id
     store.start(task, 'Create the resource, inspect its directory, then report.', 'receipt', [])
     await until(() => { const run = store!.snapshot(task).runs[0]; if (!failAfterCommit && run?.state === 'failed') throw Error(run.primary_reason ?? 'failed'); return run?.state === (failAfterCommit ? 'failed' : 'completed') })
-    db = new Database(join(root, 'trellis.sqlite'))
+    db = new Database(join(root, 'pliuna.sqlite'))
     const run = store.snapshot(task).runs[0]!, actions = db.prepare('SELECT * FROM actions WHERE task_id=?').all(task)
     expect(actions).toHaveLength(1); expect(actions[0]).toMatchObject({ state: 'ended', result: 'success' })
     const records = db.prepare('SELECT * FROM records WHERE task_id=? ORDER BY sequence').all(task)
@@ -76,7 +76,7 @@ it.each([false, true, 'diagnostic-disk'] as const)('commits once and retains res
     }
     const resources = db.prepare('SELECT * FROM resources').all(), requests = server.exchanges.length
     db.close(); db = undefined; store.close(); store = new RuntimeStore(root)
-    const reopened = new Database(join(root, 'trellis.sqlite'))
+    const reopened = new Database(join(root, 'pliuna.sqlite'))
     try {
       expect(reopened.prepare('SELECT * FROM records WHERE task_id=? ORDER BY sequence').all(task)).toEqual(records)
       expect(reopened.prepare('SELECT * FROM actions WHERE task_id=?').all(task)).toEqual(actions)

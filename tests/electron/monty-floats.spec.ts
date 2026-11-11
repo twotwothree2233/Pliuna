@@ -10,7 +10,7 @@ const capability = 'builtin:monty:v1'
 
 test('delivers native decimals, preserves rejection reasons and restores saved facts without replay', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-monty-floats-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-monty-floats-desktop-'))
   const cases = [
     { name: 'plain', code: 'result = price', inputs: { price: 14.5 }, value: 14.5 },
     { name: 'nested', code: 'result = {"total": qty * price + freight, "nested": [price, {"freight": freight}]}', inputs: { qty: 17, price: 14.5, freight: 0.3 }, value: { total: 246.8, nested: [14.5, { freight: 0.3 }] } },
@@ -48,10 +48,10 @@ test('delivers native decimals, preserves rejection reasons and restores saved f
       textStream(response, 'SAVED_AND_READ_nested')
     } catch (error) { failure = String(error); response.writeHead(500); response.end() }
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_MONTY: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_MONTY: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const call = async (request: any): Promise<any> => {
-    const result = await page.evaluate(request => window.trellis.request(request), request)
+    const result = await page.evaluate(request => window.pliuna.request(request), request)
     if (!result.ok) throw Error(result.error.code)
     return result.data
   }
@@ -72,7 +72,7 @@ test('delivers native decimals, preserves rejection reasons and restores saved f
     expect((await query('resource')).items).toHaveLength(0)
     expect((await query('call')).items).toHaveLength(cases.length)
     const settings = await readFile(join(root, 'settings.json')), auth = await readFile(join(root, 'auth.json')), requests = server.exchanges.length
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     const after = await call({ type: 'task.snapshot', task_id: task })
     expect(after.runtime_epoch).not.toBe(before.runtime_epoch)
     expect({ ...after, runtime_epoch: null }).toEqual({ ...before, runtime_epoch: null })

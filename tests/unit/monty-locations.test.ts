@@ -8,7 +8,7 @@ import { nativeTargets, hostMontyTarget, type MontyTarget } from '../../src/shar
 const roots: string[] = []
 afterEach(() => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture(target: MontyTarget, layout = 'development checkout') {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-native-location-')); roots.push(root)
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-native-location-')); roots.push(root)
   const app = join(root, layout), wrapper = join(app, 'node_modules', nativeTargets.montyPackage)
   const platform = join(wrapper, 'node_modules', target.package), manifest = join(platform, 'package.json')
   mkdirSync(platform, { recursive: true })
@@ -28,7 +28,7 @@ describe('installed Monty package locations', () => {
     expect(assets.binary.endsWith(target.binary)).toBe(true)
     expect(assets.native.endsWith(target.native)).toBe(true)
   })
-  for (const target of nativeTargets.targets) for (const layout of ['development checkout', 'Trellis app/Contents/Resources/app']) {
+  for (const target of nativeTargets.targets) for (const layout of ['development checkout', 'Pliuna app/Contents/Resources/app']) {
     it(`resolves ${target.id} from ${layout} without enabling execution`, () => {
       const f = fixture(target, layout)
       expect(montyPackageAssets(f.entry, target)).toEqual({

@@ -10,9 +10,9 @@ import { hostMontyTarget } from '../../src/shared/native-targets.mjs'
 import { processFixtures } from '../helpers/process-fixtures'
 
 let directory: string, built: string
-const childRuntime = process.env.TRELLIS_TEST_CHILD_RUNTIME ?? process.execPath
+const childRuntime = process.env.PLIUNA_TEST_CHILD_RUNTIME ?? process.execPath
 const active: MontyExecution[] = []
-beforeAll(async () => { directory = mkdtempSync(join(tmpdir(), 'trellis-monty-lifecycle-')); built = await processFixtures() })
+beforeAll(async () => { directory = mkdtempSync(join(tmpdir(), 'pliuna-monty-lifecycle-')); built = await processFixtures() })
 afterEach(async () => { vi.restoreAllMocks(); vi.useRealTimers(); for (const execution of active.splice(0)) await execution.stop() })
 afterAll(() => { rmSync(directory, { recursive: true, force: true }); rmSync(built, { recursive: true, force: true }) })
 function launch(runner: string, code: string, signal = new AbortController().signal, start: (pid: number) => void = () => {}) {

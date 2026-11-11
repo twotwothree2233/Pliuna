@@ -17,13 +17,13 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     if (input === '等待回复以检查队列') { pendingResponse.current = res; return }
     textStream(res, '中文回复：原子性关注一起完成，一致性关注业务规则。')
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-agent-conversation-'))
-  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-agent-conversation-'))
+  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
     await page.setViewportSize({ width: 1440, height: 960 })
-    const call = async (request: any): Promise<any> => page.evaluate(async request => { const response = await window.trellis.request(request); if (!response.ok) throw Error(response.error.code); return response.data }, request)
+    const call = async (request: any): Promise<any> => page.evaluate(async request => { const response = await window.pliuna.request(request); if (!response.ok) throw Error(response.error.code); return response.data }, request)
     await configureModel(page, { id: 'conversation-main', url: server.url, key: 'isolated-agent-key', model: 'wire-model', context: 100000, output: 2048 })
     await call({ type: 'model.test', model_id: 'conversation-main', role: 'main', confirm_cost: true })
     await page.getByRole('button', { name: '创建第一个任务' }).click()
@@ -88,7 +88,7 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     expect((await call({ type: 'task.snapshot', task_id: task })).records.findLast((record: any) => record.kind === 'message.assistant').payload.truncated).toBe(true)
     expect(await page.evaluate(() => (window as any).AGENT_EXECUTED)).toBeUndefined()
     expect(await page.locator('.agent-state-scroll').innerText()).not.toContain('中文解释')
-    await page.screenshot({ path: test.info().outputPath('trellis-agent-status-implemented.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-agent-status-implemented.png') })
     for (const theme of ['graphite', 'paper', 'midnight', 'dusk', 'moss', 'blueprint']) {
       await chooseTheme(page, theme)
       for (const width of [1440, 720, 390]) {
@@ -150,13 +150,13 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
     else if (request === '读取不存在的进度') hostToolStream(res, 'read', { target: { kind: 'task_data', id: 'missing-progress' } })
     else textStream(res, '这是一次纯问答回复。')
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-agent-activity-'))
-  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-agent-activity-'))
+  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
     await configureModel(page, { id: 'activity-main', url: server.url, key: 'isolated-activity-key', model: 'wire-model', context: 100000, output: 2048 })
-    await page.evaluate(async () => { const result = await window.trellis.request({ type: 'model.test', model_id: 'activity-main', role: 'main', confirm_cost: true }); if (!result.ok) throw Error(result.error.code) })
+    await page.evaluate(async () => { const result = await window.pliuna.request({ type: 'model.test', model_id: 'activity-main', role: 'main', confirm_cost: true }); if (!result.ok) throw Error(result.error.code) })
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('学习计划')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
@@ -186,7 +186,7 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
       expect(await page.locator('.agent').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     }
     await page.setViewportSize({ width: 1440, height: 960 })
-    await page.screenshot({ path: test.info().outputPath('trellis-agent-dynamic-activity.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-agent-dynamic-activity.png') })
     await page.getByRole('button', { name: '＋ 新建', exact: true }).click()
     await page.getByLabel('任务名称').fill('另一个任务')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()

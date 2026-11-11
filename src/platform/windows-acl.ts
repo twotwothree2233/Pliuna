@@ -10,8 +10,8 @@ import { absoluteFilePath } from './paths'
 const moduleURL = typeof __filename === 'string' ? pathToFileURL(__filename) : new URL(import.meta.url)
 const unavailable = (reason = 'ASSET'): never => { throw Error('FILE_PERMISSIONS_UNAVAILABLE', { cause: Error('WINDOWS_ACL_' + reason) }) }
 function helperFile(): string {
-  for (const url of [new URL('./native/trellis_acl.exe', moduleURL), new URL('../native/trellis_acl.exe', moduleURL),
-    new URL('../../out/main/native/trellis_acl.exe', moduleURL)]) {
+  for (const url of [new URL('./native/pliuna_acl.exe', moduleURL), new URL('../native/pliuna_acl.exe', moduleURL),
+    new URL('../../out/main/native/pliuna_acl.exe', moduleURL)]) {
     try {
       const stat = lstatSync(url)
       if (!stat.isFile() || stat.nlink !== 1) return unavailable()

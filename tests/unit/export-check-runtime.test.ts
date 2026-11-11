@@ -13,11 +13,11 @@ import { ObjectQueries } from '../../src/runtime/queries'
 let root: string, store: RuntimeStore, task: string, run: string, db: Database.Database
 beforeEach(() => {
   vi.useFakeTimers()
-  root = mkdtempSync(join(tmpdir(), 'trellis-export-check-'))
+  root = mkdtempSync(join(tmpdir(), 'pliuna-export-check-'))
   store = new RuntimeStore(root, undefined, { viewReplacement: true })
   task = store.create('Isolated export check').task.id
   run = store.start(task, 'held fixture', 'fixture', [])
-  db = new Database(join(root, 'trellis.sqlite'))
+  db = new Database(join(root, 'pliuna.sqlite'))
 })
 afterEach(() => { db.close(); store.close(); vi.useRealTimers() })
 const bundle = (): Bundle => JSON.parse((operationContract('surface.update')!.example as any).input_json).operations[0].bundle.bundle
@@ -99,7 +99,7 @@ it('reports a damaged selected image with its exact location but rejects changed
   writeFileSync(join(root, 'resources', id), png)
   db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(id, id, sha, png.length, 'image/png', 'Synthetic', '2026-11-03T00:00:00Z')
   db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task, id)
-  const b = bundle(); b.html = '<section id="lesson"><p>Table remains</p><img id="picture" src="trellis-resource:picture" alt="Synthetic"></section>'
+  const b = bundle(); b.html = '<section id="lesson"><p>Table remains</p><img id="picture" src="pliuna-resource:picture" alt="Synthetic"></section>'
   b.references = [{ name: 'picture', target: { kind: 'resource', id } }]
   const view = publish(b)
   const selected = { type: 'export.check', task_id: task, view_ids: [view.id], answer_ids: [] }

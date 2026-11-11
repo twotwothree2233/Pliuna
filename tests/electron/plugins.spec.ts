@@ -9,7 +9,7 @@ import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/m
 const electronPath: string = createRequire(import.meta.url)('electron')
 for (const scenario of ['echo-restart', 'independent-data', 'surface-preserve-reset', 'revoke-active', 'revoke-idle', 'mobile'] as const) test('isolated plugin desktop: '+scenario, async()=>{
  test.setTimeout(90000)
- const root=await mkdtemp(join(tmpdir(),'trellis-plugin-desktop-')),fixture=resolve('tests/fixtures/plugin-demo')
+ const root=await mkdtemp(join(tmpdir(),'pliuna-plugin-desktop-')),fixture=resolve('tests/fixtures/plugin-demo')
  const server=await modelServer(({body,url},res)=>{
   if(url==='/v1/models'){res.writeHead(200,{'content-type':'application/json'});res.end('{"data":[{"id":"fixture-model"}]}');return}
   if(synthetic(body,res))return
@@ -27,9 +27,9 @@ for (const scenario of ['echo-restart', 'independent-data', 'surface-preserve-re
   const args=current.request.startsWith('propose:')?{operation:current.request.slice(8),text:'new fixture value'}:{text:'PLUGIN_ECHO_OK',...(scenario==='revoke-active'?{delay_ms:5000}:{})}
   hostToolStream(res,'call',{capability:current.request.startsWith('propose:')?propose.id:capabilities.find((c:any)=>c.id!==propose.id).id,arguments:args,references:[]})
  })
- const launch=()=>electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root,TRELLIS_ENABLE_VIEW_REPLACEMENT:'1'}})
+ const launch=()=>electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_VIEW_REPLACEMENT:'1'}})
  let app=await launch(),page=await app.firstWindow();const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
- const call=async(r:any):Promise<any>=>{const response=await page.evaluate(r=>window.trellis.request(r),r);if(!response.ok)throw Error(response.error.code);return response.data}
+ const call=async(r:any):Promise<any>=>{const response=await page.evaluate(r=>window.pliuna.request(r),r);if(!response.ok)throw Error(response.error.code);return response.data}
  try{
   await call({type:'model.configure',configuration:{id:'fixture-main',base_url:server.url,wire_model_id:'fixture-model',context_tokens:1000000,max_output_tokens:4096,compatibility_profile:'chat-max-tokens'},api_key:'synthetic-only',confirm_memory_only:true})
   await call({type:'model.test',model_id:'fixture-main',role:'main',confirm_cost:true})
@@ -38,7 +38,7 @@ for (const scenario of ['echo-restart', 'independent-data', 'surface-preserve-re
   await openSettings(page, '插件与主流程');let panel=page.getByRole('dialog',{name:'应用设置',exact:true})
   if(scenario==='mobile')await page.setViewportSize({width:390,height:600})
   await app.evaluate(({dialog},fixture)=>{(dialog as any).showOpenDialog=async()=>({canceled:false,filePaths:[fixture]})},fixture)
-  await panel.getByRole('button',{name:'从文件夹导入固定包'}).click();await expect(panel).toContainText('trellis.acceptance')
+  await panel.getByRole('button',{name:'从文件夹导入固定包'}).click();await expect(panel).toContainText('pliuna.acceptance')
   const installed=(await call({type:'plugin.list',task_id:task})).items[0];expect(installed).toMatchObject({trusted:false,enabled:false,instances:[]})
   await panel.getByRole('button',{name:'核对代码信任'}).click();await expect(panel.getByRole('button',{name:'确认代码信任',exact:true})).toBeDisabled()
   await panel.getByRole('checkbox',{name:/我已核对固定包代码/}).check();await panel.getByRole('button',{name:'确认代码信任',exact:true}).click()

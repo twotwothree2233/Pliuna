@@ -10,8 +10,8 @@ export interface ModelOption extends ModelConfiguration { revision: number; role
 export interface ChannelOption extends ModelChannel { revision: number; remembered: boolean; credential_missing: boolean; occupied: boolean }
 export interface ModelState { models: ModelOption[]; channels?: ChannelOption[]; storage?: { available: boolean; backend: string; error?: string }; approval: { mode: 'manual' | 'assisted'; model_id: string }; features?: { view_replacement: boolean } }
 export async function hostRequest<T>(input: HostRequest): Promise<T> {
-  if (!window.trellis) throw new Error('桌面桥接不可用：请通过 pnpm dev 启动 Electron 使用本地数据。')
-  const response = await window.trellis.request(input)
+  if (!window.pliuna) throw new Error('桌面桥接不可用：请通过 pnpm dev 启动 Electron 使用本地数据。')
+  const response = await window.pliuna.request(input)
   if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
   return response.data as T
 }

@@ -5,7 +5,7 @@ import { setup, context, answer } from '../helpers/compaction'
 import { assertContract } from '../../src/shared/validation'
 it('keeps structural persistence facts separate from the minimal main role', () => {
   expect(persistenceFacts).toEqual({storage:'local-task-store',saved_records:['accepted-messages','submitted-answers','tool-records','installed-summaries'],compaction_deletes_originals:false,restart_resumes_execution:false})
-  expect(agentTemplate.trim()).toBe('你是 Trellis 的通用学习与任务助手。\n\n你可以与用户对话，使用当前提供的工具处理任务，并生成学习内容和交互界面。')
+  expect(agentTemplate.trim()).toBe('你是 Pliuna 的通用学习与任务助手。\n\n你可以与用户对话，使用当前提供的工具处理任务，并生成学习内容和交互界面。')
 })
 it('does not manufacture authority facts or authenticate a model claim through summary storage', async () => {
   const s = setup([...context().slice(0, 2), answer('claim', 2, 'Earlier layout was allowed.')])

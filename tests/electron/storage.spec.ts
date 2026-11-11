@@ -8,14 +8,14 @@ const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('storage inspection: failed publication, retained files, recheck, damaged formal resource and restart', async () => {
   test.setTimeout(60000)
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-storage-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-storage-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   const errors: string[] = []
   async function database(mode: 'fail' | 'drop' | 'query'): Promise<any> {
     return app.evaluate((_electron, { directory, mode }) => {
       const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3')
-      const db = new Database(directory + '/trellis.sqlite')
+      const db = new Database(directory + '/pliuna.sqlite')
       try {
         if (mode === 'fail') db.exec("CREATE TRIGGER fail_view BEFORE INSERT ON views BEGIN SELECT RAISE(ABORT,'injected storage failure'); END")
         if (mode === 'drop') db.exec('DROP TRIGGER fail_view')

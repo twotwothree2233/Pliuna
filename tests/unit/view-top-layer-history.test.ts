@@ -7,7 +7,7 @@ import { RuntimeStore } from '../../src/runtime/store'
 import { managedControls } from '../helpers/managed-controls'
 
 it('blocks historical top-layer presentation without altering source, draft or history across restart', () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-top-layer-history-'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-top-layer-history-'))
   let store = new RuntimeStore(root)
   const initial = store.create('Historical top-layer fixture'), task = initial.task.id
   const run = store.start(task, 'held fixture', 'fixture', [])
@@ -19,7 +19,7 @@ it('blocks historical top-layer presentation without altering source, draft or h
   old.html += `<button popovertarget="v-${view.id}-cover">Open</button><aside id="cover" popover="manual" style="position:fixed;inset:0">COVER</aside>`
   const resource: any = store.modelTool(task, run, {type:'write',input:{type:'resource.create',display_name:'historical-bundle.json',content:{type:'json',value:old}}})
   const resourceId = resource.data.id
-  const db = new Database(join(root,'trellis.sqlite'))
+  const db = new Database(join(root,'pliuna.sqlite'))
   // Simulate a bundle accepted by the previous publisher, not a new validation bypass.
   db.prepare('UPDATE views SET bundle_resource_id=? WHERE id=?').run(resourceId,view.id)
   db.prepare('UPDATE view_history SET bundle_resource_id=? WHERE view_id=?').run(resourceId,view.id)

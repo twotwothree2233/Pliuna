@@ -7,8 +7,8 @@ import { RuntimeStore } from '../../src/runtime/store'
 import type { Snapshot } from '../../src/shared/types'
 let store: RuntimeStore, db: Database.Database, directory: string, task: Snapshot, other: Snapshot
 beforeEach(() => {
-  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'trellis-query-')); store = new RuntimeStore(directory)
-  task = store.create('查询测试'); other = store.create('另一个任务'); db = new Database(join(directory, 'trellis.sqlite'))
+  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'pliuna-query-')); store = new RuntimeStore(directory)
+  task = store.create('查询测试'); other = store.create('另一个任务'); db = new Database(join(directory, 'pliuna.sqlite'))
 })
 afterEach(() => { db.close(); store.close(); rmSync(directory, { recursive: true, force: true }); vi.useRealTimers() })
 const query = (q: unknown, taskId = task.task.id): any => store.handle({ type: 'task.query', task_id: taskId, query: q })

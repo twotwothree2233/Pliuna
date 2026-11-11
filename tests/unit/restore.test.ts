@@ -13,7 +13,7 @@ const restore = (p = state().active, token = begin()): Promise<any> => store.han
 const journal = (): any => { const db = new Database(join(root, 'restore-control.sqlite')); try { return JSON.parse((db.prepare('SELECT manifest FROM restore_control').get() as any).manifest) } finally { db.close() } }
 const current = (): Database.Database => new Database(join(root, journal().selected))
 const restart = () => { store.close(); store = new RuntimeStore(root) }
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'trellis-restore-')); store = new RuntimeStore(root, undefined, { viewReplacement: true }); task = store.create('原任务') })
+beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'pliuna-restore-')); store = new RuntimeStore(root, undefined, { viewReplacement: true }); task = store.create('原任务') })
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); try { store.close() } catch {} rmSync(root, { recursive: true, force: true }) })
 function resource(text = 'original'): string {
   vi.useFakeTimers(); const run = store.start(task.task.id, 'held', 'fixture', [])
@@ -56,13 +56,13 @@ it('rejects retired point IDs and mismatched hashes without changing either data
 it('preserves saved data when preparation is cancelled', async () => { await point(); const newer = store.create('保留'); const token = begin(); store.handle({ type: 'maintenance.cancel', token }); expect(store.snapshot(newer.task.id)).toBeTruthy(); expect(journal().operations).toEqual([]) })
 it.each(['ENOSPC', 'EIO'])('keeps current data after backup failure: %s', async code => {
   await point(); const newer = store.create('保留'); vi.spyOn(Database.prototype, 'backup').mockRejectedValueOnce(Object.assign(new Error('fault'), { code }))
-  await expect(restore()).rejects.toThrow(/failed/); expect(journal().selected).toBe('trellis.sqlite'); expect(state().phase).toBe('blocked'); expect(store.snapshot(newer.task.id)).toBeTruthy()
+  await expect(restore()).rejects.toThrow(/failed/); expect(journal().selected).toBe('pliuna.sqlite'); expect(state().phase).toBe('blocked'); expect(store.snapshot(newer.task.id)).toBeTruthy()
   vi.restoreAllMocks(); restart(); expect(state().phase).toBe('idle'); expect(store.snapshot(newer.task.id)).toBeTruthy(); expect(state().restore.last.phase).toBe('rolled_back')
 })
-it('keeps current data after a damaged or missing referenced resource', async () => { const r = resource(); await point(); store.create('保留'); writeFileSync(join(root, 'resources', r), 'damaged'); await expect(restore()).rejects.toThrow(/failed/); expect(journal().selected).toBe('trellis.sqlite'); expect(journal().operations).toEqual([]) })
+it('keeps current data after a damaged or missing referenced resource', async () => { const r = resource(); await point(); store.create('保留'); writeFileSync(join(root, 'resources', r), 'damaged'); await expect(restore()).rejects.toThrow(/failed/); expect(journal().selected).toBe('pliuna.sqlite'); expect(journal().operations).toEqual([]) })
 it('keeps the active backup immutable, does not rename or remove the old WAL database', async () => {
   const p = (await point()).active, file = join(root, 'recovery', p.id + '.sqlite'), before = readFileSync(file)
-  await restore(); expect(readFileSync(file)).toEqual(before); expect(readdirSync(root)).toContain('trellis.sqlite')
+  await restore(); expect(readFileSync(file)).toEqual(before); expect(readdirSync(root)).toContain('pliuna.sqlite')
   // Native Windows DACL verification is part of protection; mode bits are POSIX only.
   if (process.platform !== 'win32') for (const image of [journal().operations[0].target, journal().operations[0].rollback]) expect(statSync(join(root, image.file)).mode & 0o777).toBe(0o600)
 })
@@ -115,7 +115,7 @@ it.each([undefined, false, [], 0, '../outside.sqlite'])('rejects malformed datab
   expect(() => new RuntimeStore(root)).toThrow(/journal/)
 })
 it('refuses a missing selected database rather than creating an empty replacement', () => {
-  store.close(); rmSync(join(root, 'trellis.sqlite')); expect(() => new RuntimeStore(root)).toThrow(/journal/); expect(readdirSync(root)).not.toContain('trellis.sqlite')
+  store.close(); rmSync(join(root, 'pliuna.sqlite')); expect(() => new RuntimeStore(root)).toThrow(/journal/); expect(readdirSync(root)).not.toContain('pliuna.sqlite')
 })
 it('keeps stopped tasks stopped and revokes old approval validity without changing the decision', async () => {
   const r = resource(); store.handle({ type: 'task.stop', task_id: task.task.id })

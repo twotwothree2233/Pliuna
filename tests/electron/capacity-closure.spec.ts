@@ -11,7 +11,7 @@ const instruction = readFileSync('src/runtime/model/prompts/summary-v0.1.txt', '
 
 test('compacts three completed request boundaries, preserves exact rounds, and rejects stale-usage installation across restart', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-capacity-closure-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-capacity-closure-'))
   const mainInputs: any[][] = [], summaryInputs: any[][] = []
   let oversized = false, resource = ''
   const server = await modelServer(({ body }, response) => {
@@ -41,10 +41,10 @@ test('compacts three completed request boundaries, preserves exact rounds, and r
     } : { content: 'FINAL_DELIVERED' }) + frame({}, number <= 3 ? 'tool_calls' : 'stop') +
       `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: number <= 3 ? 216000 : 3000, completion_tokens: 100 } })}\n\ndata: [DONE]\n\n`)
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch(), page = await app.firstWindow()
   const call = async (q: any): Promise<any> => {
-    const r = await page.evaluate(q => window.trellis.request(q), q)
+    const r = await page.evaluate(q => window.pliuna.request(q), q)
     if (!r.ok) throw Error(r.error.code)
     return r.data
   }
@@ -87,7 +87,7 @@ test('compacts three completed request boundaries, preserves exact rounds, and r
     expect(server.exchanges).toHaveLength(count)
     const audit = await app.evaluate((_electron, { root, task }) => {
       const require = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')
-      const db = new (require('better-sqlite3'))(root + '/trellis.sqlite', { readonly: true })
+      const db = new (require('better-sqlite3'))(root + '/pliuna.sqlite', { readonly: true })
       try { return { resources: db.prepare('SELECT count(*) n FROM task_resources WHERE task_id=?').get(task).n, actions: db.prepare('SELECT count(*) n FROM actions WHERE task_id=?').get(task).n } }
       finally { db.close() }
     }, { root, task })

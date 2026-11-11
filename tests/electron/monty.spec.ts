@@ -4,12 +4,12 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/model-server'
-const executablePath: string = process.env.TRELLIS_CANDIDATE_EXECUTABLE || createRequire(import.meta.url)('electron')
+const executablePath: string = process.env.PLIUNA_CANDIDATE_EXECUTABLE || createRequire(import.meta.url)('electron')
 const capability = 'builtin:monty:v1'
 
 test('native calculation discovers its contract, saves faithful values, cancels and restores without replay', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-monty-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-monty-desktop-'))
   let mode = 'normal', turn = 0, saved: any, source: any, failure: string | undefined
   const server = await modelServer(({ body }, response) => {
     try {
@@ -33,14 +33,14 @@ test('native calculation discovers its contract, saves faithful values, cancels 
       textStream(response, 'MONTY_DESKTOP_DONE: original calculation is saved, not proof of mathematical correctness.')
     } catch (error) { failure = String(error); response.writeHead(500); response.end() }
   })
-  const launch = () => electron.launch({ executablePath, args: process.env.TRELLIS_CANDIDATE_EXECUTABLE ? [] : ['.'], env: { ...Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && !['TRELLIS_ENABLE_MONTY', 'TRELLIS_ENABLE_VIEW_REPLACEMENT'].includes(key))) as Record<string, string>, PATH: '', MONTY_BIN: '/untrusted-must-not-run', NAPI_RS_NATIVE_LIBRARY_PATH: '/untrusted-must-not-load', ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const launch = () => electron.launch({ executablePath, args: process.env.PLIUNA_CANDIDATE_EXECUTABLE ? [] : ['.'], env: { ...Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && !['PLIUNA_ENABLE_MONTY', 'PLIUNA_ENABLE_VIEW_REPLACEMENT'].includes(key))) as Record<string, string>, PATH: '', MONTY_BIN: '/untrusted-must-not-run', NAPI_RS_NATIVE_LIBRARY_PATH: '/untrusted-must-not-load', ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch(), page = await app.firstWindow()
-  const request = async (input: any): Promise<any> => { const response = await page.evaluate(r => window.trellis.request(r), input); if (!response.ok) throw Error(response.error.code); return response.data }
+  const request = async (input: any): Promise<any> => { const response = await page.evaluate(r => window.pliuna.request(r), input); if (!response.ok) throw Error(response.error.code); return response.data }
   const query = (task: string, kind: string, id?: string) => request({ type: 'task.query', task_id: task, query: id ? { type: 'read', input: { target: { kind, id } } } : { type: 'list', input: { kind } } })
   try {
     await expect(page.getByText('本地运行', { exact: true })).toBeVisible()
     expect(await app.evaluate(({ app }) => app.getPath('userData'))).toBe(root)
-    if (process.env.TRELLIS_CANDIDATE_EXECUTABLE) expect(await app.evaluate(({ app }) => app.getAppPath())).toContain('Trellis.app/Contents/Resources/app')
+    if (process.env.PLIUNA_CANDIDATE_EXECUTABLE) expect(await app.evaluate(({ app }) => app.getAppPath())).toContain('Pliuna.app/Contents/Resources/app')
     expect(await request({ type: 'host.tasks' })).toEqual([])
     await request({ type: 'model.configure', configuration: { id: 'monty-synthetic', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 1000000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true, remember_connection: true, confirm_plaintext_storage: true })
     await request({ type: 'model.test', model_id: 'monty-synthetic', role: 'main', confirm_cost: true })
@@ -62,7 +62,7 @@ test('native calculation discovers its contract, saves faithful values, cancels 
     expect(await readFile(exported, 'utf8')).toContain('2 + 3 + 5 = 10')
     const settings = await readFile(join(root, 'settings.json'), 'utf8'), auth = await readFile(join(root, 'auth.json'), 'utf8')
     const count = server.exchanges.length
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     expect((await query(task, 'call', original)).data.result_data).toEqual(saved)
     expect(server.exchanges).toHaveLength(count); expect(await readFile(join(root, 'settings.json'), 'utf8')).toBe(settings); expect(await readFile(join(root, 'auth.json'), 'utf8')).toBe(auth)
     mode = 'cancel'; turn = 0
@@ -73,8 +73,8 @@ test('native calculation discovers its contract, saves faithful values, cancels 
     const stopped = await request({ type: 'task.snapshot', task_id: task }); expect(stopped.runs.find((run: any) => run.id === pending.run_id).state).not.toBe('running')
     expect((await query(task, 'resource')).items).toHaveLength(3)
     const finalCount = server.exchanges.length
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     expect(server.exchanges).toHaveLength(finalCount); expect((await query(task, 'call')).items).toHaveLength(2); expect((await query(task, 'call', original)).data.result_data).toEqual(saved)
-    console.log(JSON.stringify({ isolated_profile: root, packaged: Boolean(process.env.TRELLIS_CANDIDATE_EXECUTABLE), requests: server.exchanges.length, native_result_restored: true, real_api_requests: 0 }))
+    console.log(JSON.stringify({ isolated_profile: root, packaged: Boolean(process.env.PLIUNA_CANDIDATE_EXECUTABLE), requests: server.exchanges.length, native_result_restored: true, real_api_requests: 0 }))
   } finally { await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {}); await app.close().catch(() => {}); await server.close() }
 })

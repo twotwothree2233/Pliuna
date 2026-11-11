@@ -5,7 +5,7 @@ const { createRequire } = require('node:module')
 if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') {
   throw Error('DESIGNATED_WINDOWS_X64_RUNNER_REQUIRED')
 }
-const evidence = process.env.TRELLIS_WIN11_EVIDENCE
+const evidence = process.env.PLIUNA_WIN11_EVIDENCE
 if (!evidence || !path.isAbsolute(evidence)) throw Error('WINDOWS11_EVIDENCE_REQUIRED')
 
 // Use the same locked node-gyp as the existing Node/Electron rebuild entry.

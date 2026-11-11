@@ -13,7 +13,7 @@ let root: string, store: RuntimeStore, db: Database.Database, task: string, run:
 let pending: { snapshot: CheckSnapshot; resolve(result: CheckResult): void; reject(error: Error): void; exit(): void; stop: ReturnType<typeof vi.fn> }[]
 beforeEach(() => {
   vi.useFakeTimers(); pending = []
-  root = mkdtempSync(join(tmpdir(), 'trellis-async-export-check-'))
+  root = mkdtempSync(join(tmpdir(), 'pliuna-async-export-check-'))
   store = new RuntimeStore(root, undefined, { viewReplacement: true }, undefined, undefined, snapshot => {
     let resolve!: (result: CheckResult) => void, reject!: (error: Error) => void, exit!: () => void
     const result = new Promise<CheckResult>((yes, no) => { resolve = yes; reject = no })
@@ -22,7 +22,7 @@ beforeEach(() => {
     pending.push({ snapshot, resolve, reject, exit, stop }); return { result, stop }
   })
   task = store.create('Async selection synthetic').task.id; run = store.start(task, 'held synthetic fixture', 'fixture', [])
-  db = new Database(join(root, 'trellis.sqlite'))
+  db = new Database(join(root, 'pliuna.sqlite'))
 })
 afterEach(async () => { for (const item of pending) item.exit(); await Promise.resolve(); await store.shutdown(); db.close(); vi.useRealTimers() })
 function publish(extra = '') {

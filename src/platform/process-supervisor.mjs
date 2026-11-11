@@ -17,7 +17,7 @@ const send = (message, callback) => {
 }
 try {
   if (process.platform === 'win32') {
-    createRequire(import.meta.url)(process.env.TRELLIS_JOB_BINDING).attach(process.env.TRELLIS_JOB_NAME)
+    createRequire(import.meta.url)(process.env.PLIUNA_JOB_BINDING).attach(process.env.PLIUNA_JOB_NAME)
   }
 } catch {
   send({ type: 'tree.error' }, () => process.exit(1))

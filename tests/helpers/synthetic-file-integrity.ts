@@ -25,7 +25,7 @@ vi.mock('../../src/platform/windows-acl', async importOriginal => {
 
 // Only isolated test directories opt into the new Windows control format.
 if (process.platform === 'win32') {
-  process.env.TRELLIS_TEST_FILE_IDENTITIES = 'decimal-v2'
+  process.env.PLIUNA_TEST_FILE_IDENTITIES = 'decimal-v2'
   // Synchronous native ACL calls otherwise starve Vitest's queued worker RPCs.
   afterEach(async () => {
     const failures = aclConfirmation.failures.splice(0)

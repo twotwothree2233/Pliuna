@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trellis.local/contracts/0.1/core.schema.json",
-  "title": "Trellis core contract draft 0.1",
+  "$id": "https://pliuna.local/contracts/0.1/core.schema.json",
+  "title": "Pliuna core contract draft 0.1",
   "$defs": {
     "target": {
       "type": "object",

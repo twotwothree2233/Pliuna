@@ -20,7 +20,7 @@ function bundle(title = '旧题目', compatibility = 'exercise-1', initial = '')
 }
 function setup(enabled: boolean | 'default' = true) {
   vi.useFakeTimers()
-  const path = mkdtempSync(join(tmpdir(), 'trellis-view-replace-')), store = new RuntimeStore(path, new ModelService(), enabled === 'default' ? undefined : { viewReplacement: enabled })
+  const path = mkdtempSync(join(tmpdir(), 'pliuna-view-replace-')), store = new RuntimeStore(path, new ModelService(), enabled === 'default' ? undefined : { viewReplacement: enabled })
   cleanups.push(() => { try { store.close() } catch {} rmSync(path, { recursive: true, force: true }) })
   const task = store.create('替换验收'), run = store.start(task.task.id, 'fixture held for deterministic tools', 'fixture', [])
   store.modelTool(task.task.id, run, { type: 'write', input: { type: 'surface.update', surface_id: task.surface.id, expected_revision: 1, operations: [{ type: 'view.create', client_ref: 'first', slot_id: 'main', bundle: { type: 'inline', bundle: bundle() } }] } })
@@ -60,7 +60,7 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     expect((await result).error).toBeUndefined()
     const next = store.snapshot(task.task.id).views[0]!
     expect(next).toMatchObject({ id: before.id, revision: 2, state_revision: 2, draft: { answer: '' } })
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     expect(db.prepare('SELECT view_revision FROM view_history ORDER BY view_revision').all()).toEqual([{ view_revision: 1 }, { view_revision: 2 }]); db.close()
   })
   it('preserves saved user draft rather than new initial after explicit permission', async () => {
@@ -98,7 +98,7 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '新初值' })
     expect(store.snapshot(task.task.id).answers.map(a => a.value)).toEqual([{ answer: '旧题作答' }, { answer: '旧题作答' }])
     expect(() => store.handle(submit)).toThrow('Content or draft changed')
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     expect(db.prepare('SELECT DISTINCT h.view_revision FROM answers a JOIN view_history h ON h.id=a.view_history_id').all()).toEqual([{ view_revision: 1 }]); db.close()
   })
   it('rejects schema and compatibility changes under preserve, and ambiguous reset initials', () => {
@@ -168,7 +168,7 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const { store, task, run, path } = setup(), input = request(store, task)
     const mixed = { ...input, input: { ...input.input, operations: [{ type: 'view.create', client_ref: 'second', slot_id: 'main', bundle: { type: 'inline', bundle: bundle('second') } }, ...input.input.operations] } }
     const before = store.snapshot(task.task.id), result = invoke(store, task, run, mixed); await tick()
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     db.exec("CREATE TRIGGER fail_replacement BEFORE UPDATE ON views BEGIN SELECT RAISE(ABORT,'injected replacement failure'); END")
     await expect(respond(store, task)).rejects.toMatchObject({ code: 'SURFACE_NOT_COMMITTED' })
     expect((await result).error).toBeDefined()
@@ -211,7 +211,7 @@ describe('Surface removal and layout', () => {
     await expect(respond(store, task, true, false)).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
     await respond(store, task, true, true); expect((await result).error).toBeUndefined()
     expect(store.snapshot(task.task.id).views).toHaveLength(0); expect(store.snapshot(task.task.id).answers[0]!.value).toEqual({ answer: 'retained answer' })
-    const db = new Database(join(path, 'trellis.sqlite')); expect(db.prepare('SELECT count(*) n FROM view_history').get()).toEqual({ n: 1 }); expect(db.prepare('SELECT count(*) n FROM object_references').get()).toMatchObject({ n: 1 }); db.close()
+    const db = new Database(join(path, 'pliuna.sqlite')); expect(db.prepare('SELECT count(*) n FROM view_history').get()).toEqual({ n: 1 }); expect(db.prepare('SELECT count(*) n FROM object_references').get()).toMatchObject({ n: 1 }); db.close()
   })
   it('cancelled removal retains the current draft and View', async () => {
     const { store, task, run } = setup(); save(store, task, 'keep draft')
@@ -245,7 +245,7 @@ describe('Surface removal and layout', () => {
   it('keeps the usable View page when another page is corrupt and filters column weights with its Views', () => {
     const {store,task,run,path}=setup(),before=store.snapshot(task.task.id)
     store.modelTool(task.task.id,run,{type:'write',input:{type:'surface.update',surface_id:before.surface.id,expected_revision:before.surface.revision,operations:Array.from({length:11},(_,i)=>({type:'view.create',client_ref:'page-'+i,slot_id:'main',bundle:{type:'inline',bundle:bundle('page-'+i)}}))}})
-    const db=new Database(join(path,'trellis.sqlite')),views=db.prepare('SELECT id,bundle_resource_id FROM views ORDER BY rowid').all() as any[]
+    const db=new Database(join(path,'pliuna.sqlite')),views=db.prepare('SELECT id,bundle_resource_id FROM views ORDER BY rowid').all() as any[]
     const layout={slots:[{id:'main',groups:[{id:'others',type:'column',views:views.slice(0,8).map(v=>v.id)},{id:'weighted',type:'responsive_columns',views:views.slice(8).map(v=>v.id),column_weights:[1,2,3,4]}]}]}
     db.prepare('UPDATE surfaces SET layout_json=? WHERE id=?').run(JSON.stringify(layout),before.surface.id)
     const current=store.snapshot(task.task.id);expect(current.surface.layout!.slots[0]!.groups[1]!.column_weights).toEqual([1,2])
@@ -279,7 +279,7 @@ describe('resource-backed bundle approval', () => {
   it('copies a same-task resource into independent immutable publication', () => {
     const { store, task, run, path } = setup(), current = store.snapshot(task.task.id), ref = source(store, task, run)
     store.modelTool(task.task.id, run, { type: 'write', input: { type: 'surface.update', surface_id: current.surface.id, expected_revision: current.surface.revision, operations: [{ type: 'view.create', client_ref: 'resource', slot_id: 'main', bundle: ref }] } })
-    const db = new Database(join(path, 'trellis.sqlite')), saved = db.prepare('SELECT bundle_resource_id FROM views ORDER BY rowid DESC LIMIT 1').get() as any
+    const db = new Database(join(path, 'pliuna.sqlite')), saved = db.prepare('SELECT bundle_resource_id FROM views ORDER BY rowid DESC LIMIT 1').get() as any
     expect(saved.bundle_resource_id).not.toBe(ref.resource.id)
     writeFileSync(join(path, 'resources', ref.resource.id), 'broken source after publication')
     expect(store.snapshot(task.task.id).views[1]!.presentation.html).toContain('Resource question'); db.close()
@@ -291,7 +291,7 @@ describe('resource-backed bundle approval', () => {
     // The draft mutation requires fresh state preconditions.
     input.input.operations[0].state_transition.expected_state_revision = store.snapshot(task.task.id).views[0]!.state_revision
     const result = invoke(store, task, run, input); await tick()
-    const db = new Database(join(path, 'trellis.sqlite')), approval = db.prepare('SELECT binding_json,action_id FROM approvals').get() as any, binding = JSON.parse(approval.binding_json)
+    const db = new Database(join(path, 'pliuna.sqlite')), approval = db.prepare('SELECT binding_json,action_id FROM approvals').get() as any, binding = JSON.parse(approval.binding_json)
     expect(JSON.parse((db.prepare('SELECT request_json FROM actions WHERE id=?').get(approval.action_id) as any).request_json)).toEqual(input.input)
     expect(binding).toMatchObject({ version: 2, resolved: { version: 1, sources: [{ id: input.input.operations[0].bundle.resource.id }], effective_request: { operations: [{ bundle: { type: 'inline', bundle: { html: expect.stringContaining('Resource question') } } }] } } })
     expect(store.snapshot(task.task.id).approvals[0]!.request).toEqual(binding.resolved)
@@ -302,7 +302,7 @@ describe('resource-backed bundle approval', () => {
     const { store, task, run, path } = setup(); save(store, task, 'keep')
     const input: any = request(store, task); input.input.operations[0].bundle = source(store, task, run)
     const result = invoke(store, task, run, input); await tick()
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     if (change === 'source') writeFileSync(join(path, 'resources', input.input.operations[0].bundle.resource.id), 'corrupt')
     else { const row = db.prepare('SELECT id,binding_json FROM approvals').get() as any, binding = JSON.parse(row.binding_json); binding.resolved.sources[0].sha256 = '0'.repeat(64); db.prepare('UPDATE approvals SET binding_json=? WHERE id=?').run(JSON.stringify(binding), row.id) }
     approve(store, task); await tick()
@@ -312,7 +312,7 @@ describe('resource-backed bundle approval', () => {
   it('rejects foreign resources and malformed JSON before approval', async () => {
     const { store, task, run, path } = setup(), ref = source(store, task, run), other = store.create('foreign'), otherRun = store.start(other.task.id, 'fixture', 'fixture', [])
     const input: any = request(store, task); input.input.operations[0].bundle = ref
-    const db = new Database(join(path, 'trellis.sqlite')); db.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(task.task.id, ref.resource.id); db.prepare('INSERT INTO task_resources VALUES (?,?)').run(other.task.id, ref.resource.id)
+    const db = new Database(join(path, 'pliuna.sqlite')); db.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(task.task.id, ref.resource.id); db.prepare('INSERT INTO task_resources VALUES (?,?)').run(other.task.id, ref.resource.id)
     expect((await invoke(store, task, run, input)).error).toMatchObject({ code: 'RESOURCE_MISSING' }); expect(store.snapshot(task.task.id).approvals).toHaveLength(0)
     store.handle({ type: 'run.cancel', task_id: other.task.id, run_id: otherRun }); db.close()
   })

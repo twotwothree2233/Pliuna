@@ -8,7 +8,7 @@ import { RuntimeStore } from '../../src/runtime/store'
 import type { Bundle } from '../../src/shared/contracts.generated'
 import { imageUrl } from '../../src/runtime/view-resources'
 let root: string, store: RuntimeStore, task: string, run: string, db: Database.Database
-beforeEach(() => { vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'trellis-export-runtime-')); store = new RuntimeStore(root); task = store.create('Synthetic export').task.id; run = store.start(task, 'held fixture', 'fixture', []); db = new Database(join(root, 'trellis.sqlite')) })
+beforeEach(() => { vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'pliuna-export-runtime-')); store = new RuntimeStore(root); task = store.create('Synthetic export').task.id; run = store.start(task, 'held fixture', 'fixture', []); db = new Database(join(root, 'pliuna.sqlite')) })
 afterEach(() => { db.close(); store.close(); rmSync(root, { recursive: true, force: true }); vi.useRealTimers() })
 const call = (type: string, extra: any = {}): any => store.handle({ type, task_id: task, ...extra })
 const body = (text = 'Published learning'): Bundle => ({ profile: 'managed-v1', html: `<section id="lesson"><p>${text}</p></section>`, css: '', state: { schema: { type: 'object', additionalProperties: false, properties: {} }, initial: {}, compatibility_version: 'v1' }, forms: [], behaviors: [], references: [], export: [{ id: 'lesson', category: 'learning', source: { type: 'element', element_id: 'lesson' } }] })
@@ -36,7 +36,7 @@ it('refuses old snapshot save after restart and permits explicit cancellation wi
  expect(call('export.cancel', { operation_id: job.id })).toMatchObject({ phase: 'cancelled', pinned: false })
 })
 it('registers direct image identity in immutable history and rejects foreign or corrupt resources', () => {
- const resource = image(png()), b = body(); b.html = '<section id="lesson"><img src="trellis-resource:diagram" alt="synthetic diagram"></section>'; b.references = [{ name: 'diagram', target: { kind: 'resource', id: resource.id } }]
+ const resource = image(png()), b = body(); b.html = '<section id="lesson"><img src="pliuna-resource:diagram" alt="synthetic diagram"></section>'; b.references = [{ name: 'diagram', target: { kind: 'resource', id: resource.id } }]
  publish(b); expect(store.snapshot(task).views[0]!.presentation.html).toContain('data:image/png;base64,')
  const history = JSON.parse((db.prepare('SELECT evidence_snapshot_json value FROM view_history').get() as any).value)
  expect(history.resources[0]).toMatchObject(resource); expect(db.prepare('SELECT 1 FROM object_references WHERE target_id=?').get(resource.id)).toBeTruthy()

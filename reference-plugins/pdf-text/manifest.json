@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.1",
   "protocol_version": "0.1",
-  "id": "trellis.pdf-text",
+  "id": "pliuna.pdf-text",
   "version": "1.0.0",
   "access_level": "task",
   "contributes": [

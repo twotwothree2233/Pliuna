@@ -7,14 +7,14 @@ import { createRequire } from 'node:module'
 const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('shared UI keeps task creation errors inside the dialog and preserves the name', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-create-error-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-create-error-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow()
     await expect(page.getByRole('heading', { name: '尚无任务', exact: true })).toBeVisible()
     await app.evaluate(({ ipcMain }) => {
-      ipcMain.removeHandler('trellis:request')
-      ipcMain.handle('trellis:request', () => ({ ok: false, error: { code: 'OFFLINE', message: 'Test runtime unavailable' } }))
+      ipcMain.removeHandler('pliuna:request')
+      ipcMain.handle('pliuna:request', () => ({ ok: false, error: { code: 'OFFLINE', message: 'Test runtime unavailable' } }))
     })
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('保留未提交任务名')
@@ -31,8 +31,8 @@ test('shared UI keeps task creation errors inside the dialog and preserves the n
 })
 
 test('desktop workspace: exact theme geometry, real navigation, per-task composer and keyboard', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-workspace-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-workspace-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', e => errors.push(e.message))
@@ -101,11 +101,11 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await page.getByLabel('想从哪里开始？').fill('请解释事务中的持久性')
     await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
     await expect(page.getByRole('heading', { name: '思考与记录' })).toBeVisible()
-    await page.screenshot({ path: join(tmpdir(), 'trellis-workspace-graphite.png') })
+    await page.screenshot({ path: join(tmpdir(), 'pliuna-workspace-graphite.png') })
     await chooseTheme(page, 'paper')
-    await page.screenshot({ path: join(tmpdir(), 'trellis-workspace-paper.png') })
+    await page.screenshot({ path: join(tmpdir(), 'pliuna-workspace-paper.png') })
     await chooseTheme(page, 'dusk')
-    await page.screenshot({ path: join(tmpdir(), 'trellis-workspace-dusk.png') })
+    await page.screenshot({ path: join(tmpdir(), 'pliuna-workspace-dusk.png') })
     await page.setViewportSize({ width: 720, height: 900 })
     await expect(page.getByLabel('筛选任务')).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

@@ -10,7 +10,7 @@ import { modelServer } from '../helpers/model-server'
 import { contractScenario } from '../helpers/contract-scenario'
 
 it('actually delivers every large contract page through HTTP, uses its example and exports the persisted View', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-contract-delivery-')), scene = contractScenario()
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-contract-delivery-')), scene = contractScenario()
   const server = await modelServer(scene.handle), models = new ModelService()
   let store: RuntimeStore | undefined
   try {
@@ -25,7 +25,7 @@ it('actually delivers every large contract page through HTTP, uses its example a
     expect(scene.pages.length).toBeGreaterThan(1)
     expect(Buffer.byteLength(scene.pages[0]!.content)).toBeGreaterThan(4000)
     expect(scene.contract).toEqual(operationContract('surface.update'))
-    const db = new Database(join(root, 'trellis.sqlite'))
+    const db = new Database(join(root, 'pliuna.sqlite'))
     try {
       for (const page of scene.pages) {
         const row = db.prepare("SELECT payload_json FROM records WHERE kind='model.tool_result' AND json_extract(payload_json,'$.message.tool_call_id')=?").get(page.id) as any

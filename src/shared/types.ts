@@ -22,4 +22,4 @@ export type ExportRequest = { type: 'export.catalog'; task_id: string; offset: n
 export type HostRequest = IpcRequest | HostModelRequest | HostPluginRequest | ExportRequest | { type: 'host.messages.latest'; task_id: string } | { type: 'host.run.activity'; task_id: string; run_id: string } | { type: 'host.run.accounting'; task_id: string; run_id: string; cursor?: string } | { type: 'host.run.results'; task_id: string; run_id: string; offset: number } | { type: 'host.views.page'; task_id: string; offset: number; expected_revision: number } | { type: 'host.tasks' } | { type: 'host.cache.clear' } | { type: 'host.directory.clear' } | { type: 'host.directory.lookup'; base_url: string; provider_id: string; wire_model_id: string; refresh: boolean }
 export type HostResponse = { ok: true; data: unknown } | { ok: false; error: { code: string; message: string } }
 export interface Bridge { readonly platform: string; request(request: HostRequest): Promise<HostResponse> }
-declare global { interface Window { trellis: Bridge } }
+declare global { interface Window { pliuna: Bridge } }

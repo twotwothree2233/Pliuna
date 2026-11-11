@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-const req=createRequire(import.meta.url),esbuild=createRequire(req.resolve('vite'))('esbuild'),working=mkdtempSync(join(tmpdir(),'trellis-scale-runner-')),executable=join(working,'benchmark.cjs')
+const req=createRequire(import.meta.url),esbuild=createRequire(req.resolve('vite'))('esbuild'),working=mkdtempSync(join(tmpdir(),'pliuna-scale-runner-')),executable=join(working,'benchmark.cjs')
 try{
  await esbuild.build({entryPoints:['tests/helpers/storage-benchmark.ts'],outfile:executable,bundle:true,platform:'node',format:'cjs',packages:'external',loader:{'.txt':'text','.sql':'text'}})
  for(const scenario of process.argv.slice(2).length?process.argv.slice(2):['baseline','large','control1k','control10k','control100k','replicas','largefile']){

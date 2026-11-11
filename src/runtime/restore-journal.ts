@@ -14,13 +14,14 @@ import { validatePluginProtection,verifyPluginProtection } from './plugins/prote
 import { validateRetirement,type Retirement } from './replicas'
 import { validateResourceCleanup,type ResourceCleanup,type TaskDeletion } from './resource-cleanup'
 import { digest,resourceBody } from './resources'
+import { defaultDatabaseFile, initialDatabaseFile, initialDatabaseFiles, isInitialDatabaseFile, isManagedDatabaseFile, legacyDatabaseFile } from '../shared/branding'
 
 type Row = Record<string, any>
 export type RestoreImage = { file: string; tasks: string[]; resources: Row[]; plugins: PluginCopy[]; sha256?: string }
 type Operation = { id: string; token: string; point_id: string; phase: 'preparing' | 'switched' | 'completed' | 'rolled_back'; previous: string; target: RestoreImage; rollback: RestoreImage; created_at: string }
 type Journal = { version: 5 | 6; export_control: IdentityEncoding; selected: string; deleted_tasks: string[]; operations: Operation[]; verified_head: string | null; retirements: Retirement[]; task_deletions: TaskDeletion[]; resource_cleanups: ResourceCleanup[] }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const managed = (file: unknown): file is string => typeof file === 'string' && (file === 'trellis.sqlite' || /^restore-[0-9a-f-]{36}-(target|rollback)\.sqlite$/.test(file))
+const managed = isManagedDatabaseFile
 const fail = (): never => { throw new ContractError('RESTORE_JOURNAL_INVALID', 'Restore journal requires inspection; business access is closed') }
 
 export function flushFile(root: string, file: string): void {
@@ -32,7 +33,7 @@ export function describeDatabase(db: Database.Database, file: string): RestoreIm
 }
 export function verifyDatabase(db: Database.Database, root: string, deleted: string[], image?: RestoreImage): void {
   if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length || JSON.stringify(db.prepare('SELECT version FROM schema_version').all()) !== '[{"version":1}]') fail()
-  const actual = describeDatabase(db, image?.file ?? 'trellis.sqlite')
+  const actual = describeDatabase(db, image?.file ?? defaultDatabaseFile)
   if (actual.tasks.some(task => deleted.includes(task))) fail()
   if (image && (JSON.stringify(actual.tasks) !== JSON.stringify(image.tasks) || JSON.stringify(actual.resources) !== JSON.stringify(image.resources))) fail()
   for (const resource of actual.resources) resourceBody(root, resource as Parameters<typeof resourceBody>[1])
@@ -42,7 +43,7 @@ export function verifyDatabase(db: Database.Database, root: string, deleted: str
 // The selected database and restore outcome commit together, outside every business database.
 export class RestoreJournal {
   private db?: Database.Database
-  private value: Journal = { version: 5, export_control: 1, selected: 'trellis.sqlite', deleted_tasks: [], operations: [], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] }
+  private value: Journal = { version: 5, export_control: 1, selected: defaultDatabaseFile, deleted_tasks: [], operations: [], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] }
   readonly error: string | null
   get identityEncoding(): IdentityEncoding { if (this.error) fail(); return this.value.version === 6 ? 2 : 1 }
   constructor(private root: string, createEncoding: IdentityEncoding = newTestIdentityEncoding(root)) {
@@ -50,6 +51,9 @@ export class RestoreJournal {
     try {
       mkdirSync(root, { recursive: true, mode: 0o700 })
       const file = managedRegularFile(root, 'restore-control.sqlite'), present = existsSync(file), marker = join(root, 'restore-established')
+      const originals = initialDatabaseFiles.filter(name => existsSync(join(root, name)))
+      if (originals.length > 1) fail()
+      if (!present && originals[0] === legacyDatabaseFile) this.value.selected = legacyDatabaseFile
       if (existsSync(marker) && (!lstatSync(marker).isFile() || !['restore-v2\n', 'restore-v3\n', 'restore-v4\n', 'restore-v5\n', 'restore-v6\n'].includes(readRegularFileSync(marker, 32).toString('utf8')) || !present)) fail()
       if (present && !lstatSync(file).isFile()) fail()
       if (!present && readdirSync(root).some(name => /^restore-.*-(target|rollback)\.sqlite/.test(name))) fail()
@@ -69,6 +73,7 @@ export class RestoreJournal {
       const markerValue = existsSync(marker) ? readRegularFileSync(marker, 32).toString('utf8') : null
       if ((markerValue === 'restore-v5\n' && parsed.version !== 5) || (markerValue === 'restore-v6\n' && parsed.version !== 6) || (parsed.version === 6 && markerValue !== null && markerValue !== 'restore-v6\n')) fail()
       const normalized = RestoreJournal.normalizeControl(parsed)
+      if (originals.some(name => name !== initialDatabaseFile(normalized))) fail()
       const encoding: IdentityEncoding = normalized.version === 6 ? 2 : 1
       const exports = new ExportControl(root, present && [5, 6].includes(parsed.version), false, encoding); exports.close()
       if (parsed.version !== normalized.version) this.save(normalized)
@@ -82,7 +87,7 @@ export class RestoreJournal {
         try { this.verifyEffectivePoint(pending.point_id); this.verifyImage(pending.target); this.finish('completed') }
         catch { this.verifyImage(pending.rollback); this.save({ ...this.value, selected: pending.rollback.file, operations: this.value.operations.map(op => op.id === pending.id ? { ...op, phase: 'rolled_back' } : op) }) }
       }
-      if ((present || this.value.selected !== 'trellis.sqlite') && (!existsSync(join(root, this.value.selected)) || !lstatSync(join(root, this.value.selected)).isFile())) fail()
+      if ((present || !isInitialDatabaseFile(this.value.selected)) && (!existsSync(join(root, this.value.selected)) || !lstatSync(join(root, this.value.selected)).isFile())) fail()
     } catch { error = 'RESTORE_JOURNAL_INVALID' }
     this.error = error
   }
@@ -132,7 +137,8 @@ export class RestoreJournal {
       if (['preparing', 'switched'].includes(op.phase)) { pending++; if (v.selected !== (op.phase === 'preparing' ? op.previous : op.target.file)) fail() }
     }
     if (pending > 1 || new Set(v.operations.map(op => op.id)).size !== v.operations.length) fail()
-    if (v.selected !== 'trellis.sqlite' && !v.operations.some(op => op.target.file === v.selected || op.rollback.file === v.selected)) fail()
+    if (new Set([v.selected, ...v.operations.map(op => op.previous)].filter(isInitialDatabaseFile)).size > 1) fail()
+    if (!isInitialDatabaseFile(v.selected) && !v.operations.some(op => op.target.file === v.selected || op.rollback.file === v.selected)) fail()
   }
   static normalizeControl(value: any): Journal {
     if ([5, 6].includes(value?.version)) { RestoreJournal.validateControl(value); return value }
@@ -265,9 +271,9 @@ export class RestoreJournal {
     if (this.value.verified_head !== this.head()) this.save({ ...this.value, verified_head: this.head() })
   }
   retirementGraph(): unknown { return { selected: this.value.selected, operations: this.value.operations, verified_head: this.value.verified_head, deleted_tasks: this.value.deleted_tasks } }
-  replicaFiles(): string[] { return [...new Set(['trellis.sqlite', this.value.selected, ...this.value.operations.flatMap(o => [o.previous, o.target.file, o.rollback.file])])] }
+  replicaFiles(): string[] { return [...new Set([initialDatabaseFile(this.value), this.value.selected, ...this.value.operations.flatMap(o => [o.previous, o.target.file, o.rollback.file])])] }
   sealedReplica(file: string): RestoreImage | undefined {
-    const wasSelected = file === 'trellis.sqlite' || file === this.value.selected || this.value.operations.some(o => o.previous === file || (o.phase === 'completed' && o.target.file === file) || (o.phase === 'rolled_back' && o.rollback.file === file))
+    const wasSelected = file === initialDatabaseFile(this.value) || file === this.value.selected || this.value.operations.some(o => o.previous === file || (o.phase === 'completed' && o.target.file === file) || (o.phase === 'rolled_back' && o.rollback.file === file))
     return wasSelected ? undefined : this.value.operations.flatMap(o => [o.target, o.rollback]).find(image => image.file === file)
   }
   retirementAllowed(file: string): boolean {
@@ -279,7 +285,7 @@ export class RestoreJournal {
   }
   retainedDatabases(): string[] {
     if (this.error || this.pending()) fail()
-    const files = new Set(['trellis.sqlite', this.value.selected])
+    const initial = initialDatabaseFile(this.value), files = new Set([initial, this.value.selected])
     for (const op of this.value.operations) {
       files.add(op.previous)
       for (const image of [op.target, op.rollback]) {
@@ -287,7 +293,7 @@ export class RestoreJournal {
         files.add(image.file)
       }
     }
-    for (const file of files) if (!this.retired(file) && (file === 'trellis.sqlite' || file === this.value.selected || this.value.operations.some(op => op.previous === file)) && !existsSync(join(this.root, file))) fail()
+    for (const file of files) if (!this.retired(file) && (file === initial || file === this.value.selected || this.value.operations.some(op => op.previous === file)) && !existsSync(join(this.root, file))) fail()
     return [...files].filter(file => !this.retired(file))
   }
   close(): void { this.db?.close() }

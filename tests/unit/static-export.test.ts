@@ -57,7 +57,7 @@ it('preserves original-question styles with distinct scopes and no nested docume
  expect(result.styles.join('\n')).toContain('#export-answer-0-0-question');expect(result.html.match(/<h1>/g)).toHaveLength(1)
 })
 it('localizes known missing images without losing neighboring learning or weakening reference validation',()=>{
- const b=bundle();b.html=b.html.replace('Original question','Before<img src="trellis-resource:picture" alt="Picture">After');b.references=[{name:'picture',target:{kind:'resource',id:'resource'}}]
+ const b=bundle();b.html=b.html.replace('Original question','Before<img src="pliuna-resource:picture" alt="Picture">After');b.references=[{name:'picture',target:{kind:'resource',id:'resource'}}]
  const resolve=()=>{throw new ContractError('RESOURCE_CORRUPT','synthetic')}
  const result=staticDocument('Title',[{bundle:b,resolve}]);expect(result.issues).toContain('View 1: IMAGE_OMITTED_RESOURCE_CORRUPT');expect(result.html).toContain('Before');expect(result.html).toContain('After');expect(result.html).toContain('此处图片未导出');expect(result.html).not.toContain('<img')
  expect(()=>staticDocument('Title',[{bundle:b,resolve:()=>{throw new ContractError('EXPORT_HISTORY_INVALID','untrusted')}}])).toThrow('untrusted')

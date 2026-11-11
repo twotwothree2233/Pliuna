@@ -15,6 +15,7 @@ coverage/
 *.zip
 
 # Local application profiles and credentials must never be versioned.
+.pliuna/
 .trellis/
 auth.json
 settings.json

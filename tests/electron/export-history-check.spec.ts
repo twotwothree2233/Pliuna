@@ -11,7 +11,7 @@ const question = (complete: boolean): Bundle => ({ profile: 'managed-v1', html: 
 
 test('keeps frozen original blockers after current correction and restores checks without replay', async () => {
   test.setTimeout(60000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-history-check-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-history-check-desktop-'))
   let source: any, phase = 0, replace = false
   const server = await modelServer(({ body }, response) => {
     if (synthetic(body, response)) return
@@ -19,9 +19,9 @@ test('keeps frozen original blockers after current correction and restores check
     if (phase++ === 0) return hostToolStream(response, 'write', { type: 'surface.update', surface_id: source.surface.id, expected_revision: source.surface.revision, operations: [replace ? { type: 'view.replace', view_id: source.views[0].id, expected_view_revision: source.views[0].revision, state_transition: { type: 'preserve', expected_state_revision: source.views[0].state_revision, compatibility_version: 'numeric-v1' }, bundle: { type: 'inline', bundle: question(true) } } : { type: 'view.create', client_ref: 'question', slot_id: 'main', bundle: { type: 'inline', bundle: question(false) } }] })
     textStream(response, replace ? 'CURRENT_CORRECTED' : 'ORIGINAL_CREATED')
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
-  const call = async (request: any): Promise<any> => { const result = await page.evaluate(request => window.trellis.request(request), request); if (!result.ok) throw Error(result.error.code); return result.data }
+  const call = async (request: any): Promise<any> => { const result = await page.evaluate(request => window.pliuna.request(request), request); if (!result.ok) throw Error(result.error.code); return result.data }
   try {
     await call({ type: 'model.configure', configuration: { id: 'history-check', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 240000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic', confirm_memory_only: true, remember_connection: true, confirm_plaintext_storage: true })
     await call({ type: 'model.test', model_id: 'history-check', role: 'main', confirm_cost: true })

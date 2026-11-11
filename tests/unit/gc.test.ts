@@ -13,7 +13,7 @@ const execute = (p: any, token: string, retry = false): any => store.handle({ ty
 const status = (id?: string): any => store.handle({ type: 'maintenance.gc.status', ...(id ? { operation_id: id } : {}) })
 const cancel = (token: string) => store.handle({ type: 'maintenance.cancel', token })
 const restart = () => { db.close(); store.close(); store = new RuntimeStore(root); const control = new Database(join(root, 'restore-control.sqlite')), selected = JSON.parse((control.prepare('SELECT manifest FROM restore_control').get() as any).manifest).selected; control.close(); db = new Database(join(root, selected)) }
-beforeEach(() => { root = fs.mkdtempSync(join(tmpdir(), 'trellis-gc-')); store = new RuntimeStore(root); taskId = store.create('隔离回收').task.id; db = new Database(join(root, 'trellis.sqlite')) })
+beforeEach(() => { root = fs.mkdtempSync(join(tmpdir(), 'pliuna-gc-')); store = new RuntimeStore(root); taskId = store.create('隔离回收').task.id; db = new Database(join(root, 'pliuna.sqlite')) })
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); db.close(); store.close(); fs.rmSync(root, { recursive: true, force: true }) })
 function seed(key = randomUUID(), temporary = true): any {
   const action = randomUUID(), stage = randomUUID()
@@ -123,7 +123,7 @@ it('keeps pre-restore generation staging and every database and rollback image',
   await store.handle({ type: 'maintenance.restore', token, point_id: state.active.id, database_sha256: state.active.database_sha256, inputs_saved: true, confirm_replace_newer_data: true })
   restart()
   // Recreate the old orphan declaration in the restored current database; old generation still protects it.
-  const original = new Database(join(root, 'trellis.sqlite')), row = original.prepare('SELECT * FROM staging WHERE id=?').get(s.stage) as any, action = original.prepare('SELECT * FROM actions WHERE id=?').get(s.action) as any; original.close()
+  const original = new Database(join(root, 'pliuna.sqlite')), row = original.prepare('SELECT * FROM staging WHERE id=?').get(s.stage) as any, action = original.prepare('SELECT * FROM actions WHERE id=?').get(s.action) as any; original.close()
   db.prepare(`INSERT INTO actions (${Object.keys(action).join(',')}) VALUES (${Object.keys(action).map(k => '@' + k).join(',')})`).run(action)
   db.prepare('INSERT INTO staging VALUES (@id,@task_id,@owner_kind,@owner_id,@runtime_epoch,@state,@storage_key,@resource_id,@expected_bytes,@received_bytes,@sha256,@created_at)').run(row)
   const files = fs.readdirSync(root).filter(f => f.endsWith('.sqlite')).map(file => ({ file, hash: digest(fs.readFileSync(join(root, file))) })), prep = begin(), p = preview(prep); expect(p.items).toEqual([]); execute(p, prep); expect(fs.existsSync(join(root, 'resources', s.key))).toBe(true)
@@ -138,7 +138,7 @@ it.each(['corrupt', 'missing', 'version'])('closes GC on invalid independent con
   if (mode === 'corrupt') fs.writeFileSync(join(root, 'gc-control.sqlite'), 'bad')
   if (mode === 'missing') fs.unlinkSync(join(root, 'gc-control.sqlite'))
   if (mode === 'version') { const control = new Database(join(root, 'gc-control.sqlite')); control.prepare('UPDATE gc_version SET version=97').run(); control.close() }
-  store = new RuntimeStore(root); db = new Database(join(root, 'trellis.sqlite')); expect(status()).toMatchObject({ enabled: false, error: 'GC_CONTROL_INVALID' }); expect(store.create('safe business')).toBeTruthy(); expect(fs.readdirSync(join(root, 'resources'))).toHaveLength(2)
+  store = new RuntimeStore(root); db = new Database(join(root, 'pliuna.sqlite')); expect(status()).toMatchObject({ enabled: false, error: 'GC_CONTROL_INVALID' }); expect(store.create('safe business')).toBeTruthy(); expect(fs.readdirSync(join(root, 'resources'))).toHaveLength(2)
 })
 it('does not let a new preview reset the original failure budget and allows paged original-result lookup', () => {
   seed(undefined, false); const token = begin(), p = preview(token)
@@ -164,7 +164,7 @@ it.each(['target', 'rollback', 'point', 'distinct-key'])('keeps independent %s r
   } else {
     const control = new Database(join(root, 'restore-control.sqlite')), state = JSON.parse((control.prepare('SELECT manifest FROM restore_control').get() as any).manifest), id = randomUUID()
     const material = { id: mode === 'distinct-key' ? randomUUID() : s.key, storage_key: s.key, sha256: digest(Buffer.from('original')), byte_length: 8 }
-    state.operations.push({ id, token: randomUUID(), point_id: randomUUID(), previous: 'trellis.sqlite', phase: 'rolled_back', created_at: new Date().toISOString(), target: { file: `restore-${id}-target.sqlite`, tasks: [taskId], resources: ['target', 'distinct-key'].includes(mode) ? [material] : [], plugins: [] }, rollback: { file: `restore-${id}-rollback.sqlite`, tasks: [taskId], resources: mode === 'rollback' ? [material] : [], plugins: [] } })
+    state.operations.push({ id, token: randomUUID(), point_id: randomUUID(), previous: 'pliuna.sqlite', phase: 'rolled_back', created_at: new Date().toISOString(), target: { file: `restore-${id}-target.sqlite`, tasks: [taskId], resources: ['target', 'distinct-key'].includes(mode) ? [material] : [], plugins: [] }, rollback: { file: `restore-${id}-rollback.sqlite`, tasks: [taskId], resources: mode === 'rollback' ? [material] : [], plugins: [] } })
     control.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify(state)); control.close(); cancel(token); restart()
     const next = begin(), q = preview(next); expect(q.items).toEqual([]); execute(q, next); expect(fs.existsSync(join(root, 'resources', s.key))).toBe(true)
   }

@@ -16,12 +16,12 @@ test('fixed preview, explicit answers, controlled overwrite, offline document an
     if (body.messages.at(-1).role === 'tool') return textStream(res, 'DAILY_READY')
     hostToolStream(res, 'write', { type: 'surface.update', surface_id: surface.id, expected_revision: surface.revision, operations: [{ type: 'view.create', client_ref: 'learning', slot_id: 'main', bundle: { type: 'inline', bundle } }] })
   })
-  const root = await mkdtemp(join(tmpdir(), 'trellis-daily-export-')), target = join(root, 'learning.html')
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-daily-export-')), target = join(root, 'learning.html')
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
-    const call = (request: unknown) => page.evaluate(async r => { const response = await window.trellis.request(r as any); if (!response.ok) throw Error(response.error.code); return response.data as any }, request)
+    const call = (request: unknown) => page.evaluate(async r => { const response = await window.pliuna.request(r as any); if (!response.ok) throw Error(response.error.code); return response.data as any }, request)
     await call({ type: 'model.configure', configuration: { id: 'daily', base_url: server.url, wire_model_id: 'wire', context_tokens: 100000, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic', confirm_memory_only: true })
     await call({ type: 'model.test', model_id: 'daily', role: 'main', confirm_cost: true })
     await page.getByRole('button', { name: '创建第一个任务', exact: true }).click(); await page.getByLabel('任务名称').fill('Daily export'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
@@ -34,7 +34,7 @@ test('fixed preview, explicit answers, controlled overwrite, offline document an
     const preview = page.frameLocator('iframe[title="固定快照离线预览"]'); await expect(preview.getByText('OFFLINE_LEARNING', { exact: true })).toBeVisible(); await expect(preview.locator('textarea,input,button')).toHaveCount(0)
     const current = (await call({ type: 'export.list', task_id: task.id }))[0]
     expect((await call({ type: 'maintenance.status' })).phase).toBe('idle')
-    const maintenance = await page.evaluate(() => window.trellis.request({ type: 'maintenance.begin' })); expect(maintenance.ok).toBe(false)
+    const maintenance = await page.evaluate(() => window.pliuna.request({ type: 'maintenance.begin' })); expect(maintenance.ok).toBe(false)
     await app.evaluate(({ dialog }, target) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: target }); dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false }) }, target)
     await writeFile(target, 'ORIGINAL_FILE')
     await page.getByRole('button', { name: '选择位置并保存 HTML', exact: true }).click(); await expect(page.getByRole('button', { name: '选择位置并保存 HTML', exact: true })).toBeEnabled(); expect(await readFile(target, 'utf8')).toBe('ORIGINAL_FILE')
@@ -63,10 +63,10 @@ test('View paging saves input; layout and removal retain history across restart'
   const operations=mode==='create'?Array.from({length:12},(_,index)=>({type:'view.create',client_ref:'lesson-'+index,slot_id:'main',bundle:{type:'inline',bundle:{...bundle,html:bundle.html.replace('OFFLINE_LEARNING','Lesson '+index)}}})):mode==='layout'?[{type:'layout.set',layout:{slots:[{slot_id:'main',groups:[{id:'reordered',mode:'responsive_columns',views:[...ids].reverse().map(view_id=>({type:'existing',view_id})),gap:'large',align:'start'}]}]}}]:[{type:'view.remove',view_id:source.views[0].id,expected_view_revision:source.views[0].revision,expected_state_revision:source.views[0].state_revision}]
   hostToolStream(res,'write',{type:'surface.update',surface_id:source.surface.id,expected_revision:source.surface.revision,operations})
  })
- const root=await mkdtemp(join(tmpdir(),'trellis-daily-surface-')),launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root,TRELLIS_ENABLE_VIEW_REPLACEMENT:'1'}})
+ const root=await mkdtemp(join(tmpdir(),'pliuna-daily-surface-')),launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_VIEW_REPLACEMENT:'1'}})
  let app=await launch()
  try{
-  let page=await app.firstWindow();const call=(request:unknown)=>page.evaluate(async r=>{const response=await window.trellis.request(r as any);if(!response.ok)throw Error(response.error.code);return response.data as any},request)
+  let page=await app.firstWindow();const call=(request:unknown)=>page.evaluate(async r=>{const response=await window.pliuna.request(r as any);if(!response.ok)throw Error(response.error.code);return response.data as any},request)
   await call({type:'model.configure',configuration:{id:'daily',base_url:server.url,wire_model_id:'wire',context_tokens:1000000,max_output_tokens:8192,compatibility_profile:'chat-max-tokens'},api_key:'synthetic',confirm_memory_only:true});await call({type:'model.test',model_id:'daily',role:'main',confirm_cost:true})
   await page.getByRole('button',{name:'创建第一个任务',exact:true}).click();await page.getByLabel('任务名称').fill('Paged daily task');await page.getByRole('button',{name:'创建任务',exact:true}).click()
   const task=(await call({type:'host.tasks'}))[0],snapshot=()=>call({type:'task.snapshot',task_id:task.id});source=await snapshot()

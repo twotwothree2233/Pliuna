@@ -30,8 +30,8 @@ test('HTTP model publishes an interactive View, user submits, next Run reads imm
     if (last.tool_call_id === 'list-answers') { hostToolStream(res, 'read', { target: { kind: 'answer', id: result.data.items[0].id } }, '', 'read-answer'); return }
     textStream(res, `本机合成服务读取正式答案：${result.data.data.value.response}`)
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-model-surface-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-model-surface-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', e => errors.push(e.message))
@@ -62,7 +62,7 @@ test('HTTP model publishes an interactive View, user submits, next Run reads imm
     await page.getByRole('tab', { name: /执行记录/ }).click()
     await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     await expect(page.getByRole('region', { name: '原动作分页浏览', exact: true })).toContainText('success')
-    await page.screenshot({ path: join(tmpdir(), 'trellis-http-execution.png') })
+    await page.screenshot({ path: join(tmpdir(), 'pliuna-http-execution.png') })
     expect(errors).toEqual([])
     expect(server.exchanges.filter(e => !e.body?.messages?.[0]?.content.startsWith('Synthetic') && e.body)).toHaveLength(6)
   } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }

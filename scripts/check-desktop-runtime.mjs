@@ -7,11 +7,11 @@ import { verifyDesktop } from './verify-desktop.mjs'
 
 if (process.argv.length !== 3) throw Error('Usage: node scripts/check-desktop-runtime.mjs /absolute/package-output')
 const { app, executable } = verifyDesktop(process.argv[2]), target = hostMontyTarget()
-const directory = mkdtempSync(join(tmpdir(), 'trellis-packaged-runtime-'))
+const directory = mkdtempSync(join(tmpdir(), 'pliuna-packaged-runtime-'))
 try {
   const fixture = join(directory, 'backend.cjs'), probe = join(directory, 'probe.mjs'), pdf = join(directory, 'sample.pdf')
   // A synthetic one-page PDF. No user document or source installation is used.
-  const content = 'BT /F1 12 Tf 50 700 Td (Trellis offline package) Tj ET'
+  const content = 'BT /F1 12 Tf 50 700 Td (Pliuna offline package) Tj ET'
   const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [4 0 R] /Count 1 >>', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>', `<< /Length ${content.length} >>\nstream\n${content}\nendstream`]
   let body = '%PDF-1.4\n'; const offsets = []
   for (const [index, object] of objects.entries()) { offsets.push(Buffer.byteLength(body)); body += `${index + 1} 0 obj\n${object}\nendobj\n` }
@@ -41,13 +41,13 @@ let privateAcl=false;
 if(process.platform==='win32') {
   const {execFileSync}=await import('node:child_process'),{randomUUID}=await import('node:crypto');
   const {performance}=await import('node:perf_hooks');
-  const jobs=require(join(root,'out/main/native/trellis_job.node'));
-  const helper=join(root,'out/main/native/trellis_acl.exe'),file=join(process.cwd(),'private-acl.txt');
+  const jobs=require(join(root,'out/main/native/pliuna_job.node'));
+  const helper=join(root,'out/main/native/pliuna_acl.exe'),file=join(process.cwd(),'private-acl.txt');
   writeFileSync(file,'package ACL fixture');
   const identity=lstatSync(file,{bigint:true});
   let protectedTime;
   for(let repeat=0;repeat<2;repeat++) {
-    const name='Local\\\\Trellis-'+randomUUID(),owner=jobs.create(name);
+    const name='Local\\\\Pliuna-'+randomUUID(),owner=jobs.create(name);
     try {
       const deadline=performance.now()+15000;
       const result=JSON.parse(execFileSync(helper,['protect',name,win32.toNamespacedPath(file),String(identity.dev),String(identity.ino),'file','0'],
@@ -85,15 +85,15 @@ const pdfTree=startProcessTree({mode:'spawn',command:process.execPath,args:[join
 let pdfRpc;
 try {
   await pdfTree.ready;pdfRpc=new PluginRpc(pdfTree.process.stdout,pdfTree.process.stdin,()=>({}));
-  const initialized=await pdfRpc.request('initialize',{plugin_id:'trellis.pdf-text',capabilities:['extract']},{timeout:5000});
-  assert.equal(initialized.plugin_id,'trellis.pdf-text');assert.equal(initialized.protocol_version,'0.1');
+  const initialized=await pdfRpc.request('initialize',{plugin_id:'pliuna.pdf-text',capabilities:['extract']},{timeout:5000});
+  assert.equal(initialized.plugin_id,'pliuna.pdf-text');assert.equal(initialized.protocol_version,'0.1');
   await pdfRpc.request('shutdown',{}, {timeout:5000});
 } finally {pdfRpc?.close();pdfTree.terminate();await pdfTree.confirm(10000);}
 const bytes=Uint8Array.from(readFileSync(process.argv[4]));
 const worker=new Worker(join(plugin,'parser-worker.mjs'),{workerData:{bytes:bytes.buffer},transferList:[bytes.buffer]});
 try {
   const parsed=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.once('exit',code=>{if(code!==0)reject(Error('PDF worker exited: '+code))})});
-  assert.equal(parsed.ok,true);assert.equal(parsed.page_count,1);assert.ok(parsed.text.includes('Trellis offline package'));
+  assert.equal(parsed.ok,true);assert.equal(parsed.page_count,1);assert.ok(parsed.text.includes('Pliuna offline package'));
 } finally {await worker.terminate();}
 console.log(JSON.stringify({sqlite:true,montyBinding:true,appNodeRpc:true,descendantsReaped:true,pdfBackend:true,offlinePdf:true,...(privateAcl?{privateAcl:true}:{}),platform:process.platform,arch:process.arch,electron:process.versions.electron}));
 `)

@@ -18,11 +18,11 @@ test('cross-page background export and long-approval original result navigation'
   if(mode==='data')return hostToolStream(res,'write',{type:'task_data.create',data:{schema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false},value:{text:'initial'},references:[]}})
   hostToolStream(res,'write',{type:'task_data.replace',id:dataId,expected_revision:1,value:{text:'LONG_PARAMETER_'.repeat(5000)},references:[]})
  })
- const root=await mkdtemp(join(tmpdir(),'trellis-long-desktop-')),launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root,TRELLIS_ENABLE_VIEW_REPLACEMENT:'1'}})
+ const root=await mkdtemp(join(tmpdir(),'pliuna-long-desktop-')),launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_VIEW_REPLACEMENT:'1'}})
  let app=await launch()
  try{
   let page=await app.firstWindow();const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
-  const call=(request:unknown)=>page.evaluate(async r=>{const reply=await window.trellis.request(r as any);if(!reply.ok)throw Error(reply.error.code);return reply.data as any},request)
+  const call=(request:unknown)=>page.evaluate(async r=>{const reply=await window.pliuna.request(r as any);if(!reply.ok)throw Error(reply.error.code);return reply.data as any},request)
   await call({type:'model.configure',configuration:{id:'long',base_url:server.url,wire_model_id:'wire',context_tokens:1000000,max_output_tokens:100000,compatibility_profile:'chat-max-tokens'},api_key:'synthetic',confirm_memory_only:true})
   await call({type:'model.test',model_id:'long',role:'main',confirm_cost:true})
   await page.getByRole('button',{name:'创建第一个任务',exact:true}).click();await page.getByLabel('任务名称').fill('Long task acceptance');await page.getByRole('button',{name:'创建任务',exact:true}).click()

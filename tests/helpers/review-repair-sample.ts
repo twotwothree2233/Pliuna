@@ -7,7 +7,7 @@ import { managedControls } from './managed-controls'
 import { pluginCapabilityId } from '../../src/runtime/plugins/directory'
 
 export async function reviewRepairSample() {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-review-desktop-')), store = new RuntimeStore(root)
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-review-desktop-')), store = new RuntimeStore(root)
   const snapshot = store.create('Review repair synthetic'), task = snapshot.task.id
   const run = store.start(task, 'held synthetic fixture', 'fixture', [])
   clearTimeout((store as any).timers.get(run)); (store as any).timers.delete(run)
@@ -16,7 +16,7 @@ export async function reviewRepairSample() {
   const view = store.snapshot(task).views[0]!, old = structuredClone(bundle)
   old.html += `<button id="open-cover" popovertarget="v-${view.id}-cover">OPEN_COVER</button><aside id="cover" popover="manual" style="position:fixed;inset:0;width:100vw;height:100vh;background:#fff;margin:0;z-index:999999">TOP_LAYER_COVER</aside>`
   const result: any = store.modelTool(task,run,{type:'write',input:{type:'resource.create',display_name:'historical.json',content:{type:'json',value:old}}})
-  const resource = result.data.id, db = new Database(join(root,'trellis.sqlite'))
+  const resource = result.data.id, db = new Database(join(root,'pliuna.sqlite'))
   // This fixture represents a previously accepted bundle; current publishing stays validated.
   db.prepare('UPDATE views SET bundle_resource_id=? WHERE id=?').run(resource,view.id)
   db.prepare('UPDATE view_history SET bundle_resource_id=? WHERE view_id=?').run(resource,view.id)

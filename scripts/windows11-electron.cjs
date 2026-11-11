@@ -7,7 +7,7 @@ const { pipeline } = require('node:stream/promises')
 if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') {
   throw Error('DESIGNATED_WINDOWS_X64_RUNNER_REQUIRED')
 }
-const evidence = process.env.TRELLIS_WIN11_EVIDENCE
+const evidence = process.env.PLIUNA_WIN11_EVIDENCE
 if (!evidence || !path.isAbsolute(evidence)) throw Error('WINDOWS11_EVIDENCE_REQUIRED')
 const report = { status: 'started' }
 const save = () => fs.writeFileSync(path.join(evidence, 'electron-download.json'), JSON.stringify(report, null, 2) + '\n')
@@ -21,7 +21,7 @@ async function main() {
   // the original install.js retains its own validation and extraction.
   const { Cache } = require(path.join(path.dirname(electronRequire.resolve('@electron/get')), 'Cache.js'))
   const cache = new Cache(process.env.electron_config_cache)
-  const headers = { 'User-Agent': 'Trellis-Windows11-dependencies', Accept: 'application/vnd.github+json' }
+  const headers = { 'User-Agent': 'Pliuna-Windows11-dependencies', Accept: 'application/vnd.github+json' }
   if (process.env.GITHUB_TOKEN) headers.Authorization = 'Bearer ' + process.env.GITHUB_TOKEN
   const metadata = await fetch(`https://api.github.com/repos/electron/electron/releases/tags/v${version}`, {
     headers, signal: AbortSignal.timeout(60000)
@@ -40,7 +40,7 @@ async function main() {
   if (cached && fs.statSync(cached).size === asset.size) {
     report.status = 'cached'; save(); console.log(JSON.stringify(report)); return
   }
-  const work = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, 'trellis-electron-'))
+  const work = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, 'pliuna-electron-'))
   const heartbeat = setInterval(() => console.log(JSON.stringify({ phase: 'electron_download_in_progress', file })), 30000)
   try {
     const destination = path.join(work, file)

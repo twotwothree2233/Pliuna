@@ -12,13 +12,13 @@ if (process.platform === 'win32') {
   const require = createRequire(import.meta.url)
   // Reuse the pinned compiler toolchain already owned by @electron/rebuild.
   const gyp = createRequire(require.resolve('@electron/rebuild')).resolve('node-gyp/bin/node-gyp.js')
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-job-build-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-job-build-'))
   try {
     cpSync(join(root, 'native/windows-job'), directory, { recursive: true })
     execFileSync(process.execPath, [gyp, 'rebuild', '--directory', directory], { stdio: 'inherit' })
     const destination = join(root, 'out/main/native')
     mkdirSync(destination, { recursive: true })
-    copyFileSync(join(directory, 'build/Release/trellis_job.node'), join(destination, 'trellis_job.node'))
+    copyFileSync(join(directory, 'build/Release/pliuna_job.node'), join(destination, 'pliuna_job.node'))
     console.log('Windows Job Object N-API helper built')
   } finally { rmSync(directory, { recursive: true, force: true }) }
   await import('./build-windows-acl.mjs')

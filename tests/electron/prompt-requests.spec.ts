@@ -12,12 +12,12 @@ const schema = { type: 'object', properties: { stage: { type: 'string' } }, requ
 
 test('approved prompts, assisted replacement and text summary survive isolated restart with saved role settings', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-approved-prompts-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-approved-prompts-desktop-'))
   const captured: { label: string; body: any }[] = []
   const server = await modelServer(({ body }, res) => {
     if (synthetic(body, res)) return
     const prompt = body.messages[0].content
-    if (prompt.startsWith('你是 Trellis 的单次动作辅助审批评估器。')) {
+    if (prompt.startsWith('你是 Pliuna 的单次动作辅助审批评估器。')) {
       captured.push({ label: 'approval', body })
       expect(body).not.toHaveProperty('max_tokens'); expect(body).not.toHaveProperty('max_completion_tokens')
       const input = JSON.parse(body.messages[1].content)
@@ -39,10 +39,10 @@ test('approved prompts, assisted replacement and text summary survive isolated r
     if (input.request.startsWith('replace ')) toolStream(res, 'write', { operation: 'task_data.replace', input_json: JSON.stringify({ id: input.request.slice(8), expected_revision: 1, value: { stage: 'updated' }, references: [] }) })
     else toolStream(res, 'write', { operation: 'task_data.create', input_json: JSON.stringify({ data: { schema, value: { stage: 'initial' }, references: [] } }) })
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const call = async (request: any): Promise<any> => {
-    const result = await page.evaluate(request => window.trellis.request(request), request)
+    const result = await page.evaluate(request => window.pliuna.request(request), request)
     if (!result.ok) throw Error(result.error.code)
     return result.data
   }
@@ -64,7 +64,7 @@ test('approved prompts, assisted replacement and text summary survive isolated r
     expect(captured.map(item => item.label)).toEqual(['main', 'main', 'main', 'approval', 'main', 'summary'])
     const snapshot = await call({ type: 'task.snapshot', task_id: task }), summary = await call({ type: 'context.status', task_id: task })
     const settings = await readFile(join(root, 'settings.json')), auth = await readFile(join(root, 'auth.json')), network = server.exchanges.length
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     expect((await call({ type: 'task.snapshot', task_id: task })).records).toEqual(snapshot.records)
     expect(await call({ type: 'task.data.read', task_id: task, id, expected_revision: 2 })).toMatchObject({ value: { stage: 'updated' } })
     expect(await call({ type: 'context.status', task_id: task })).toEqual(summary)

@@ -10,7 +10,7 @@ const executablePath: string = createRequire(import.meta.url)('electron')
 
 test('saved messages, authority guidance and original sources survive three summaries and an isolated restart', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-storage-authority-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-storage-authority-desktop-'))
   let summaries = 0
   const server = await modelServer(({ body }, response) => {
     if (synthetic(body, response)) return
@@ -27,9 +27,9 @@ test('saved messages, authority guidance and original sources survive three summ
     }
     textStream(response, 'Accepted message saved as a task record; structured object creation is separate. No historical approval grants current permission.')
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
-  const call = async (request: any): Promise<any> => { const reply = await page.evaluate(q => window.trellis.request(q), request); if (!reply.ok) throw Error(reply.error.code); return reply.data }
+  const call = async (request: any): Promise<any> => { const reply = await page.evaluate(q => window.pliuna.request(q), request); if (!reply.ok) throw Error(reply.error.code); return reply.data }
   try {
     await call({ type: 'model.configure', configuration: { id: 'isolated', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 1000000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', remember_connection: true, confirm_plaintext_storage: true, confirm_memory_only: true })
     await call({ type: 'model.test', model_id: 'isolated', role: 'main', confirm_cost: true })
@@ -51,7 +51,7 @@ test('saved messages, authority guidance and original sources survive three summ
     expect(await list('task_data')).toHaveLength(1)
     const summary = await call({ type: 'context.status', task_id: task }), messages = await list('message'), objects = await list('task_data')
     const settings = await readFile(join(root, 'settings.json')), auth = await readFile(join(root, 'auth.json')), count = server.exchanges.length
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     expect(await call({ type: 'context.status', task_id: task })).toEqual(summary)
     expect(await list('message')).toEqual(messages); expect(await list('task_data')).toEqual(objects)
     expect(await readFile(join(root, 'settings.json'))).toEqual(settings); expect(await readFile(join(root, 'auth.json'))).toEqual(auth)

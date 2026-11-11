@@ -65,7 +65,7 @@ async function run(capability:string, value:unknown):Promise<{id:string;result:P
  return {id,result}
 }
 async function approval():Promise<any>{for(let n=0;n<100;n++){const found=store.snapshot(task).approvals.find(a=>a.decision==='pending');if(found)return found;await new Promise(r=>setTimeout(r,10))}throw Error('approval missing')}
-beforeEach(async()=>{root=await mkdtemp(join(tmpdir(),'trellis-plugin-calls-'));store=new RuntimeStore(root,new ModelService(),{viewReplacement:true});task=store.create('fixture').task.id;db=new Database(join(root,'trellis.sqlite'))})
+beforeEach(async()=>{root=await mkdtemp(join(tmpdir(),'pliuna-plugin-calls-'));store=new RuntimeStore(root,new ModelService(),{viewReplacement:true});task=store.create('fixture').task.id;db=new Database(join(root,'pliuna.sqlite'))})
 afterEach(async()=>{vi.restoreAllMocks();await (store as any).pluginProcesses.shutdown('test_cleanup',20);await store.shutdown();db.close();await rm(root,{recursive:true,force:true})})
 it('keeps Run and task in cleanup until the ordinary child exits, including kill failure',async()=>{
  const p=await plugin(),r=await run(p.capability,{delay:1000})

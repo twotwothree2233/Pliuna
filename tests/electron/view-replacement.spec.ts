@@ -21,8 +21,8 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     if (reset) bundle.state.compatibility_version = 'new-question-v2'
     hostToolStream(res, 'write', { type: 'surface.update', surface_id: source.surface.id, expected_revision: source.surface.revision, operations: [{ type: 'view.replace', view_id: view.id, expected_view_revision: view.revision, bundle: { type: 'inline', bundle }, state_transition: reset ? { type: 'reset', expected_state_revision: view.state_revision, initial: bundle.state.initial } : { type: 'preserve', expected_state_revision: view.state_revision, compatibility_version: view.bundle.state.compatibility_version } }] })
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-view-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && !['TRELLIS_ENABLE_MONTY', 'TRELLIS_ENABLE_VIEW_REPLACEMENT'].includes(key))) as Record<string, string>, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory, TRELLIS_TEST_VIEW_REPLACEMENT: '' } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-view-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && !['PLIUNA_ENABLE_MONTY', 'PLIUNA_ENABLE_VIEW_REPLACEMENT'].includes(key))) as Record<string, string>, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory, PLIUNA_TEST_VIEW_REPLACEMENT: '' } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
@@ -50,10 +50,10 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     await expect(first.getByRole('status')).toContainText('提交成功')
     const otherNode = await other.getByLabel('你的想法').elementHandle()
     source = await page.evaluate(async () => {
-      const tasks = await window.trellis.request({ type: 'host.tasks' })
+      const tasks = await window.pliuna.request({ type: 'host.tasks' })
       if (!tasks.ok) throw new Error('tasks unavailable')
       const task = (tasks.data as { id: string }[])[0]!
-      const result = await window.trellis.request({ type: 'task.snapshot', task_id: task.id })
+      const result = await window.pliuna.request({ type: 'task.snapshot', task_id: task.id })
       if (!result.ok) throw new Error('snapshot unavailable')
       return result.data as Snapshot
     })
@@ -100,7 +100,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
         await unloadHandling
       } finally { page.removeListener('dialog', observeUnload) }
       expect(page.isClosed()).toBe(false)
-      expect(await page.evaluate(async () => (await window.trellis.request({ type: 'host.tasks' })).ok)).toBe(true)
+      expect(await page.evaluate(async () => (await window.pliuna.request({ type: 'host.tasks' })).ok)).toBe(true)
       const requests = server.exchanges.length
       await page.getByRole('button', { name: '查询原替换结果并同步', exact: true }).click()
       await expect(page.getByRole('button', { name: '查询原替换结果并同步', exact: true })).toHaveCount(0)
@@ -112,7 +112,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     expect(await otherNode!.evaluate(node => node.isConnected)).toBe(true)
     await expect(other.getByLabel('你的想法')).toHaveValue('其他 View 不变')
     if (scenario === 'preserve' || scenario === 'reset-confirm') {
-      const stale = await page.evaluate(async old => window.trellis.request({ type: 'draft.save', task_id: old.task.id, view_id: old.views[0]!.id, view_revision: old.views[0]!.revision, expected_state_revision: old.views[0]!.state_revision, fields: [{ path: '/response', value: 'stale write' }] }), source)
+      const stale = await page.evaluate(async old => window.pliuna.request({ type: 'draft.save', task_id: old.task.id, view_id: old.views[0]!.id, view_revision: old.views[0]!.revision, expected_state_revision: old.views[0]!.state_revision, fields: [{ path: '/response', value: 'stale write' }] }), source)
       expect(stale).toMatchObject({ ok: false, error: { code: 'VERSION_CONFLICT' } })
     }
     await page.getByRole('tab', { name: /作答记录/ }).click()

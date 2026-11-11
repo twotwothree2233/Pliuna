@@ -372,7 +372,7 @@ export class ModelService {
     if (entry.credentialMissing) throw new ContractError('CREDENTIAL_REQUIRED', 'Credential was deleted; enter a new credential')
     if (entry.locks) throw new ContractError('CONFIGURATION_BUSY', 'Role validation cannot change while the model is occupied')
     entry.locks++
-    const messages: ChatMessage[] = role === 'main' ? [{ role: 'user', content: 'Synthetic capability test only. First call list exactly once with {"kind":"capability"}. After receiving the synthetic tool result reply TRELLIS_OK, with no further tools. Do not perform any business operation.' }] : role === 'compaction' ? [{ role: 'user', content: 'Synthetic compaction format test only. Summarize this synthetic goal in plain text: continue the synthetic task. Do not use tools.' }] : [{ role: 'user', content: 'Synthetic approval format test only. Return exactly {"decision":"escalate","reason":"synthetic test"} with no tools or other text.' }]
+    const messages: ChatMessage[] = role === 'main' ? [{ role: 'user', content: 'Synthetic capability test only. First call list exactly once with {"kind":"capability"}. After receiving the synthetic tool result reply PLIUNA_OK, with no further tools. Do not perform any business operation.' }] : role === 'compaction' ? [{ role: 'user', content: 'Synthetic compaction format test only. Summarize this synthetic goal in plain text: continue the synthetic task. Do not use tools.' }] : [{ role: 'user', content: 'Synthetic approval format test only. Return exactly {"decision":"escalate","reason":"synthetic test"} with no tools or other text.' }]
     const tools: ToolDefinition[] | undefined = role === 'main' ? modelTools : undefined
     const outputLimit = entry.config.max_output_tokens
     let invalidated = false

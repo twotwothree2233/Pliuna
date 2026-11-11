@@ -9,8 +9,8 @@ if (process.platform !== 'win32') {
   console.error('WINDOWS_REQUIRED: this probe requires a native Windows host')
   process.exit(2)
 }
-const binding = createRequire(import.meta.url)('../out/main/native/trellis_job.node')
-const name = () => 'Local\\Trellis-' + randomUUID()
+const binding = createRequire(import.meta.url)('../out/main/native/pliuna_job.node')
+const name = () => 'Local\\Pliuna-' + randomUUID()
 const self = fileURLToPath(import.meta.url)
 const spawn = (mode, jobName) => fork(self, [mode, jobName ?? ''], { env: { SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP, ELECTRON_RUN_AS_NODE: '1' }, execArgv: [], stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
 const message = child => new Promise((resolve, reject) => {

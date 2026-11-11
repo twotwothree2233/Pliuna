@@ -13,7 +13,7 @@ async function fixture(backend = false, global = false): Promise<void> {
   await writeFile(join(source, 'skill.md'), 'fixture content')
   if (backend) await writeFile(join(source, 'backend.cjs'), 'throw new Error("must not execute at import")')
 }
-beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'trellis-plugin-')); source = join(root, 'source'); await mkdir(source); await fixture() })
+beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pliuna-plugin-')); source = join(root, 'source'); await mkdir(source); await fixture() })
 afterEach(async () => { control?.close(); control = undefined; await rm(root, { recursive: true, force: true }) })
 it('imports only fixed package content, not the source path, and never executes', async () => {
   await fixture(true); control = new PluginControl(root)

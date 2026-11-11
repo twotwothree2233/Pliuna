@@ -7,11 +7,11 @@ import { createRequire } from 'node:module'
 const electronPath: string = createRequire(import.meta.url)('electron')
 for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 'current-fallback', 'partial-retry'] as const) test('isolated replica retirement desktop: ' + scenario, async () => {
   test.setTimeout(60000)
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-replicas-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-replicas-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const errors: string[] = []; page.on('pageerror', e => errors.push(e.message))
-  const call = async (request: any): Promise<any> => { const response = await page.evaluate(request => window.trellis.request(request), request); if (!response.ok) throw new Error(response.error.code); return response.data }
+  const call = async (request: any): Promise<any> => { const response = await page.evaluate(request => window.pliuna.request(request), request); if (!response.ok) throw new Error(response.error.code); return response.data }
   const begin = async (): Promise<string> => (await call({ type: 'maintenance.begin' })).reservation.token
   async function inspect(): Promise<any> {
     return app.evaluate((_electron, root) => {
@@ -33,7 +33,7 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
     if (scenario === 'current-fallback') {
       await call({ type: 'maintenance.restore', token: await begin(), point_id: active.id, database_sha256: active.database_sha256, inputs_saved: true, confirm_replace_newer_data: true })
       const pre = await call({ type: 'maintenance.replica.list' }); expect(pre.items.filter((i: any) => i.eligible)).toHaveLength(1)
-      const current = pre.items.find((i: any) => i.label.includes('当前代际')), rejected = await page.evaluate(async ({ token, replica_id }) => window.trellis.request({ type: 'maintenance.replica.preview', token, replica_id, inputs_saved: true }), { token: await begin(), replica_id: current.replica_id }); expect(rejected.ok).toBe(false)
+      const current = pre.items.find((i: any) => i.label.includes('当前代际')), rejected = await page.evaluate(async ({ token, replica_id }) => window.pliuna.request({ type: 'maintenance.replica.preview', token, replica_id, inputs_saved: true }), { token: await begin(), replica_id: current.replica_id }); expect(rejected.ok).toBe(false)
       await call({ type: 'maintenance.cancel', token: (await call({ type: 'maintenance.status' })).reservation.token })
       await app.close(); app = await launch(); page = await app.firstWindow()
       const items = (await call({ type: 'maintenance.replica.list' })).items; expect(items.filter((i: any) => i.eligible)).toHaveLength(3)
@@ -53,8 +53,8 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       await app.close(); app = await launch(); page = await app.firstWindow(); await page.getByRole('button', { name: /副本隔离验收/ }).click()
     }
     if (scenario === 'response-lost') await app.evaluate(({ ipcMain }) => {
-      const original = (ipcMain as any)._invokeHandlers.get('trellis:request'); let lost = false
-      ipcMain.removeHandler('trellis:request'); ipcMain.handle('trellis:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.replica.execute' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Isolated response loss' } } }; return result })
+      const original = (ipcMain as any)._invokeHandlers.get('pliuna:request'); let lost = false
+      ipcMain.removeHandler('pliuna:request'); ipcMain.handle('pliuna:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.replica.execute' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Isolated response loss' } } }; return result })
     })
     await page.getByLabel('想从哪里开始？').fill('保持未发送的消息')
     await openSettings(page, '存储与恢复'); const panel = page.getByRole('dialog', { name: '应用设置', exact: true }), section = panel.getByRole('region', { name: '副本退役与回收' })
@@ -62,7 +62,7 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
     const enabled = scenario === 'partial-retry' ? section.getByRole('button', { name: '重试原副本未完成项', exact: true }).first() : section.locator('button:not([disabled])').filter({ hasText: /^核验并退役此副本$/ }).first()
     await expect(enabled).toBeEnabled()
     if (scenario === 'input-conflict') {
-      await app.evaluate((_electron, root) => { const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(root + '/trellis.sqlite'); db.exec('UPDATE views SET state_revision=state_revision+1'); db.close() }, directory)
+      await app.evaluate((_electron, root) => { const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(root + '/pliuna.sqlite'); db.exec('UPDATE views SET state_revision=state_revision+1'); db.close() }, directory)
       await page.getByLabel('你的想法').evaluate(inputElement => { const input = inputElement as HTMLTextAreaElement; input.value = '冲突输入不能丢'; input.dispatchEvent(new Event('input', { bubbles: true })); Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent === '核验并退役此副本' && !b.disabled)!.click() })
       await expect(panel.getByRole('alert').last()).toContainText('VERSION_CONFLICT'); expect((await inspect()).journal.retirements).toHaveLength(0); await expect(page.getByLabel('你的想法')).toHaveValue('冲突输入不能丢')
       await panel.getByRole('button', { name: /^返回工作区/ }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()

@@ -22,7 +22,7 @@ it('returns safe actionable native diagnostics with original code lines', async 
     const output = await run(code!)
     expect(output).toMatchObject({ ok: false, execution: 'failure', error })
     expect((output as any).message).toContain(message)
-    expect(JSON.stringify(output)).not.toMatch(/synthetic-private-path|Traceback|<python-input|_trellis_|HOME/)
+    expect(JSON.stringify(output)).not.toMatch(/synthetic-private-path|Traceback|<python-input|_pliuna_|HOME/)
   }
   expect(await run('raise ValueError("synthetic private diagnostic")')).toMatchObject({ ok: false, message: expect.not.stringContaining('synthetic private diagnostic') })
 })
@@ -64,7 +64,7 @@ it('rejects cycles, unsupported values, host access and poisoned output rather t
   expect(()=>materializeValue({type:'json',value:{number:Number.MAX_SAFE_INTEGER+1}})).toThrow('faithfully')
 })
 it('classifies unexpected encoder failures without exposing exception text as a user value rejection', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-monty-encoding-fault-')), original = assets()
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-monty-encoding-fault-')), original = assets()
   symlinkSync(join(process.cwd(), 'out/main/chunks'), join(root, 'chunks'))
   symlinkSync(join(process.cwd(), 'node_modules'), join(root, 'node_modules'))
   const source = readFileSync(original.runner, 'utf8'), marker = '    if t is float:'
@@ -95,7 +95,7 @@ it('rejects production print and allocator quota overflow without silently trunc
  for(const code of ['print("x" * 1048577)\nresult=1','result="x" * (256 * 1024 * 1024)','def f():\n    return f()\nresult=f()']) expect(await run(code)).toMatchObject({ok:false,execution:'failure'})
 },20000)
 it('kills the whole detached group at its external deadline even if no native PID was received',async()=>{
- const root=mkdtempSync(join(tmpdir(),'trellis-monty-wall-')),runner=join(root,'hung.cjs');writeFileSync(runner,'process.on("message",()=>{});setInterval(()=>{},1000)')
+ const root=mkdtempSync(join(tmpdir(),'pliuna-monty-wall-')),runner=join(root,'hung.cjs');writeFileSync(runner,'process.on("message",()=>{});setInterval(()=>{},1000)')
  let start!:()=>void,pid=0;const started=new Promise<void>(resolve=>{start=resolve})
  vi.useFakeTimers({toFake:['setTimeout','clearTimeout']})
  const execution=nativeMonty({...assets(),runner},{code:'result=1',inputs:{}},new AbortController().signal,process.execPath,value=>{pid=value;start()})
@@ -104,7 +104,7 @@ it('kills the whole detached group at its external deadline even if no native PI
  finally {vi.useRealTimers();await execution.stop()}
 })
 it('destroys wrapper and native worker after its owner is SIGKILLed rather than publishing late output',async()=>{
- const root=mkdtempSync(join(tmpdir(),'trellis-monty-owner-')),supervisor=join(root,'owner.cjs'),a=assets()
+ const root=mkdtempSync(join(tmpdir(),'pliuna-monty-owner-')),supervisor=join(root,'owner.cjs'),a=assets()
  writeFileSync(supervisor,`const {fork}=require('node:child_process');const child=fork(${JSON.stringify(a.runner)},[],{detached:true,env:{},stdio:['ignore','ignore','ignore','ipc']});child.on('message',m=>process.send({wrapper:child.pid,...m}));child.send({binary:${JSON.stringify(a.binary)},input:{code:'while True:\\n    pass',inputs:{}},limits:${JSON.stringify(montyLimits)}});`)
  const owner=fork(supervisor,[],{stdio:['ignore','ignore','ignore','ipc']})
  const ids=await new Promise<{wrapper:number;worker_pid:number}>((resolve,reject)=>{owner.once('message',message=>resolve(message as any));owner.once('error',reject)})

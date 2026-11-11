@@ -12,8 +12,8 @@ import type { SavedConnection } from '../../src/runtime/model/persistence'
 const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function setup() {
-  const parent = mkdtempSync(join(tmpdir(), 'trellis-settings-unit-')); roots.push(parent)
-  const root = join(parent, '.trellis'); prepareApplicationDirectory(root)
+  const parent = mkdtempSync(join(tmpdir(), 'pliuna-settings-unit-')); roots.push(parent)
+  const root = join(parent, '.pliuna'); prepareApplicationDirectory(root)
   const store = new FileModelStore(root); expect(store.load().records).toEqual([])
   return { root, parent, store }
 }
@@ -22,10 +22,24 @@ const record: SavedConnection = {
   key: 'synthetic-key-do-not-use', revision: 1, protocol: 'test-protocol', roles: ['main']
 }
 describe('hidden profile file settings', () => {
-  it('resolves every normal platform to the same hidden directory without probing legacy paths', () => {
-    const home = join(tmpdir(), 'synthetic-home'), override = join(tmpdir(), 'isolated', '.trellis')
-    expect(applicationDirectory(home)).toBe(join(home, '.trellis'))
+  it('resolves the current hidden directory and honors an explicit profile override', () => {
+    const home = mkdtempSync(join(tmpdir(), 'pliuna-empty-home-')); roots.push(home)
+    const override = join(home, 'isolated', '.pliuna')
+    expect(applicationDirectory(home)).toBe(join(home, '.pliuna'))
     expect(applicationDirectory(home, override)).toBe(override)
+  })
+  it('continues reading existing settings in the old hidden directory without moving credentials', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'pliuna-previous-settings-')); roots.push(parent)
+    const previous = join(parent, '.trellis'); prepareApplicationDirectory(previous)
+    const store = new FileModelStore(previous); store.load(); store.save([record])
+    expect(applicationDirectory(parent)).toBe(previous)
+    expect(new FileModelStore(applicationDirectory(parent)).load().records).toEqual([record])
+    expect(existsSync(join(parent, '.pliuna'))).toBe(false)
+  })
+  it('prefers the current profile when both hidden directories exist without merging them', () => {
+    const { root, parent } = setup(), previous = join(parent, '.trellis'); mkdirSync(previous)
+    expect(applicationDirectory(parent)).toBe(root)
+    expect(applicationDirectory(parent, previous)).toBe(previous)
   })
   it('stores configuration and plaintext credentials separately and restarts without networking', () => {
     const { root, store } = setup(); store.save([record])
@@ -164,10 +178,10 @@ describe('hidden profile file settings', () => {
   it('leaves business files and resource protection directories untouched', () => {
     const { root, store } = setup()
     for (const name of ['resources', 'staging', 'plugins', 'recovery']) { mkdirSync(join(root, name)); writeFileSync(join(root, name, 'sentinel'), 'protected') }
-    writeFileSync(join(root, 'trellis.sqlite'), 'business-sentinel')
+    writeFileSync(join(root, 'pliuna.sqlite'), 'business-sentinel')
     store.save([record]); store.save([])
     for (const name of ['resources', 'staging', 'plugins', 'recovery']) expect(readFileSync(join(root, name, 'sentinel'), 'utf8')).toBe('protected')
-    expect(readFileSync(join(root, 'trellis.sqlite'), 'utf8')).toBe('business-sentinel')
+    expect(readFileSync(join(root, 'pliuna.sqlite'), 'utf8')).toBe('business-sentinel')
   })
 })
 

@@ -28,8 +28,8 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     else if (request === '解除引用') hostToolStream(res, 'write', { type: 'task_data.replace', id: source, expected_revision: 1, value: '已解除', references: [] })
     else hostToolStream(res, 'write', { type: 'task_data.remove', id: target, expected_revision: 2 })
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-reference-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-reference-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   try {
     let page = await app.firstWindow(); const errors: string[] = []; page.on('pageerror', e => errors.push(e.message))

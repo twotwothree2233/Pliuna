@@ -1,3 +1,4 @@
+import { applicationPreference } from '../../shared/branding'
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
@@ -160,7 +161,7 @@ function App() {
   const [creating, setCreating] = useState(false)
   const [creationError, setCreationError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [theme, setTheme] = useState(localStorage.getItem('trellis-theme') ?? 'system')
+  const [theme, setTheme] = useState(applicationPreference(localStorage, 'theme') ?? 'system')
   const [textSize, setTextSize] = useState(readTextSize)
   useLayoutEffect(() => { applyTextSize(textSize) }, [textSize])
   const workspace = useRef<WorkspaceHandle>(null)
@@ -465,7 +466,7 @@ function App() {
   useEffect(() => {
     const media = matchMedia('(prefers-color-scheme: dark)')
     const apply = () => { document.documentElement.dataset.theme = theme === 'system' ? (media.matches ? 'dusk' : 'graphite') : theme }
-    apply(); media.addEventListener('change', apply); localStorage.setItem('trellis-theme', theme)
+    apply(); media.addEventListener('change', apply); localStorage.setItem('pliuna-theme', theme)
     return () => media.removeEventListener('change', apply)
   }, [theme])
   useEffect(() => {
@@ -495,8 +496,8 @@ function App() {
   const readyModels = models.models.filter(m => m.roles.includes('main'))
   const taskState = (state: Task['state']) => ({ active: '进行中', stopping: '停止中', stopped: '已停止', deleting: '删除中' })[state]
   const filteredTasks = tasks.filter(t => t.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
-  return <WorkspaceLayout ref={workspace} nativeMac={desktopPlatform() === 'darwin' && Boolean(window.trellis)}
-    header={<><PaneToggle side="left" /><div className="window-title"><b>Trellis</b><span>{snapshot?.task.title ?? '工作空间'}</span></div><div className="window-tools"><button disabled={!snapshot || busy || exportOpen} onClick={() => setExportOpen(true)}>导出</button></div></>}
+  return <WorkspaceLayout ref={workspace} nativeMac={desktopPlatform() === 'darwin' && Boolean(window.pliuna)}
+    header={<><PaneToggle side="left" /><div className="window-title"><b>Pliuna</b><span>{snapshot?.task.title ?? '工作空间'}</span></div><div className="window-tools"><button disabled={!snapshot || busy || exportOpen} onClick={() => setExportOpen(true)}>导出</button></div></>}
     sidebar={<><div className="sidebar-heading"><span>任务</span><div className="sidebar-actions"><button onClick={newTask} disabled={busy} title={`新建任务（${shortcutLabel('N')}）`}>＋ 新建</button><PaneClose side="left" /></div></div><input type="search" aria-label="筛选任务" placeholder="筛选任务" value={filter} onChange={e => setFilter(e.target.value)} /><div className="task-list">{filteredTasks.map((t, i) => <button className={'task-row ' + (t.id === snapshot?.task.id ? 'selected' : '')} key={t.id} aria-current={t.id === snapshot?.task.id ? 'page' : undefined} title={`${t.title} · ${taskState(t.state)}`} onClick={() => void select(t.id)}><span className="task-number">{String(i + 1).padStart(2, '0')}</span><span className="task-name">{t.title}</span><span className={'task-dot ' + t.state} aria-label={taskState(t.state)} /></button>)}{taskCursor && <button onClick={() => { taskPageLimit.current += 50; void refresh().catch(e => setError(String(e))) }}>加载更多任务</button>}{!filteredTasks.length && <p className="sidebar-empty">{tasks.length ? '没有匹配的任务' : '尚无任务'}</p>}</div><div className="sidebar-footer"><button onClick={settings}>设置 <span>{shortcutLabel(',')}</span></button><small>本地保存 · 切换任务不取消执行</small></div></>}
     content={<><nav className="toolbar" aria-label="当前任务工具栏"><span className="breadcrumb">{snapshot ? snapshot.task.title : '工作空间'}{snapshot && <span className="badge">{taskState(snapshot.task.state)}</span>}</span>{snapshot && <div><button disabled={busy || snapshot.task.state === 'stopping'} onClick={() => void act({ type: snapshot.task.state === 'stopped' ? 'task.resume' : 'task.stop', task_id: snapshot.task.id })}>{snapshot.task.state === 'stopped' ? '恢复任务' : snapshot.task.state === 'stopping' ? '停止中…' : '停止任务'}</button><button disabled={busy} onClick={async () => { if (!canLeave() || !confirm('永久删除任务及应用内记录？此操作不能撤销。资源文件先保留并登记收尾，只有全部保护解除后，才能在“存储检查”另行确认物理回收。')) return; setBusy(true); try { const recovery = await request<{ active: { id: string; task_ids: string[] } | null }>({ type: 'maintenance.status' }); const affected = recovery.active?.task_ids.includes(snapshot.task.id) ? recovery.active.id : undefined; if (affected && !confirm('该任务包含在当前唯一有效恢复点中。继续删除会先废止整个恢复点（包括其他任务的恢复能力），不能撤销。确认继续？')) return; await request({ type: 'task.delete', task_id: snapshot.task.id, ...(affected ? { invalidate_recovery_id: affected } : {}) }); composerDrafts.current.delete(snapshot.task.id); selected.current = null; generation.current++; setSnapshot(null); setText(''); setError(''); await refresh() } catch (e) { setError(String(e)) } finally { setBusy(false) } }}>删除</button></div>}</nav>
     {detachedDrafts.length > 0 && <section className="notice" aria-label="恢复前未发送文本"><h3>恢复前未发送文本（只读，未自动发送）</h3>{detachedDrafts.map((draft, index) => <pre key={index}>{draft}</pre>)}<button onClick={() => { if (confirm('确认清除当前窗口保留的恢复前未发送文本？')) setDetachedDrafts([]) }}>清除恢复前文本</button></section>}

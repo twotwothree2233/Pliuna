@@ -34,8 +34,8 @@ test('immutable resources: HTTP Agent, desktop continuation/reference/approval, 
     } else if (!result) toolStream(res, 'write', { type: 'task_data.replace', id: dataId, expected_revision: 1, value: { stage: 'updated' }, references: reference(jsonId) }, '', 'replace-reference')
     else textStream(res, result.execution === 'success' ? '引用替换已提交。' : '引用替换未执行。')
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-resource-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-resource-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   const errors: string[] = []
   async function send(page: Page, request: string) {

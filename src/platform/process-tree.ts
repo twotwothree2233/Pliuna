@@ -30,10 +30,10 @@ function supervisorFile(): string {
 }
 export function createWindowsJob(): { binding: JobBinding; file: string; job: object; name: string } {
   const file = installedFile([
-    new URL('./native/trellis_job.node', moduleURL), new URL('../native/trellis_job.node', moduleURL),
-    new URL('../../out/main/native/trellis_job.node', moduleURL)
+    new URL('./native/pliuna_job.node', moduleURL), new URL('../native/pliuna_job.node', moduleURL),
+    new URL('../../out/main/native/pliuna_job.node', moduleURL)
   ], 'PROCESS_JOB_UNAVAILABLE')
-  const binding = createRequire(moduleURL)(file) as JobBinding, name = 'Local\\Trellis-' + randomUUID()
+  const binding = createRequire(moduleURL)(file) as JobBinding, name = 'Local\\Pliuna-' + randomUUID()
   return { binding, file, name, job: binding.create(name) }
 }
 export function processEnvironment(): NodeJS.ProcessEnv {
@@ -56,7 +56,7 @@ export function startProcessTree(spec: ProcessSpec, options: {
   let child: ChildProcess
   try {
     child = fork(supervisor, [], { execPath: options.runtime, execArgv: [], serialization: 'advanced', detached: process.platform !== 'win32', ...{ windowsHide: true },
-      stdio: ['pipe', 'pipe', 'pipe', 'ipc'], env: { ...processEnvironment(), ...(job ? { TRELLIS_JOB_BINDING: job.file, TRELLIS_JOB_NAME: job.name } : {}) } })
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'], env: { ...processEnvironment(), ...(job ? { PLIUNA_JOB_BINDING: job.file, PLIUNA_JOB_NAME: job.name } : {}) } })
   } catch (e) { if (job) job.binding.close(job.job); throw e }
   let rootExited = false, finished = false, stopping = false, started = false, complete = false
   let exit: ProcessExit = { code: null, signal: null }, polling: ReturnType<typeof setTimeout> | undefined

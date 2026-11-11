@@ -6,9 +6,9 @@
 
 ## Renderer 到宿主
 
-页面只通过 `window.trellis.request` 请求宿主。
+页面只通过 `window.pliuna.request` 请求宿主。
 预加载层暴露固定桥接对象和平台标识。
-传输通道名为 `trellis:request`。
+传输通道名为 `pliuna:request`。
 
 ```json ipc_request
 {"type":"task.create","title":"阅读材料"}

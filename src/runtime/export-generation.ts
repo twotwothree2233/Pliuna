@@ -4,6 +4,7 @@ import { resourceBody } from './resources'
 import { imageBodyUrl } from './view-resources'
 import { staticDocument, type ExportIssue } from './static-export'
 import { ContractError } from '../shared/validation'
+import { isBundleMediaType } from '../shared/branding'
 
 export interface ExportInput {
   root: string; title: string; resources: ExportResource[]; views: { bundle_id: string; resource_ids: string[]; fragment_ids?: string[] }[];
@@ -19,7 +20,7 @@ export function generateExportBody(input: Omit<ExportInput, 'root'>, body: (reso
   const resources = new Map(input.resources.map(r => [r.id, r]))
   const load = (id: string, allowed: string[]) => {
     const r = resources.get(id)
-    if (!r || r.byte_length > 262144 || r.media_type !== 'application/vnd.trellis.bundle+json') throw new ContractError('EXPORT_HISTORY_INVALID', 'Invalid fixed bundle')
+    if (!r || r.byte_length > 262144 || !isBundleMediaType(r.media_type)) throw new ContractError('EXPORT_HISTORY_INVALID', 'Invalid fixed bundle')
     const bundle = JSON.parse(body(r).toString()) as Bundle
     if (new Set(bundle.references.map(r => r.name)).size !== bundle.references.length || bundle.references.some(ref => ref.target.kind !== 'resource' || ref.target.expected_revision !== undefined || !allowed.includes(ref.target.id) || !resources.has(ref.target.id))) throw new ContractError('EXPORT_HISTORY_INVALID', 'Direct resources are not frozen in this historical version')
     const resolve = (name: string) => {

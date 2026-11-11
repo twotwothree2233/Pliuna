@@ -48,7 +48,7 @@ Agent 栏展示当前阶段、最近工具动态和待处理项。
 
 主题使用根节点 data-theme 属性。
 默认跟随系统，浅色为 graphite，深色为 dusk。
-手动主题记入 trellis-theme 本地偏好。
+手动主题记入 pliuna-theme 本地偏好。
 
 下表取自当前[style.css](../../src/renderer/src/style.css)。
 完整语义 Token 也直接在该文件维护。
@@ -69,7 +69,7 @@ Agent 栏展示当前阶段、最近工具动态和待处理项。
 ## 文字大小
 
 文字档位为 90%、100%、110%、125%、140%。
-偏好保存在 trellis-text-size，默认 100%。
+偏好保存在 pliuna-text-size，默认 100%。
 主题、栏宽和导出描述保持各自独立。
 
 [文字缩放](../../src/renderer/src/text-size.ts)使用 --text-scale。
