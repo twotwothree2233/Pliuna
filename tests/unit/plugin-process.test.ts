@@ -45,7 +45,14 @@ function request(args: Record<string, unknown> = {}, options: Partial<PluginExec
   return { call_id: crypto.randomUUID(), capability: 'echo', arguments: args, references: [], signal: new AbortController().signal, dispatch() {}, valid() {}, ...options }
 }
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'trellis-plugin-process-')); control = new PluginControl(root) })
-afterEach(async () => { vi.restoreAllMocks(); await processes?.shutdown('test_cleanup', 20); processes = undefined; control.close(); await rm(root, { recursive: true, force: true }) })
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await processes?.shutdown('test_cleanup', 20)
+  processes = undefined
+  control.close()
+  // Windows may briefly retain fixture directory handles after confirmed exit.
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+})
 it('discovers static descriptions without executing a backend, then calls lazily', async () => {
   await setup(); expect((await pluginCapabilities(root, copy))[0]!.capability.id).toBe('echo')
   await expect(readFile(join(root, 'started'))).rejects.toBeDefined()
