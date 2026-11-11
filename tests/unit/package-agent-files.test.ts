@@ -46,6 +46,12 @@ it.each([
   'app/.windsurfrules',
   'app/opencode.json',
   'app/opencode.jsonc',
+  'app/out/.github/copilot-instructions.md',
+  'PDF Text Plugin/.github/instructions/review.instructions.md',
+  'app/out/.github/agents/review.agent.md',
+  'app/out/.github/prompts/review.prompt.md',
+  'app/out/.GiThUb/CoPiLoT-Instructions.MD',
+  'app\\out\\.GITHUB\\Instructions\\review.instructions.md',
   'app/out/aGeNtS.Md',
   'APP/OUT/.CoDeX/config.toml',
   'Trellis.app\\Contents\\Resources\\app\\out\\.agents\\notes\\audit.md'
@@ -55,19 +61,21 @@ it.each([
 it('rejects a manifest link targeting local agent metadata', () => {
   expect(() => assertCleanPayload([{ path: 'app/guide', link: '.codex/config.toml' }])).toThrow('Local agent file rejected')
 })
-it.each(['.agents/notes/audit.md', '.codex/config.toml', 'AGENTS.md', 'CLAUDE.local.md'])('rejects legacy file traversal through %s', path => {
+it.each(['.agents/notes/audit.md', '.codex/config.toml', 'AGENTS.md', 'CLAUDE.local.md', '.github/copilot-instructions.md', '.github/instructions/review.instructions.md'])('rejects legacy file traversal through %s', path => {
   const root = temporaryRoot(); put(root, path)
   expect(() => fileManifest(root)).toThrow('Local agent file rejected')
 })
-it('rejects empty agent directories during legacy traversal', () => {
-  const root = temporaryRoot(); mkdirSync(join(root, '.agents'))
+it.each(['.agents', '.github/instructions', '.github/agents', '.github/prompts'])('rejects empty agent directory %s during legacy traversal', path => {
+  const root = temporaryRoot(); mkdirSync(join(root, path), { recursive: true })
   expect(() => fileManifest(root)).toThrow('Local agent file rejected')
 })
 it('keeps application agent modules and original role prompts in legacy manifests', () => {
   const root = temporaryRoot(), assets = new Map([
     ['app/out/main/agent.js', 'application agent'],
     ['app/out/renderer/AgentPanel.js', 'application UI'],
-    ['PDF Text Plugin/agent-tools.mjs', 'application plugin']
+    ['PDF Text Plugin/agent-tools.mjs', 'application plugin'],
+    ['app/out/.github/workflows/build.yml', 'unrelated GitHub configuration'],
+    ['app/out/.github/ISSUE_TEMPLATE/bug.md', 'unrelated GitHub template']
   ])
   for (const name of ['agent', 'approval', 'summary']) {
     assets.set(`app/out/main/prompts/${name}-v0.1.txt`, readFileSync(`src/runtime/model/prompts/${name}-v0.1.txt`, 'utf8'))
@@ -108,7 +116,9 @@ it.runIf(process.platform === 'darwin' && process.arch === 'arm64').each([
   'node_modules/bindings/.claude/settings.local.json',
   'node_modules/better-sqlite3/lib/CLAUDE.local.md',
   'node_modules/electron/dist/Electron.app/Contents/Resources/.ao/session.json',
-  'reference-plugins/pdf-text/.codex/config.toml'
+  'reference-plugins/pdf-text/.codex/config.toml',
+  'out/.github/copilot-instructions.md',
+  'reference-plugins/pdf-text/.github/instructions/review.instructions.md'
 ])('stops the legacy macOS workflow before signing or archiving %s', path => {
   const { workspace, output } = legacyWorkspace(); put(workspace, path)
   expect(() => packageMacos(output, workspace)).toThrow('Local agent file rejected')

@@ -64,6 +64,8 @@ it.each([
   'out/.agents/notes/local.md',
   'out/.codex/config.toml',
   'out/.claude.json',
+  'out/.github/copilot-instructions.md',
+  'out/.GitHub/Instructions/review.instructions.md',
   'node_modules/bindings/.claude/settings.local.json',
   'node_modules/bindings/CLAUDE.md',
   'node_modules/better-sqlite3/lib/CLAUDE.local.md',
@@ -72,31 +74,41 @@ it.each([
   'reference-plugins/pdf-text/CONTEXT.md',
   'reference-plugins/pdf-text/.cursor/rules/local.mdc',
   'reference-plugins/pdf-text/.windsurf/rules/local.md',
-  'reference-plugins/pdf-text/.opencode/config.json'
+  'reference-plugins/pdf-text/.opencode/config.json',
+  'reference-plugins/pdf-text/.github/instructions/review.instructions.md',
+  'reference-plugins/pdf-text/.github/agents/review.agent.md',
+  'reference-plugins/pdf-text/.github/prompts/review.prompt.md'
 ])('rejects local agent metadata before copying %s', path => {
   const { root, stage } = fixture(); put(root, path)
   expect(() => stageDesktop(root, stage, nativeTargets.targets[0])).toThrow('Local agent file rejected')
 })
-it('rejects an empty local agent directory before copying it', () => {
-  const { root, stage } = fixture(); mkdirSync(join(root, 'out/.codex'))
+it.each(['.codex', '.github/instructions', '.github/agents', '.github/prompts'])('rejects an empty local agent directory before copying %s', path => {
+  const { root, stage } = fixture(); mkdirSync(join(root, 'out', path), { recursive: true })
   expect(() => stageDesktop(root, stage, nativeTargets.targets[0])).toThrow('Local agent file rejected')
-  expect(existsSync(join(stage, 'app/out/.codex'))).toBe(false)
+  expect(existsSync(join(stage, 'app/out', path))).toBe(false)
 })
 it.each([
   ['app', 'out/main/aGeNtS.Md'],
   ['app', 'node_modules/bindings/.codex/config.toml'],
   ['plugin', '.agents/notes/local.md'],
-  ['plugin', 'CLAUDE.local.md']
+  ['plugin', 'CLAUDE.local.md'],
+  ['app', 'out/.github/copilot-instructions.md'],
+  ['plugin', '.github/instructions/review.instructions.md']
 ] as const)('rejects agent metadata added to a staged %s at %s', (section, path) => {
-  const { root, stage } = fixture(), target = nativeTargets.targets[0]!
+  const { root, stage } = fixture(), target = nativeTargets.targets.find(t => t.platform === process.platform && t.arch === process.arch)!
   const payload = stageDesktop(root, stage, target)
   put(payload[section], path)
   expect(() => verifyDesktopPayload(payload.app, target, payload.plugin)).toThrow('Local agent file rejected')
 })
 it('keeps application agent code and role prompts while excluding root-only local metadata', () => {
-  const { root, stage } = fixture(), target = nativeTargets.targets[0]!
+  const { root, stage } = fixture(), target = nativeTargets.targets.find(t => t.platform === process.platform && t.arch === process.arch)!
   for (const path of ['AGENTS.md', '.agents/notes/local.md', '.codex/config.toml', '.claude/settings.local.json']) put(root, path)
-  const assets = new Map([['out/main/agent.js', 'export const applicationAgent = true'], ['out/renderer/AgentPanel.js', 'application agent UI']])
+  const assets = new Map([
+    ['out/main/agent.js', 'export const applicationAgent = true'],
+    ['out/renderer/AgentPanel.js', 'application agent UI'],
+    ['out/.github/workflows/build.yml', 'unrelated GitHub configuration'],
+    ['out/.github/ISSUE_TEMPLATE/bug.md', 'unrelated GitHub template']
+  ])
   for (const name of ['agent', 'approval', 'summary']) {
     assets.set(`out/main/prompts/${name}-v0.1.txt`, readFileSync(`src/runtime/model/prompts/${name}-v0.1.txt`, 'utf8'))
   }

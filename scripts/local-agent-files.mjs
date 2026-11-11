@@ -6,10 +6,13 @@ import { basename, relative } from 'node:path'
 const directories = new Set(['.agents', '.codex', '.claude', '.ao', '.cursor', '.opencode', '.gemini', '.continue', '.windsurf'])
 const configurations = new Set(['.claude.json', '.mcp.json', '.cursorrules', '.windsurfrules', 'opencode.json', 'opencode.jsonc'])
 const guidance = /^(?:agents(?:\.(?:local|override))?|claude(?:\.local)?|gemini|context)\.md$/i
+const githubGuidance = new Set(['copilot-instructions.md', 'instructions', 'agents', 'prompts'])
 
 export function assertNoLocalAgentPath(path) {
-  for (const part of path.replaceAll('\\', '/').split('/')) {
-    if (directories.has(part.toLowerCase()) || configurations.has(part.toLowerCase()) || guidance.test(part)) {
+  const parts = path.replaceAll('\\', '/').split('/')
+  for (const [index, part] of parts.entries()) {
+    if (directories.has(part.toLowerCase()) || configurations.has(part.toLowerCase()) || guidance.test(part) ||
+        (parts[index - 1]?.toLowerCase() === '.github' && githubGuidance.has(part.toLowerCase()))) {
       throw Error('Local agent file rejected: ' + path)
     }
   }

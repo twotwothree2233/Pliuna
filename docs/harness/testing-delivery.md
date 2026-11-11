@@ -71,6 +71,7 @@ Node 原生模块、utility worker 和监督器保持固定路径。
 
 本地代理元数据通过[共享规则](../../scripts/local-agent-files.mjs)拒绝。
 覆盖配置目录、指引文件和笔记路径。
+也覆盖 `.github` 下的 Copilot 指引、指令、代理和提示词。
 复制阶段与成品检查均可阻止混入。
 规则不按 agent 关键词排除应用代码和提示词。
 
