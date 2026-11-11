@@ -77,7 +77,10 @@ export class FileModelStore {
   private atomic(name: string, value: unknown, onPublished: () => void = () => {}): void {
     const text = JSON.stringify(value, null, 2) + '\n'
     if (Buffer.byteLength(text) > limit) throw Error('SETTINGS_WRITE_FAILED')
-    atomicWriteFileSync(managedFile(this.directory, name), text, onPublished)
+    atomicWriteFileSync(managedFile(this.directory, name), text, () => {
+      this.protectedFiles.delete(name)
+      onPublished()
+    })
   }
   save(records: SavedConnection[], channels?: SavedChannel[]): void {
     if (this.error || this.snapshot === undefined) throw Error(this.error || 'SETTINGS_READ_FAILED')
