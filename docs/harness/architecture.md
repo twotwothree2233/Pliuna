@@ -1,99 +1,66 @@
-# 架构与技术栈
+# 当前架构与模块边界
 
-状态：主体技术栈与进程方向已确认；以下模块划分和存储提交方法是推荐实现。
+应用使用 Electron、TypeScript、React 和独立 runtime。
+业务数据库只有 runtime 写入。
+窗口、原生文件选择和配置文件由主进程管理。
 
-## 已确认技术栈
+## 进程分工
 
-| 层次 | 选择与约束 |
-| --- | --- |
-| 桌面宿主 | Electron；安装包携带所需本地运行设施 |
-| 开发语言 | TypeScript；不引入 Python 主后端 |
-| 宿主前端 | React + Vite；不要求生成界面使用 React |
-| Agent runtime | 独立后台进程中的 Node.js；不在 Electron 主进程跑主 loop |
-| 模型接口 | Adapter；首版明确限定 OpenAI-compatible Chat Completions 契约，不假设所有兼容服务等价 |
-| 持久化 | SQLite 存结构化状态，应用私有目录存文件资源 |
-| 凭据 | 系统凭据存储，不在配置或数据库明文保存密钥 |
-| 数据协议 | JSON Schema 2020-12 + Ajv，TypeScript 类型由 schema 生成 |
-| 测试 | Vitest + Playwright，模型默认模拟 |
-| 内置代码执行 | Monty，原生后端为集成基线；Python 子集，完整验收待完成 |
-
-不引入完整 agent 框架；协议不绑定某厂商 SDK。具体候选驱动/构建工具见文末已确认基线；精确版本在工程建立及兼容性验证后锁定。
-
-## 进程职责
-
-```text
-Electron 主进程
-  ├─ 窗口、应用生命周期、平台权限及受控桥接
-  ├─ 宿主 renderer：React 界面与受管理的任务 DOM
-  │    └─ 按需创建隔离脚本区域
-  └─ Agent runtime 后台进程
-       ├─ 会话、模型接入、插件目录、审批与调度
-       ├─ SQLite / 资源访问协调
-       └─ 通过窄接口调用内置工具及插件执行端
-            ├─ 内置一次性 Monty 执行环境（已选型、待集成验收）
-            └─ 可信本地插件子进程（双向 JSON-RPC，不是沙箱）
-```
-
-独立后台进程用于稳定性和生命周期管理，不自动构成安全沙箱。生成界面关闭 Node 集成；宿主 renderer 不直接持有模型密钥、数据库句柄或通用文件访问接口。
-
-## 模块接口
-
-| 模块 | 外部调用者需要了解的接口 | 隐藏的实现复杂性 |
+| 层 | 实现入口 | 职责 |
 | --- | --- | --- |
-| Session | 读取快照、接收事件、开启/取消 run | 排队、持久化、恢复、租约 |
-| Model | 输入上下文、输出流式动作、取消 | 服务差异、错误规范化、工具 schema 转换 |
-| Plugin Registry | 发现、读描述、激活/停用能力 | 包校验、版本固定、依赖、命名空间 |
-| Execution | 调用受授权工具、查询/取消操作 | 审批、输入输出校验、预算、Monty 限制及插件进程调度 |
-| Surface | 检查、暂存、发布、接收事件 | 任务归属、范围授权、布局限制、版本、渲染 profile |
-| Resource Store | 按 ID 创建/读取/删除资源 | 私有路径、内容摘要、引用、体积和清理 |
-| Approval | 对具体操作给出批准/拒绝/转人工 | 模式、独立模型调用、过期与审计 |
+| 主进程 | [main/index.ts](../../src/main/index.ts) | 窗口、IPC、原生对话框、配置落盘 |
+| 预加载 | [preload/index.ts](../../src/preload/index.ts) | 固定 request 桥接与平台标识 |
+| Renderer | [renderer/main.tsx](../../src/renderer/src/main.tsx) | 工作区、界面状态及用户确认 |
+| Runtime utility process | [worker.ts](../../src/runtime/worker.ts) | 请求分发、数据库与执行协调 |
+| 检查与导出 worker | [导出预检](../../src/runtime/export-check-worker.ts)、[生成](../../src/runtime/export-generation-worker.ts)、[存储检查](../../src/runtime/inspection-worker.ts) | 后台计算、固定快照及只读分析 |
+| Monty worker | [monty/worker.ts](../../src/runtime/monty/worker.ts) | 一次性受限计算 |
+| 插件进程 | [plugins/process.ts](../../src/runtime/plugins/process.ts) | 可信本地后端与双向 RPC |
 
-模块不得通过共享裸数据库连接或任意工具派发绕过其他模块的接口。先保持少量深模块，不因为未来可能扩展就拆成网络微服务。
+窗口启用 contextIsolation、sandbox 和 webSecurity。
+Renderer 关闭 Node 集成。
+宿主禁止额外窗口和页面导航。
 
-## 持久化与凭据
+## Runtime 模块
 
-SQLite 保存任务、消息、事件、run、插件实例与版本、审批、View 版本和资源索引；文件资源保存原件、派生内容、工具输出和界面 bundle。核心表结构已有[初始 SQL 草案](../contracts/sql/001-core.sql)，完整管理表及真实迁移仍待实现。
+| 模块 | 职责 |
+| --- | --- |
+| [store.ts](../../src/runtime/store.ts) | 对象、事务、审批和执行总协调 |
+| [request-queue.ts](../../src/runtime/request-queue.ts) | 请求材料绑定及启动时复查 |
+| [model](../../src/runtime/model/) | 模型适配、上下文、容量和请求记录 |
+| [plugins](../../src/runtime/plugins/) | 包、权限、派发、回调和派生来源 |
+| [managed.ts](../../src/runtime/managed.ts) | Bundle、HTML/CSS 和表单校验 |
+| [storage-lifecycle.ts](../../src/runtime/storage-lifecycle.ts) | staging、发布与必要清理 |
+| [recovery.ts](../../src/runtime/recovery.ts) | 恢复点与维护预约 |
+| [restore-journal.ts](../../src/runtime/restore-journal.ts) | 数据库选择和恢复控制记录 |
+| [export-control.ts](../../src/runtime/export-control.ts) | 导出状态、目标和资源保护 |
 
-推荐文件入库流程：先写有界临时文件并校验摘要，再发布不可变资源，最后在数据库事务中增加引用。失败产生的孤立资源可回收；不得把“数据库事务”误认为能原子提交数据库与任意文件系统操作。删除共享资源前检查其他任务的引用。
+进程控制统一经过[platform](../../src/platform/)适配层。
+Windows 原生模块提供 ACL 和 Job Object 辅助能力。
 
-凭据模块封装操作系统安全存储；不可用时明确拒绝持久保存或使用经确认的仅内存模式，禁止静默明文降级。日志、错误和模型输入必须移除密钥；任意配置的模型地址不自动获得其他服务的凭据。
+## 数据与配置
 
-## 跨平台与协议纪律
+默认数据目录由[application-data.ts](../../src/main/application-data.ts)确定。
+初始业务数据库名为 trellis.sqlite。
+恢复后由控制记录选择当前业务数据库。
 
-路径、凭据、原生二进制启动、打包和签名通过平台 adapter 封装。不硬编码用户目录，不依赖 shell 命令拼接，不要求系统 Python/Node。macOS 成功不代表其他系统已验证。
+资源、插件包与恢复副本存放在应用私有目录。
+恢复、导出和插件配置使用独立控制数据库。
+settings.json 与 auth.json 由主进程管理。
+这些文件不进入桌面安装包。
 
-跨进程消息的来源必须由实际连接绑定，再做 schema 与权限检查。Schema 是结构的唯一来源，生成的 TypeScript 类型禁止手工修改。模型服务可能只支持 schema 子集，adapter 应转换可保真的定义或明确拒绝，不静默删约束。
+## 启动与关闭
 
-## 插件信任与调度补充
+启动先核对目录归属、数据库及控制记录。
+异常控制状态会关闭写入并保留数据。
+正常启动废止旧 epoch 的执行和许可。
 
-插件由用户信任后启动，可自行运行任意代码，harness 不提供统一 OS 沙箱。通过 stdio 双向 JSON-RPC 2.0 查询业务数据和申请动作。任务级按任务、全局级按应用管理实例；等级内查询免逐次审批，宿主秘密排除。详见 [插件接入](plugin-integration.md)。
+主进程对 runtime 崩溃执行有界重启。
+退出时先请求必要清理，确认后结束进程。
+清理未确认时保留显式错误和保护状态。
 
-Task 长期保存，Run 承担单次推理；每任务最多一个未结束 Run。动作申请独立保存，可无 Run。审批等待不占写入队列；统一写入调度同时服务主 agent、插件动作和必要输入保存，具体事务实现待定。
+## 平台门槛
 
-## 存储与恢复基线
-
-采用当前状态加必要历史，不建设事件溯源。数据库业务状态与对应事件在同一事务提交，正式答案不可变；文件先保存，再提交数据库引用。资源导入副本、版本不可变，已发布界面历史保留。重启仅恢复数据，执行由用户重新发起；永久删除维护可中断续清理。详见 [存储与恢复](storage-recovery.md)，表结构和迁移方案仍待设计。
-
-## 插件包存储与环境职责
-
-Plugin Registry 静态校验并保存应用管理的固定版本副本及包内摘要，从副本发现/加载内容及启动包内入口，不跟随原目录或提供热加载。更新显式重新导入，按占用和信任规则生效；副本或声明配置不符时拒绝按旧记录加载/启动。
-
-外部解释器和依赖不纳入 harness 的路径固定、摘要检测或环境管理；启动失败仅报告，不自动修复。这与宿主安装包携带自身运行设施、内置 Monty 的分发验收是不同职责，不能混为插件运行环境保证。见 [插件接入](plugin-integration.md)。
-
-## 迁移维护边界
-
-正常业务与插件访问开放前检查数据库 schema 版本，维护阶段停止业务写入，使用 SQLite 一致性备份后受控向前迁移；失败阻止业务启动，旧版不读取更高版本或自动降级。恢复点含必要非敏感配置和引用清单，保护资源/插件副本而非复制全部文件，不明文导出凭据。
-
-最多一个有效恢复点，新候选校验成功后替换旧点，不按天过期。永久删除任务先废止包含它的恢复点再清理，防止恢复复活。具体维护互斥、恢复点发布和失效记录存储待实现，详见 [存储与恢复](storage-recovery.md)。
-
-## 四原语与内部模块
-
-面向模型仅提供 list/read/write/call，按受管理对象类型与能力契约分发至既有模块。对象引用不是文件路径或权限凭证。对象类型/能力说明经 list/read 按需加载，不一次注入全部 schema。
-
-write 的单次意图由宿主协调校验、审批和提交，Surface 内部 stage/commit 与版本化发布不删除；插件 JSON-RPC 仍保留专门方法，四原语不取代内部模块接口。模型不因通用入口获得管理级写权。详见 [工具与资源](tools-resources.md)。
-
-## 实现契约与工程基线
-
-runtime 统一持有业务数据库连接和写事务，renderer/主进程通过窄接口操作，禁止旁路业务写入。使用短事务，模型、工具、审批和文件准备在事务外，提交时重新核验当前资格和版本。宿主 IPC 采用快照、有序对象增量和缺口重同步，不建持久事件总线。
-
-候选工具链已确认：pnpm workspace、electron-vite、electron-builder、better-sqlite3、json-schema-to-typescript；创建工程时锁定精确版本并优先验证原生 ABI，不声称现已兼容。具体接口见[接入契约](../contracts/integration.md)，结构见[SQL 草案](../contracts/sql/001-core.sql)。
+原生目标来自[native-targets.json](../../src/shared/native-targets.json)。
+目前只有 darwin-arm64 的 Monty runtimeVerified 为 true。
+其余目标通过各自候选构建与平台测试逐步验证。
+目录存在目标包不改变该执行门槛。
