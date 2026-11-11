@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync, symlinkSync, realpathSync, rmSync } from 'n
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const root = mkdtempSync(join(tmpdir(), 'trellis-test-environment-'))
+const root = mkdtempSync(join(tmpdir(), 'pliuna-test-environment-'))
 try {
   const file = join(root, 'source'), link = join(root, 'link')
   writeFileSync(file, '')

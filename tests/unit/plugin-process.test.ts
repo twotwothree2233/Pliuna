@@ -37,14 +37,14 @@ async function setup(options: { timeout?: number; badHandshake?: boolean; global
   const script = backend.replaceAll('MARKER_PATH', JSON.stringify(join(root, 'started')))
   await writeFile(join(source, 'backend.cjs'), options.badHandshake ? script.replace("protocol_version:'0.1'", "protocol_version:'future'") : script)
   await writeFile(join(source, 'echo.json'), JSON.stringify({ id: 'echo', description: 'fixture', when_to_use: 'testing', input_schema: { type: 'object' }, output_schema: { type: 'object', properties: { value: {} }, required: ['value'], additionalProperties: false }, effect: 'read', timeout_ms: options.timeout ?? 2000, errors: [], examples: [] }))
-  await writeFile(join(source, 'manifest.json'), JSON.stringify({ manifest_version: '0.1', protocol_version: '0.1', id: options.pdf ? 'trellis.pdf-text' : 'fixture.process', version: '1.0.0', access_level: options.global ? 'global' : 'task', contributes: [{ id: 'echo', kind: 'tool', entry: 'echo.json', description: 'fixture' }], backend: options.appRuntime ? { runtime: 'app-node', entry: 'backend.cjs' } : { command: process.execPath, args: ['backend.cjs'], entry: 'backend.cjs' } }))
+  await writeFile(join(source, 'manifest.json'), JSON.stringify({ manifest_version: '0.1', protocol_version: '0.1', id: options.pdf ? 'pliuna.pdf-text' : 'fixture.process', version: '1.0.0', access_level: options.global ? 'global' : 'task', contributes: [{ id: 'echo', kind: 'tool', entry: 'echo.json', description: 'fixture' }], backend: options.appRuntime ? { runtime: 'app-node', entry: 'backend.cjs' } : { command: process.execPath, args: ['backend.cjs'], entry: 'backend.cjs' } }))
   copy = await control.install(source); await control.grant(copy.digest, { local_code: true, cross_task: options.global ?? false })
   processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return options.reverseRead ? options.reverseRead() : { value: 'reverse result' } }, () => {}, options.hostRuntime)
 }
 function request(args: Record<string, unknown> = {}, options: Partial<PluginExecution> = {}): PluginExecution {
   return { call_id: crypto.randomUUID(), capability: 'echo', arguments: args, references: [], signal: new AbortController().signal, dispatch() {}, valid() {}, ...options }
 }
-beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'trellis-plugin-process-')); control = new PluginControl(root) })
+beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pliuna-plugin-process-')); control = new PluginControl(root) })
 afterEach(async () => {
   vi.restoreAllMocks()
   await processes?.shutdown('test_cleanup', 20)

@@ -11,7 +11,7 @@ afterEach(async()=>{for(const f of cleanups.splice(0).reverse())await f()})
 async function until(check:()=>boolean){const start=Date.now();while(!check()){if(Date.now()-start>4000)throw Error('request model timeout');await new Promise(r=>setTimeout(r,5))}}
 async function setup(handler:(x:Exchange,r:ServerResponse)=>void){
  const server=await modelServer((x,r)=>{if(!synthetic(x.body,r))handler(x,r)});cleanups.push(server.close)
- const root=mkdtempSync(join(tmpdir(),'trellis-request-http-')),models=new ModelService(),configuration={id:'main',base_url:server.url,wire_model_id:'synthetic-wire',context_tokens:1000000,max_output_tokens:1024,compatibility_profile:'chat-max-tokens'}
+ const root=mkdtempSync(join(tmpdir(),'pliuna-request-http-')),models=new ModelService(),configuration={id:'main',base_url:server.url,wire_model_id:'synthetic-wire',context_tokens:1000000,max_output_tokens:1024,compatibility_profile:'chat-max-tokens'}
  models.configure({type:'model.configure',configuration,api_key:'synthetic',confirm_memory_only:true});await models.test('main','main')
  const store=new RuntimeStore(root,models),task=store.create('isolated request').task.id;cleanups.push(()=>{store.close();rmSync(root,{recursive:true,force:true})})
  const call=(type:string,extra:Record<string,unknown>={})=>store.handle({type,task_id:task,...extra}) as any

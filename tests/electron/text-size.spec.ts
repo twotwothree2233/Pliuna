@@ -19,8 +19,8 @@ async function metrics(page: Page) {
 
 test('text size scales UI and managed text without remounting drafts, then persists across restart', async () => {
   test.setTimeout(60000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-text-size-'))
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-text-size-'))
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
@@ -55,7 +55,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await page.keyboard.press('ArrowLeft')
     await expect(page.getByRole('radio', { name: '125%', exact: true })).toBeChecked()
     await page.getByRole('radio', { name: '140%', exact: true }).check()
-    await page.screenshot({ path: test.info().outputPath('trellis-text-size-desktop.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-text-size-desktop.png') })
     await closeSettings(page)
     for (const name of ['你的想法', '想从哪里开始？']) {
       await expect(page.getByLabel(name)).toHaveAttribute('data-retained-editor', 'yes')
@@ -70,7 +70,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     expect(await page.locator('.settings-content').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.getByRole('radio', { name: '140%', exact: true }).scrollIntoViewIfNeeded()
-    await page.screenshot({ path: test.info().outputPath('trellis-text-size-mobile.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-text-size-mobile.png') })
     await closeSettings(page)
     await expect(page.getByRole('status').filter({ hasText: /^已保存$/ })).toBeVisible()
     expect(errors).toEqual([])
@@ -79,7 +79,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await expect(page.getByRole('radio', { name: '140%', exact: true })).toBeChecked()
     expect(await page.locator('.settings-page h1').evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(24 * 1.4, 1)
     // Invalid persisted values must fall back to the original baseline.
-    await page.evaluate(() => localStorage.setItem('trellis-text-size', '999'))
+    await page.evaluate(() => localStorage.setItem('pliuna-text-size', '999'))
     await page.reload()
     await openSettings(page, '外观')
     await expect(page.getByRole('radio', { name: '100%（默认）', exact: true })).toBeChecked()

@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 
 export async function processFixtures(): Promise<string> {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-process-fixtures-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-process-fixtures-'))
   await build({ configFile: false, logLevel: 'error', build: {
     ssr: true, outDir: directory, emptyOutDir: false,
     rollupOptions: { input: { owner: resolve('tests/fixtures/process-owner.ts'), monty: resolve('tests/fixtures/monty-execution.ts') },

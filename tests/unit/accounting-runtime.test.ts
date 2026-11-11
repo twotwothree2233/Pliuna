@@ -10,7 +10,7 @@ import { requestAccounting } from '../../src/runtime/model/accounting'
 import { performance as realPerformance } from 'node:perf_hooks'
 let root:string,store:RuntimeStore,db:Database.Database,task:string,run:string
 const config={id:'isolated',base_url:'https://example.invalid',wire_model_id:'synthetic',context_tokens:1000000,max_output_tokens:1024,compatibility_profile:'chat-max-tokens' as const}
-beforeEach(()=>{vi.useFakeTimers();root=mkdtempSync(join(tmpdir(),'trellis-accounting-runtime-'));store=new RuntimeStore(root);db=new Database(join(root,'trellis.sqlite'));task=store.create('synthetic').task.id;run=store.start(task,'synthetic','fixture',[])})
+beforeEach(()=>{vi.useFakeTimers();root=mkdtempSync(join(tmpdir(),'pliuna-accounting-runtime-'));store=new RuntimeStore(root);db=new Database(join(root,'pliuna.sqlite'));task=store.create('synthetic').task.id;run=store.start(task,'synthetic','fixture',[])})
 afterEach(()=>{vi.restoreAllMocks();store.close();db.close();vi.useRealTimers()})
 const read=():any=>store.handle({type:'task.query',task_id:task,query:{type:'read',input:{target:{kind:'run',id:run}}}})
 const page=(cursor?:string):any=>store.handle({type:'host.run.accounting',task_id:task,run_id:run,...(cursor?{cursor}:{})})

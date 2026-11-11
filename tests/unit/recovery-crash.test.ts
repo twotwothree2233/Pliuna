@@ -9,13 +9,13 @@ import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 let working: string, executable: string
 beforeAll(async () => {
-  working = mkdtempSync(join(tmpdir(), 'trellis-recovery-crash-')); executable = join(working, 'crash.cjs')
+  working = mkdtempSync(join(tmpdir(), 'pliuna-recovery-crash-')); executable = join(working, 'crash.cjs')
   const req = createRequire(import.meta.url), esbuild = createRequire(req.resolve('vite'))('esbuild')
   await esbuild.build({ entryPoints: ['tests/helpers/recovery-crash.ts'], outfile: executable, bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.txt': 'text', '.sql': 'text' } })
 })
 afterAll(() => rmSync(working, { recursive: true, force: true }))
 for (const point of ['candidate', 'switched', 'invalidated']) it('reconciles actual SIGKILL after independent ' + point + ' commit without replay', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-recovery-crash-data-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-recovery-crash-data-'))
   let store = new RuntimeStore(directory); const task = store.create('崩溃恢复点'), prep = store.handle({ type: 'maintenance.begin' }) as any
   const old = await store.handle({ type: 'maintenance.create', token: prep.reservation.token, inputs_saved: true, replace_id: null }) as any
   store.close()
@@ -37,7 +37,7 @@ for (const point of ['candidate', 'switched', 'invalidated']) it('reconciles act
       // Deletion never began before durable invalidation; a new explicit delete is still required.
       store.handle({ type: 'task.delete', task_id: task.task.id }); expect(store.tasks()).toEqual([])
     }
-    const db = new Database(join(directory, 'trellis.sqlite'))
+    const db = new Database(join(directory, 'pliuna.sqlite'))
     expect(db.prepare('SELECT count(*) n FROM runs').get()).toEqual({ n: 0 }); db.close()
   } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exit }; store.close(); rmSync(directory, { recursive: true, force: true }) }
 }, 15000)

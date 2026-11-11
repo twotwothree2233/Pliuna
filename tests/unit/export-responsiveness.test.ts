@@ -8,11 +8,11 @@ import { RuntimeStore } from '../../src/runtime/store'
 import type { Bundle } from '../../src/shared/contracts.generated'
 
 it('measures synchronous selection preflight and a queued independent read within existing quotas', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-export-response-audit-'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-export-response-audit-'))
   vi.useFakeTimers()
   const store = new RuntimeStore(root), task = store.create('Synthetic export response baseline').task.id
   const run = store.start(task, 'held synthetic fixture', 'fixture', [])
-  const db = new Database(join(root, 'trellis.sqlite'))
+  const db = new Database(join(root, 'pliuna.sqlite'))
   try {
     const viewIds: string[] = []
     const bundle: Bundle = {

@@ -19,7 +19,7 @@ async function enable(copy: PluginCopy, choices: string[] = [], global = false):
   const plan = control.plan(task, copy.digest, choices)
   await control.enable(task, copy.digest, choices, plan.fingerprint, global, idle)
 }
-beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'trellis-plugin-selection-')); control = new PluginControl(root); task = randomUUID() })
+beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pliuna-plugin-selection-')); control = new PluginControl(root); task = randomUUID() })
 afterEach(async () => { control.close(); await rm(root, { recursive: true, force: true }) })
 it('plans dependencies without enabling and persists explicit workflow independently', async () => {
   const dependency = await install('dependency'), main = await install('main', { dependencies: [dep('dependency')] })

@@ -17,11 +17,11 @@ vi.mock('../../src/runtime/file-format', async importOriginal => {
   return { newTestIdentityEncoding: (root: string, env = process.env, platform = 'win32') => original.newTestIdentityEncoding(root, env, platform) }
 })
 const roots: string[] = [], opened: { close(): void }[] = []
-const root = () => { const r = fs.mkdtempSync(join(tmpdir(), 'trellis-format-')); roots.push(r); return r }
+const root = () => { const r = fs.mkdtempSync(join(tmpdir(), 'pliuna-format-')); roots.push(r); return r }
 const keep = <T extends { close(): void }>(value: T): T => { opened.push(value); return value }
 function read(r: string): any { const db = new Database(join(r, 'restore-control.sqlite'), { readonly: true }); try { return JSON.parse((db.prepare('SELECT manifest FROM restore_control').get() as any).manifest) } finally { db.close() } }
 function edit(r: string, update: (value: any) => void): void { const db = new Database(join(r, 'restore-control.sqlite')); try { const v = read(r); update(v); db.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify(v)) } finally { db.close() } }
-beforeEach(() => { vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', 'decimal-v2') })
+beforeEach(() => { vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', 'decimal-v2') })
 afterEach(() => { opened.splice(0).reverse().forEach(c => c.close()); vi.restoreAllMocks(); vi.unstubAllEnvs(); roots.splice(0).forEach(r => fs.rmSync(r, { recursive: true, force: true })) })
 function largeNativeIds(): void {
   // Business format fixtures use a virtual identity namespace. A real Win32
@@ -52,7 +52,7 @@ it('requires explicit Windows test opt-in and a fresh managed directory', () => 
   fs.mkdirSync(join(r, 'cache')); fs.writeFileSync(join(r, 'cache', 'model-directory.json'), '{}')
   expect(newTestIdentityEncoding(r)).toBe(1)
 })
-it.each(['trellis.sqlite', 'restore-control.sqlite-wal', 'restore-established', 'gc-established', 'settings.json', 'auth.json', 'unknown-profile'])('does not opt an existing %s directory into the new format', file => {
+it.each(['pliuna.sqlite', 'restore-control.sqlite-wal', 'restore-established', 'gc-established', 'settings.json', 'auth.json', 'unknown-profile'])('does not opt an existing %s directory into the new format', file => {
   const r = root(); fs.writeFileSync(join(r, file), 'retained')
   expect(newTestIdentityEncoding(r)).toBe(1)
 })
@@ -63,14 +63,14 @@ it('creates v6/v2 controls only for a fresh test root, and restarts without an o
   expect(fs.readFileSync(join(r, 'gc-established'), 'utf8')).toBe('gc-v2\n')
   const result = await inspectStorage(r, { scope: 'growth' }, () => {})
   expect(result).toMatchObject({ complete: true, controls: { format: 6, exports: { format: 2 } } })
-  store.close(); vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', '')
+  store.close(); vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', '')
   const restarted = keep(new RuntimeStore(r)); expect(restarted.snapshot(task).task.title).toBe('fresh exact test')
   expect(read(r).version).toBe(6)
 })
 it('retains an existing v5/v1 profile when Windows test opt-in is added', () => {
-  const r = root(); vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', '')
+  const r = root(); vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', '')
   const first = keep(new RuntimeStore(r)); first.create('legacy'); first.close()
-  const before = read(r); vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', 'decimal-v2')
+  const before = read(r); vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', 'decimal-v2')
   const restarted = keep(new RuntimeStore(r)); expect(restarted.tasks()).toHaveLength(1)
   expect(read(r)).toEqual(before)
   expect(fs.readFileSync(join(r, 'restore-established'), 'utf8')).toBe('restore-v5\n')
@@ -78,7 +78,7 @@ it('retains an existing v5/v1 profile when Windows test opt-in is added', () => 
 })
 it('round trips exact export identity, while a safe legacy job keeps its own version', () => {
   const r = root(), control = keep(new ExportControl(r, false, false, 2))
-  const job = control.create(randomUUID(), randomUUID(), 'trellis.sqlite', [], {})
+  const job = control.create(randomUUID(), randomUUID(), 'pliuna.sqlite', [], {})
   control.preview(job.id, '<p>fixture</p>', []); control.beginSave(job.id, join(r, 'result.html'), join(r, 'output.tmp'), false)
   control.created(job.id, { dev: 2695480082n, ino: 9007199256376705n }); control.close()
   const reopened = keep(new ExportControl(r, true))
@@ -103,7 +103,7 @@ it.each(['marker', 'export', 'gc', 'unknown'])('rejects %s version mismatch with
   expect((await inspectStorage(r, { scope: 'growth' }, () => {})).complete).toBe(mode === 'marker')
 })
 it('rejects lossy legacy export identity and retains the stored record', () => {
-  const r = root(), c = keep(new ExportControl(r, false, false, 1)), job = c.create(randomUUID(), randomUUID(), 'trellis.sqlite', [], {})
+  const r = root(), c = keep(new ExportControl(r, false, false, 1)), job = c.create(randomUUID(), randomUUID(), 'pliuna.sqlite', [], {})
   c.cancel(job.id); c.close()
   const db = new Database(join(r, 'export-control.sqlite')), invalid = { ...job, phase: 'saved', destination: { target: join(r, 'retained.html'), temporary: join(r, 'retained.tmp'), identity: { dev: 2695480082, ino: 9007199256376704 } } }
   db.prepare('UPDATE export_jobs SET phase=?,manifest=? WHERE id=?').run('saved', JSON.stringify(invalid), job.id); db.close()
@@ -114,7 +114,7 @@ it('rejects lossy legacy export identity and retains the stored record', () => {
 it('uses an exact v2 GC operation for real deletion and persists its result across restart', () => {
   largeNativeIds()
   const r = root(), store = keep(new RuntimeStore(r)), task = store.create('v2 GC').task.id, key = randomUUID(), action = randomUUID(), stage = randomUUID()
-  const db = new Database(join(r, 'trellis.sqlite'))
+  const db = new Database(join(r, 'pliuna.sqlite'))
   db.prepare("INSERT INTO actions (id,task_id,kind,state,result,source_json,request_json,commit_valid,created_at) VALUES (?,?,'mutation','ended','not_executed','{}','{}',0,'now')").run(action, task)
   db.prepare("INSERT INTO staging (id,task_id,owner_kind,owner_id,runtime_epoch,state,storage_key,expected_bytes,sha256,created_at) VALUES (?,?,'action',?,'old','invalid',?,8,?,'now')").run(stage, task, action, key, digest(Buffer.from('original'))); db.close()
   fs.writeFileSync(join(r, 'resources', key), 'original')
@@ -133,7 +133,7 @@ it('uses an exact v2 GC operation for real deletion and persists its result acro
 it('uses exact v2 cleanup authority and retains the completed record across restart', () => {
   largeNativeIds()
   const r = root(), store = keep(new RuntimeStore(r)), task = store.create('v2 cleanup').task.id, key = randomUUID()
-  const db = new Database(join(r, 'trellis.sqlite'))
+  const db = new Database(join(r, 'pliuna.sqlite'))
   db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(key, key, digest(Buffer.from('original')), 8, 'text/plain', 'fixture', 'now')
   db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task, key); db.close(); fs.writeFileSync(join(r, 'resources', key), 'original')
   store.handle({ type: 'task.delete', task_id: task })

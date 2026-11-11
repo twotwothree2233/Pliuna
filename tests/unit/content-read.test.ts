@@ -8,7 +8,7 @@ import { validateModel } from '../../src/shared/validation'
 import { digest } from '../../src/runtime/resources'
 import { randomUUID } from 'node:crypto'
 let root: string, store: RuntimeStore, db: Database.Database, task: string, other: string
-beforeEach(() => { vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'trellis-content-read-')); store = new RuntimeStore(root); db = new Database(join(root, 'trellis.sqlite')); task = store.create('synthetic content').task.id; other = store.create('other').task.id })
+beforeEach(() => { vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'pliuna-content-read-')); store = new RuntimeStore(root); db = new Database(join(root, 'pliuna.sqlite')); task = store.create('synthetic content').task.id; other = store.create('other').task.id })
 afterEach(() => { store.close(); db.close(); vi.useRealTimers() })
 function save(text: string, media = 'text/plain; charset=utf-8') {
  const id = randomUUID(), bytes = Buffer.from(text); writeFileSync(join(root, 'resources', id), bytes)

@@ -10,7 +10,7 @@ const executablePath: string = createRequire(import.meta.url)('electron')
 
 test('request-boundary compaction retains latest user and two complete batches across consecutive summaries and restart', async () => {
   test.setTimeout(60000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-request-window-v2-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-request-window-v2-'))
   let requests = 0, summaries = 0
   const mainInputs: any[] = [], summaryInputs: any[] = []
   const server = await modelServer(({ body }, res) => {
@@ -36,9 +36,9 @@ test('request-boundary compaction retains latest user and two complete batches a
     expect(requests).toBe(5)
     textStream(res, 'FINAL_' + 'z'.repeat(18500))
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch(), page = await app.firstWindow()
-  const call = async (request: any): Promise<any> => { const reply = await page.evaluate(value => window.trellis.request(value), request); if (!reply.ok) throw Error(reply.error.code); return reply.data }
+  const call = async (request: any): Promise<any> => { const reply = await page.evaluate(value => window.pliuna.request(value), request); if (!reply.ok) throw Error(reply.error.code); return reply.data }
   try {
     await call({ type: 'model.configure', configuration: { id: 'summary', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 240000, max_output_tokens: 128000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', remember_connection: true, confirm_plaintext_storage: true, confirm_memory_only: true })
     await call({ type: 'model.test', model_id: 'summary', role: 'compaction', confirm_cost: true })
@@ -50,7 +50,7 @@ test('request-boundary compaction retains latest user and two complete batches a
     expect(requests).toBe(5); expect(summaries).toBe(3)
     const snapshot = await call({ type: 'task.snapshot', task_id: task }), status = await call({ type: 'context.status', task_id: task })
     const originals = await app.evaluate((_electron, { root, task }) => {
-      const require = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json'), db = new (require('better-sqlite3'))(root + '/trellis.sqlite', { readonly: true })
+      const require = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json'), db = new (require('better-sqlite3'))(root + '/pliuna.sqlite', { readonly: true })
       try { return db.prepare('SELECT id,kind,payload_json FROM records WHERE task_id=? ORDER BY sequence').all(task).map((row: any) => ({ ...row, payload: JSON.parse(row.payload_json) })) } finally { db.close() }
     }, { root, task })
     const results = originals.filter((r: any) => r.kind === 'model.tool_result'), responses = originals.filter((r: any) => r.kind === 'model.response')

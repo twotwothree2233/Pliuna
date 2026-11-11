@@ -1,3 +1,4 @@
+import { isManagedDatabaseFile } from '../shared/branding'
 import { fileFstatSync as fstatSync, fileLstatSync as lstatSync, atomicWriteFileSync, entryExistsSync as existsSync, flushDirectorySync, managedFile, managedRegularFile, openRegularFileSync, readRegularFileSync } from '../platform/files'
 import { journalFileIdentity,sameJournalFileIdentity,validJournalFileIdentity,type IdentityEncoding,type JournalFileIdentity } from '../platform/file-identity'
 import { newTestIdentityEncoding } from './file-format'
@@ -16,7 +17,7 @@ type Identity = JournalFileIdentity
 type Item = { stage: Row; temporary: boolean; identity: Identity; state: 'pending' | 'deleting' | 'deleted' | 'absent' | 'skipped' | 'failed'; attempt: number; next_retry_at: string | null; reason: string }
 type Operation = { version: IdentityEncoding; id: string; token: string; selected: string; created_at: string; phase: 'preview' | 'running' | 'settled'; authorized: boolean; items: Item[]; protected: number; reviews: number; next_after: number | null }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
-const managed = (file: string) => file === 'trellis.sqlite' || /^restore-[a-f0-9-]{36}-(target|rollback)\.sqlite$/.test(file)
+const managed = isManagedDatabaseFile
 const fail = (code: string): never => { throw new ContractError(code, 'GC requires inspection; files are retained. Query the original operation, do not resubmit') }
 
 // No deletion authority is stored in a restorable business database.

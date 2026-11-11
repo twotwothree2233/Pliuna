@@ -29,7 +29,7 @@ for (const decision of ['approve', 'deny', 'escalate', 'invalid'] as const) it('
     hostToolStream(res, 'write', { type: 'surface.update', surface_id: source.surface.id, expected_revision: source.surface.revision, operations: [{ type: 'view.replace', view_id: view.id, expected_view_revision: view.revision, bundle: { type: 'inline', bundle: next }, state_transition: { type: 'reset', expected_state_revision: view.state_revision, initial: next.state.initial } }] })
   })
   cleanups.push(server.close)
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-view-assisted-')), models = new ModelService()
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-view-assisted-')), models = new ModelService()
   const store = new RuntimeStore(directory, models, { viewReplacement: true })
   cleanups.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
   const task = store.create('辅助审批替换'), fixture = store.start(task.task.id, 'PRIVATE_OLD_RUN_SENTINEL', 'fixture', [])

@@ -12,7 +12,7 @@ import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 
 const roots: string[] = []
-function scene() { const root = fs.mkdtempSync(join(tmpdir(), 'trellis-persistence-')); roots.push(root); prepareApplicationDirectory(root); return root }
+function scene() { const root = fs.mkdtempSync(join(tmpdir(), 'pliuna-persistence-')); roots.push(root); prepareApplicationDirectory(root); return root }
 const record: SavedConnection = { configuration: { id: 'fixture', base_url: 'https://example.test/v1', wire_model_id: 'fixture', context_tokens: 10000, max_output_tokens: 1000, compatibility_profile: 'chat-max-tokens' }, key: 'old-key', revision: 1, protocol: 'fixture', roles: [] }
 function settings() { const root = scene(), store = new FileModelStore(root); store.load(); store.save([record]); return { root, store } }
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }) })
@@ -89,7 +89,7 @@ it('does not create a database through a dangling restore-control link', () => {
 })
 it('refuses a multiply linked selected database before business writes', () => {
   const root = scene(), store = new RuntimeStore(root); store.create('retained'); store.close()
-  const file = join(root, 'trellis.sqlite'), outside = join(root, 'foreign.sqlite')
+  const file = join(root, 'pliuna.sqlite'), outside = join(root, 'foreign.sqlite')
   fs.renameSync(file, outside); fs.linkSync(outside, file); const before = fs.readFileSync(outside)
   expect(() => new RuntimeStore(root)).toThrow('FILE_UNSAFE')
   expect(fs.readFileSync(outside)).toEqual(before)

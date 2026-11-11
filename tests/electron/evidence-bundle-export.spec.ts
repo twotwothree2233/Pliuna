@@ -20,11 +20,11 @@ test('resource bundle approval, explicit personal fragments, static file and iso
   if(mode==='invalid')expect(JSON.parse(body.messages.at(-1).content).error.code).toBe('EXPORT_FRAGMENT_OVERLAP')
   textStream(res,'FINISHED_'+mode)
  })
- const root=await mkdtemp(join(tmpdir(),'trellis-evidence-bundle-desktop-')),target=join(root,'static-delivery.html')
- const launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root,TRELLIS_ENABLE_VIEW_REPLACEMENT:'1'}})
+ const root=await mkdtemp(join(tmpdir(),'pliuna-evidence-bundle-desktop-')),target=join(root,'static-delivery.html')
+ const launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_VIEW_REPLACEMENT:'1'}})
  let app=await test.step('Launch isolated application',()=>launch())
  try{
-  let page=await app.firstWindow();const call=(r:unknown)=>test.step('Host request: '+(r as any).type,()=>page.evaluate(async r=>{const response=await window.trellis.request(r as any);if(!response.ok)throw Error(response.error.code);return response.data as any},r))
+  let page=await app.firstWindow();const call=(r:unknown)=>test.step('Host request: '+(r as any).type,()=>page.evaluate(async r=>{const response=await window.pliuna.request(r as any);if(!response.ok)throw Error(response.error.code);return response.data as any},r))
   await call({type:'model.configure',configuration:{id:'evidence',base_url:server.url,wire_model_id:'wire',context_tokens:1000000,compatibility_profile:'chat-max-tokens'},api_key:'synthetic',confirm_memory_only:true});await call({type:'model.test',model_id:'evidence',role:'main',confirm_cost:true})
   await test.step('Create and select the task through the workspace',async()=>{
    await page.getByRole('button',{name:'创建第一个任务',exact:true}).click();await page.getByLabel('任务名称').fill('Evidence bundle delivery');await page.getByRole('button',{name:'创建任务',exact:true}).click()

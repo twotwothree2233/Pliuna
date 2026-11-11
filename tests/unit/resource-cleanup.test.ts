@@ -27,14 +27,14 @@ function resource(text = 'original', title = '材料'): string {
 }
 function candidate(key = resource()): any { remove(); const r = list().items.find((r: any) => r.resource_id === key); return r }
 function prepare(id: string): string { const t = begin(); preview(id, t); return t }
-beforeEach(context => { if (context.task.name === 'v2 control upgrades preserve existing replica and permanent task deletion facts') vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', ''); root = fs.mkdtempSync(join(tmpdir(), 'trellis-resource-cleanup-')); store = new RuntimeStore(root, undefined, { viewReplacement: true }); task = store.create('资源收尾隔离').task.id })
+beforeEach(context => { if (context.task.name === 'v2 control upgrades preserve existing replica and permanent task deletion facts') vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', ''); root = fs.mkdtempSync(join(tmpdir(), 'pliuna-resource-cleanup-')); store = new RuntimeStore(root, undefined, { viewReplacement: true }); task = store.create('资源收尾隔离').task.id })
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.useRealTimers(); store.close(); fs.rmSync(root, { recursive: true, force: true }) })
 it('registers exact source and committed handoff before deleting business; only explicit confirmation removes a resource', () => {
   const key = resource(), result = remove() as any; expect(result).toMatchObject({ deleted: true, resource_cleanup: 'retained_pending_explicit_confirmation' }); expect(store.tasks()).toEqual([])
   const r = list().items[0]; expect(r.eligible).toBe(true); expect(fs.readFileSync(join(root, 'resources', key), 'utf8')).toBe('original'); expect(journal().task_deletions[0].stages[0]).toMatchObject({ state: 'committed', owner_state: 'ended', owner_result: 'success' })
   const t = prepare(r.id); expect(execute(r.id, t)).toMatchObject({ phase: 'complete', file_result: 'deleted', files_deleted: 1, deleted_bytes: 8, metadata_cleaned: true, business_replayed: false })
   const db = database(); expect(db.prepare('SELECT * FROM resources').all()).toEqual([]); db.close(); expect(fs.existsSync(join(root, 'resources', key))).toBe(false)
-  restart(); expect(status(r.id).phase).toBe('complete'); expect(journal().deleted_tasks).toContain(task); expect(journal().version).toBe(process.platform === 'win32' && process.env.TRELLIS_TEST_FILE_IDENTITIES === 'decimal-v2' ? 6 : 5)
+  restart(); expect(status(r.id).phase).toBe('complete'); expect(journal().deleted_tasks).toContain(task); expect(journal().version).toBe(process.platform === 'win32' && process.env.PLIUNA_TEST_FILE_IDENTITIES === 'decimal-v2' ? 6 : 5)
 })
 it('cancel, expired preparation and all explicit confirmation fields are required', () => {
   const r = candidate(), t = prepare(r.id); cancel(t); const next = begin(); expect(() => execute(r.id, next)).toThrow(); cancel(next)

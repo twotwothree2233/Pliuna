@@ -14,7 +14,7 @@ const journal = () => read('restore-control.sqlite', 'restore_control')
 const status = (): any => store!.handle({ type: 'maintenance.status' })
 const begin = (): string => (store!.handle({ type: 'maintenance.begin' }) as any).reservation.token
 const point = async (): Promise<any> => store!.handle({ type: 'maintenance.create', token: begin(), inputs_saved: true, replace_id: status().active?.id ?? null })
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'trellis-plugin-protection-')) })
+beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'pliuna-plugin-protection-')) })
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); store?.close(); store = undefined; plugins?.close(); plugins = undefined; rmSync(root, { recursive: true, force: true }) })
 async function setup(): Promise<string> {
   const source = join(root, 'fixture'); mkdirSync(source)
@@ -54,14 +54,14 @@ it('managed copy corruption blocks startup recovery use without modifying bytes'
   store = new RuntimeStore(root); expect(status().phase).toBe('blocked'); expect(readFileSync(file, 'utf8')).toBe('damaged')
 })
 it('upgrades validated legacy empty controls without fabricating plugin history', () => {
-  vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', '')
+  vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', '')
   store = new RuntimeStore(root); store.close(); store = undefined
   const db = new Database(join(root, 'recovery-control.sqlite')); db.prepare('UPDATE control SET manifest=?').run(JSON.stringify({ version: 1, active: null, candidates: [], retired: [], invalidated: [] })); db.close()
-  const restore = new Database(join(root, 'restore-control.sqlite')); restore.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify({ version: 3, selected: 'trellis.sqlite', deleted_tasks: [], operations: [], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] })); restore.close(); writeFileSync(join(root, 'restore-established'), 'restore-v3\n')
+  const restore = new Database(join(root, 'restore-control.sqlite')); restore.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify({ version: 3, selected: 'pliuna.sqlite', deleted_tasks: [], operations: [], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] })); restore.close(); writeFileSync(join(root, 'restore-established'), 'restore-v3\n')
   store = new RuntimeStore(root); expect(recovery().version).toBe(2); expect(journal().version).toBe(5)
   expect(recovery().active).toBeNull(); expect(journal().operations).toEqual([])
 })
 it('rejects downgraded or unknown plugin-bearing controls rather than emptying protections', () => {
   expect(() => RecoveryManager.validateControl({ version: 1, active: { plugins: [] }, candidates: [], retired: [], invalidated: [] })).toThrow()
-  expect(() => RestoreJournal.normalizeControl({ version: 3, selected: 'trellis.sqlite', deleted_tasks: [], operations: [{ target: { plugins: [] }, rollback: {} }], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] })).toThrow()
+  expect(() => RestoreJournal.normalizeControl({ version: 3, selected: 'pliuna.sqlite', deleted_tasks: [], operations: [{ target: { plugins: [] }, rollback: {} }], verified_head: null, retirements: [], task_deletions: [], resource_cleanups: [] })).toThrow()
 })

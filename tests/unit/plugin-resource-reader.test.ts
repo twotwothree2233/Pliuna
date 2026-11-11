@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { readPluginResource, readResourceContent } from '../../src/runtime/plugins/resource-reader'
 import { digest } from '../../src/runtime/resources'
 let root: string
-beforeEach(async()=>{root=await mkdtemp(join(tmpdir(),'trellis-plugin-read-'));await mkdir(join(root,'resources'))})
+beforeEach(async()=>{root=await mkdtemp(join(tmpdir(),'pliuna-plugin-read-'));await mkdir(join(root,'resources'))})
 afterEach(async()=>{await rm(root,{recursive:true,force:true})})
 async function resource(text:string){const body=Buffer.from(text);await writeFile(join(root,'resources','fixture'),body);return {id:'fixture',storage_key:'fixture',sha256:digest(body),byte_length:body.length}}
 it('reads complete UTF-8 fragments without splitting code points',async()=>{

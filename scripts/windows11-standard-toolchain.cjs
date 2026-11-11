@@ -98,7 +98,8 @@ function inspectTools() {
       return { category: 'path', accessible: false, error: 'NOT_FOUND' }
     }
     const python = [fromPath(),
-      candidate('current_user_toolchain', path.join(local, 'Programs', 'Trellis-Toolchain', 'Python312', 'python.exe')),
+      candidate('current_user_toolchain', path.join(local, 'Programs', 'Pliuna-Toolchain', 'Python312', 'python.exe')),
+      candidate('legacy_current_user_toolchain', path.join(local, 'Programs', 'Trellis-Toolchain', 'Python312', 'python.exe')),
       candidate('current_user_python', path.join(local, 'Programs', 'Python', 'Python312', 'python.exe')),
       candidate('program_files', path.join(process.env.ProgramFiles, 'Python312', 'python.exe')),
       candidate('machine_root', path.join(machinePython, 'python.exe')),
@@ -173,7 +174,7 @@ function inspectTools() {
 
 module.exports = async function verifyStandardToolchain(core, { expose = true } = {}) {
   if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.RUNNER_NAME !== 'DESKTOP-SFE95TP') throw Error('DESIGNATED_WINDOWS_X64_RUNNER_REQUIRED')
-  const evidence = process.env.TRELLIS_WIN11_EVIDENCE
+  const evidence = process.env.PLIUNA_WIN11_EVIDENCE
   const host = JSON.parse(fs.readFileSync(path.join(evidence, 'host.json'), 'utf8'))
   if (host.standard_user_required !== true || host.elevated !== false || host.administrators_group_present !== false ||
       host.system_account !== false || host.user_interactive !== true || !Number.isInteger(host.session_id) || host.session_id <= 0) throw Error('STANDARD_USER_INTERACTIVE_SESSION_REQUIRED')

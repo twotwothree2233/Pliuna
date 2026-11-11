@@ -16,7 +16,7 @@ export async function chooseTheme(page: Page, theme: string) {
   await closeSettings(page)
 }
 export async function configureModel(page: Page, input: { id: string; url: string; key: string; model: string; context: number; output?: number; remember?: boolean }) {
-  const response=await page.evaluate(async input=>window.trellis.request({type:'model.configure',configuration:{id:input.id,base_url:input.url,wire_model_id:input.model,context_tokens:input.context,...(input.output===undefined?{}:{max_output_tokens:input.output}),compatibility_profile:'chat-max-tokens'},api_key:input.key,confirm_memory_only:true,remember_connection:!!input.remember,...(input.remember?{confirm_plaintext_storage:true as const}:{})}),input)
+  const response=await page.evaluate(async input=>window.pliuna.request({type:'model.configure',configuration:{id:input.id,base_url:input.url,wire_model_id:input.model,context_tokens:input.context,...(input.output===undefined?{}:{max_output_tokens:input.output}),compatibility_profile:'chat-max-tokens'},api_key:input.key,confirm_memory_only:true,remember_connection:!!input.remember,...(input.remember?{confirm_plaintext_storage:true as const}:{})}),input)
   expect(response.ok).toBe(true)
 }
 export async function addChannel(page: Page, input: { name: string; url: string; key: string; remember?: boolean }) {

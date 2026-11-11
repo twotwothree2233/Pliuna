@@ -84,7 +84,7 @@ Windows 原生模块提供 ACL 和 Job Object 辅助能力。
 ## 数据与配置
 
 默认数据目录由[application-data.ts](../../src/main/application-data.ts)确定。
-初始业务数据库名为 trellis.sqlite。
+初始业务数据库名为 pliuna.sqlite。
 恢复后由控制记录选择当前业务数据库。
 
 资源、插件包与恢复副本存放在应用私有目录。

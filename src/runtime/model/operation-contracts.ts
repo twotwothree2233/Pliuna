@@ -95,7 +95,7 @@ export function contractRepresentation(contract: Record<string, any>, selection:
     })
     sections.set('html-css', {
       ...managedVocabulary(),
-      html: { structure: 'Browser HTML/SVG/MathML, including semantic attributes and inline styles. Unique local IDs; declared behavior targets must exist.', images: 'Declared same-task verified PNG/JPEG references via trellis-resource:<name>. No external or file requests.', local_references: 'label.for and aria-describedby must name existing local IDs.', controls: 'Declared behavior/control/schema types must agree; native submission and navigation are disabled.' },
+      html: { structure: 'Browser HTML/SVG/MathML, including semantic attributes and inline styles. Unique local IDs; declared behavior targets must exist.', images: 'Declared same-task verified PNG/JPEG references via pliuna-resource:<name>. No external or file requests.', local_references: 'label.for and aria-describedby must name existing local IDs.', controls: 'Declared behavior/control/schema types must agree; native submission and navigation are disabled.' },
       css: { structure: 'Browser CSS, including custom properties, fonts, media/container queries, keyframes, nesting, pseudo-elements and functions. Styles are isolated per View.', resources: 'No external stylesheets or URLs; local fragment URLs are supported.' },
       complete_validation: { kind: 'object_type', id: 'surface.update', selection: { view: 'schema', section: 'bundle' } }
     })

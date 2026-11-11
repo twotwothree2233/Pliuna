@@ -17,7 +17,7 @@ export async function saveExport(target: string, expected: Identity | null, hook
   valid?(): Promise<unknown>;
   finish(phase: 'saved' | 'failed' | 'unknown', reason: string | null): Promise<unknown>
 }): Promise<unknown> {
-  const temporary = join(dirname(target), `.trellis-export-${randomUUID()}.tmp`)
+  const temporary = join(dirname(target), `.pliuna-export-${randomUUID()}.tmp`)
   let created: Identity | null = null, published = false, uncertain = false, begun = false
   try {
     if (!same(await identity(target), expected)) throw Error('EXPORT_TARGET_CHANGED')

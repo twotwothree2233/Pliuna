@@ -29,8 +29,8 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
     if (request === '创建学习进度') hostToolStream(res, 'write', { type: 'task_data.create', data: { schema: { type: 'object', properties: { stage: { type: 'string' } }, required: ['stage'], additionalProperties: false }, value: { stage: 'initial' }, references: [] } })
     else hostToolStream(res, 'write', { type: 'task_data.replace', id: dataId, expected_revision: 1, value: '{"stage":"updated"}', references: [] })
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-model-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-model-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
@@ -44,7 +44,7 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
     expect(server.exchanges[0]!.body).toBeNull()
     await page.getByRole('button',{name:'关闭',exact:true}).click()
     await addModel(page,{name:'Main',model:'wire-model',context:1000000,output:1024})
-    const mainId=await page.evaluate(async()=>{const r:any=await window.trellis.request({type:'model.list'});return r.data.models[0].id as string})
+    const mainId=await page.evaluate(async()=>{const r:any=await window.pliuna.request({type:'model.list'});return r.data.models[0].id as string})
     await testRole(page,'主模型')
     await closeSettings(page)
     await page.getByRole('button', { name: '创建第一个任务' }).click()
@@ -78,7 +78,7 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
     await expect(page.getByRole('region', { name: '原动作分页浏览', exact: true })).toContainText('success')
     expect(errors).toEqual([])
     await app.close()
-    const dbBytes = await readFile(join(directory, 'trellis.sqlite'))
+    const dbBytes = await readFile(join(directory, 'pliuna.sqlite'))
     expect(dbBytes.includes(Buffer.from('desktop-secret-sentinel'))).toBe(false)
     app = await launch(); page = await app.firstWindow()
     await page.getByRole('button', { name: /模型审批任务/ }).click()
@@ -91,8 +91,8 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
 test('channel discovery is explicit, handles authentication and never auto-retries', async () => {
   let mode: 'ok'|'auth'|'empty'='ok'
   const server=await modelServer(({url},res)=>{expect(url).toBe('/v1/models');res.writeHead(mode==='auth'?401:200,{'content-type':'application/json'});res.end(mode==='auth'?'private-provider-error':mode==='empty'?'{"data":[]}':'{"data":[{"id":"model-a"},{"id":"model-b"}]}')})
-  const directory=await mkdtemp(join(tmpdir(),'trellis-catalogue-'))
-  const app=await electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:directory}})
+  const directory=await mkdtemp(join(tmpdir(),'pliuna-catalogue-'))
+  const app=await electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:directory}})
   try {
     const page=await app.firstWindow()
     await addChannel(page,{name:'Catalogue',url:server.url,key:'catalogue-test-key'})
@@ -133,8 +133,8 @@ test('desktop real-API onboarding handles authentication, explicit cancellation 
     if (mode === 'hang') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders(); return }
     synthetic(body, res)
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-onboarding-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-onboarding-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow()
     await addChannel(page,{name:'Real ready',url:server.url,key:'onboarding-secret'})

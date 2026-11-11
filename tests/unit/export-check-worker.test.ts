@@ -8,10 +8,10 @@ import { tmpdir } from 'node:os'
 import { digest } from '../../src/runtime/resources'
 
 it('runs the built worker with transferred verified bytes and exact corrupt-image diagnostics', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-check-worker-')); mkdirSync(join(root, 'resources'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-check-worker-')); mkdirSync(join(root, 'resources'))
   const image = { id: 'picture', storage_key: 'picture', sha256: digest(Buffer.from('damaged')), byte_length: 7, media_type: 'image/png', display_name: 'synthetic' }
-  const bundle = { profile: 'managed-v1', html: '<section id="lesson">Before<img src="trellis-resource:picture" alt="test">After</section>', css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: '1' }, forms: [], behaviors: [], references: [{ name: 'picture', target: { kind: 'resource', id: image.id } }], export: [{ id: 'lesson', category: 'learning', source: { type: 'element', element_id: 'lesson' } }] }
-  const body = Buffer.from(JSON.stringify(bundle)), resource = { ...image, id: 'bundle', storage_key: 'bundle', byte_length: body.length, sha256: digest(body), media_type: 'application/vnd.trellis.bundle+json' }
+  const bundle = { profile: 'managed-v1', html: '<section id="lesson">Before<img src="pliuna-resource:picture" alt="test">After</section>', css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: '1' }, forms: [], behaviors: [], references: [{ name: 'picture', target: { kind: 'resource', id: image.id } }], export: [{ id: 'lesson', category: 'learning', source: { type: 'element', element_id: 'lesson' } }] }
+  const body = Buffer.from(JSON.stringify(bundle)), resource = { ...image, id: 'bundle', storage_key: 'bundle', byte_length: body.length, sha256: digest(body), media_type: 'application/vnd.pliuna.bundle+json' }
   writeFileSync(join(root, 'resources', 'bundle'), body); writeFileSync(join(root, 'resources', 'picture'), 'invalid')
   const input = { root, title: 'test', resources: [resource, image], views: [{ bundle_id: resource.id, resource_ids: [image.id] }], answers: [] }
   const captured = captureCheck(input), expected = generateCheck(captured.snapshot)
@@ -29,7 +29,7 @@ it('runs the built worker with transferred verified bytes and exact corrupt-imag
 })
 
 it('binds damaged-image omissions to their observed file identity', () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-check-damaged-image-')); mkdirSync(join(root, 'resources'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-check-damaged-image-')); mkdirSync(join(root, 'resources'))
   const resource = { id: 'picture', storage_key: 'picture', sha256: digest(Buffer.from('original')), byte_length: 8, media_type: 'image/png', display_name: 'synthetic' }
   const input = { root, title: 'test', resources: [resource], views: [], answers: [] }
   writeFileSync(join(root, 'resources', 'picture'), 'damaged1')

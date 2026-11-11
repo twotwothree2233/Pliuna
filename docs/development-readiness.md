@@ -54,13 +54,17 @@ Node 测试与 Electron 测试使用不同的原生 ABI。
 
 ## 数据与诊断入口
 
-默认数据目录为 `~/.trellis`。
-`TRELLIS_TEST_DATA` 可指定独立数据目录。
+默认数据目录为 `~/.pliuna`。
+`PLIUNA_TEST_DATA` 可指定独立数据目录。
 测试和本地诊断应使用独立目录。
 
+新目录不存在时，应用沿用已有的 `~/.trellis`。
+旧资料保持原位，不自动合并两个目录。
+旧诊断变量仍可读取，新变量优先。
+
 正式启动默认启用界面替换与 Monty 功能入口。
-`TRELLIS_ENABLE_VIEW_REPLACEMENT=0` 可关闭界面替换。
-`TRELLIS_ENABLE_MONTY=0` 可关闭计算入口。
+`PLIUNA_ENABLE_VIEW_REPLACEMENT=0` 可关闭界面替换。
+`PLIUNA_ENABLE_MONTY=0` 可关闭计算入口。
 Monty 仍需通过平台与原生资产门槛。
 
 `fixture` 是设置中可选的固定示例模型。

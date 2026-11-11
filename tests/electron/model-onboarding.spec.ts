@@ -13,8 +13,8 @@ for (const scenario of ['connection-confirmation', 'service-metadata', 'saved-co
     if (synthetic(body, response)) return
     response.writeHead(500); response.end()
   })
-  const root = await mkdtemp(join(tmpdir(), 'trellis-onboarding-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-onboarding-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   try {
     const page = await app.firstWindow()
     await addChannel(page,{name:'Onboarding',url:server.url,key:'synthetic-key'})
@@ -80,8 +80,8 @@ for (const scenario of ['connection-confirmation', 'service-metadata', 'saved-co
 })
 
 test('offline channel settings save makes no request and restart restores without credential echo', async () => {
-  const root=await mkdtemp(join(tmpdir(),'trellis-offline-settings-'))
-  const launch=()=>electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:join(root,'.trellis')}})
+  const root=await mkdtemp(join(tmpdir(),'pliuna-offline-settings-'))
+  const launch=()=>electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:join(root,'.pliuna')}})
   let app=await launch()
   try {
     let page=await app.firstWindow()

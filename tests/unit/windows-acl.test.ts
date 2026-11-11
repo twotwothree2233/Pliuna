@@ -3,7 +3,7 @@ import { lstatSync, type Stats } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { protectWindowsPath } from '../../src/platform/windows-acl'
 
-const job = vi.hoisted(() => ({ value: {}, name: 'Local\\Trellis-test',
+const job = vi.hoisted(() => ({ value: {}, name: 'Local\\Pliuna-test',
   binding: { active: vi.fn(() => 0), terminate: vi.fn(), close: vi.fn() } }))
 const clock = vi.hoisted(() => ({ now: vi.fn(() => 0) }))
 vi.mock('../../src/platform/process-tree', () => ({ createWindowsJob: vi.fn(() => ({ job: job.value, name: job.name, binding: job.binding })) }))
@@ -23,7 +23,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 it('uses a fixed helper, exact identities, minimal environment and the original deadline', () => {
   expect(protectWindowsPath(path, 'file', false, identity)).toBe('verified')
   const [command, args, options] = vi.mocked(execFileSync).mock.calls[0]!
-  expect(String(command)).toMatch(/[/\\]native[/\\]trellis_acl\.exe$/)
+  expect(String(command)).toMatch(/[/\\]native[/\\]pliuna_acl\.exe$/)
   expect(args).toEqual(['protect', job.name, '\\\\?\\' + path, '1', '9007199254740993', 'file', '0'])
   expect(options).toMatchObject({ timeout: 15000, windowsHide: true, maxBuffer: 4096 })
   expect(options?.env).not.toHaveProperty('PRIVATE_MODEL_SECRET')

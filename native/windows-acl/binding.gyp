@@ -1,7 +1,7 @@
 {
   "targets": [
     {
-      "target_name": "trellis_acl",
+      "target_name": "pliuna_acl",
       "type": "executable",
       "product_extension": "exe",
       "win_delay_load_hook": "false",

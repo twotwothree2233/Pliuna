@@ -9,13 +9,13 @@ import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 let working: string, executable: string
 beforeAll(async () => {
-  working = mkdtempSync(join(tmpdir(), 'trellis-restore-crash-')); executable = join(working, 'crash.cjs')
+  working = mkdtempSync(join(tmpdir(), 'pliuna-restore-crash-')); executable = join(working, 'crash.cjs')
   const req = createRequire(import.meta.url), esbuild = createRequire(req.resolve('vite'))('esbuild')
   await esbuild.build({ entryPoints: ['tests/helpers/restore-crash.ts'], outfile: executable, bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.txt': 'text', '.sql': 'text' } })
 })
 afterAll(() => rmSync(working, { recursive: true, force: true }))
 for (const point of ['registered', 'rollback_ready', 'sealed', 'selected', 'selected-corrupt', 'selected-both-corrupt', 'completed', 'delete_intent']) it('reconciles actual SIGKILL after restore ' + point + ' without replay or partial business access', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-restore-crash-data-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-restore-crash-data-'))
   let store = new RuntimeStore(directory), storeOpen = true
   const task = store.create('点内任务'), prep = store.handle({ type: 'maintenance.begin' }) as any
   await store.handle({ type: 'maintenance.create', token: prep.reservation.token, inputs_saved: true, replace_id: null })

@@ -9,13 +9,13 @@ import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 let working: string, executable: string
 beforeAll(async () => {
-  working = mkdtempSync(join(tmpdir(), 'trellis-crash-harness-')); executable = join(working, 'crash.cjs')
+  working = mkdtempSync(join(tmpdir(), 'pliuna-crash-harness-')); executable = join(working, 'crash.cjs')
   const require = createRequire(import.meta.url), esbuild = createRequire(require.resolve('vite'))('esbuild')
   await esbuild.build({ entryPoints: ['tests/helpers/storage-crash.ts'], outfile: executable, bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.txt': 'text', '.sql': 'text' } })
 })
 afterAll(() => rmSync(working, { recursive: true, force: true }))
 for (const point of ['pinned', 'partial', 'renamed', 'before_commit', 'after_commit']) it('recovers actual SIGKILL at ' + point + ' without replay or file deletion', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-crash-data-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-crash-data-'))
   const child = fork(executable, [directory, point], { env: { ...process.env, NODE_PATH: join(process.cwd(), 'node_modules') }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
   let errors = ''; child.stderr!.on('data', data => { errors += data.toString() })
   let store: RuntimeStore | undefined, db: Database.Database | undefined
@@ -28,7 +28,7 @@ for (const point of ['pinned', 'partial', 'renamed', 'before_commit', 'after_com
     })
     child.kill('SIGKILL'); await exit
     const files = readdirSync(join(directory, 'resources'))
-    db = new Database(join(directory, 'trellis.sqlite')); const actionCount = db.prepare('SELECT count(*) n FROM actions').get()
+    db = new Database(join(directory, 'pliuna.sqlite')); const actionCount = db.prepare('SELECT count(*) n FROM actions').get()
     store = new RuntimeStore(directory)
     const status: any = store.handle({ type: 'storage.status' })
     expect(status.items).toHaveLength(1)

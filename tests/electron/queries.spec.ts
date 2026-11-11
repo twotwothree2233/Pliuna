@@ -6,20 +6,20 @@ import { createRequire } from 'node:module'
 const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('bounded desktop queries: pagination, Unicode continuation, original results and restart', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-query-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-query-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
     await expect(page.getByRole('heading', { name: '尚无任务', exact: true })).toBeVisible()
     const taskId = await page.evaluate(async () => {
-      const result = await window.trellis.request({ type: 'task.create', title: '分页续读验收' })
+      const result = await window.pliuna.request({ type: 'task.create', title: '分页续读验收' })
       if (!result.ok) throw Error(result.error.code)
       return (result.data as { task: { id: string } }).task.id
     })
     await app.evaluate(async (_electron, { directory, taskId }) => {
       const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3')
-      const db = new Database(directory + '/trellis.sqlite')
+      const db = new Database(directory + '/pliuna.sqlite')
       try { db.transaction(() => {
         const data = db.prepare('INSERT INTO task_data (id,task_id,revision,schema_json,value_json,references_json) VALUES (?,?,1,?,?,?)')
         const event = db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)')
@@ -85,7 +85,7 @@ test('bounded desktop queries: pagination, Unicode continuation, original result
     await messages.getByRole('button', { name: /message-000/ }).click()
     await expect(messages.locator('pre')).toContainText('历史消息 0')
     const counts = await page.evaluate(async taskId => {
-      const result = await window.trellis.request({ type: 'task.query', task_id: taskId, query: { type: 'list', input: { kind: 'action' } } })
+      const result = await window.pliuna.request({ type: 'task.query', task_id: taskId, query: { type: 'list', input: { kind: 'action' } } })
       if (!result.ok) throw Error(result.error.code)
       return (result.data as { items: unknown[] }).items.length
     }, taskId)

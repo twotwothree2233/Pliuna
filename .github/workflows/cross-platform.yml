@@ -126,20 +126,20 @@ jobs:
         id: directory_package
         if: "!cancelled() && steps.build.outcome == 'success' && steps.electron_native.outcome == 'success' && steps.packaging_checks.outcome == 'success' && (runner.os != 'macOS' || steps.electron_distribution.outcome == 'success')"
         shell: bash
-        run: node scripts/package-desktop.mjs --output "$RUNNER_TEMP/trellis-package" --format dir
+        run: node scripts/package-desktop.mjs --output "$RUNNER_TEMP/pliuna-package" --format dir
       - name: Probe packaged native modules, process trees and offline PDF
         if: "!cancelled() && steps.directory_package.outcome == 'success'"
         shell: bash
-        run: node scripts/check-desktop-runtime.mjs "$RUNNER_TEMP/trellis-package"
+        run: node scripts/check-desktop-runtime.mjs "$RUNNER_TEMP/pliuna-package"
       - name: Packaged desktop startup and restart (Linux)
         if: "!cancelled() && runner.os == 'Linux' && steps.directory_package.outcome == 'success' && steps.linux_desktop.outcome == 'success'"
         env:
-          TRELLIS_PACKAGED_OUTPUT: ${{ runner.temp }}/trellis-package
+          PLIUNA_PACKAGED_OUTPUT: ${{ runner.temp }}/pliuna-package
         run: xvfb-run -a pnpm exec playwright test platform-smoke.spec.ts
       - name: Packaged desktop startup and restart (macOS / Windows)
         if: "!cancelled() && runner.os != 'Linux' && steps.directory_package.outcome == 'success' && steps.electron_native.outcome == 'success'"
         env:
-          TRELLIS_PACKAGED_OUTPUT: ${{ runner.temp }}/trellis-package
+          PLIUNA_PACKAGED_OUTPUT: ${{ runner.temp }}/pliuna-package
         run: pnpm exec playwright test platform-smoke.spec.ts
       - name: Keep desktop failure evidence
         if: failure()
@@ -203,7 +203,8 @@ jobs:
               if (kind === 'file' ? !stat.isFile() : !stat.isDirectory()) throw Error('BUILD_PATH_UNSAFE');
               return absolute;
             }
-            const git = inspect(path.join(process.env.LOCALAPPDATA, 'Programs/Trellis-Toolchain/Git/cmd/git.exe'), 'file');
+            const gitCandidates = ['Pliuna-Toolchain', 'Trellis-Toolchain'].map(name => path.join(process.env.LOCALAPPDATA, 'Programs', name, 'Git/cmd/git.exe'));
+            const git = inspect(gitCandidates.find(file => fs.existsSync(file)) ?? gitCandidates[0], 'file');
             const toolEnv = Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP'].filter(key => process.env[key]).map(key => [key, process.env[key]]));
             const gitVersion = cp.execFileSync(git, ['--version'], { env: toolEnv, encoding: 'utf8', timeout: 3000, maxBuffer: 512, windowsHide: true }).trim();
             if (!/^git version 2\.56\.0\.windows\.4$/.test(gitVersion)) throw Error('EXISTING_GIT_VERSION_REQUIRED');
@@ -211,8 +212,8 @@ jobs:
             if (cp.execFileSync(node, ['--version'], { env: toolEnv, encoding: 'utf8', timeout: 3000, maxBuffer: 512, windowsHide: true }).trim() !== 'v22.23.1') throw Error('EXISTING_NODE_VERSION_REQUIRED');
             const workspace = inspect(process.env.GITHUB_WORKSPACE, 'directory');
             const temp = inspect(process.env.RUNNER_TEMP, 'directory');
-            const relative = 'trellis-manual-source-' + suffix, source = path.join(workspace, relative);
-            const output = path.join(temp, 'trellis-manual-package-' + suffix);
+            const relative = 'pliuna-manual-source-' + suffix, source = path.join(workspace, relative);
+            const output = path.join(temp, 'pliuna-manual-package-' + suffix);
             for (const file of [source, output]) {
               try { fs.lstatSync(file); throw Error('BUILD_TARGET_ALREADY_EXISTS'); }
               catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -227,11 +228,11 @@ jobs:
               { env: toolEnv, encoding: 'utf8', timeout: 5000, maxBuffer: 512, windowsHide: true }).trim();
             const actual = fs.lstatSync(source, { bigint: true });
             if (owner !== 'True' || !actual.isDirectory() || actual.isSymbolicLink() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw Error('BUILD_SOURCE_OWNER_UNCONFIRMED');
-            const evidence = fs.mkdtempSync(path.join(temp, 'trellis-manual-build-evidence-'));
+            const evidence = fs.mkdtempSync(path.join(temp, 'pliuna-manual-build-evidence-'));
             fs.writeFileSync(path.join(evidence, 'host.json'), JSON.stringify(host, null, 2) + '\n', { flag: 'wx' });
-            core.exportVariable('TRELLIS_WIN11_EVIDENCE', evidence);
-            core.exportVariable('TRELLIS_MANUAL_SOURCE', relative);
-            core.exportVariable('TRELLIS_MANUAL_OUTPUT', output);
+            core.exportVariable('PLIUNA_WIN11_EVIDENCE', evidence);
+            core.exportVariable('PLIUNA_MANUAL_SOURCE', relative);
+            core.exportVariable('PLIUNA_MANUAL_OUTPUT', output);
             core.addPath(path.dirname(git)); core.addPath(path.dirname(node));
             console.log(JSON.stringify({ host, git: gitVersion, node: '22.23.1', build_only: true, application_tests: 0 }));
       - name: Checkout the exact private source
@@ -243,7 +244,7 @@ jobs:
           GIT_TERMINAL_PROMPT: '0'
           GCM_INTERACTIVE: Never
         with:
-          path: ${{ env.TRELLIS_MANUAL_SOURCE }}
+          path: ${{ env.PLIUNA_MANUAL_SOURCE }}
           persist-credentials: false
           set-safe-directory: false
       - name: Require the dispatched commit and existing build tools
@@ -252,8 +253,8 @@ jobs:
         with:
           script: |
             const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
-            const relative = process.env.TRELLIS_MANUAL_SOURCE;
-            if (!/^trellis-manual-source-[0-9]+-[0-9]+$/.test(relative)) throw Error('BUILD_SOURCE_INVALID');
+            const relative = process.env.PLIUNA_MANUAL_SOURCE;
+            if (!/^pliuna-manual-source-[0-9]+-[0-9]+$/.test(relative)) throw Error('BUILD_SOURCE_INVALID');
             const source = path.join(process.env.GITHUB_WORKSPACE, relative);
             const head = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', timeout: 3000 }).trim();
             if (head !== process.env.GITHUB_SHA || fs.readFileSync(path.join(source, '.node-version'), 'utf8').trim() !== '22.23.1') throw Error('BUILD_SOURCE_COMMIT_UNCONFIRMED');
@@ -262,63 +263,63 @@ jobs:
         with:
           version: 10.20.0
           run_install: false
-          package_json_file: ${{ format('{0}/package.json', env.TRELLIS_MANUAL_SOURCE) }}
+          package_json_file: ${{ format('{0}/package.json', env.PLIUNA_MANUAL_SOURCE) }}
       - name: Materialize pinned dependencies without lifecycle scripts
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         run: pnpm install --frozen-lockfile --ignore-scripts --config.side-effects-cache=false
       - name: Select the pinned native compiler entry
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         run: node scripts/windows11-dependencies.cjs
       - name: Build pinned Node dependencies
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         run: pnpm rebuild better-sqlite3 esbuild --config.side-effects-cache=false
       - name: Reuse the official Electron cache
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/windows11-electron.cjs
       - name: Extract pinned Electron
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         run: pnpm rebuild electron --config.side-effects-cache=false
       - name: Compile application and native Windows helpers
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         run: pnpm build
       - name: Compile SQLite for the packaged Electron ABI
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
         run: pnpm rebuild:electron
       - name: Build the unsigned installer and unpacked application
         id: package
-        working-directory: ${{ env.TRELLIS_MANUAL_SOURCE }}
-        run: node scripts/package-desktop.mjs --target win32-x64-msvc --output "%TRELLIS_MANUAL_OUTPUT%" --format default
+        working-directory: ${{ env.PLIUNA_MANUAL_SOURCE }}
+        run: node scripts/package-desktop.mjs --target win32-x64-msvc --output "%PLIUNA_MANUAL_OUTPUT%" --format default
       - name: Record manual build provenance
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('node:fs'), path = require('node:path');
-            const source = path.join(process.env.GITHUB_WORKSPACE, process.env.TRELLIS_MANUAL_SOURCE);
+            const source = path.join(process.env.GITHUB_WORKSPACE, process.env.PLIUNA_MANUAL_SOURCE);
             const version = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8')).version;
-            const lines = ['Trellis Windows 11 x64 manual candidate', 'Version: ' + version, 'Commit: ' + process.env.GITHUB_SHA,
+            const lines = ['Pliuna Windows 11 x64 manual candidate', 'Version: ' + version, 'Commit: ' + process.env.GITHUB_SHA,
               'Run: ' + process.env.GITHUB_RUN_ID + ' attempt ' + process.env.GITHUB_RUN_ATTEMPT,
               'Build only: no tests, application launches, installer execution or publication.', 'Unsigned local candidate; existing platform capability gates remain.'];
-            fs.writeFileSync(path.join(process.env.TRELLIS_MANUAL_OUTPUT, 'BUILD-INFO.txt'), lines.join('\r\n') + '\r\n', { flag: 'wx' });
+            fs.writeFileSync(path.join(process.env.PLIUNA_MANUAL_OUTPUT, 'BUILD-INFO.txt'), lines.join('\r\n') + '\r\n', { flag: 'wx' });
             await core.summary.addRaw(lines.join('\n')).write();
       - name: Upload the current-user installer for manual use
         uses: actions/upload-artifact@v4
         with:
-          name: Trellis-Windows11-x64-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Pliuna-Windows11-x64-installer-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.TRELLIS_MANUAL_OUTPUT }}/Trellis-*-win32-x64-msvc.exe
-            ${{ env.TRELLIS_MANUAL_OUTPUT }}/BUILD-INFO.txt
+            ${{ env.PLIUNA_MANUAL_OUTPUT }}/Pliuna-*-win32-x64-msvc.exe
+            ${{ env.PLIUNA_MANUAL_OUTPUT }}/BUILD-INFO.txt
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
       - name: Upload the unpacked application for manual use
         uses: actions/upload-artifact@v4
         with:
-          name: Trellis-Windows11-x64-unpacked-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Pliuna-Windows11-x64-unpacked-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.TRELLIS_MANUAL_OUTPUT }}/win-unpacked/**
-            ${{ env.TRELLIS_MANUAL_OUTPUT }}/BUILD-INFO.txt
+            ${{ env.PLIUNA_MANUAL_OUTPUT }}/win-unpacked/**
+            ${{ env.PLIUNA_MANUAL_OUTPUT }}/BUILD-INFO.txt
           if-no-files-found: error
           retention-days: 7
       - name: Keep build preparation evidence
@@ -326,6 +327,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows11-manual-build-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.TRELLIS_WIN11_EVIDENCE }}
+          path: ${{ env.PLIUNA_WIN11_EVIDENCE }}
           if-no-files-found: ignore
           retention-days: 7

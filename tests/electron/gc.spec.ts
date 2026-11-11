@@ -7,13 +7,13 @@ import { createRequire } from 'node:module'
 const electronPath: string = createRequire(import.meta.url)('electron')
 for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 'active-run', 'gc-control-blocked', 'persisted-retry'] as const) test('isolated restricted GC desktop: ' + scenario, async () => {
   test.setTimeout(60000)
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-gc-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-gc-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   async function database(mode = 'query'): Promise<any> {
     return app.evaluate((_electron, { directory, mode }) => {
-      const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(directory + '/trellis.sqlite')
+      const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(directory + '/pliuna.sqlite')
       try {
         if (mode === 'fail') db.exec("CREATE TRIGGER reject_view BEFORE INSERT ON views BEGIN SELECT RAISE(ABORT,'isolated fault'); END")
         if (mode === 'drop') db.exec('DROP TRIGGER reject_view')
@@ -35,11 +35,11 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
     expect(files).toHaveLength(2)
     if (scenario === 'gc-control-blocked') { await app.close(); await writeFile(join(directory, 'gc-control.sqlite'), 'corrupt'); app = await launch(); page = await app.firstWindow() }
     if (scenario === 'response-lost') await app.evaluate(({ ipcMain }) => {
-      const original = (ipcMain as any)._invokeHandlers.get('trellis:request'); let lost = false
-      ipcMain.removeHandler('trellis:request'); ipcMain.handle('trellis:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.gc.execute' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Injected GC response loss' } } }; return result })
+      const original = (ipcMain as any)._invokeHandlers.get('pliuna:request'); let lost = false
+      ipcMain.removeHandler('pliuna:request'); ipcMain.handle('pliuna:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.gc.execute' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Injected GC response loss' } } }; return result })
     })
     if (scenario === 'active-run') {
-      const result = await page.evaluate(async () => { const tasks = await window.trellis.request({ type: 'host.tasks' }); if (!tasks.ok) throw new Error('tasks'); const task = (tasks.data as any[])[0]; const started = await window.trellis.request({ type: 'task.submit', task_id: task.id, text: 'held fixture', model_config_id: 'fixture', attachments: [] }); const blocked = await window.trellis.request({ type: 'maintenance.begin' }); if (started.ok) await window.trellis.request({ type: 'run.cancel', task_id: task.id, run_id: (started.data as any).run_id }); return blocked })
+      const result = await page.evaluate(async () => { const tasks = await window.pliuna.request({ type: 'host.tasks' }); if (!tasks.ok) throw new Error('tasks'); const task = (tasks.data as any[])[0]; const started = await window.pliuna.request({ type: 'task.submit', task_id: task.id, text: 'held fixture', model_config_id: 'fixture', attachments: [] }); const blocked = await window.pliuna.request({ type: 'maintenance.begin' }); if (started.ok) await window.pliuna.request({ type: 'run.cancel', task_id: task.id, run_id: (started.data as any).run_id }); return blocked })
       expect(result.ok).toBe(false); if (!result.ok) expect(result.error.code).toBe('MAINTENANCE_EXECUTION_ACTIVE'); expect(await readdir(join(directory, 'resources'))).toEqual(files)
     }
     await openSettings(page, '存储与恢复'); const panel = page.getByRole('dialog', { name: '应用设置', exact: true }), collect = panel.getByRole('button', { name: '检查并回收暂存首批', exact: true })

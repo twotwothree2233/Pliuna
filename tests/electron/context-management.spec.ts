@@ -19,12 +19,12 @@ for (const scenario of ['organize-restart', 'cancel-late', 'invalid-candidate'] 
   }
   textStream(res,'Business reply; original records retained.')
  })
- const root=await mkdtemp(join(tmpdir(),'trellis-context-desktop-'))
- const launch=()=>electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root,TRELLIS_TEST_VIEW_REPLACEMENT:'1'}})
+ const root=await mkdtemp(join(tmpdir(),'pliuna-context-desktop-'))
+ const launch=()=>electron.launch({executablePath:electronPath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_TEST_VIEW_REPLACEMENT:'1'}})
  let app=await launch()
  try{
   let page=await app.firstWindow()
-  const call=async(request:unknown)=>page.evaluate(async request=>{const result=await window.trellis.request(request as any);if(!result.ok)throw Error(result.error.code);return result.data as any},request)
+  const call=async(request:unknown)=>page.evaluate(async request=>{const result=await window.pliuna.request(request as any);if(!result.ok)throw Error(result.error.code);return result.data as any},request)
   await call({type:'model.configure',configuration:{id:'context-main',base_url:server.url,wire_model_id:'wire',context_tokens:100000,max_output_tokens:8192,compatibility_profile:'chat-max-tokens'},api_key:'synthetic-key',confirm_memory_only:true,remember_connection:true,confirm_plaintext_storage:true})
   await call({type:'model.test',model_id:'context-main',role:'main',confirm_cost:true})
   await page.getByRole('button',{name:'创建第一个任务',exact:true}).click();await page.getByLabel('任务名称').fill('Context acceptance');await page.getByRole('button',{name:'创建任务',exact:true}).click()

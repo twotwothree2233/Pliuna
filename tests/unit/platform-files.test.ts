@@ -11,7 +11,7 @@ import { protectPrivatePath } from '../../src/platform/permissions'
 
 const roots: string[] = []
 function scene() {
-  const root = fs.mkdtempSync(join(tmpdir(), 'trellis-files-')); roots.push(root)
+  const root = fs.mkdtempSync(join(tmpdir(), 'pliuna-files-')); roots.push(root)
   const target = join(root, '学习 材料.json'), source = join(root, 'prepared.tmp')
   return { root, source, target }
 }

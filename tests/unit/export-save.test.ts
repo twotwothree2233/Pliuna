@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { exportTargetIdentity, reconcileExport, saveExport } from '../../src/main/export-save'
 const roots: string[] = []
-const setup = async () => { const root = await mkdtemp(join(tmpdir(), 'trellis-export-save-')); roots.push(root); return { root, target: join(root, 'output.html') } }
+const setup = async () => { const root = await mkdtemp(join(tmpdir(), 'pliuna-export-save-')); roots.push(root); return { root, target: join(root, 'output.html') } }
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 describe('host-only export publication', () => {
   it('publishes verified bytes and finalizes only afterwards', async () => {

@@ -7,5 +7,5 @@ const output = process.argv[2]
 verifyDesktop(output)
 const require = createRequire(import.meta.url)
 execFileSync(process.execPath, [require.resolve('@playwright/test/cli'), 'test', 'platform-smoke.spec.ts'], {
-  env: { ...process.env, TRELLIS_PACKAGED_OUTPUT: output }, stdio: 'inherit', windowsHide: true
+  env: { ...process.env, PLIUNA_PACKAGED_OUTPUT: output }, stdio: 'inherit', windowsHide: true
 })

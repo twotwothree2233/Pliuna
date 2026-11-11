@@ -21,7 +21,7 @@ else {
 }
 `
 beforeAll(async () => {
-  directory = mkdtempSync(join(tmpdir(), 'trellis-process-tree-')); built = await processFixtures()
+  directory = mkdtempSync(join(tmpdir(), 'pliuna-process-tree-')); built = await processFixtures()
   entry = join(directory, 'backend.cjs'); writeFileSync(entry, backend)
 })
 afterEach(async () => {

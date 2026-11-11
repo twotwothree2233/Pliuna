@@ -21,8 +21,8 @@ async function dragSeparator(page: Page, side: 'left' | 'right', offset: number)
 
 test('resizes real workspace, closes panes completely and retains task input across drawers', async () => {
   test.setTimeout(60000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-layout-'))
-  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-layout-'))
+  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   const page = await app.firstWindow(), errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   try {
@@ -85,7 +85,7 @@ test('resizes real workspace, closes panes completely and retains task input acr
     await page.locator('#toggle-right').click(); await expect(page.locator('#pane-right.drawer')).toBeVisible()
     await expect(page.locator('#pane-left')).toBeHidden()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-    await page.screenshot({ path: test.info().outputPath('trellis-workspace-narrow.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-workspace-narrow.png') })
     await page.getByRole('button', { name: '关闭Agent 栏', exact: true }).click()
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1320, 860))
     await expect(page.locator('#pane-left')).toBeVisible()
@@ -93,7 +93,7 @@ test('resizes real workspace, closes panes completely and retains task input acr
     await page.locator('#toggle-right').click()
     await expect(input).toHaveValue('关闭面板后保留的草稿')
     await expect(input).toHaveAttribute('data-retained-editor', 'yes')
-    await page.screenshot({ path: test.info().outputPath('trellis-workspace-desktop.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-workspace-desktop.png') })
     for (const theme of ['graphite', 'paper', 'midnight', 'dusk', 'moss', 'blueprint']) {
       await chooseTheme(page, theme)
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme)

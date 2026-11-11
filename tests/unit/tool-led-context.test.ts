@@ -7,7 +7,7 @@ import { ModelService } from '../../src/runtime/model/service'
 import { modelServer, synthetic, textStream, toolStream } from '../helpers/model-server'
 
 it('discovers task, surface, answers and actions through tools; keeps Runs continuous and tasks isolated', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-tool-led-')), requests: any[] = []
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-tool-led-')), requests: any[] = []
   const kinds = ['task', 'surface', 'answer', 'action', 'capability', 'plugin']
   const server = await modelServer(({ body }, res) => {
     if (synthetic(body, res)) return

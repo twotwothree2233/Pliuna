@@ -6,6 +6,7 @@ import { ContractError } from '../shared/validation'
 import { digest, resourceBody } from './resources'
 import { generateExportBody, type ExportInput } from './export-generation'
 import type { ExportIssue } from './static-export'
+import { isBundleMediaType } from '../shared/branding'
 
 export interface CheckSnapshot {
   input: Omit<ExportInput, 'root'>
@@ -25,7 +26,7 @@ export function captureCheck(input: ExportInput): { snapshot: CheckSnapshot; fin
       copy_ms += performance.now() - start; bytes += body.byteLength
       return { id: resource.id, bytes: body }
     } catch (error) {
-      if (resource.media_type === 'application/vnd.trellis.bundle+json' || !(error instanceof ContractError)) throw error
+      if (isBundleMediaType(resource.media_type) || !(error instanceof ContractError)) throw error
       let observation = 'unavailable'
       if (/^[a-zA-Z0-9_-]+$/.test(resource.storage_key)) {
         try {

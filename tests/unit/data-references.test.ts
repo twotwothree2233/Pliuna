@@ -8,8 +8,8 @@ import type { Snapshot } from '../../src/shared/types'
 
 let store: RuntimeStore, db: Database.Database, directory: string, task: Snapshot, other: Snapshot, run: string
 beforeEach(() => {
-  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'trellis-data-references-')); store = new RuntimeStore(directory)
-  task = store.create('版本引用'); other = store.create('另一任务'); db = new Database(join(directory, 'trellis.sqlite'))
+  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'pliuna-data-references-')); store = new RuntimeStore(directory)
+  task = store.create('版本引用'); other = store.create('另一任务'); db = new Database(join(directory, 'pliuna.sqlite'))
   run = store.start(task.task.id, 'fixture', 'fixture', [])
 })
 afterEach(() => { db.close(); store.close(); rmSync(directory, { recursive: true, force: true }); vi.useRealTimers() })

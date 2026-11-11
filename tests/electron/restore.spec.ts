@@ -7,8 +7,8 @@ import { createRequire } from 'node:module'
 const electronPath: string = createRequire(import.meta.url)('electron')
 for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 'startup-blocked'] as const) test('isolated restore desktop: ' + scenario, async () => {
   test.setTimeout(60000)
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-restore-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-restore-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   async function inspect(): Promise<any> {
@@ -40,14 +40,14 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       return
     }
     if (scenario === 'response-lost') await app.evaluate(({ ipcMain }) => {
-      const original = (ipcMain as any)._invokeHandlers.get('trellis:request'); let lost = false
-      ipcMain.removeHandler('trellis:request'); ipcMain.handle('trellis:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.restore' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Injected restore response loss' } } }; return result })
+      const original = (ipcMain as any)._invokeHandlers.get('pliuna:request'); let lost = false
+      ipcMain.removeHandler('pliuna:request'); ipcMain.handle('pliuna:request', async (event, request) => { const result = await original(event, request); if (!lost && request?.type === 'maintenance.restore' && result.ok) { lost = true; return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Injected restore response loss' } } }; return result })
     })
     await openSettings(page, '存储与恢复'); panel = page.getByRole('dialog', { name: '应用设置', exact: true })
     const restore = panel.getByRole('button', { name: '恢复此点的旧数据', exact: true }); await expect(restore).toBeEnabled()
     if (scenario === 'input-conflict') {
       await app.evaluate((_electron, directory) => {
-        const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(directory + '/trellis.sqlite'); db.prepare('UPDATE views SET state_revision=state_revision+1').run(); db.close()
+        const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(directory + '/pliuna.sqlite'); db.prepare('UPDATE views SET state_revision=state_revision+1').run(); db.close()
       }, directory)
       await page.getByLabel('你的想法').evaluate(element => { const input = element as HTMLTextAreaElement; input.value = '保留冲突输入'; input.dispatchEvent(new Event('input', { bubbles: true })); Array.from(document.querySelectorAll('button')).find(b => b.textContent === '恢复此点的旧数据')!.click() })
       await expect(panel.getByRole('alert')).toContainText('VERSION_CONFLICT'); expect((await inspect()).journal.operations).toHaveLength(0)

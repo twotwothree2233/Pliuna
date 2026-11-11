@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
+import { isBundleMediaType } from '../shared/branding'
 
 type Resource = { id: string; storage_key: string; sha256: string; byte_length: number; media_type: string; display_name: string; created_at: string }
 export const digest = (body: Buffer): string => createHash('sha256').update(body).digest('hex')
@@ -34,7 +35,7 @@ export function resourceBody(root: string, resource: Resource): Buffer {
 }
 export function resourceValue(root: string, resource: Resource): Record<string, unknown> {
   const metadata = { id: resource.id, sha256: resource.sha256, byte_length: resource.byte_length, media_type: resource.media_type, display_name: resource.display_name, created_at: resource.created_at }
-  const supported = ['text/plain; charset=utf-8', 'application/json', 'application/vnd.trellis.bundle+json'].includes(resource.media_type)
+  const supported = ['text/plain; charset=utf-8', 'application/json'].includes(resource.media_type) || isBundleMediaType(resource.media_type)
   if (!supported) return { ...metadata, content_available: false, reason: 'UNSUPPORTED_REPRESENTATION' }
   // The inline slice never materializes an unbounded file into a model response.
   if (resource.byte_length > Math.max(defaults.resource.inline_bytes, defaults.surface.inline_bundle_bytes)) return { ...metadata, content_available: false, reason: 'REPRESENTATION_LIMIT' }

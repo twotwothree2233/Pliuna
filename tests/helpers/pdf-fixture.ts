@@ -1,4 +1,4 @@
-export function pdfFixture(texts = ['Trellis PDF text one', 'Trellis PDF text two'], options: { encrypted?: boolean; activityUrl?: string; fontSize?: number; overlapLines?: boolean } = {}): Buffer {
+export function pdfFixture(texts = ['Pliuna PDF text one', 'Pliuna PDF text two'], options: { encrypted?: boolean; activityUrl?: string; fontSize?: number; overlapLines?: boolean } = {}): Buffer {
   const objects: string[] = ['', '', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
   const pages: number[] = []
   for (const text of texts) {

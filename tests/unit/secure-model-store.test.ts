@@ -7,7 +7,7 @@ import { SecureModelStore, type SecureStorageBackend } from '../../src/main/secu
 const directories: string[] = []
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
 function setup(platform: NodeJS.Platform = 'darwin', backend = 'gnome_libsecret', available = true) {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-vault-')); directories.push(directory)
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-vault-')); directories.push(directory)
   const key = randomBytes(32)
   const secure: SecureStorageBackend = {
     isEncryptionAvailable: () => available, getSelectedStorageBackend: () => backend,

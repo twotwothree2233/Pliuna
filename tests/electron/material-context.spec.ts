@@ -11,7 +11,7 @@ const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('isolated material context: complete repeated reads, compaction, three summaries and restart', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-context-repair-desktop-')), data = join(root, '.trellis'), marker = randomUUID(), text = '中😀'.repeat(15980) + marker
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-context-repair-desktop-')), data = join(root, '.pliuna'), marker = randomUUID(), text = '中😀'.repeat(15980) + marker
   const input = join(root, 'synthetic.txt'); await writeFile(input, text)
   let resource = '', summaries = 0, corrections = 0, phase = '', turn = 0
   const server = await modelServer(({ body }, res) => {
@@ -41,9 +41,9 @@ test('isolated material context: complete repeated reads, compaction, three summ
     }
     expect(turn).toBe(3); textStream(res, 'Read evidence checked; application retains accepted task records. No business write was performed.')
   })
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: data, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: data, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
-  const call = async (request: any): Promise<any> => { const response = await page.evaluate(r => window.trellis.request(r), request); if (!response.ok) throw Error(response.error.code); return response.data }
+  const call = async (request: any): Promise<any> => { const response = await page.evaluate(r => window.pliuna.request(r), request); if (!response.ok) throw Error(response.error.code); return response.data }
   try {
     for (const [id, capacity] of [['wide', 1000000], ['narrow', 125000]] as const) {
       await call({ type: 'model.configure', configuration: { id, base_url: server.url, wire_model_id: 'synthetic', context_tokens: capacity, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true, remember_connection: true, confirm_plaintext_storage: true })
@@ -82,7 +82,7 @@ test('isolated material context: complete repeated reads, compaction, three summ
     expect(server.exchanges).toHaveLength(beforeSourceRead)
     const settings = await readFile(join(data, 'settings.json'), 'utf8'), auth = await readFile(join(data, 'auth.json'), 'utf8'), count = server.exchanges.length
     const beforeSummary = await call({ type: 'context.status', task_id: task }), beforeResource = await readFile(join(data, 'resources', resource))
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     expect(await call({ type: 'context.status', task_id: task })).toEqual(beforeSummary); expect(server.exchanges).toHaveLength(count)
     expect(await readFile(join(data, 'settings.json'), 'utf8')).toBe(settings); expect(await readFile(join(data, 'auth.json'), 'utf8')).toBe(auth); expect(await readFile(join(data, 'resources', resource))).toEqual(beforeResource)
     await submit(task, 'restored fact check')

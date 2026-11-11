@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 // Convert before the native JS bridge loses set/frozenset identity. All output is untrusted data.
 export function encodedProgram(code: string): string {
-  const prefix = '_trellis_' + randomUUID().replaceAll('-', '')
+  const prefix = '_pliuna_' + randomUUID().replaceAll('-', '')
   return `def ${prefix}_run():
     result = None
 ${code.split('\n').map(line => '    ' + line).join('\n')}

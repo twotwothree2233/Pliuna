@@ -9,12 +9,12 @@ import { exportCheckScenario } from '../helpers/export-check-scenario'
 const executablePath: string = createRequire(import.meta.url)('electron')
 test('delivers paged export diagnosis, repairs classification and preserves full HTML across isolated restart', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-export-check-desktop-')), target = join(root, 'complete.html')
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-export-check-desktop-')), target = join(root, 'complete.html')
   const scene = exportCheckScenario(), server = await modelServer(scene.handle)
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const call = async (request: any): Promise<any> => {
-    const response = await page.evaluate(request => window.trellis.request(request), request)
+    const response = await page.evaluate(request => window.pliuna.request(request), request)
     if (!response.ok) throw Error(response.error.code)
     return response.data
   }

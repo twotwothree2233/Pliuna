@@ -1,8 +1,8 @@
 {
-  "name": "trellis",
+  "name": "pliuna",
   "version": "0.1.0",
   "private": true,
-  "description": "Local task harness",
+  "description": "Pliuna local-first AI workspace",
   "type": "module",
   "main": "out/main/index.js",
   "packageManager": "pnpm@10.20.0",

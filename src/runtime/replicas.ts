@@ -10,13 +10,14 @@ import { verifyPluginProtection } from './plugins/protection'
 import type { RecoveryManager } from './recovery'
 import { digest } from './resources'
 import { verifyDatabase,type RestoreJournal } from './restore-journal'
+import { isManagedDatabaseFile } from '../shared/branding'
 
 type Row = Record<string, any>
 type Identity = JournalFileIdentity
 type Member = { suffix: '' | '-wal' | '-shm' | '-journal'; identity: Identity; state: 'pending' | 'deleting' | 'deleted' | 'absent' }
 export type Retirement = { version: IdentityEncoding; id: string; token: string; file: string; selected: string; graph: string; created_at: string; phase: 'preview' | 'retired' | 'group_deleted' | 'released'; protection: { tasks: string[]; resources: Row[]; staging: Row[]; references: Row[]; keys: string[] }; members: Member[]; attempt: number; next_retry_at: string | null; reason: string }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
-const generation = (f: unknown): f is string => typeof f === 'string' && (f === 'trellis.sqlite' || /^restore-[a-f0-9-]{36}-(target|rollback)\.sqlite$/.test(f))
+const generation = isManagedDatabaseFile
 const managed = (f: unknown): f is string => generation(f) || (typeof f === 'string' && /^recovery\/[a-f0-9-]{36}\.sqlite$/.test(f))
 const suffixes = ['', '-wal', '-shm', '-journal'] as const
 const fail = (code: string): never => { throw new ContractError(code, 'Replica retained. Query the original retirement; no business or deletion is replayed') }

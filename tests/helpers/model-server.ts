@@ -42,7 +42,7 @@ export function hostToolStream(res: ServerResponse, name: string, args: unknown,
 }
 export function synthetic(body: any, res: ServerResponse): boolean {
   const prompt = body.messages?.[0]?.content ?? ''
-  if (prompt.startsWith('Synthetic capability') && body.messages.at(-1).role === 'tool') { textStream(res, 'TRELLIS_OK'); return true }
+  if (prompt.startsWith('Synthetic capability') && body.messages.at(-1).role === 'tool') { textStream(res, 'PLIUNA_OK'); return true }
   if (prompt.startsWith('Synthetic capability')) { toolStream(res, 'list', { kind: 'capability' }); return true }
   if (prompt.startsWith('Synthetic approval')) { textStream(res, '{"decision":"escalate","reason":"synthetic test"}'); return true }
   return false

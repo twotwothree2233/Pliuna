@@ -19,7 +19,7 @@ const point = async (): Promise<any> => store.handle({ type: 'maintenance.create
 const restore = async (): Promise<any> => store.handle({ type: 'maintenance.restore', token: begin(), point_id: state().active.id, database_sha256: state().active.database_sha256, inputs_saved: true, confirm_replace_newer_data: true })
 const control = (): any => { const db = new Database(join(root, 'restore-control.sqlite')); try { return JSON.parse((db.prepare('SELECT manifest FROM restore_control').get() as any).manifest) } finally { db.close() } }
 const restart = () => { store.close(); store = new RuntimeStore(root, undefined, { viewReplacement: true }) }
-beforeEach(context => { if (context.task.name === 'new control format is rejected by the old strict version gate; v1 upgrades preserve selector and outcomes') vi.stubEnv('TRELLIS_TEST_FILE_IDENTITIES', ''); root = fs.mkdtempSync(join(tmpdir(), 'trellis-replicas-')); store = new RuntimeStore(root, undefined, { viewReplacement: true }); task = store.create('副本隔离验收').task.id })
+beforeEach(context => { if (context.task.name === 'new control format is rejected by the old strict version gate; v1 upgrades preserve selector and outcomes') vi.stubEnv('PLIUNA_TEST_FILE_IDENTITIES', ''); root = fs.mkdtempSync(join(tmpdir(), 'pliuna-replicas-')); store = new RuntimeStore(root, undefined, { viewReplacement: true }); task = store.create('副本隔离验收').task.id })
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.useRealTimers(); store.close(); fs.rmSync(root, { recursive: true, force: true }) })
 async function obsolete(): Promise<string> { const old = (await point()).active; await point(); return 'recovery/' + old.id + '.sqlite' }
 function resource(text = 'unchanged'): string {
@@ -30,8 +30,8 @@ function resource(text = 'unchanged'): string {
 function prepare(file: string): { token: string; p: any } { const token = begin(); return { token, p: preview(digest(Buffer.from(file)), token) } }
 it('protects current generation and active point without invalidation and does not expose internal names', async () => {
   await point(); const items = list(); expect(items.every(i => !i.eligible)).toBe(true)
-  const token = begin(); expect(() => preview(digest(Buffer.from('trellis.sqlite')), token)).toThrow(); expect(() => preview(digest(Buffer.from('recovery/' + state().active.id + '.sqlite')), token)).toThrow(); cancel(token)
-  expect(JSON.stringify(items)).not.toMatch(/trellis\.sqlite|recovery\/|storage_key|\/Users\//); expect(state().active).not.toBeNull()
+  const token = begin(); expect(() => preview(digest(Buffer.from('pliuna.sqlite')), token)).toThrow(); expect(() => preview(digest(Buffer.from('recovery/' + state().active.id + '.sqlite')), token)).toThrow(); cancel(token)
+  expect(JSON.stringify(items)).not.toMatch(/pliuna\.sqlite|recovery\/|storage_key|\/Users\//); expect(state().active).not.toBeNull()
 })
 it('retires only one obsolete point; keeps effective point, formal resources, data and independent outcome over restart', async () => {
   const key = resource(), file = await obsolete(), active = state().active, bytes = fs.readFileSync(join(root, 'resources', key)), { token, p } = prepare(file)
@@ -41,9 +41,9 @@ it('retires only one obsolete point; keeps effective point, formal resources, da
 })
 it('requires successful startup after restore before retiring prior generation or fallback, regardless terminal phase', async () => {
   await point(); await restore(); expect(control().operations[0].phase).toBe('completed'); expect(list().filter(i => i.eligible)).toEqual([])
-  const token = begin(); expect(() => preview(digest(Buffer.from('trellis.sqlite')), token)).toThrow(); cancel(token)
+  const token = begin(); expect(() => preview(digest(Buffer.from('pliuna.sqlite')), token)).toThrow(); cancel(token)
   restart(); expect(list().filter(i => i.eligible)).toHaveLength(2)
-  const { token: next, p } = prepare('trellis.sqlite'); expect(execute(p, next).phase).toBe('released'); expect(control().selected).toMatch(/target/)
+  const { token: next, p } = prepare('pliuna.sqlite'); expect(execute(p, next).phase).toBe('released'); expect(control().selected).toMatch(/target/)
   restart(); expect(store.snapshot(task)).toBeTruthy(); const t = begin(); expect(store.handle({ type: 'maintenance.gc.preview', token: t, inputs_saved: true })).toBeTruthy(); cancel(t)
 })
 it('retires private rollback only after restart and never retires selected target', async () => {
@@ -151,20 +151,20 @@ it('does not delete on preview registration failure and retains pins on release 
   vi.restoreAllMocks(); restart(); vi.useFakeTimers(); vi.advanceTimersByTime(1100); expect(execute(q.p, begin(), true)).toMatchObject({ phase: 'released', reason: 'PROTECTION_RELEASED' })
 })
 it('rejects arbitrary selectors, unknown operation and paths without exposing private material', () => {
-  expect(() => store.handle({ type: 'maintenance.replica.preview', token: randomUUID(), inputs_saved: true, replica_id: '../trellis.sqlite' })).toThrow()
-  expect(() => result(randomUUID())).toThrow(); expect(control().version).toBe(process.platform === 'win32' && process.env.TRELLIS_TEST_FILE_IDENTITIES === 'decimal-v2' ? 6 : 5); expect(control().retirements).toEqual([])
+  expect(() => store.handle({ type: 'maintenance.replica.preview', token: randomUUID(), inputs_saved: true, replica_id: '../pliuna.sqlite' })).toThrow()
+  expect(() => result(randomUUID())).toThrow(); expect(control().version).toBe(process.platform === 'win32' && process.env.PLIUNA_TEST_FILE_IDENTITIES === 'decimal-v2' ? 6 : 5); expect(control().retirements).toEqual([])
 })
 it('new control format is rejected by the old strict version gate; v1 upgrades preserve selector and outcomes', () => {
-  store.close(); const db = new Database(join(root, 'restore-control.sqlite')); db.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify({ version: 1, selected: 'trellis.sqlite', deleted_tasks: [], operations: [] })); db.close(); fs.writeFileSync(join(root, 'restore-established'), 'restore-v2\n'); restart()
-  expect(control()).toMatchObject({ version: 5, selected: 'trellis.sqlite', operations: [], deleted_tasks: [], retirements: [] }); expect([1, 2, 3].includes(control().version)).toBe(false)
+  store.close(); const db = new Database(join(root, 'restore-control.sqlite')); db.prepare('UPDATE restore_control SET manifest=?').run(JSON.stringify({ version: 1, selected: 'pliuna.sqlite', deleted_tasks: [], operations: [] })); db.close(); fs.writeFileSync(join(root, 'restore-established'), 'restore-v2\n'); restart()
+  expect(control()).toMatchObject({ version: 5, selected: 'pliuna.sqlite', operations: [], deleted_tasks: [], retirements: [] }); expect([1, 2, 3].includes(control().version)).toBe(false)
 })
 it('keeps other replica staging protection, releases only deleted replica, and requires a fresh staging confirmation', async () => {
-  const db = new Database(join(root, 'trellis.sqlite')), key = randomUUID(), owner = randomUUID(), stage = randomUUID()
+  const db = new Database(join(root, 'pliuna.sqlite')), key = randomUUID(), owner = randomUUID(), stage = randomUUID()
   db.prepare("INSERT INTO actions (id,task_id,kind,state,result,source_json,request_json,commit_valid,created_at) VALUES (?,?,'mutation','ended','not_executed','{}','{}',0,'now')").run(owner, task)
   db.prepare("INSERT INTO staging (id,task_id,owner_kind,owner_id,runtime_epoch,state,storage_key,expected_bytes,sha256,created_at) VALUES (?,?,'action',?,'old','invalid',?,8,?,'now')").run(stage, task, owner, key, digest(Buffer.from('original')))
   fs.writeFileSync(join(root, 'resources', key), 'original'); db.close()
   const first = (await point()).active, second = (await point()).active
-  const current = new Database(join(root, 'trellis.sqlite')); current.prepare('DELETE FROM staging WHERE id=?').run(stage); await point()
+  const current = new Database(join(root, 'pliuna.sqlite')); current.prepare('DELETE FROM staging WHERE id=?').run(stage); await point()
   current.prepare("INSERT INTO staging (id,task_id,owner_kind,owner_id,runtime_epoch,state,storage_key,expected_bytes,sha256,created_at) VALUES (?,?,'action',?,'old','invalid',?,8,?,'now')").run(stage, task, owner, key, digest(Buffer.from('original'))); current.close()
   let t = begin(), old = store.handle({ type: 'maintenance.gc.preview', token: t, inputs_saved: true }) as any; expect(old.items).toEqual([]); cancel(t)
   for (const [i, p] of [first, second].entries()) {

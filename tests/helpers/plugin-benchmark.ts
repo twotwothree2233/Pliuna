@@ -7,7 +7,7 @@ import { PluginControl } from '../../src/runtime/plugins/control'
 import { PluginDirectory, pluginCapabilityId } from '../../src/runtime/plugins/directory'
 import { PluginQueries } from '../../src/runtime/plugins/queries'
 import { PluginProcesses } from '../../src/runtime/plugins/process'
-const count = Number(process.argv[2]), root = mkdtempSync(join(tmpdir(), 'trellis-plugin-scale-'))
+const count = Number(process.argv[2]), root = mkdtempSync(join(tmpdir(), 'pliuna-plugin-scale-'))
 const report: Record<string, any> = { packages: count, platform: platform(), arch: arch(), node: process.versions.node, complete: false, cache: 'local temporary filesystem, warm repeated reads; no cache flush', thresholds: { discovery_p95_ms: 100, content_p95_ms: 250, event_loop_p99_ms: 100 }, metrics: {} }
 const delay = monitorEventLoopDelay({ resolution: 10 }); delay.enable()
 const control = new PluginControl(root), directory = new PluginDirectory(root, control), queries = new PluginQueries(directory)

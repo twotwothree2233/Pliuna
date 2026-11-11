@@ -11,15 +11,15 @@ const p95 = (values: number[]) => [...values].sort((a, b) => a - b)[Math.ceil(va
 test('keeps preflight responsive, cancels safely, saves a full document and forgets checks on isolated restart', async () => {
   test.setTimeout(180000)
   const sample = JSON.parse(execFileSync(process.execPath, ['scripts/export-check-sample.mjs'], { encoding: 'utf8' }))
-  const root = await mkdtemp(join(tmpdir(), 'trellis-async-export-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-async-export-desktop-'))
   await cp(sample.root, root, { recursive: true, filter: path => !path.endsWith('runtime-owner.sqlite') })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow(), network = 0
   const errors: string[] = [], attach = async () => {
     page.on('pageerror', e => errors.push(e.message))
     await app.evaluate(({ session }) => { (globalThis as any).__network = 0; session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, done) => { (globalThis as any).__network++; done({ cancel: true }) }) })
   }
-  const call = async (request: any): Promise<any> => { const response = await page.evaluate(q => window.trellis.request(q), request); if (!response.ok) throw Error(response.error.code); return response.data }
+  const call = async (request: any): Promise<any> => { const response = await page.evaluate(q => window.pliuna.request(q), request); if (!response.ok) throw Error(response.error.code); return response.data }
   const wait = async (id: string) => {
     let state: any
     await expect.poll(async () => { state = await call({ type: 'export.check.status', task_id: sample.task, check_id: id }); return state.exited }, { timeout: 30000, intervals: [20, 50, 100] }).toBe(true)
@@ -52,7 +52,7 @@ test('keeps preflight responsive, cancels safely, saves a full document and forg
       const samples: any[] = []
       for (let i = 0; i <= (count === 50 ? 5 : 20); i++) {
         const measured: any = await page.evaluate(async ({ selection, view, i }) => {
-          const start = performance.now(), invoke = async (request: any) => { const value = await window.trellis.request(request); if (!value.ok) throw Error(value.error.code); return value.data as any }
+          const start = performance.now(), invoke = async (request: any) => { const value = await window.pliuna.request(request); if (!value.ok) throw Error(value.error.code); return value.data as any }
           const inspection = invoke({ type: 'export.check.start', ...selection }).then(data => ({ data, start_ms: performance.now() - start }))
           const independent = invoke({ type: 'export.list', task_id: selection.task_id }).then(() => performance.now() - start)
           const draft = invoke({ type: 'draft.save', task_id: selection.task_id, view_id: view.id, view_revision: view.revision, expected_state_revision: view.state_revision, fields: [{ path: '/draft', value: 'SAVED_DURING_CHECK_' + i }] }).then(() => performance.now() - start)
@@ -75,7 +75,7 @@ test('keeps preflight responsive, cancels safely, saves a full document and forg
     for (let i = 0; i < 20; i++) {
       const started = await call({ type: 'export.check.start', ...selection })
       const measured = await page.evaluate(async ({ task, id }) => {
-        const start = performance.now(), response = await window.trellis.request({ type: 'export.check.cancel', task_id: task, check_id: id })
+        const start = performance.now(), response = await window.pliuna.request({ type: 'export.check.cancel', task_id: task, check_id: id })
         if (!response.ok) throw Error(response.error.code); return { ack_ms: performance.now() - start, status: response.data as any }
       }, { task, id: started.id })
       expect(measured.status).toMatchObject({ phase: 'cancelling', exited: false })
@@ -97,14 +97,14 @@ test('keeps preflight responsive, cancels safely, saves a full document and forg
     const metrics = await app.evaluate(({ app }) => app.getAppMetrics().map(p => ({ type: p.type, pid: p.pid, memory: p.memory })))
     network += await app.evaluate(() => (globalThis as any).__network)
     await app.close(); app = await launch(); page = await app.firstWindow(); await attach()
-    const absent = await page.evaluate(q => window.trellis.request(q), { type: 'export.check.status' as const, task_id: task, check_id: checked.id })
+    const absent = await page.evaluate(q => window.pliuna.request(q), { type: 'export.check.status' as const, task_id: task, check_id: checked.id })
     expect(absent).toMatchObject({ ok: false, error: { code: 'EXPORT_CHECK_NOT_FOUND' } })
     const after = await call({ type: 'task.snapshot', task_id: task })
     expect(after.views).toEqual(before.views); expect(after.answers).toEqual(before.answers); expect(after.records).toEqual(before.records); expect(await readFile(target)).toEqual(html)
     expect(await call({ type: 'export.status', task_id: task, operation_id: job.id })).toMatchObject({ phase: 'saved', pinned: false })
     network += await app.evaluate(() => (globalThis as any).__network); expect(network).toBe(0); expect(errors).toEqual([])
     const report = { platform: process.platform + '-' + process.arch, ui_ack_samples_ms: ui, ui_ack_p95_ms: p95(ui), cancellation_samples: cancellations, cancellation_p95_ms: p95(cancellations.map(s => s.ack_ms)), scenarios: results, app_metrics_before: baselineMetrics, app_metrics_after: metrics, source_bytes_per_view: sample.bundle_bytes, html_bytes: html.length, selected_views: 50, table_rows: 90000, restart_exact: true, ephemeral_check_forgotten: true, real_api_requests: 0, automatic_http_requests: network, renderer_errors: errors }
-    await writeFile(test.info().outputPath('trellis-async-export-performance.json'), JSON.stringify(report, null, 2)); await writeFile(test.info().outputPath('trellis-async-export-desktop-scene.json'), JSON.stringify({ root, checked: checked.id, task, job: job.id }))
+    await writeFile(test.info().outputPath('pliuna-async-export-performance.json'), JSON.stringify(report, null, 2)); await writeFile(test.info().outputPath('pliuna-async-export-desktop-scene.json'), JSON.stringify({ root, checked: checked.id, task, job: job.id }))
     console.log('ASYNC_EXPORT_PERFORMANCE', JSON.stringify({ ui_p95_ms: report.ui_ack_p95_ms, cancel_p95_ms: report.cancellation_p95_ms, scenarios: results.map(r => ({ views: r.views, independent_read_max_ms: Math.max(...r.samples.slice(1).map((s: any) => s.independent_read_ms)), start_max_ms: Math.max(...r.samples.slice(1).map((s: any) => s.start_ms)) })), html_bytes: html.length, real_api_requests: 0 }))
     console.log('Preserved new isolated async export desktop directory:', root)
   } finally { await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(w => w.destroy())).catch(() => {}); await app.close().catch(() => {}) }

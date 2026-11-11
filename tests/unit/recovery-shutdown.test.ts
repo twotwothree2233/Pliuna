@@ -9,7 +9,7 @@ const stores: RuntimeStore[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.shutdown() })
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } }
 function setup() {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-recovery-shutdown-')), store = new RuntimeStore(root)
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-recovery-shutdown-')), store = new RuntimeStore(root)
   stores.push(store)
   const task = store.create('Recovery shutdown synthetic').task.id
   const call = (type: string, extra = {}): any => store.handle({ type, ...extra })
@@ -143,6 +143,6 @@ it('does not start a Run when an accepted material preflight returns after shutd
   expect(request.state).toBe('queued');expect(queue.busy()).toBe(true)
   await store.shutdown();release.resolve()
   await vi.waitFor(()=>expect(queue.busy()).toBe(false))
-  const db=new Database(join((store as any).root,'trellis.sqlite'),{readonly:true})
+  const db=new Database(join((store as any).root,'pliuna.sqlite'),{readonly:true})
   try{expect(db.prepare('SELECT count(*) n FROM runs').get()).toEqual({n:0})}finally{db.close()}
 })

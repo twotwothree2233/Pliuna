@@ -7,7 +7,7 @@ import { RuntimeStore } from '../../src/runtime/store'
 import { generateExport, type ExportRunner, type ExportResult } from '../../src/runtime/export-generation'
 import type { Bundle } from '../../src/shared/contracts.generated'
 let root:string, store:RuntimeStore, db:Database.Database, task:string, run:string
-beforeEach(()=>{vi.useFakeTimers();root=mkdtempSync(join(tmpdir(),'trellis-long-stability-'));store=new RuntimeStore(root);db=new Database(join(root,'trellis.sqlite'));task=store.create('Synthetic long task').task.id;run=store.start(task,'fixture held','fixture',[])})
+beforeEach(()=>{vi.useFakeTimers();root=mkdtempSync(join(tmpdir(),'pliuna-long-stability-'));store=new RuntimeStore(root);db=new Database(join(root,'pliuna.sqlite'));task=store.create('Synthetic long task').task.id;run=store.start(task,'fixture held','fixture',[])})
 afterEach(async()=>{await store.shutdown();db.close();rmSync(root,{recursive:true,force:true});vi.useRealTimers()})
 const call=(type:string,extra:any={}):any=>store.handle({type,task_id:task,...extra})
 const bundle=(n=0):Bundle=>({profile:'managed-v1',html:`<section id="lesson">Lesson ${n}</section>`,css:'',state:{schema:{type:'object',additionalProperties:false,properties:{}},initial:{},compatibility_version:'v1'},forms:[],behaviors:[],references:[],export:[{id:'learning',category:'learning',source:{type:'element',element_id:'lesson'}}]})

@@ -4,14 +4,14 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 const electronPath:string=createRequire(import.meta.url)('electron')
-const executablePath=process.env.TRELLIS_CANDIDATE_EXECUTABLE||electronPath
-const args=process.env.TRELLIS_CANDIDATE_EXECUTABLE?[]:['.']
+const executablePath=process.env.PLIUNA_CANDIDATE_EXECUTABLE||electronPath
+const args=process.env.PLIUNA_CANDIDATE_EXECUTABLE?[]:['.']
 
 // Injection wraps the real built worker outside the app; production IPC stays unchanged.
 for(const scenario of ['backup-1','backup-2','backup-failure','publish-failure','renderer-gone'] as const) test(`accepted recovery shutdown barrier: ${scenario}`,async()=>{
   test.setTimeout(45000)
-  const work=await mkdtemp(join(tmpdir(),'trellis-p2-electron-')),root=join(work,'runtime'),release=join(work,'release'),wrapper=join(work,'wrapper.cjs')
-  const app=await electron.launch({executablePath,args,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:join(work,'app')}})
+  const work=await mkdtemp(join(tmpdir(),'pliuna-p2-electron-')),root=join(work,'runtime'),release=join(work,'release'),wrapper=join(work,'wrapper.cjs')
+  const app=await electron.launch({executablePath,args,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:join(work,'app')}})
   const runtime=await app.evaluate(({app})=>app.getAppPath()+'/out/main/runtime.js')
   const source=`const {createRequire}=require('node:module');const {existsSync}=require('node:fs');
 const Database=createRequire(${JSON.stringify(runtime)})('better-sqlite3');const backup=Database.prototype.backup;let count=0;
@@ -20,7 +20,7 @@ import(${JSON.stringify(runtime)});`
   await writeFile(wrapper,source)
   const start=()=>app.evaluate(({utilityProcess},{wrapper,root})=>{
     const state:any={events:[],pending:new Map(),next:0,paused:false,exited:false}
-    const child=utilityProcess.fork(wrapper,[root,process.execPath],{stdio:'pipe',serviceName:'Trellis isolated recovery test'})
+    const child=utilityProcess.fork(wrapper,[root,process.execPath],{stdio:'pipe',serviceName:'Pliuna isolated recovery test'})
     state.request=(request:any,shutdown=false)=>new Promise(resolve=>{const id=String(++state.next);state.pending.set(id,resolve);child.postMessage(shutdown?{id,shutdown:true}:{id,request})})
     child.on('message',(message:any)=>{
       if(message.vault){child.postMessage({vault_response:message.id,ok:true,data:message.vault==='load'?[]:undefined});return}
@@ -68,10 +68,10 @@ import(${JSON.stringify(runtime)});`
 
 test('ordinary app quit drains accepted restore after renderer loss and restarts without replay',async()=>{
   test.setTimeout(60000)
-  const work=await mkdtemp(join(tmpdir(),'trellis-p2-app-')),root=join(work,'profile'),release=join(work,'release'),paused=join(work,'paused'),events=join(work,'events'),wrapper=join(work,'wrapper.cjs')
-  const launch=()=>electron.launch({executablePath,args,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root}})
+  const work=await mkdtemp(join(tmpdir(),'pliuna-p2-app-')),root=join(work,'profile'),release=join(work,'release'),paused=join(work,'paused'),events=join(work,'events'),wrapper=join(work,'wrapper.cjs')
+  const launch=()=>electron.launch({executablePath,args,env:{...process.env,NODE_OPTIONS:'',ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root}})
   let app=await launch(),page=await app.firstWindow(),exited=false
-  const request=async(r:any)=>{const result=await page.evaluate(r=>window.trellis.request(r),r);if(!result.ok)throw Error(result.error.code);return result.data as any}
+  const request=async(r:any)=>{const result=await page.evaluate(r=>window.pliuna.request(r),r);if(!result.ok)throw Error(result.error.code);return result.data as any}
   try{
     const task=(await request({type:'task.create',title:'P2 application lifecycle'})).task.id
     await request({type:'request.submit',task_id:task,text:'synthetic fixture',model_config_id:'fixture',resource_ids:[],import_ids:[]})
@@ -90,13 +90,13 @@ test('ordinary app quit drains accepted restore after renderer loss and restarts
         if(file.endsWith('/runtime.js'))child.on('message',(m:any)=>{if(m.response&&!m.vault)fs.appendFileSync(events,JSON.stringify({id:m.id,response:m.response})+'\n')})
         return child
       }) as any
-      const runtime=app.getAppMetrics().find((m:any)=>m.name==='Trellis Runtime')
+      const runtime=app.getAppMetrics().find((m:any)=>m.name==='Pliuna Runtime')
       if(!runtime)throw Error('Synthetic runtime missing')
       process.kill(runtime.pid,'SIGTERM')
     },{wrapper,events})
     await expect.poll(async()=>{try{return (await request({type:'task.snapshot',task_id:task})).task.id}catch{return null}},{timeout:10000}).toBe(task)
     const next=(await request({type:'maintenance.begin'})).reservation.token
-    await page.evaluate((r:any)=>{void window.trellis.request(r)}, {type:'maintenance.restore',token:next,point_id:point.id,database_sha256:point.database_sha256,inputs_saved:true,confirm_replace_newer_data:true})
+    await page.evaluate((r:any)=>{void window.pliuna.request(r)}, {type:'maintenance.restore',token:next,point_id:point.id,database_sha256:point.database_sha256,inputs_saved:true,confirm_replace_newer_data:true})
     await expect.poll(()=>readFile(paused,'utf8').catch(()=>'' )).toBe('paused')
     app.on('close',()=>{exited=true})
     await app.evaluate(({BrowserWindow})=>{BrowserWindow.getAllWindows()[0]!.webContents.forcefullyCrashRenderer()})

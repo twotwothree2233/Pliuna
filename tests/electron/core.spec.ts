@@ -7,8 +7,8 @@ import { createRequire } from 'node:module'
 const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('core slice: task, fixture write, saved submission, data-only restart', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-electron-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-electron-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
@@ -49,7 +49,7 @@ test('core slice: task, fixture write, saved submission, data-only restart', asy
     await expect(page.getByLabel('你的想法')).toHaveValue('答案与事件必须一起提交。')
     await expect(page.locator('[data-view]')).toHaveCount(1)
     expect(pageErrors).toEqual([])
-    expect(await page.evaluate(() => ({ node: typeof (window as unknown as { require?: unknown }).require, keys: Object.keys(window.trellis) }))).toEqual({ node: 'undefined', keys: ['request'] })
+    expect(await page.evaluate(() => ({ node: typeof (window as unknown as { require?: unknown }).require, keys: Object.keys(window.pliuna) }))).toEqual({ node: 'undefined', keys: ['request'] })
     for (const width of [390, 720, 1440]) {
       await page.setViewportSize({ width, height: 900 })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

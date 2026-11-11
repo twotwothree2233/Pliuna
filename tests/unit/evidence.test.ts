@@ -13,9 +13,9 @@ let store: RuntimeStore, db: Database.Database, root: string, task: Snapshot, ru
 const schema = { type: 'object' as const, properties: { text: { type: 'string' as const } }, required: ['text'], additionalProperties: false as const }
 const bundle: Bundle = { profile: 'managed-v1', html: '<textarea id="a"></textarea><button id="s">提交</button>', css: '', state: { schema, initial: { text: '' }, compatibility_version: 'e1' }, forms: [{ id: 'f', fields: ['/text'] }], behaviors: [{ type: 'input', element_id: 'a', field: '/text', control: 'textarea' }, { type: 'submit', element_id: 's', form_id: 'f' }], references: [], export: [] }
 beforeEach(() => {
-  vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'trellis-evidence-'))
+  vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'pliuna-evidence-'))
   store = new RuntimeStore(root, new ModelService(), { viewReplacement: true }); task = store.create('证据验收')
-  db = new Database(join(root, 'trellis.sqlite')); run = store.start(task.task.id, 'held', 'fixture', [])
+  db = new Database(join(root, 'pliuna.sqlite')); run = store.start(task.task.id, 'held', 'fixture', [])
 })
 afterEach(() => { vi.restoreAllMocks(); db.close(); store.close(); rmSync(root, { recursive: true, force: true }); vi.useRealTimers() })
 async function data(text = '原始依据', references: unknown[] = []) {

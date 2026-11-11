@@ -8,7 +8,7 @@ import { modelServer, synthetic, textStream, toolStream } from '../helpers/model
 const executablePath: string = createRequire(import.meta.url)('electron')
 test('delivers recoverable tool errors, explicit reads and calculation facts across isolated restart', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-tool-diagnostics-desktop-'))
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-tool-diagnostics-desktop-'))
   const material = 'A中😀Z', capability = 'builtin:monty:v1'
   let turn = 0, resource = '', failure: string | undefined, continuation: any
   const calculations: any[] = [], feedback: any[] = [], requests: any[] = []
@@ -78,10 +78,10 @@ test('delivers recoverable tool errors, explicit reads and calculation facts acr
       throw Error('Unexpected extra model request')
     } catch (error) {failure=String(error);response.writeHead(500);response.end()}
   })
-  const launch = () => electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',TRELLIS_TEST_DATA:root,TRELLIS_ENABLE_MONTY:'1'}})
+  const launch = () => electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_MONTY:'1'}})
   let app = await launch(), page = await app.firstWindow()
   const call = async (input: any): Promise<any> => {
-    const response = await page.evaluate(input => window.trellis.request(input), input)
+    const response = await page.evaluate(input => window.pliuna.request(input), input)
     if (!response.ok) throw Error(response.error.code)
     return response.data
   }
@@ -102,7 +102,7 @@ test('delivers recoverable tool errors, explicit reads and calculation facts acr
     expect((await query('call')).items).toHaveLength(3)
     expect((await query('resource')).items).toHaveLength(1)
     const settings = await readFile(join(root,'settings.json')), auth = await readFile(join(root,'auth.json')), count = server.exchanges.length
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(()=>!!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(()=>!!window.pliuna)
     const after = await call({type:'task.snapshot',task_id:task})
     expect({...after,runtime_epoch:null}).toEqual({...before,runtime_epoch:null})
     for (const result of calculations) expect((await query('call',result.operation_id)).data.result_data).toEqual(result)

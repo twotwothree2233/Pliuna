@@ -14,12 +14,12 @@ test('declared controls: local interactions, field-isolated answers and offline 
     if (body.messages.at(-1).role === 'tool') { textStream(res, 'CONTROLS_READY'); return }
     hostToolStream(res, 'write', { type: 'surface.update', surface_id: surface.id, expected_revision: surface.revision, operations: [{ type: 'view.create', client_ref: 'controls', slot_id: 'main', bundle: { type: 'inline', bundle: managedControls() } }] })
   })
-  const root = await mkdtemp(join(tmpdir(), 'trellis-controls-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root } })
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-controls-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root } })
   let app = await launch()
   try {
     let page = await app.firstWindow()
-    const call = async (request: unknown) => page.evaluate(async request => { const result = await window.trellis.request(request as any); if (!result.ok) throw Error(result.error.code); return result.data as any }, request)
+    const call = async (request: unknown) => page.evaluate(async request => { const result = await window.pliuna.request(request as any); if (!result.ok) throw Error(result.error.code); return result.data as any }, request)
     await call({ type: 'model.configure', configuration: { id: 'controls', base_url: server.url, wire_model_id: 'wire', context_tokens: 100000, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-controls-key', confirm_memory_only: true })
     await call({ type: 'model.test', model_id: 'controls', role: 'main', confirm_cost: true })
     await page.getByRole('button', { name: '创建第一个任务', exact: true }).click()

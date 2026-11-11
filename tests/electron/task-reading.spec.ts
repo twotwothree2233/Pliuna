@@ -9,8 +9,8 @@ const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('continuous task reading: inline records, saved drafts, history and safe resources', async () => {
   test.setTimeout(90000)
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-task-reading-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-task-reading-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
@@ -43,7 +43,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     await answers.getByRole('button', { name: '基于已保存作答继续', exact: true }).click()
     const selectedAnswer = await answers.locator('.record-rows > .record-detail > header > .mono').textContent()
     expect(continuation).toContain(selectedAnswer!)
-    expect(await page.evaluate(async () => { const tasks = await window.trellis.request({ type: 'host.tasks' }); if (!tasks.ok) throw Error(tasks.error.code); const taskId = (tasks.data as { id: string }[])[0]!.id; const result = await window.trellis.request({ type: 'task.snapshot', task_id: taskId }); if (!result.ok) throw Error(result.error.code); return (result.data as { runs: unknown[] }).runs.length })).toBe(1)
+    expect(await page.evaluate(async () => { const tasks = await window.pliuna.request({ type: 'host.tasks' }); if (!tasks.ok) throw Error(tasks.error.code); const taskId = (tasks.data as { id: string }[])[0]!.id; const result = await window.pliuna.request({ type: 'task.snapshot', task_id: taskId }); if (!result.ok) throw Error(result.error.code); return (result.data as { runs: unknown[] }).runs.length })).toBe(1)
     await answers.getByRole('button', { name: '回到当前内容', exact: true }).click()
     await expect(page.getByLabel('你的想法')).toHaveValue('第二份中文作答')
     await send('继续理解一致性')
@@ -55,10 +55,10 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     await expect(page.getByText('存在未保存或冲突输入，请等待保存完成或明确处理冲突后再切换任务。', { exact: true })).toHaveCount(0)
     const data = page.getByRole('region', { name: '全部任务数据分页浏览', exact: true })
     await expect(data.locator('.record-row')).toHaveCount(0)
-    const taskId = await page.evaluate(async () => { const response = await window.trellis.request({ type: 'host.tasks' }); if (!response.ok) throw Error(response.error.code); return (response.data as { id: string }[])[0]!.id })
+    const taskId = await page.evaluate(async () => { const response = await window.pliuna.request({ type: 'host.tasks' }); if (!response.ok) throw Error(response.error.code); return (response.data as { id: string }[])[0]!.id })
     await app.evaluate((_electron, { directory, taskId }) => {
       const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3')
-      const db = new Database(directory + '/trellis.sqlite')
+      const db = new Database(directory + '/pliuna.sqlite')
       try { db.prepare('INSERT INTO task_data (id,task_id,revision,schema_json,value_json,references_json) VALUES (?,?,1,?,?,?)').run('reading-data', taskId, JSON.stringify({ type: 'object', properties: { topic: { type: 'string' } } }), JSON.stringify({ topic: '事务与一致性' }), '[]') } finally { db.close() }
     }, { directory, taskId })
     await data.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
@@ -110,7 +110,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
       if (id === 'answers') await page.getByRole('region', { name: '全部作答分页浏览', exact: true }).locator('.record-row').last().click()
       if (id === 'resources') await page.getByRole('region', { name: '全部资源分页浏览', exact: true }).getByRole('button', { name: /中文材料/ }).click()
       if (id === 'execution') await page.getByRole('region', { name: '全部运行分页浏览', exact: true }).locator('.record-row').first().click()
-      await page.screenshot({ path: join(tmpdir(), `trellis-task-A-${id}.png`) })
+      await page.screenshot({ path: join(tmpdir(), `pliuna-task-A-${id}.png`) })
     }
     expect(errors).toEqual([])
   } finally { await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {}); await app.close(); await rm(directory, { recursive: true, force: true }) }
@@ -135,13 +135,13 @@ test('windowed answer actions use the selected answer independently of segmented
       forms: [{ id: 'exercise', fields: ['/response'] }], behaviors: [{ type: 'input', element_id: 'response', field: '/response', control: 'textarea' }, { type: 'submit', element_id: 'submit', form_id: 'exercise' }], references: [], export: []
     } } }] })
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-windowed-answer-'))
-  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-windowed-answer-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
     await page.setViewportSize({ width: 1440, height: 960 })
-    const call = async (request: any): Promise<any> => page.evaluate(async request => { const result = await window.trellis.request(request); if (!result.ok) throw Error(result.error.code); return result.data }, request)
+    const call = async (request: any): Promise<any> => page.evaluate(async request => { const result = await window.pliuna.request(request); if (!result.ok) throw Error(result.error.code); return result.data }, request)
     await configureModel(page, { id: 'answer-main', url: server.url, key: 'isolated-answer-test-key', model: 'wire-model', context: 1000000, output: 4096 })
     await call({ type: 'model.test', model_id: 'answer-main', role: 'main', confirm_cost: true })
     await page.getByRole('button', { name: '创建第一个任务' }).click()
@@ -188,7 +188,7 @@ test('windowed answer actions use the selected answer independently of segmented
     expect(requests).toHaveLength(beforeCancel)
     expect((await call({ type: 'task.snapshot', task_id: taskId })).runs).toHaveLength(1)
     await continueAnswer.scrollIntoViewIfNeeded()
-    await page.screenshot({ path: test.info().outputPath('trellis-windowed-answer-actions.png') })
+    await page.screenshot({ path: test.info().outputPath('pliuna-windowed-answer-actions.png') })
     await returnToContent.click()
     await expect(page.getByLabel('长作答内容', { exact: true })).toHaveValue('最新的短作答')
     await page.getByRole('tab', { name: /作答记录/ }).click()

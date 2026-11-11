@@ -16,8 +16,8 @@ const resource = (id = 'input', bytes = source) => ({ id, storage_key: id, byte_
 const proposal = () => ({ task_id: 'task', input_resource_id: 'input', output_resource_id: 'output', pages: [{ page: 1, start: 0, end: 9 }, { page: 2, start: 9, end: output.length }], partial: false, notice: '' })
 const record = (task: string, kind: string, payload: unknown) => db.prepare('INSERT INTO records VALUES (?, ?, 1, ?, ?, ?)').run('event', task, kind, JSON.stringify(payload), 'now')
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'trellis-material-foundations-')); await mkdir(join(root, 'resources'))
-  db = new Database(join(root, 'trellis.sqlite')); db.exec(sql)
+  root = await mkdtemp(join(tmpdir(), 'pliuna-material-foundations-')); await mkdir(join(root, 'resources'))
+  db = new Database(join(root, 'pliuna.sqlite')); db.exec(sql)
   db.prepare("INSERT INTO tasks VALUES ('task','synthetic','active',1,1)").run()
   db.prepare("INSERT INTO tasks VALUES ('other','synthetic','active',1,1)").run()
   for (const [id, bytes] of [['input', source], ['output', output]] as const) {

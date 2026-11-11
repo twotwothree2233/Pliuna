@@ -9,7 +9,7 @@ import instruction from '../../src/runtime/model/prompts/summary-v0.1.txt?raw'
 import { modelServer, synthetic, textStream } from '../helpers/model-server'
 
 it('counts exact organizing input and rejects foreign retained references without source expansion', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-summary-source-runtime-'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-summary-source-runtime-'))
   let original: any, rounds = 0
   const server = await modelServer(({ body }, response) => {
     if (synthetic(body, response)) return
@@ -26,7 +26,7 @@ it('counts exact organizing input and rejects foreign retained references withou
   models.configure({ type: 'model.configure', configuration: { id: 'main', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 240000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic', confirm_memory_only: true })
   let store: RuntimeStore | undefined, db: Database.Database | undefined
   try {
-    await models.test('main', 'main'); store = new RuntimeStore(root, models); db = new Database(join(root, 'trellis.sqlite'))
+    await models.test('main', 'main'); store = new RuntimeStore(root, models); db = new Database(join(root, 'pliuna.sqlite'))
     const task = store.create('Original source continuity').task.id, other = store.create('Other task').task.id
     const until = async (run: string) => { const end = Date.now() + 8000; while (true) { const r = store!.snapshot(task).runs.find(r => r.id === run)!; if (r.state === 'completed') return; if (r.state === 'failed') throw Error(r.primary_reason!); if (Date.now() > end) throw Error('TEST_TIMEOUT'); await new Promise(r => setTimeout(r, 10)) } }
     for (let n = 0; n < 3; n++) {

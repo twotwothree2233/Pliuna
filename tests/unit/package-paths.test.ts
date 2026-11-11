@@ -23,7 +23,7 @@ it('shares the legacy macOS packaging target and integrity metadata with the run
   expect(nativeTargets.montyVersion).toBe('1.3.0')
 })
 function packageFixture() {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-production-packages-')); roots.push(root)
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-production-packages-')); roots.push(root)
   writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: { [nativeTargets.montyPackage]: nativeTargets.montyVersion } }))
   const wrapper = { name: nativeTargets.montyPackage, version: nativeTargets.montyVersion,
     optionalDependencies: Object.fromEntries(nativeTargets.targets.map(t => [t.package, nativeTargets.montyVersion])) }

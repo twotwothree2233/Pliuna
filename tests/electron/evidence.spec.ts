@@ -40,8 +40,8 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
       else textStream(res, '源移除完成')
     }
   })
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-evidence-desktop-'))
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-evidence-desktop-'))
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
   let app = await launch()
   const errors: string[] = []
   async function send(page: Page, text: string) {
@@ -66,8 +66,8 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('不可变证据验收'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
     const snapshot: any = await page.evaluate(async () => {
-      const tasks: any = await window.trellis.request({ type: 'host.tasks' })
-      const snapshot: any = await window.trellis.request({ type: 'task.snapshot', task_id: tasks.data[0].id }); return snapshot.data
+      const tasks: any = await window.pliuna.request({ type: 'host.tasks' })
+      const snapshot: any = await window.pliuna.request({ type: 'task.snapshot', task_id: tasks.data[0].id }); return snapshot.data
     })
     taskId = snapshot.task.id; surfaceId = snapshot.surface.id
     await send(page, '发布冻结依据'); await expect(page.getByText('冻结发布完成', { exact: true })).toBeVisible()
@@ -92,7 +92,7 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
     await answers.getByRole('button', { name: '刷新全部作答', exact: true }).click(); await answers.locator('.object-list button').first().click()
     const answer = await full(answers); expect(answer.value).toEqual({ text: '原版作答' }); expect(answer.view_history.id).toBe(saved.id)
     expect(answer.view_history.evidence.sources[0].value.text).toBe(original)
-    const data: any = await page.evaluate(async task_id => window.trellis.request({ type: 'task.query', task_id, query: { type: 'list', input: { kind: 'task_data' } } }), taskId)
+    const data: any = await page.evaluate(async task_id => window.pliuna.request({ type: 'task.query', task_id, query: { type: 'list', input: { kind: 'task_data' } } }), taskId)
     expect(data.data.items).toEqual([])
     await writeFile(join(directory, 'resources', resourceId), 'damaged')
     await answers.getByRole('button', { name: '重新查询原记录', exact: true }).click(); await expect(answers.locator('pre').first()).not.toHaveText('')

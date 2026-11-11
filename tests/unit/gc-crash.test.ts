@@ -10,15 +10,15 @@ import { RuntimeStore } from '../../src/runtime/store'
 import { digest } from '../../src/runtime/resources'
 let working: string, executable: string
 beforeAll(async () => {
-  working = mkdtempSync(join(tmpdir(), 'trellis-gc-crash-')); executable = join(working, 'crash.cjs')
+  working = mkdtempSync(join(tmpdir(), 'pliuna-gc-crash-')); executable = join(working, 'crash.cjs')
   const req = createRequire(import.meta.url), esbuild = createRequire(req.resolve('vite'))('esbuild')
   await esbuild.build({ entryPoints: ['tests/helpers/gc-crash.ts'], outfile: executable, bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.txt': 'text', '.sql': 'text' } })
 })
 afterAll(() => rmSync(working, { recursive: true, force: true }))
 for (const point of ['preview', 'authorized', 'intent', 'unlinked', 'partial', 'settled']) it('reconciles SIGKILL at GC ' + point + ' without implicit deletion or lost business', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-gc-crash-data-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-gc-crash-data-'))
   let store: RuntimeStore | undefined = new RuntimeStore(directory)
-  const task = store.create('隔离故障'), db = new Database(join(directory, 'trellis.sqlite'))
+  const task = store.create('隔离故障'), db = new Database(join(directory, 'pliuna.sqlite'))
   db.prepare("INSERT INTO actions (id,task_id,kind,state,result,source_json,request_json,commit_valid,created_at) VALUES ('owner',?,'mutation','ended','not_executed','{}','{}',0,'now')").run(task.task.id)
   db.prepare("INSERT INTO staging (id,task_id,owner_kind,owner_id,runtime_epoch,state,storage_key,expected_bytes,sha256,created_at) VALUES ('stage',?,'action','owner','old','invalid','orphan',8,?,'now')").run(task.task.id, digest(Buffer.from('original')))
   db.close(); writeFileSync(join(directory, 'resources', 'orphan'), 'original'); writeFileSync(join(directory, 'resources', 'orphan.tmp'), 'part'); store.close(); store = undefined

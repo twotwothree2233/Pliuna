@@ -8,7 +8,7 @@ import { PluginQueries } from '../../src/runtime/plugins/queries'
 let root: string, control: PluginControl, directory: PluginDirectory, queries: PluginQueries, digest: string
 const task = '00000000-0000-4000-8000-000000000001'
 beforeEach(async () => {
- root=await mkdtemp(join(tmpdir(),'trellis-plugin-query-'));control=new PluginControl(root);directory=new PluginDirectory(root,control);queries=new PluginQueries(directory)
+ root=await mkdtemp(join(tmpdir(),'pliuna-plugin-query-'));control=new PluginControl(root);directory=new PluginDirectory(root,control);queries=new PluginQueries(directory)
  const source=join(root,'source');await mkdir(source)
  await writeFile(join(source,'workflow.md'),'fixture workflow '+ 'long-content '.repeat(1000))
  await writeFile(join(source,'manifest.json'),JSON.stringify({manifest_version:'0.1',protocol_version:'0.1',id:'fixture.content',version:'1.0.0',access_level:'task',extensions:{context_retention:'Keep unresolved errors and exact answer sources; no authority.'},contributes:[{id:'workflow',kind:'workflow',entry:'workflow.md',description:'fixture workflow'}]}))

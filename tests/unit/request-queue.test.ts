@@ -5,11 +5,11 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {RuntimeStore} from '../../src/runtime/store'
 let root:string,store:RuntimeStore,task:string
-beforeEach(()=>{vi.useFakeTimers();root=fs.mkdtempSync(join(tmpdir(),'trellis-request-'));store=new RuntimeStore(root);task=store.create('request fixture').task.id})
+beforeEach(()=>{vi.useFakeTimers();root=fs.mkdtempSync(join(tmpdir(),'pliuna-request-'));store=new RuntimeStore(root);task=store.create('request fixture').task.id})
 afterEach(()=>{vi.restoreAllMocks();store.close();fs.rmSync(root,{recursive:true,force:true});vi.useRealTimers()})
 const call=(type:string,extra:Record<string,unknown>={})=>store.handle({type,task_id:task,...extra}) as any
 const submit=(extra={})=>call('request.submit',{text:'synthetic request',model_config_id:'fixture',resource_ids:[],import_ids:[],...extra})
-const db=()=>new Database(join(root,'trellis.sqlite'))
+const db=()=>new Database(join(root,'pliuna.sqlite'))
 function reg(){return call('material.internal.register',{items:[{display_name:'test.txt',source:'text'}]}).items[0].operation_id}
 function save(id=reg()){call('material.internal.begin',{operation_id:id,byte_length:3,media_type:'text/plain; charset=utf-8'});call('material.internal.chunk',{operation_id:id,offset:0,data:Buffer.from('abc').toString('base64')});return call('material.internal.finish',{operation_id:id}).resource.id}
 const resolve=(id:string,extra={})=>call('request.resolve',{request_id:id,model_config_id:'fixture',confirm:true,use_successful:false,replacements:[],...extra})

@@ -11,10 +11,10 @@ import { RuntimeStore } from '../../src/runtime/store'
 import { digest } from '../../src/runtime/resources'
 import { inspectStorage } from '../../src/runtime/storage-inspection'
 it('real inspector SIGKILL preserves business/control/resource facts and allows a fresh read-only check', async () => {
-  const root=fs.mkdtempSync(join(tmpdir(),'trellis-inspection-kill-')),working=fs.mkdtempSync(join(tmpdir(),'trellis-inspection-build-')),executable=join(working,'inspect.cjs')
+  const root=fs.mkdtempSync(join(tmpdir(),'pliuna-inspection-kill-')),working=fs.mkdtempSync(join(tmpdir(),'pliuna-inspection-build-')),executable=join(working,'inspect.cjs')
   const store=new RuntimeStore(root),task=store.create('isolated crash').task.id,id=randomUUID(),body=Buffer.alloc(5*1024*1024,1)
-  const db=new Database(join(root,'trellis.sqlite'));db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(id,id,digest(body),body.length,'text/plain','isolated','now');db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task,id);db.close();fs.writeFileSync(join(root,'resources',id),body);store.close()
-  const files=['trellis.sqlite','restore-control.sqlite','recovery-control.sqlite','gc-control.sqlite'],before=files.map(file=>fs.readFileSync(join(root,file)))
+  const db=new Database(join(root,'pliuna.sqlite'));db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(id,id,digest(body),body.length,'text/plain','isolated','now');db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task,id);db.close();fs.writeFileSync(join(root,'resources',id),body);store.close()
+  const files=['pliuna.sqlite','restore-control.sqlite','recovery-control.sqlite','gc-control.sqlite'],before=files.map(file=>fs.readFileSync(join(root,file)))
   let child: ReturnType<typeof fork> | undefined
   try {
     const req=createRequire(import.meta.url),esbuild=createRequire(req.resolve('vite'))('esbuild')

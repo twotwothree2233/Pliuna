@@ -9,7 +9,7 @@ const electronPath: string = createRequire(import.meta.url)('electron')
 
 test('long plaintext selection, independent tail evidence, request accounting and isolated restart reuse', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-long-material-desktop-')), marker = randomUUID(), text = 'a'.repeat(32999) + '\n' + marker
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-long-material-desktop-')), marker = randomUUID(), text = 'a'.repeat(32999) + '\n' + marker
   const input = join(root, 'synthetic-long.txt'); await writeFile(input, text)
   let resource = '', business = 0, firstRun = true
   const server = await modelServer(({ body }, res) => {
@@ -37,11 +37,11 @@ test('long plaintext selection, independent tail evidence, request accounting an
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     res.end(frame({ role: 'assistant', content: 'Read tail evidence: ' + marker }) + `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 123, completion_tokens: 7 } })}\n\n` + 'data: [DONE]\n\n')
   })
-  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   const call = async (request: any): Promise<any> => {
-    const response = await page.evaluate(r => window.trellis.request(r), request)
+    const response = await page.evaluate(r => window.pliuna.request(r), request)
     if (!response.ok) throw Error(response.error.code)
     return response.data
   }

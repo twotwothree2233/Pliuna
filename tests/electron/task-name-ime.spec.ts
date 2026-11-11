@@ -7,8 +7,8 @@ import { join } from 'node:path'
 const executablePath: string = createRequire(import.meta.url)('electron')
 
 for (const key of ['Enter', 'Escape'] as const) test(`task name keeps Chinese composition active when pressing ${key}`, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'trellis-task-ime-'))
-  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: directory } })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-task-ime-'))
+  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
   try {
     const page = await app.firstWindow()
     await page.getByRole('button', { name: '创建第一个任务' }).click()
@@ -20,7 +20,7 @@ for (const key of ['Enter', 'Escape'] as const) test(`task name keeps Chinese co
     await page.keyboard.press(key)
     // The query is ordered after the key-triggered IPC, detecting accidental creation.
     const tasks = await page.evaluate(async () => {
-      const reply = await window.trellis.request({ type: 'host.tasks' })
+      const reply = await window.pliuna.request({ type: 'host.tasks' })
       if (!reply.ok) throw new Error(reply.error.code)
       return reply.data as { title: string }[]
     })

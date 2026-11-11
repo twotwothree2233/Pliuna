@@ -1,3 +1,4 @@
+import { initialDatabaseFile } from '../shared/branding'
 import { fileLstatSync, fileFstatSync, type FileStat, managedFile, openRegularFileSync } from '../platform/files'
 import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
@@ -103,7 +104,7 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
             const counts: Row = {}; for (const table of ['tasks', 'resources', 'records', 'view_history', 'staging']) counts[table] = (db.prepare(`SELECT count(*) n FROM ${table}`).get() as Row).n
             return { counts, resource_declared_bytes: (db.prepare('SELECT coalesce(sum(byte_length),0) n FROM resources').get() as Row).n, database_file_bytes: bytes(root, journal.selected), wal_bytes: fs.existsSync(join(root, journal.selected + '-wal')) ? bytes(root, journal.selected + '-wal') : 0 }
           })()
-          result.protection = { retained_generation_entries: new Set(['trellis.sqlite', journal.selected, ...journal.operations.flatMap((op: Row) => [op.previous, op.target.file, op.rollback.file])]).size, unreleased_replica_records: journal.retirements.filter((r: Row) => r.phase !== 'preview' && r.phase !== 'released').length, files_not_scanned: true, bytes_are_not_free_space: true }
+          result.protection = { retained_generation_entries: new Set([initialDatabaseFile(journal), journal.selected, ...journal.operations.flatMap((op: Row) => [op.previous, op.target.file, op.rollback.file])]).size, unreleased_replica_records: journal.retirements.filter((r: Row) => r.phase !== 'preview' && r.phase !== 'released').length, files_not_scanned: true, bytes_are_not_free_space: true }
         } finally { recovery.close(); gc?.close() }
       } else {
         if (!fileLstatSync(join(root, 'resources')).isDirectory()) fail('INSPECT_UNSAFE_DIRECTORY')

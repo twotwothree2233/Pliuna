@@ -1,10 +1,11 @@
+import { applicationPreference } from '../../shared/branding'
 export const textSizes = [90, 100, 110, 125, 140] as const
 export type TextSize = typeof textSizes[number]
-const storageKey = 'trellis-text-size'
+const storageKey = 'pliuna-text-size'
 
 export function readTextSize(): TextSize {
   try {
-    const value = Number(localStorage.getItem(storageKey))
+    const value = Number(applicationPreference(localStorage, 'text-size'))
     return textSizes.find(size => size === value) ?? 100
   } catch { return 100 }
 }

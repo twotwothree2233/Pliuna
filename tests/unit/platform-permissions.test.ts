@@ -25,7 +25,7 @@ it('passes Windows paths as environment data to a fixed system executable', () =
   expect(command).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   expect(args).not.toContain(file)
   const opts = options as import('node:child_process').ExecFileSyncOptions
-  expect(opts.env?.TRELLIS_PRIVATE_PATH).toBe('\\\\?\\' + file)
+  expect(opts.env?.PLIUNA_PRIVATE_PATH).toBe('\\\\?\\' + file)
   expect(opts.env).not.toHaveProperty('PRIVATE_MODEL_SECRET')
   expect(opts.windowsHide).toBe(true)
   const script = Buffer.from((args as string[]).at(-1)!, 'base64').toString('utf16le')

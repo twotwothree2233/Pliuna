@@ -182,7 +182,7 @@ describe('real API connection onboarding and cancellable role tests', () => {
   })
   it('accepts a tool-only first message and validates terminal text in the second round', async () => {
     const server = await modelServer(({ body }, res) => {
-      if (body.messages.at(-1).role === 'tool') { expect(body.messages.at(-2).content).toBeNull(); textStream(res, 'TRELLIS_OK') }
+      if (body.messages.at(-1).role === 'tool') { expect(body.messages.at(-2).content).toBeNull(); textStream(res, 'PLIUNA_OK') }
       else hostToolStream(res, 'list', { kind: 'capability' })
     }); cleanups.push(server.close)
     const service = new ModelService()
@@ -195,7 +195,7 @@ describe('real API connection onboarding and cancellable role tests', () => {
   })
   for (const failure of ['text-command', 'wrong-target', 'wrong-approval']) it('leaves the role closed for ' + failure, async () => {
     const server = await modelServer((_x, res) => {
-      if (failure === 'text-command') textStream(res, 'TRELLIS_OK list({"kind":"capability"})')
+      if (failure === 'text-command') textStream(res, 'PLIUNA_OK list({"kind":"capability"})')
       else if (failure === 'wrong-target') hostToolStream(res, 'list', { kind: 'task' })
       else textStream(res, '{"decision":"approve","reason":"wrong synthetic choice"}')
     }); cleanups.push(server.close)

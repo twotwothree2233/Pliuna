@@ -9,7 +9,7 @@ import { assertNewOutput, assertCleanPayload, fileManifest, productionPackages, 
 import { verifyManifest } from '../../scripts/verify-package.mjs'
 
 it('packages without repository documents and includes only an explicit guide snapshot', () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-package-guide-')), guide = join(root, 'external-guide.txt'), output = join(root, 'output')
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-package-guide-')), guide = join(root, 'external-guide.txt'), output = join(root, 'output')
   mkdirSync(output)
   copyGuide(output, readGuide(undefined))
   expect(existsSync(join(output, '使用指南.md'))).toBe(false)
@@ -40,7 +40,7 @@ it('records runtime assets but does not enumerate repository prose', () => {
 })
 
 it('refuses existing outputs, zip siblings, dangling links and workspace destinations', () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-package-guards-')), workspace = join(root, 'workspace')
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-package-guards-')), workspace = join(root, 'workspace')
   mkdirSync(workspace)
   expect(assertNewOutput(join(root, 'new'), workspace)).toBe(join(root, 'new'))
   expect(() => assertNewOutput(join(workspace, 'build'), workspace)).toThrow('outside')
@@ -55,7 +55,7 @@ it('refuses existing outputs, zip siblings, dangling links and workspace destina
 })
 
 it('records exact bytes and relative links and rejects external links', () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-package-manifest-'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-package-manifest-'))
   writeFileSync(join(root, 'file'), 'abc')
   symlinkSync('file', join(root, 'link'))
   expect(fileManifest(root)).toEqual([
@@ -83,7 +83,7 @@ it('resolves the real production closure with only the approved native platform'
 })
 
 it('rejects changed bytes and extra files in a completed package', () => {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-package-verify-'))
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-package-verify-'))
   writeFileSync(join(root, 'file'), 'before')
   writeFileSync(join(root, 'FILES.json'), JSON.stringify(fileManifest(root)))
   expect(verifyManifest(root)).toBe(1)

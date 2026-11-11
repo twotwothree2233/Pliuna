@@ -11,7 +11,7 @@ const begin = (): string => (store.handle({ type: 'maintenance.begin' }) as any)
 const create = (token = begin(), replace_id = state().active?.id ?? null): Promise<any> => store.handle({ type: 'maintenance.create', token, inputs_saved: true, replace_id }) as Promise<any>
 const control = (): any => { const d = new Database(join(root, 'recovery-control.sqlite')); try { return JSON.parse((d.prepare('SELECT manifest FROM control').get() as any).manifest) } finally { d.close() } }
 const restart = () => { store.close(); store = new RuntimeStore(root) }
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'trellis-recovery-')); store = new RuntimeStore(root); task = store.create('恢复点验收'); db = new Database(join(root, 'trellis.sqlite')) })
+beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'pliuna-recovery-')); store = new RuntimeStore(root); task = store.create('恢复点验收'); db = new Database(join(root, 'pliuna.sqlite')) })
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); store.close(); db.close(); rmSync(root, { recursive: true, force: true }) })
 function material(): string {
   vi.useFakeTimers()

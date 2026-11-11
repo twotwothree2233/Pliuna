@@ -17,7 +17,7 @@ async function setup() {
     if (body.messages.at(-1).content === instruction) { textStream(res, 'SUMMARY_' + ++summaries); return }
     textStream(res, 'Business response')
   }); closes.push(server.close)
-  const root = mkdtempSync(join(tmpdir(), 'trellis-context-runtime-v2-')), models = new ModelService(); closes.push(() => models.close())
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-context-runtime-v2-')), models = new ModelService(); closes.push(() => models.close())
   models.configure({ type: 'model.configure', configuration: { id: 'main', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 100000, max_output_tokens: 128000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true })
   await models.test('main', 'main')
   let store = new RuntimeStore(root, models); closes.push(() => store.close())
@@ -32,7 +32,7 @@ it('persists text and exact retention references and restores without replay', a
   const s = await setup(); await s.submit('Initial'); await s.submit('最新目标😀'); await s.compact()
   const status = s.call('context.status'), before = s.server.exchanges.length
   expect(status.current).toMatchObject({ version: 2, text: 'SUMMARY_1', retained_interactions: [expect.any(Array), expect.any(Array)] })
-  const db = new Database(join(s.root, 'trellis.sqlite')), original = db.prepare('SELECT * FROM records ORDER BY sequence').all()
+  const db = new Database(join(s.root, 'pliuna.sqlite')), original = db.prepare('SELECT * FROM records ORDER BY sequence').all()
   s.reopen(); expect(s.call('context.status')).toEqual(status); expect(s.server.exchanges).toHaveLength(before)
   expect(db.prepare('SELECT * FROM records ORDER BY sequence').all()).toEqual(original); db.close()
   s.store.models.configure({ type: 'model.configure', configuration: { id: 'main', base_url: s.server.url, wire_model_id: 'synthetic', context_tokens: 100000, max_output_tokens: 128000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true })
@@ -106,7 +106,7 @@ it('preserves oversized retained originals after recovery cannot reduce the cont
   expect(snapshot.records.some(record => record.kind === 'context.summary.installed')).toBe(false)
   expect(s.server.exchanges).toHaveLength(before + 1)
   s.reopen(); expect(s.store.snapshot(s.task).records).toEqual(snapshot.records)
-  const db = new Database(join(s.root, 'trellis.sqlite'), { readonly: true })
+  const db = new Database(join(s.root, 'pliuna.sqlite'), { readonly: true })
   try {
     const row = db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='message.assistant' LIMIT 1").get(s.task) as { payload_json: string }
     expect(JSON.parse(row.payload_json).text).toBe('PRIVATE_BODY_'.repeat(10000))

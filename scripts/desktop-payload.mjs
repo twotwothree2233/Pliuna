@@ -5,7 +5,7 @@ import { nativeTargets } from '../src/shared/native-targets.mjs'
 import { assertNoLocalAgentPath, copyPackageTree } from './local-agent-files.mjs'
 
 export const mainEntries = ['index.js', 'runtime.js', 'inspection.js', 'export-check-worker.js', 'export-generation-worker.js', 'monty-worker.js', 'process-control.js', 'process-supervisor.mjs']
-const privateEntry = /(^|\/)(?:\.git|\.trellis|\.env(?:\.[^/]*)?|auth\.json|settings\.json|credentials?(?:\.[^/]*)?|[^/]*\.(?:sqlite|sqlite3|db)(?:-(?:wal|shm))?)(\/|$)/i
+const privateEntry = /(^|\/)(?:\.git|\.pliuna|\.trellis|\.env(?:\.[^/]*)?|auth\.json|settings\.json|credentials?(?:\.[^/]*)?|[^/]*\.(?:sqlite|sqlite3|db)(?:-(?:wal|shm))?)(\/|$)/i
 const json = file => JSON.parse(readFileSync(file, 'utf8'))
 function regular(file) {
   if (!lstatSync(file).isFile()) throw Error('Expected regular payload file: ' + file)
@@ -70,7 +70,7 @@ export function verifyDesktopPayload(app, target, plugin) {
       const file = join(folder, name), path = relative(root, file).split(sep).join('/'), stat = lstatSync(file)
       assertNoLocalAgentPath(path)
       if (privateEntry.test(path)) throw Error('Private payload rejected: ' + path)
-      if (name === 'trellis_acl_probe.exe') throw Error('Diagnostic ACL helper rejected from payload')
+      if (['pliuna_acl_probe.exe', 'trellis_acl_probe.exe'].includes(name)) throw Error('Diagnostic ACL helper rejected from payload')
       if (stat.isSymbolicLink()) throw Error('Payload symlink rejected: ' + path)
       if (stat.isDirectory()) visit(file, root)
       else if (stat.isFile()) files++
@@ -82,8 +82,8 @@ export function verifyDesktopPayload(app, target, plugin) {
   if (pkg.main !== 'out/main/index.js' || pkg.devDependencies || pkg.scripts) throw Error('Unexpected packaged manifest')
   for (const file of [...mainEntries.map(name => 'out/main/' + name), 'out/preload/index.cjs', 'out/renderer/index.html', 'node_modules/better-sqlite3/build/Release/better_sqlite3.node']) regular(join(app, file))
   if (target.platform === 'win32') {
-    regular(join(app, 'out/main/native/trellis_job.node'))
-    windowsAclExecutable(join(app, 'out/main/native/trellis_acl.exe'), target)
+    regular(join(app, 'out/main/native/pliuna_job.node'))
+    windowsAclExecutable(join(app, 'out/main/native/pliuna_acl.exe'), target)
   }
   else if ((lstatSync(join(app, 'node_modules', target.package, target.binary)).mode & 0o111) === 0) throw Error('Native binary is not executable')
   for (const file of [target.binary, target.native]) regular(join(app, 'node_modules', target.package, file))

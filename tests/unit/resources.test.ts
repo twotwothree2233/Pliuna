@@ -8,8 +8,8 @@ import { RuntimeStore } from '../../src/runtime/store'
 import type { Snapshot } from '../../src/shared/types'
 let store: RuntimeStore, db: Database.Database, directory: string, task: Snapshot, other: Snapshot, run: string
 beforeEach(() => {
-  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'trellis-resources-')); store = new RuntimeStore(directory)
-  task = store.create('资源隔离'); other = store.create('另一个任务'); db = new Database(join(directory, 'trellis.sqlite'))
+  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'pliuna-resources-')); store = new RuntimeStore(directory)
+  task = store.create('资源隔离'); other = store.create('另一个任务'); db = new Database(join(directory, 'pliuna.sqlite'))
   run = store.start(task.task.id, 'test', 'fixture', [])
 })
 afterEach(() => { vi.restoreAllMocks(); db.close(); store.close(); rmSync(directory, { recursive: true, force: true }); vi.useRealTimers() })
@@ -159,7 +159,7 @@ it('does not commit a resource if the published file fails its pre-commit integr
 it('reads existing managed bundle resources only as JSON data', () => {
   const value = { profile: 'managed-v1', html: '<script>not executed</script>' }
   const resource = create({ type: 'json', value })
-  db.prepare('UPDATE resources SET media_type=? WHERE id=?').run('application/vnd.trellis.bundle+json', resource.data.id)
+  db.prepare('UPDATE resources SET media_type=? WHERE id=?').run('application/vnd.pliuna.bundle+json', resource.data.id)
   expect(read(resource.data.id).data.content).toEqual({ type: 'json', value })
 })
 it('explicitly reports metadata-only representations without claiming verified content', () => {

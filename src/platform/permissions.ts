@@ -9,8 +9,8 @@ import { protectWindowsPath } from './windows-acl'
 // Static script: paths are environment data, never PowerShell source/arguments.
 const windowsPrivateAcl = `
 $ErrorActionPreference = 'Stop'
-$path = $env:TRELLIS_PRIVATE_PATH
-$directory = $env:TRELLIS_PRIVATE_KIND -eq 'directory'
+$path = $env:PLIUNA_PRIVATE_PATH
+$directory = $env:PLIUNA_PRIVATE_KIND -eq 'directory'
 $attributes = [System.IO.File]::GetAttributes($path)
 if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Unsafe reparse point' }
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -50,7 +50,7 @@ if (-not (Test-PrivateAcl $actual)) {
   else { [System.IO.File]::SetAccessControl($path, $acl); $actual = [System.IO.File]::GetAccessControl($path) }
 }
 if (-not (Test-PrivateAcl $actual)) { throw 'Private ACL verification failed' }
-if ($directory -and $env:TRELLIS_PRIVATE_HIDDEN -eq '1' -and ($attributes -band [System.IO.FileAttributes]::Hidden) -eq 0) { [System.IO.File]::SetAttributes($path, $attributes -bor [System.IO.FileAttributes]::Hidden) }
+if ($directory -and $env:PLIUNA_PRIVATE_HIDDEN -eq '1' -and ($attributes -band [System.IO.FileAttributes]::Hidden) -eq 0) { [System.IO.File]::SetAttributes($path, $attributes -bor [System.IO.FileAttributes]::Hidden) }
 
 `
 
@@ -78,7 +78,7 @@ export function protectPrivatePath(file: string, kind: 'file' | 'directory', hid
       execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsPrivateAcl, 'utf16le').toString('base64')], {
         windowsHide: true, timeout: remaining, stdio: 'pipe',
         env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP,
-          TRELLIS_PRIVATE_PATH: win32.toNamespacedPath(file), TRELLIS_PRIVATE_KIND: kind, TRELLIS_PRIVATE_HIDDEN: hidden ? '1' : '0' }
+          PLIUNA_PRIVATE_PATH: win32.toNamespacedPath(file), PLIUNA_PRIVATE_KIND: kind, PLIUNA_PRIVATE_HIDDEN: hidden ? '1' : '0' }
       })
     }
     const after = fileLstatSync(file)

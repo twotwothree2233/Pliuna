@@ -43,7 +43,7 @@ export async function packageDesktop(options, workspace = resolve(dirname(fileUR
   if (electron.version !== pkg.devDependencies.electron) throw Error('Installed Electron differs from the pinned version')
   const electronDist = options.electronDist ?? join(dirname(electronManifest), 'dist')
   if (readFileSync(join(electronDist, 'version'), 'utf8').trim().replace(/^v/, '') !== electron.version) throw Error('Electron distribution differs from the pinned version')
-  const stage = mkdtempSync(join(tmpdir(), 'trellis-desktop-stage-'))
+  const stage = mkdtempSync(join(tmpdir(), 'pliuna-desktop-stage-'))
   try {
     const native = productionPackages(workspace, target).find(pkg => pkg.name === target.package)
     const originalAssets = [target.binary, target.native].map(name => ({ name, bytes: readFileSync(join(native.folder, name)) }))

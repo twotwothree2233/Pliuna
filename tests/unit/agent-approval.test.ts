@@ -15,7 +15,7 @@ afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await 
 const schema = { type: 'object', properties: { progress: { type: 'string' } }, required: ['progress'], additionalProperties: false }
 async function setup(handle: (exchange: Exchange, res: ServerResponse) => void | Promise<void>, limits?: import('../../src/shared/contracts.generated').ModelConfiguration['limits']) {
   const server = await modelServer((exchange, res) => { if (!synthetic(exchange.body, res)) return handle(exchange, res) }); cleanups.push(server.close)
-  const path = mkdtempSync(join(tmpdir(), 'trellis-agent-')), models = new ModelService()
+  const path = mkdtempSync(join(tmpdir(), 'pliuna-agent-')), models = new ModelService()
   const configuration = { id: 'main', limits, base_url: server.url, wire_model_id: 'wire-id', context_tokens: 1000000, max_output_tokens: 1024, compatibility_profile: 'chat-max-tokens' }
   models.configure({ type: 'model.configure', configuration, api_key: 'credential-sentinel', confirm_memory_only: true })
   await models.test('main', 'main'); await models.test('main', 'approval')
@@ -57,7 +57,7 @@ describe('general Agent loop and persisted single-action approval', () => {
     expect(snapshot.runs[0]).toMatchObject({ id: run, state: 'failed', primary_reason: 'CONTEXT_BUDGET_EXCEEDED' })
     expect(server.exchanges.length).toBe(before + 1)
     expect(store.handle({ type: 'task.data.read', task_id: task.task.id, id: target.id, expected_revision: 1 })).toMatchObject({ value: { progress: 'initial' } })
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     try {
       const rows = db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='model.context.rejected'").all(task.task.id) as any[]
       expect(rows).toHaveLength(1)
@@ -191,7 +191,7 @@ describe('general Agent loop and persisted single-action approval', () => {
     expect(budget).toMatchObject({ model_requests: 2, tool_requests: 1, cost: 'unknown', template: 'agent-v0.1' })
     expect(budget.tokens).toBeGreaterThan(0)
     expect(snapshot.approvals).toHaveLength(0)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     expect(db.prepare('SELECT revision,value_json FROM task_data').get()).toEqual({ revision: 1, value_json: '{"progress":"initial"}' }); db.close()
     expect(JSON.stringify(snapshot)).not.toContain('credential-sentinel')
     const data = snapshot.task_data.items[0]!
@@ -207,7 +207,7 @@ describe('general Agent loop and persisted single-action approval', () => {
     const run = store.start(task.task.id, 'query', 'fixture', [])
     expect(store.modelTool(task.task.id, run, { type: 'list', input: { kind: 'action' } })).toMatchObject({ items: [], next_cursor: null })
     expect(store.modelTool(task.task.id, run, { type: 'list', input: { kind: 'resource' } })).toMatchObject({ items: [], next_cursor: null })
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     const insert = db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)')
     for (let i = 0; i < 201; i++) insert.run('history-' + i, task.task.id, i + 100, 'message.assistant', '{}', new Date().toISOString())
     db.close()
@@ -221,7 +221,7 @@ describe('general Agent loop and persisted single-action approval', () => {
     expect(() => store.start(task.task.id, 'second', 'main', [])).toThrow('unfinished Run')
     expect(() => models.remove('main')).toThrow('occupied')
     const second = store.create('other task'); expect(second.task.title).toBe('other task')
-    const db = new Database(join(path, 'trellis.sqlite')); expect(db.prepare('SELECT revision FROM task_data WHERE id=?').get(dataId)).toEqual({ revision: 1 }); db.close()
+    const db = new Database(join(path, 'pliuna.sqlite')); expect(db.prepare('SELECT revision FROM task_data WHERE id=?').get(dataId)).toEqual({ revision: 1 }); db.close()
     store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'approve' })
     const snapshot = await ended(store, task)
     expect(snapshot.approvals[0]).toMatchObject({ decision: 'approve', validity: 'revoked', handling: 'resolved', result: 'success' })
@@ -234,7 +234,7 @@ describe('general Agent loop and persisted single-action approval', () => {
     expect(() => store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'approve' })).toThrow()
     const snapshot = await ended(store, task)
     expect(snapshot.runs[0]).toMatchObject({ state: 'cancelled', primary_reason: 'user_cancelled' })
-    const db = new Database(join(path, 'trellis.sqlite')); expect(db.prepare('SELECT revision FROM task_data').get()).toEqual({ revision: 1 }); db.close()
+    const db = new Database(join(path, 'pliuna.sqlite')); expect(db.prepare('SELECT revision FROM task_data').get()).toEqual({ revision: 1 }); db.close()
   })
   it('does not reopen a denied target within the same Run after model parameter rewrites', async () => {
     const { store, task, server } = await setup((exchange, res) => {
@@ -261,7 +261,7 @@ describe('general Agent loop and persisted single-action approval', () => {
   })
   it('approved operation fails if version changed while waiting; no rebinding', async () => {
     const { store, task, path } = await setup(dataConversation), { approval, dataId } = await beginReplacement(store, task)
-    const db = new Database(join(path, 'trellis.sqlite')); db.prepare('UPDATE task_data SET revision=2 WHERE id=?').run(dataId)
+    const db = new Database(join(path, 'pliuna.sqlite')); db.prepare('UPDATE task_data SET revision=2 WHERE id=?').run(dataId)
     store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'approve' })
     const snapshot = await ended(store, task)
     expect(snapshot.approvals[0]).toMatchObject({ decision: 'approve', result: 'not_executed' })
@@ -270,7 +270,7 @@ describe('general Agent loop and persisted single-action approval', () => {
   })
   it('expires original approval record and never extends lifetime for a late decision', async () => {
     const { store, task, path } = await setup(dataConversation), { approval } = await beginReplacement(store, task)
-    const db = new Database(join(path, 'trellis.sqlite')); db.prepare('UPDATE approvals SET expires_at=? WHERE id=?').run(new Date(Date.now() - 1).toISOString(), approval.id)
+    const db = new Database(join(path, 'pliuna.sqlite')); db.prepare('UPDATE approvals SET expires_at=? WHERE id=?').run(new Date(Date.now() - 1).toISOString(), approval.id)
     expect(() => store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'approve' })).toThrow('expired')
     const snapshot = await ended(store, task)
     expect(snapshot.approvals[0]).toMatchObject({ decision: 'pending', validity: 'expired', result: 'not_executed' })
@@ -278,7 +278,7 @@ describe('general Agent loop and persisted single-action approval', () => {
   })
   it('rejects changed action parameters rather than rebinding an approval', async () => {
     const { store, task, path } = await setup(dataConversation), { approval } = await beginReplacement(store, task)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     const request = { ...(approval.request as Record<string, unknown>), value: { progress: 'tampered' } }
     db.prepare('UPDATE actions SET request_json=? WHERE id=?').run(JSON.stringify(request), approval.action_id)
     store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'approve' })
@@ -288,7 +288,7 @@ describe('general Agent loop and persisted single-action approval', () => {
   })
   it('assisted timeout falls back to the same manual record and original deadline', async () => {
     const { store, task } = await setup((exchange, res) => {
-      if (exchange.body.messages[0].content.includes('你是 Trellis 的单次动作辅助审批评估器。')) { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders() }
+      if (exchange.body.messages[0].content.includes('你是 Pliuna 的单次动作辅助审批评估器。')) { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders() }
       else dataConversation(exchange, res)
     }, { request_timeout_ms: 1000 })
     store.handle({ type: 'approval.configure', mode: 'assisted', model_id: 'main', confirm_external_processing: true })
@@ -307,7 +307,7 @@ describe('general Agent loop and persisted single-action approval', () => {
   for (const decision of ['approve', 'deny', 'escalate', 'invalid']) it('assisted ' + decision + ' uses an independent no-tools context and correct fallback', async () => {
     let approvalBody: any
     const { store, task, path } = await setup((exchange, res) => {
-      if (exchange.body.messages[0].role === 'system' && exchange.body.messages[0].content.includes('你是 Trellis 的单次动作辅助审批评估器。')) {
+      if (exchange.body.messages[0].role === 'system' && exchange.body.messages[0].content.includes('你是 Pliuna 的单次动作辅助审批评估器。')) {
         approvalBody = exchange.body
         textStream(res, decision === 'invalid' ? '```json\n{"decision":"approve","reason":"x"}\n```' : JSON.stringify({ decision, reason: 'specific operation review' }))
       } else dataConversation(exchange, res)
@@ -324,7 +324,7 @@ describe('general Agent loop and persisted single-action approval', () => {
       store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'deny' })
     }
     const snapshot = await ended(store, task)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     expect(db.prepare('SELECT revision FROM task_data').get()).toEqual({ revision: decision === 'approve' ? 2 : 1 }); db.close()
     expect(snapshot.approvals[0]!.decision).toBe(decision === 'approve' ? 'approve' : 'deny')
     const ledger = (store.handle({ type: 'task.query', task_id: task.task.id, query: { type: 'read', input: { target: { kind: 'run', id: snapshot.runs[0]!.id } } } }) as any).data.accounting
@@ -351,7 +351,7 @@ describe('general Agent loop and persisted single-action approval', () => {
       ] }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n')
     })
     store.start(task.task.id, 'batch', 'main', []); await ended(store, task)
-    const db = new Database(join(path, 'trellis.sqlite'))
+    const db = new Database(join(path, 'pliuna.sqlite'))
     expect(db.prepare('SELECT count(*) AS count FROM task_data').get()).toEqual({ count: 0 })
     expect(db.prepare('SELECT dispatch,execution FROM calls').get()).toEqual({ dispatch: 'not_sent', execution: 'not_executed' }); db.close()
     const response = [...server.exchanges].reverse().find(x => x.body?.messages?.at(-1).role === 'tool')!

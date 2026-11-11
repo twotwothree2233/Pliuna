@@ -12,8 +12,11 @@ import { applicationDirectory, prepareApplicationDirectory } from './application
 import { homedir } from 'node:os'
 import { mkdirSync } from 'node:fs'
 import { saveExport, exportTargetIdentity, reconcileExport } from './export-save'
+import { applicationEnvironment, applicationName } from '../shared/branding'
 
-const dataDirectory = applicationDirectory(homedir(), process.env.TRELLIS_TEST_DATA)
+app.setName(applicationName)
+if (process.platform === 'win32') app.setAppUserModelId('app.pliuna.desktop')
+const dataDirectory = applicationDirectory(homedir(), applicationEnvironment(process.env, 'TEST_DATA'))
 prepareApplicationDirectory(dataDirectory)
 app.setPath('userData', dataDirectory)
 mkdirSync(join(dataDirectory, 'browser-state'), { recursive: true, mode: 0o700 })
@@ -22,7 +25,7 @@ app.setAppLogsPath(join(dataDirectory, 'logs'))
 app.setPath('crashDumps', join(dataDirectory, 'crashes'))
 app.commandLine.appendSwitch('disk-cache-dir', join(dataDirectory, 'cache', 'http'))
 const directory = new ModelDirectory(dataDirectory)
-const inspections = new StorageInspections(() => utilityProcess.fork(join(__dirname, 'inspection.js'), [app.getPath('userData')], { serviceName: 'Trellis Read-only Inspection', stdio: 'pipe' }))
+const inspections = new StorageInspections(() => utilityProcess.fork(join(__dirname, 'inspection.js'), [app.getPath('userData')], { serviceName: 'Pliuna Read-only Inspection', stdio: 'pipe' }))
 let runtime: UtilityProcess | undefined
 let closing = false
 let quitReady = false
@@ -39,7 +42,7 @@ function runtimeRequest(request: unknown): Promise<any> {
   })
 }
 function startRuntime(): void {
-  const child = utilityProcess.fork(join(__dirname, 'runtime.js'), [app.getPath('userData'), process.execPath], { serviceName: 'Trellis Runtime', stdio: 'pipe' })
+  const child = utilityProcess.fork(join(__dirname, 'runtime.js'), [app.getPath('userData'), process.execPath], { serviceName: 'Pliuna Runtime', stdio: 'pipe' })
   runtime = child
   const vault = new FileModelStore(app.getPath('userData'))
   child.on('message', (message: { id: string; response: HostResponse; vault?: 'load' | 'save'; records?: import('../runtime/model/persistence').SavedConnection[]; channels?: import('../runtime/model/channels').SavedChannel[] }) => {
@@ -67,14 +70,14 @@ app.whenReady().then(() => {
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : [{ label: '文件', submenu: [{ role: 'quit' as const }] }]),
     { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }
   ]))
-  const window = new BrowserWindow({ title: 'Trellis', width: 1320, height: 860, minWidth: 390, minHeight: 600, show: false,
+  const window = new BrowserWindow({ title: 'Pliuna', width: 1320, height: 860, minWidth: 390, minHeight: 600, show: false,
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 16 } } : {}),
     webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())
   const materials = new MaterialSources(runtimeRequest, async () => { const selected=await dialog.showOpenDialog(window,{title:'添加任务材料',properties:['openFile','multiSelections']});return selected.canceled?[]:selected.filePaths })
   let exportSaving = false
-  ipcMain.handle('trellis:request', (event, request: unknown): Promise<HostResponse> | HostResponse => {
+  ipcMain.handle('pliuna:request', (event, request: unknown): Promise<HostResponse> | HostResponse => {
     if (closing) return { ok: false, error: { code: 'SHUTTING_DOWN', message: 'Host is shutting down' } }
     if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) return { ok: false, error: { code: 'FORBIDDEN', message: 'Untrusted frame' } }
     if (Buffer.byteLength(JSON.stringify(request) ?? '') > defaults.transport.rpc_message_bytes) return { ok: false, error: { code: 'INPUT_TOO_LARGE', message: 'IPC message too large' } }
@@ -100,7 +103,7 @@ app.whenReady().then(() => {
           try {
             const status = await runtimeRequest({ type: 'export.status', task_id: r.task_id, operation_id: r.operation_id })
             if (status.phase !== 'preview') throw Error('EXPORT_STATE_CHANGED')
-            const selected = await dialog.showSaveDialog(window, { title: '保存离线学习材料', defaultPath: 'Trellis-learning.html', filters: [{ name: 'HTML', extensions: ['html'] }], properties: ['showOverwriteConfirmation'] })
+            const selected = await dialog.showSaveDialog(window, { title: '保存离线学习材料', defaultPath: 'Pliuna-learning.html', filters: [{ name: 'HTML', extensions: ['html'] }], properties: ['showOverwriteConfirmation'] })
             if (selected.canceled || !selected.filePath) return { ok: true, data: { cancelled: true } }
             const expected = await exportTargetIdentity(selected.filePath)
             if (expected && (await dialog.showMessageBox(window, { type: 'warning', message: '覆盖已存在的 HTML 文件？', detail: '只覆盖你刚选择的文件；失败时不会自动重试。', buttons: ['取消', '确认覆盖'], defaultId: 0, cancelId: 0 })).response !== 1) return { ok: true, data: { cancelled: true } }

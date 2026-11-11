@@ -11,15 +11,15 @@ import { RuntimeStore } from '../../src/runtime/store'
 import { digest } from '../../src/runtime/resources'
 let working: string, executable: string
 beforeAll(async () => {
-  working = mkdtempSync(join(tmpdir(), 'trellis-resource-crash-')); executable = join(working, 'crash.cjs')
+  working = mkdtempSync(join(tmpdir(), 'pliuna-resource-crash-')); executable = join(working, 'crash.cjs')
   const req = createRequire(import.meta.url), esbuild = createRequire(req.resolve('vite'))('esbuild')
   await esbuild.build({ entryPoints: ['tests/helpers/resource-cleanup-crash.ts'], outfile: executable, bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.txt': 'text', '.sql': 'text' } })
 })
 afterAll(() => rmSync(working, { recursive: true, force: true }))
 for (const point of ['source', 'retired', 'intent', 'unlinked', 'file_deleted', 'metadata', 'complete']) it('formal cleanup real SIGKILL boundary: ' + point, async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'trellis-resource-crash-data-'))
+  const directory = mkdtempSync(join(tmpdir(), 'pliuna-resource-crash-data-'))
   let store: RuntimeStore | undefined = new RuntimeStore(directory)
-  const task = store.create('隔离故障').task.id, resource = randomUUID(), db = new Database(join(directory, 'trellis.sqlite'))
+  const task = store.create('隔离故障').task.id, resource = randomUUID(), db = new Database(join(directory, 'pliuna.sqlite'))
   db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(resource, resource, digest(Buffer.from('keep')), 4, 'text/plain', '故障材料', 'now'); db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task, resource); db.close(); writeFileSync(join(directory, 'resources', resource), 'keep'); store.close(); store = undefined
   const child = fork(executable, [directory, point, task], { env: { ...process.env, NODE_PATH: join(process.cwd(), 'node_modules') }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
   let errors = ''; child.stderr!.on('data', data => { errors += data.toString() }); const exit = once(child, 'exit')

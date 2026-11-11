@@ -10,12 +10,12 @@ const executablePath: string = createRequire(import.meta.url)('electron')
 
 test('discovers, receives full contract pages, publishes and exports the returned example across isolated restart', async () => {
   test.setTimeout(60000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-contract-desktop-')), target = join(root, 'example.html')
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-contract-desktop-')), target = join(root, 'example.html')
   const scene = contractScenario(), server = await modelServer(scene.handle)
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: root, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: root, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
   const call = async (request: any): Promise<any> => {
-    const response = await page.evaluate(request => window.trellis.request(request), request)
+    const response = await page.evaluate(request => window.pliuna.request(request), request)
     if (!response.ok) throw Error(response.error.code)
     return response.data
   }

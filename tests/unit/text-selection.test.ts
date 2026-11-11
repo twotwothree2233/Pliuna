@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { readTextSelection } from '../../src/runtime/plugins/text-selection'
 import type { ReadSelection } from '../../src/runtime/model/tool-input'
 function saved(text: string | Buffer) {
-  const root = mkdtempSync(join(tmpdir(), 'trellis-text-selection-')), buffer = Buffer.from(text)
+  const root = mkdtempSync(join(tmpdir(), 'pliuna-text-selection-')), buffer = Buffer.from(text)
   mkdirSync(join(root, 'resources')); writeFileSync(join(root, 'resources', 'text'), buffer)
   const resource = { id: 'r', storage_key: 'text', byte_length: buffer.length, sha256: createHash('sha256').update(buffer).digest('hex') }
   return { root, resource, read: (selection: ReadSelection, max = 4000, previous?: any, valid = () => {}) => readTextSelection(root, resource, selection, max, previous, undefined, valid) }

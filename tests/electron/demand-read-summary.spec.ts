@@ -11,7 +11,7 @@ const executablePath: string = createRequire(import.meta.url)('electron')
 
 test('autonomous small reads never expand unread material; exact recent results survive five summaries and restart', async () => {
   test.setTimeout(90000)
-  const root = await mkdtemp(join(tmpdir(), 'trellis-demand-read-desktop-')), data = join(root, '.trellis')
+  const root = await mkdtemp(join(tmpdir(), 'pliuna-demand-read-desktop-')), data = join(root, '.pliuna')
   const selected = 'SELECTED_' + randomUUID(), unread = 'UNREAD_' + randomUUID()
   const text = selected + '中😀'.repeat(20000) + unread, input = join(root, 'synthetic.txt')
   await writeFile(input, text)
@@ -39,9 +39,9 @@ test('autonomous small reads never expand unread material; exact recent results 
     }
     textStream(res, 'Navigation retained; explicit reads retrieve selected text only.')
   })
-  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', TRELLIS_TEST_DATA: data, TRELLIS_ENABLE_VIEW_REPLACEMENT: '1' } })
+  const launch = () => electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: data, PLIUNA_ENABLE_VIEW_REPLACEMENT: '1' } })
   let app = await launch(), page = await app.firstWindow()
-  const call = async (request: any): Promise<any> => { const r = await page.evaluate(r => window.trellis.request(r), request); if (!r.ok) throw Error(r.error.code); return r.data }
+  const call = async (request: any): Promise<any> => { const r = await page.evaluate(r => window.pliuna.request(r), request); if (!r.ok) throw Error(r.error.code); return r.data }
   try {
     await call({ type: 'model.configure', configuration: { id: 'main', base_url: server.url, wire_model_id: 'synthetic', context_tokens: 240000, max_output_tokens: 128000, compatibility_profile: 'chat-max-tokens' }, api_key: 'synthetic-only', confirm_memory_only: true, remember_connection: true, confirm_plaintext_storage: true })
     await call({ type: 'model.test', model_id: 'main', role: 'main', confirm_cost: true })
@@ -64,7 +64,7 @@ test('autonomous small reads never expand unread material; exact recent results 
     await submit('read same selected excerpt explicitly again'); expect(reads).toBe(2)
     oldSource = { id: (await call({ type: 'task.snapshot', task_id: task })).records.find((r: any) => r.kind === 'model.tool_result').id }
     const audit = async () => app.evaluate((_electron, { data, task, sourceId }) => {
-      const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(data + '/trellis.sqlite', { readonly: true })
+      const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(data + '/pliuna.sqlite', { readonly: true })
       try {
         const rows = db.prepare('SELECT id,kind,payload_json FROM records WHERE task_id=? ORDER BY sequence').all(task) as any[]
         return { source: rows.find(r => r.id === sourceId), evidence: rows.filter(r => r.kind === 'model.request.evidence').map(r => JSON.parse(r.payload_json)), accounting: rows.filter(r => r.kind === 'model.request.accounting').map(r => JSON.parse(r.payload_json)) }
@@ -84,7 +84,7 @@ test('autonomous small reads never expand unread material; exact recent results 
     const beforeSummary = await call({ type: 'context.status', task_id: task }), count = server.exchanges.length
     const settings = await readFile(join(data, 'settings.json')), auth = await readFile(join(data, 'auth.json')), bytes = await readFile(join(data, 'resources', resource))
     expect(bytes.toString()).toBe(text)
-    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.trellis)
+    await app.close(); app = await launch(); page = await app.firstWindow(); await page.waitForFunction(() => !!window.pliuna)
     expect(await call({ type: 'context.status', task_id: task })).toEqual(beforeSummary)
     expect(await readFile(join(data, 'settings.json'))).toEqual(settings); expect(await readFile(join(data, 'auth.json'))).toEqual(auth)
     expect(await readFile(join(data, 'resources', resource))).toEqual(bytes); expect(server.exchanges).toHaveLength(count)

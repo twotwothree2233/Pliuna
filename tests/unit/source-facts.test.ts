@@ -40,7 +40,7 @@ it('labels Run token totals as cumulative and unavailable usage as nonzero-unkno
 
 it('keeps source guidance out of the main role while the summary retains evidence distinctions', () => {
   const agent = readFileSync('src/runtime/model/prompts/agent-v0.1.txt', 'utf8')
-  expect(agent.trim()).toBe('你是 Trellis 的通用学习与任务助手。\n\n你可以与用户对话，使用当前提供的工具处理任务，并生成学习内容和交互界面。')
+  expect(agent.trim()).toBe('你是 Pliuna 的通用学习与任务助手。\n\n你可以与用户对话，使用当前提供的工具处理任务，并生成学习内容和交互界面。')
   const summary = readFileSync('src/runtime/model/prompts/summary-v0.1.txt', 'utf8')
   expect(summary).toContain('区分用户请求、模型陈述和工具结果')
   expect(summary).toContain('不把模型自述当作执行证据')

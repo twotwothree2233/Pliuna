@@ -37,9 +37,10 @@ static uint64_t decimal(const wchar_t* text, bool positive = false) {
   return n;
 }
 static void attach(const wchar_t* text) {
+  const std::wstring prefix = L"Local\\Pliuna-";
   std::wstring name(text);
-  if (name.size() != 50 || name.substr(0, 14) != L"Local\\Trellis-") fail("job-name");
-  for (size_t i = 14; i < name.size(); i++) {
+  if (name.size() != prefix.size() + 36 || name.compare(0, prefix.size(), prefix) != 0) fail("job-name");
+  for (size_t i = prefix.size(); i < name.size(); i++) {
     wchar_t c = name[i];
     if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || c == L'-')) fail("job-name");
   }
