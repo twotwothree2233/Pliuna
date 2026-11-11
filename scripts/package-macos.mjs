@@ -1,13 +1,12 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { montyTarget } from '../src/shared/native-targets.mjs'
 
 import { productionPackages as collectProductionPackages } from './production-packages.mjs'
-import { assertNoLocalAgentPath, copyPackageTree } from './local-agent-files.mjs'
 
 export const packageTarget = montyTarget('darwin', 'arm64')
 export const nativeHashes = {
@@ -35,9 +34,7 @@ export function fileManifest(root) {
   const entries = [], base = realpathSync(root)
   function visit(folder) {
     for (const name of readdirSync(folder).sort()) {
-      const file = join(folder, name), path = relative(base, file).split(sep).join('/')
-      assertNoLocalAgentPath(path)
-      const stat = lstatSync(file)
+      const file = join(folder, name), stat = lstatSync(file), path = relative(base, file).split(sep).join('/')
       if (stat.isSymbolicLink()) {
         if (!isInside(base, realpathSync(file))) throw Error('Escaping package symlink: ' + path)
         entries.push({ path, link: readlinkSync(file) })
@@ -51,10 +48,6 @@ export function fileManifest(root) {
 }
 
 export function assertCleanPayload(entries) {
-  for (const entry of entries) {
-    assertNoLocalAgentPath(entry.path)
-    if (entry.link) assertNoLocalAgentPath(entry.link)
-  }
   const forbidden = /(^|\/)(auth\.json|settings\.json|[^/]*\.sqlite(?:-(?:wal|shm))?|synthetic-sample|acceptance\.mjs|\.env(?:\.[^/]*)?)(\/|$)/i
   if (entries.some(entry => forbidden.test(entry.path))) throw Error('Private or acceptance-only payload rejected')
 }
@@ -103,17 +96,17 @@ export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(i
   mkdirSync(base, { mode: 0o700 })
   const app = join(base, 'Trellis.app'), payload = join(app, 'Contents/Resources/app')
   // Preserve framework symlinks rather than resolving links back into the checkout.
-  copyPackageTree(sourceApp, app, { recursive: true, verbatimSymlinks: true })
+  cpSync(sourceApp, app, { recursive: true, verbatimSymlinks: true })
   mkdirSync(payload, { recursive: true })
-  copyPackageTree(join(workspace, 'out'), join(payload, 'out'), { recursive: true })
+  cpSync(join(workspace, 'out'), join(payload, 'out'), { recursive: true })
   writeFileSync(join(payload, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, type: 'module', main: pkg.main }, null, 2) + '\n')
   for (const dependency of dependencies) {
     const dest = join(payload, 'node_modules', dependency.name)
     mkdirSync(dirname(dest), { recursive: true })
     if (dependency.name === 'better-sqlite3') {
       mkdirSync(join(dest, 'build/Release'), { recursive: true })
-      for (const name of ['package.json', 'LICENSE', 'lib', 'build/Release/better_sqlite3.node']) copyPackageTree(join(dependency.folder, name), join(dest, name), { recursive: true })
-    } else copyPackageTree(dependency.folder, dest, { recursive: true, filter: path => !['node_modules', '.git', 'test', 'tests', 'benchmark'].includes(path.split(sep).at(-1)) })
+      for (const name of ['package.json', 'LICENSE', 'lib', 'build/Release/better_sqlite3.node']) cpSync(join(dependency.folder, name), join(dest, name), { recursive: true })
+    } else cpSync(dependency.folder, dest, { recursive: true, filter: path => !['node_modules', '.git', 'test', 'tests', 'benchmark'].includes(path.split(sep).at(-1)) })
   }
   const executable = join(app, 'Contents/MacOS/Trellis')
   renameSync(join(app, 'Contents/MacOS/Electron'), executable)
@@ -140,7 +133,7 @@ export function packageMacos(output, workspace = resolve(dirname(fileURLToPath(i
   verifyMonty()
   copyGuide(base, guideBytes)
   const plugin = join(workspace, 'reference-plugins/pdf-text')
-  if (existsSync(plugin)) copyPackageTree(plugin, join(base, 'PDF Text Plugin'), { recursive: true })
+  if (existsSync(plugin)) cpSync(plugin, join(base, 'PDF Text Plugin'), { recursive: true })
   writeFileSync(join(base, 'BUILD.json'), JSON.stringify({ version: pkg.version, platform: packageTarget.id, electron: electronPkg.version, built_at: new Date().toISOString(), direct_entry: pkg.main, sources, ...(guideBytes === undefined ? {} : { guide: { path: '使用指南.md', sha256: createHash('sha256').update(guideBytes).digest('hex') } }), dependencies: dependencies.map(({ name, version }) => ({ name, version })), signing: { ad_hoc: true, developer_id: false, notarized: false }, native_hashes: nativeHashes, credentials_included: false, bit_identical_zip_claimed: false }, null, 2) + '\n')
   const entries = fileManifest(base)
   assertCleanPayload(entries)

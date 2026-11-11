@@ -1,0 +1,13 @@
+{
+  "request_type": "write",
+  "operation_id": "action_1",
+  "execution": "success",
+  "delivery": "delivered",
+  "truncated": false,
+  "data": {
+    "surface_revision": 2,
+    "created_views": {
+      "new_lesson": "view_1"
+    }
+  }
+}

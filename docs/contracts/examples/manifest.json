@@ -1,0 +1,87 @@
+[
+  {
+    "file": "examples/01-bundle.json",
+    "definition": "bundle",
+    "valid": true
+  },
+  {
+    "file": "examples/02-model_request.json",
+    "definition": "model_request",
+    "valid": true
+  },
+  {
+    "file": "examples/03-tool_result.json",
+    "definition": "tool_result",
+    "valid": true
+  },
+  {
+    "file": "examples/04-ipc_request.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "examples/05-model_request.json",
+    "definition": "model_request",
+    "valid": true
+  },
+  {
+    "file": "examples/06-tool_result.json",
+    "definition": "tool_result",
+    "valid": true
+  },
+  {
+    "file": "examples/07-approval_decision.json",
+    "definition": "approval_decision",
+    "valid": true
+  },
+  {
+    "file": "examples/08-summary.json",
+    "definition": "summary",
+    "valid": true
+  },
+  {
+    "file": "examples/09-manifest.json",
+    "definition": "manifest",
+    "valid": true
+  },
+  {
+    "file": "examples/10-sync_delta.json",
+    "definition": "sync_delta",
+    "valid": true
+  },
+  {
+    "file": "examples/11-wire_value.json",
+    "definition": "wire_value",
+    "valid": true
+  },
+  {
+    "file": "examples/invalid-01.json",
+    "definition": "model_request",
+    "valid": false
+  },
+  {
+    "file": "examples/invalid-02.json",
+    "definition": "approval_decision",
+    "valid": false
+  },
+  {
+    "file": "examples/invalid-03.json",
+    "definition": "local_schema",
+    "valid": false
+  },
+  {
+    "file": "examples/invalid-04.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "examples/invalid-05.json",
+    "definition": "bundle",
+    "valid": false
+  },
+  {
+    "file": "examples/invalid-06.json",
+    "definition": "model_request",
+    "valid": false
+  }
+]

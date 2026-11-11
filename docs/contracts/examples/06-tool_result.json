@@ -1,0 +1,12 @@
+{
+  "request_type": "write",
+  "operation_id": "action_2",
+  "execution": "not_executed",
+  "delivery": "delivered",
+  "truncated": false,
+  "error": {
+    "code": "REVISION_CONFLICT",
+    "message": "Surface 版本变化，请重新读取。",
+    "path": "/expected_revision"
+  }
+}

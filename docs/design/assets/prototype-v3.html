@@ -1,0 +1,1684 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trellis · 桌面原型</title>
+<style>
+
+:root{
+  --stage:#e8e7e1;
+  --stage-ink:#2c2e29;
+  --stage-muted:#71746b;
+  --ui:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:"SFMono-Regular",Menlo,"JetBrains Mono","Roboto Mono",monospace;
+  --serif:"Songti SC","STSong","Noto Serif SC","Source Han Serif SC",Georgia,serif;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:
+    radial-gradient(1100px 480px at 16% -8%,rgba(255,255,255,.8),transparent 68%),
+    var(--stage);
+  color:var(--stage-ink);
+  font-family:var(--ui);
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+input,textarea,select{font:inherit}
+svg{display:block}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+::selection{background:#d8d6cb}
+
+/* ============================ stage ============================ */
+.page{max-width:1480px;margin:0 auto;padding:40px 40px 56px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:32px;margin-bottom:22px}
+.eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--stage-muted)}
+.eyebrow::before{content:"";width:14px;height:1px;background:#9a9c92}
+.page-head h1{font-size:26px;line-height:1.2;letter-spacing:-.7px;font-weight:650;margin:9px 0 8px}
+.page-head p{max-width:680px;margin:0;font-size:12.5px;line-height:1.75;color:var(--stage-muted)}
+.head-meta{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex:none}
+.layout-badge{display:inline-flex;align-items:center;gap:8px;border:1px solid #cfcec5;border-radius:999px;padding:6px 11px;font-size:10px;color:#4d5048;background:#f6f5f0;white-space:nowrap}
+.mini-layout{display:flex;gap:1.5px;width:24px;height:13px}
+.mini-layout i{background:#b9b9ae;border-radius:1px}
+.mini-layout i:nth-child(1){width:5px}
+.mini-layout i:nth-child(2){flex:1;background:#d2d1c8}
+.mini-layout i:nth-child(3){width:5px}
+.key-hint{font-size:10px;color:var(--stage-muted);white-space:nowrap}
+.key-hint kbd{display:inline-block;border:1px solid #c9c8bf;border-bottom-width:2px;background:#fbfaf6;border-radius:3px;padding:0 4px;margin:0 1px;font-family:var(--mono);font-size:9px;line-height:15px;color:#5d6057}
+
+/* ============================ app shell ============================ */
+.app{
+  --bg:#ffffff;--chrome:#f3f3f1;--sidebar:#ededeb;--panel:#fafaf9;
+  --fg:#23262a;--muted:#62686e;--quiet:#8c9298;
+  --line:#dedfdb;--line-strong:#c8cac5;--hover:#e5e6e2;
+  --sel:#e2e8ea;--sel-fg:#2e4d5e;
+  --accent:#35617d;--accent-soft:#eaf1f5;--accent-ink:#ffffff;
+  --warn:#8a6432;--warn-bg:#f7efe1;--block:#f5f5f3;--live:#4f8a66;
+  --radius:9px;--radius-sm:6px;--radius-xs:4px;
+  --title-font:var(--ui);--read-font:var(--ui);--read-size:12.5px;--read-lh:1.95;
+  --doc-w:640px;--sidebar-w:214px;--agent-w:300px;
+  --titlebar-h:48px;--status-h:26px;--border-w:1px;
+  --window-border:var(--line);
+  --shadow:0 1px 2px rgba(20,24,28,.06),0 24px 60px rgba(20,24,28,.14);
+  --chart-bg:var(--panel);--chart-grid:#96a0a8;--chart-font:var(--mono);
+  position:relative;isolation:isolate;display:flex;flex-direction:column;
+  width:100%;height:812px;overflow:hidden;
+  background:var(--bg);color:var(--fg);
+  border:var(--border-w) solid var(--window-border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  font-family:var(--ui);font-size:12.5px;line-height:1.5;
+}
+.app button{color:inherit}
+.app :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app ::selection{background:var(--accent-soft);color:var(--fg)}
+.app .ic{width:16px;height:16px}
+.icon-btn{width:28px;height:28px;display:inline-grid;place-items:center;border-radius:var(--radius-xs);color:var(--muted);flex:none}
+.icon-btn:hover{background:var(--hover);color:var(--fg)}
+.icon-btn.on{color:var(--accent);background:var(--accent-soft)}
+.app .ic-sm{width:12px;height:12px}
+
+/* ---------- titlebar ---------- */
+.titlebar{position:relative;z-index:10;flex:none;height:var(--titlebar-h);display:flex;align-items:center;gap:10px;padding:0 12px 0 16px;background:var(--chrome);border-bottom:1px solid var(--line);user-select:none}
+.traffic{display:flex;gap:8px;flex:none}
+.traffic i{width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.1);background:#ff5f57}
+.traffic i:nth-child(2){background:#febc2e}
+.traffic i:nth-child(3){background:#28c840}
+.tb-left{display:flex;align-items:center;gap:7px;min-width:0;margin-left:6px}
+.app-name{font-family:var(--title-font);font-size:12.5px;font-weight:620;letter-spacing:-.25px;white-space:nowrap}
+.tb-center{position:absolute;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:7px;max-width:42%;font-size:11px;color:var(--muted);pointer-events:none}
+.tb-center .ic{width:13px;height:13px;color:var(--quiet)}
+.tb-center span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-center .quiet{color:var(--quiet)}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:2px;padding-left:10px}
+.tb-divider{width:1px;height:16px;background:var(--line);margin:0 6px;flex:none}
+
+/* ---------- body ---------- */
+.body{position:relative;display:flex;flex:1;min-height:0;overflow:hidden}
+
+/* ---------- sidebar ---------- */
+.sidebar{position:relative;z-index:6;width:var(--sidebar-w);flex:none;display:flex;flex-direction:column;min-height:0;padding:13px 9px 0;background:var(--sidebar);border-right:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;padding:1px 5px 15px;flex:none}
+.brand-mark{width:26px;height:26px;display:grid;place-items:center;flex:none;border-radius:var(--radius-xs);background:var(--accent);color:var(--accent-ink)}
+.brand-mark .ic{width:16px;height:16px;stroke-width:1.7}
+.brand-name{font-family:var(--title-font);font-size:16px;font-weight:650;letter-spacing:-.5px;line-height:1}
+.brand-add{margin-left:auto}
+.side-scroll{flex:1;min-height:0;overflow:auto;padding-bottom:8px;scrollbar-width:none}
+.side-scroll::-webkit-scrollbar{display:none}
+.nav-row{position:relative;display:flex;align-items:center;gap:9px;width:100%;min-height:31px;padding:7px 8px;border-radius:var(--radius-xs);color:var(--muted);font-size:11.5px;text-align:left}
+.nav-row .ic{width:14px;height:14px;color:var(--quiet)}
+.nav-row:hover{background:var(--hover);color:var(--fg)}
+.nav-row.active{background:var(--sel);color:var(--sel-fg);font-weight:500}
+.nav-row.active .ic{color:var(--accent)}
+.nav-row .label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-row .count{margin-left:auto;font-family:var(--mono);font-size:9px;font-weight:400;color:var(--quiet);font-variant-numeric:tabular-nums}
+.task-row .task-dot{width:5px;height:5px;border-radius:50%;background:var(--line-strong);flex:none}
+.task-row.active .task-dot{background:var(--accent)}
+.task-row.active::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:2px;border-radius:2px;background:var(--accent)}
+.idx{display:none}
+.side-label{display:flex;align-items:center;justify-content:space-between;padding:20px 8px 7px;font-size:9px;font-weight:500;letter-spacing:.08em;color:var(--quiet)}
+.side-label .count{font-family:var(--mono);font-weight:400}
+.sub{margin:0 0 3px 16px;padding-left:6px;border-left:1px solid var(--line)}
+.sub-row{min-height:27px;padding:5px 7px;font-size:10.5px;gap:7px}
+.sub-row .ic{width:12px;height:12px}
+.side-foot{flex:none;margin-top:4px;padding:8px 0 9px;border-top:1px solid var(--line)}
+.local-note{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:9px;color:var(--quiet)}
+.local-note .ic{width:10px;height:10px}
+
+/* ---------- main ---------- */
+.main{position:relative;display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;background:var(--bg)}
+.toolbar{flex:none;height:42px;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--bg)}
+.crumb{display:flex;align-items:center;gap:7px;min-width:0;font-size:10.5px;color:var(--quiet)}
+.crumb .sep{color:var(--line-strong);flex:none}
+.crumb strong{font-weight:500;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toolbar-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+.version{font-family:var(--mono);font-size:9px;color:var(--quiet);padding:0 3px;white-space:nowrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:6px 10px;border:1px solid transparent;border-radius:var(--radius-xs);font-size:10.5px;line-height:1.2;white-space:nowrap;color:var(--fg)}
+.btn .ic{width:12px;height:12px}
+.btn.ghost{border-color:var(--line);color:var(--muted)}
+.btn.ghost:hover{border-color:var(--line-strong);color:var(--fg);background:var(--hover)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.small{padding:4px 8px;font-size:9.5px;border-color:var(--line-strong);background:var(--bg);color:var(--fg)}
+.btn.small:hover{background:var(--hover)}
+.doc-scroll{flex:1;min-height:0;overflow:auto;padding:32px 40px 46px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.doc{width:100%;max-width:var(--doc-w);margin:0 auto}
+
+/* ---------- document ---------- */
+.view-label{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--quiet)}
+.view-label .line{flex:1;height:1px;background:var(--line)}
+.doc-title{font-family:var(--title-font);font-size:27px;line-height:1.32;letter-spacing:-.7px;font-weight:600;margin:13px 0 0;color:var(--fg)}
+.doc-meta{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px;font-size:10px;color:var(--quiet)}
+.tag{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:3px;padding:2px 7px;font-size:9px;line-height:16px;color:var(--muted);white-space:nowrap}
+.doc-lead{font-family:var(--read-font);font-size:var(--read-size);line-height:var(--read-lh);color:var(--muted);margin:18px 0 20px}
+.chart{margin:0 0 18px;padding:12px 14px 9px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--chart-bg);overflow:hidden}
+.chart svg{width:100%;height:auto;display:block}
+.chart svg .grid path{stroke:var(--chart-grid);stroke-width:1;opacity:.5}
+.chart svg .axis{fill:none;stroke:var(--line-strong);stroke-width:1;opacity:.75}
+.chart svg .curve{fill:none;stroke:var(--accent);stroke-width:2.4}
+.chart svg .tangent{fill:none;stroke:var(--warn);stroke-width:1.4;stroke-dasharray:6 5}
+.chart svg .drop{stroke:var(--line-strong);stroke-width:1;stroke-dasharray:3 4;opacity:.8}
+.chart svg .point{fill:var(--bg);stroke:var(--accent);stroke-width:2.4}
+.chart text{font-family:var(--chart-font);font-size:11px;letter-spacing:.04em;fill:var(--muted)}
+.chart figcaption{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;font-size:9px;color:var(--quiet)}
+.chart figcaption span:last-child{white-space:nowrap}
+.callout{display:flex;gap:9px;padding:11px 13px;margin:0 0 24px;border-left:2px solid var(--accent);background:var(--accent-soft);color:var(--muted);font-size:10.5px;line-height:1.8}
+.callout .ic{width:14px;height:14px;color:var(--accent);margin-top:2px;flex:none}
+.callout p{margin:0}
+.doc-section + .doc-section{margin-top:28px;padding-top:26px;border-top:1px solid var(--line)}
+.question-title{display:block;font-size:14px;font-weight:550;line-height:1.7;margin:9px 0 4px;color:var(--fg)}
+.choices{padding:2px 0 4px}
+.choice{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:var(--radius-xs);font-size:12px;color:var(--muted);cursor:pointer}
+.choice:hover{background:var(--hover);color:var(--fg)}
+.choice input{width:14px;height:14px;margin:0;flex:none;accent-color:var(--accent)}
+.question textarea{width:100%;min-height:74px;margin-top:10px;padding:9px 11px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--bg);color:var(--fg);font-family:var(--read-font);font-size:11.5px;line-height:1.8;resize:vertical}
+.question textarea::placeholder{color:var(--quiet)}
+.question textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.answer-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;font-size:9px;color:var(--quiet)}
+.next-link{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:22px;padding-top:12px;border-top:1px dashed var(--line);font-size:11px;color:var(--muted)}
+.next-link .tiny{font-family:var(--mono);font-size:8.5px;color:var(--quiet)}
+.doc-foot{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px;font-size:9px;color:var(--quiet)}
+.doc-foot span + span::before{content:"·";margin-right:10px;color:var(--line-strong)}
+
+/* ---------- agent ---------- */
+.agent{position:relative;z-index:7;width:var(--agent-w);flex:none;display:flex;flex-direction:column;min-height:0;background:var(--panel);border-left:1px solid var(--line)}
+.agent-head{flex:none;height:42px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 13px;border-bottom:1px solid var(--line)}
+.agent-title{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:550}
+.agent-title .ic{width:14px;height:14px;color:var(--accent)}
+.agent-state{flex:none;display:flex;align-items:center;gap:7px;padding:8px 13px;border-bottom:1px solid var(--line);background:var(--chrome);font-size:9px;color:var(--muted);white-space:nowrap;overflow:hidden}
+.live-dot{width:5px;height:5px;border-radius:50%;background:var(--live);flex:none}
+.agent-state .sep{color:var(--line-strong)}
+.agent-state .quiet{color:var(--quiet);overflow:hidden;text-overflow:ellipsis}
+.agent-feed{flex:1;min-height:0;overflow:auto;padding:16px 13px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.feed-time{text-align:center;margin-bottom:16px;font-size:9px;color:var(--quiet)}
+.msg{margin-bottom:16px;font-size:11px;line-height:1.85}
+.msg p{margin:0;color:var(--muted)}
+.msg.user p{padding:9px 11px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--block);color:var(--fg)}
+.msg-head{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:9.5px;font-weight:600;color:var(--fg)}
+.msg-head .ic{width:12px;height:12px;color:var(--accent)}
+.tool-line{display:flex;align-items:center;gap:6px;margin:2px 0 16px;padding:7px 9px;border:1px dashed var(--line);border-radius:var(--radius-xs);font-size:9.5px;color:var(--quiet);white-space:nowrap;overflow:hidden}
+.tool-line .ic{width:12px;height:12px;color:var(--muted);flex:none}
+.tool-line strong{font-weight:500;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+.tool-line .tail{margin-left:auto;font-family:var(--mono);font-size:8px;flex:none}
+.approval{margin-top:2px;border:1px solid var(--line);border-left:2px solid var(--warn);border-radius:var(--radius-xs);background:var(--warn-bg);padding:9px 10px 10px}
+.approval-head{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:550;color:var(--warn)}
+.approval-head .ic{width:12px;height:12px}
+.approval-head .count{margin-left:auto;font-family:var(--mono);font-size:8px;font-weight:400}
+.approval p{margin:6px 0 8px;font-size:9.5px;line-height:1.75;color:var(--muted)}
+.composer{flex:none;padding:10px 11px 9px;border-top:1px solid var(--line);background:var(--panel)}
+.composer-box{padding:8px 9px 6px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg)}
+.composer-box:focus-within{border-color:var(--accent)}
+.composer textarea{display:block;width:100%;height:48px;border:0;outline:none;background:transparent;color:var(--fg);font-family:var(--ui);font-size:10.5px;line-height:1.8;resize:none;padding:0}
+.composer textarea::placeholder{color:var(--quiet)}
+.composer-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:5px}
+.composer-tools{display:flex;align-items:center;gap:7px;min-width:0}
+.composer-tools .icon-btn{width:22px;height:22px}
+.composer-tools .ic{width:13px;height:13px}
+.model{font-size:8.5px;color:var(--quiet);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.send{width:24px;height:24px;display:grid;place-items:center;flex:none;border-radius:var(--radius-xs);background:var(--accent);color:var(--accent-ink)}
+.send:hover{filter:brightness(1.08)}
+.send .ic{width:13px;height:13px}
+
+/* ---------- statusbar ---------- */
+.statusbar{flex:none;height:var(--status-h);display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 13px;border-top:1px solid var(--line);background:var(--chrome);font-size:9px;color:var(--quiet);user-select:none}
+.statusbar>div{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap;overflow:hidden}
+.statusbar .sep{color:var(--line-strong)}
+.statusbar .live-dot{width:4px;height:4px}
+
+/* ---------- panels hidden ---------- */
+.app.hide-sidebar .sidebar{display:none}
+.app.hide-agent .agent{display:none}
+
+/* ---------- toast ---------- */
+.app-toast{position:absolute;left:50%;bottom:42px;z-index:60;transform:translate(-50%,8px);max-width:calc(100% - 40px);padding:8px 12px;border-radius:var(--radius-xs);background:var(--fg);color:var(--bg);font-size:10px;line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,.18);opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease;white-space:nowrap}
+.app-toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* ============================ style: paper ============================ */
+.app[data-style="paper"]{
+  --bg:#fbf8f0;--chrome:#f3ecdd;--sidebar:#eee6d4;--panel:#f8f2e5;
+  --fg:#33302a;--muted:#6b6154;--quiet:#988c79;
+  --line:#e1d7c2;--line-strong:#cdbfa5;--hover:#e8dfcc;
+  --sel:#e9dcc3;--sel-fg:#6b4a2a;
+  --accent:#a1502c;--accent-soft:#f5e6d9;--accent-ink:#fffaf2;
+  --warn:#8d5f22;--warn-bg:#f6ecd8;--block:#f2e8d6;--live:#6f7d42;
+  --radius:5px;--radius-sm:3px;--radius-xs:2px;
+  --title-font:var(--serif);--read-font:var(--serif);--read-size:13.5px;--read-lh:2.05;
+  --doc-w:618px;
+  --shadow:0 20px 55px rgba(74,58,35,.16);
+  --chart-bg:transparent;--chart-font:var(--serif);--window-border:#d8cbae;
+}
+.app[data-style="paper"] .brand-name{font-size:18px;font-weight:600;letter-spacing:-.3px}
+.app[data-style="paper"] .doc-title{font-size:31px;font-weight:600;letter-spacing:-.3px;line-height:1.28}
+.app[data-style="paper"] .doc-meta{padding-bottom:13px;border-bottom:1px solid var(--line-strong);margin-bottom:0}
+.app[data-style="paper"] .doc-lead{color:var(--fg);margin-top:16px}
+.app[data-style="paper"] .view-label{font-family:var(--ui);letter-spacing:.18em}
+.app[data-style="paper"] .chart{border-color:var(--line-strong)}
+.app[data-style="paper"] .callout{font-family:var(--serif);font-size:11.5px}
+.app[data-style="paper"] .question-title{font-family:var(--serif);font-size:16px;font-weight:600;color:var(--fg)}
+.app[data-style="paper"] .choice{font-family:var(--serif);font-size:13px}
+.app[data-style="paper"] .question textarea{background:#fdfaf3}
+.app[data-style="paper"] .tag{background:transparent;font-family:var(--ui)}
+.app[data-style="paper"] .agent-state{background:#f6efe1}
+.app[data-style="paper"] .doc-foot{font-family:var(--ui);letter-spacing:.02em}
+
+/* ============================ style: midnight ============================ */
+.app[data-style="midnight"]{
+  --bg:#171a1e;--chrome:#1c2025;--sidebar:#191d21;--panel:#1b1f24;
+  --fg:#e4e8ec;--muted:#a1aab3;--quiet:#727d88;
+  --line:#2b3239;--line-strong:#3c454f;--hover:#242b33;
+  --sel:#233647;--sel-fg:#bad7f2;
+  --accent:#7fb0f0;--accent-soft:#1d2c3c;--accent-ink:#0d1116;
+  --warn:#d8b176;--warn-bg:#2b271f;--block:#222930;--live:#6fce9a;
+  --radius:10px;--radius-sm:7px;--radius-xs:5px;
+  --shadow:0 30px 80px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);
+  --chart-bg:#14171b;--chart-grid:#3d4650;--chart-font:var(--mono);--window-border:#2f363e;
+}
+.app[data-style="midnight"] .titlebar{background:linear-gradient(180deg,#20252b,#1b1f24)}
+.app[data-style="midnight"] .statusbar{background:#191d21}
+.app[data-style="midnight"] .traffic i{filter:saturate(.9) brightness(.92);border-color:rgba(255,255,255,.14)}
+.app[data-style="midnight"] .doc-title{font-size:26px}
+.app[data-style="midnight"] .chart{border-color:#2b3239}
+.app[data-style="midnight"] .tag{background:#20262d}
+.app[data-style="midnight"] .btn.primary{color:#0c1117}
+.app[data-style="midnight"] .nav-row.active{box-shadow:inset 0 0 0 1px #2d4357}
+.app[data-style="midnight"] .send{box-shadow:0 0 0 3px rgba(127,176,240,.12)}
+.app[data-style="midnight"] .composer-box{background:#20262d}
+.app[data-style="midnight"] .composer{background:#191d21}
+
+/* ============================ style: dusk ============================ */
+.app[data-style="dusk"]{
+  --bg:#23282a;--chrome:#2b3133;--sidebar:#262c2e;--panel:#282e31;
+  --fg:#dfe5e2;--muted:#a7b2ae;--quiet:#828e8a;
+  --line:#3a4446;--line-strong:#4d585a;--hover:#333b3d;
+  --sel:#3a4a45;--sel-fg:#d3e6dc;
+  --accent:#9ec7b2;--accent-soft:#2f3d39;--accent-ink:#18201d;
+  --warn:#d7b483;--warn-bg:#393228;--block:#303739;--live:#7fc9a2;
+  --radius:11px;--radius-sm:8px;--radius-xs:5px;
+  --shadow:0 26px 70px rgba(0,0,0,.4),0 2px 6px rgba(0,0,0,.25);
+  --chart-bg:#1f2426;--chart-grid:#4a5652;--chart-font:var(--mono);--window-border:#3c4547;
+}
+.app[data-style="dusk"] .titlebar{background:linear-gradient(180deg,#2e3436,#292f31)}
+.app[data-style="dusk"] .statusbar{background:#252b2d}
+.app[data-style="dusk"] .traffic i{filter:saturate(.85) brightness(.95);border-color:rgba(255,255,255,.12)}
+.app[data-style="dusk"] .doc-title{font-size:26px}
+.app[data-style="dusk"] .chart{border-color:#333d3f}
+.app[data-style="dusk"] .tag{background:#2e3537}
+.app[data-style="dusk"] .btn.primary{color:#101815}
+.app[data-style="dusk"] .nav-row.active{box-shadow:inset 0 0 0 1px #44554e}
+.app[data-style="dusk"] .send{box-shadow:0 0 0 3px rgba(158,199,178,.1)}
+.app[data-style="dusk"] .composer-box{background:#2b3234}
+.app[data-style="dusk"] .composer{background:#262c2e}
+.app[data-style="midnight"],.app[data-style="dusk"]{color-scheme:dark}
+
+/* ============================ style: moss ============================ */
+.app[data-style="moss"]{
+  --bg:#f7f9f3;--chrome:#eef2e8;--sidebar:#e8eee1;--panel:#f5f8f0;
+  --fg:#2c362e;--muted:#626f5f;--quiet:#879483;
+  --line:#dbe3d4;--line-strong:#c4d0bc;--hover:#dfe8d7;
+  --sel:#dce8d3;--sel-fg:#38543b;
+  --accent:#4c7150;--accent-soft:#e5efe0;--accent-ink:#fbfdf8;
+  --warn:#886a35;--warn-bg:#f4eddd;--block:#eef3e8;--live:#5f8a52;
+  --radius:14px;--radius-sm:10px;--radius-xs:7px;
+  --doc-w:660px;
+  --shadow:0 2px 4px rgba(40,60,40,.05),0 26px 60px rgba(40,60,40,.14);
+  --chart-bg:#fbfcf8;--chart-font:var(--mono);--window-border:#d5dfcd;
+}
+.app[data-style="moss"] .doc-scroll{background:linear-gradient(180deg,#fafbf7,var(--bg) 260px)}
+.app[data-style="moss"] .doc-title{font-size:28px;letter-spacing:-.4px}
+.app[data-style="moss"] .tag{border-radius:999px;padding:3px 9px;background:rgba(255,255,255,.55)}
+.app[data-style="moss"] .callout{border-left:0;border-radius:10px;padding:12px 14px}
+.app[data-style="moss"] .chart{border-radius:12px}
+.app[data-style="moss"] .question textarea{border-radius:9px;background:#fbfcf8}
+.app[data-style="moss"] .send{border-radius:50%}
+.app[data-style="moss"] .btn.primary{border-radius:999px;padding:6px 12px}
+.app[data-style="moss"] .composer-box{border-radius:11px;background:#fbfcf8}
+.app[data-style="moss"] .agent{background:var(--panel)}
+.app[data-style="moss"] .statusbar{background:var(--sidebar)}
+.app[data-style="moss"] .doc-section + .doc-section{border-top-color:var(--line-strong)}
+
+/* ============================ style: blueprint ============================ */
+.app[data-style="blueprint"]{
+  --bg:#ffffff;--chrome:#f2f2ee;--sidebar:#f7f7f3;--panel:#fbfbf8;
+  --fg:#101214;--muted:#4d5359;--quiet:#7c838a;
+  --line:#d8d9d3;--line-strong:#101214;--hover:#ecece7;
+  --sel:#eaeefe;--sel-fg:#1b34c8;
+  --accent:#1f3cff;--accent-soft:#eef1ff;--accent-ink:#ffffff;
+  --warn:#c2410c;--warn-bg:#fff2e9;--block:#f5f5f1;--live:#1f3cff;
+  --radius:0px;--radius-sm:0px;--radius-xs:0px;
+  --doc-w:672px;--sidebar-w:224px;--agent-w:312px;--titlebar-h:46px;
+  --shadow:none;--chart-bg:#ffffff;--chart-grid:#ccd2ee;--chart-font:var(--mono);
+  --window-border:#101214;--border-w:1.5px;
+}
+.app[data-style="blueprint"] .titlebar{border-bottom:1.5px solid #101214;padding-left:14px}
+.app[data-style="blueprint"] .traffic i{width:10px;height:10px;border-radius:0;border:1px solid #101214}
+.app[data-style="blueprint"] .app-name{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:.18em;text-transform:uppercase}
+.app[data-style="blueprint"] .brand-mark{background:#101214;color:#fff;border-radius:0}
+.app[data-style="blueprint"] .brand-name{font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.18em;text-transform:uppercase}
+.app[data-style="blueprint"] .sidebar{border-right:1.5px solid #101214;padding-top:14px}
+.app[data-style="blueprint"] .side-label{font-family:var(--mono);font-size:8.5px;letter-spacing:.12em}
+.app[data-style="blueprint"] .side-label::before{content:"//";margin-right:6px;font-family:var(--mono);color:var(--accent)}
+.app[data-style="blueprint"] .idx{display:inline-block;width:18px;flex:none;font-family:var(--mono);font-size:8.5px;color:var(--quiet)}
+.app[data-style="blueprint"] .task-row.active .idx{color:var(--accent)}
+.app[data-style="blueprint"] .task-row .task-dot{display:none}
+.app[data-style="blueprint"] .task-row.active::before{display:none}
+.app[data-style="blueprint"] .sub{margin-left:26px;border-left:1px solid #101214}
+.app[data-style="blueprint"] .side-foot{border-top:1.5px solid #101214}
+.app[data-style="blueprint"] .toolbar{height:40px;padding:0 18px;border-bottom:1px solid #101214}
+.app[data-style="blueprint"] .crumb{font-family:var(--mono);font-size:9px}
+.app[data-style="blueprint"] .crumb strong{font-weight:500}
+.app[data-style="blueprint"] .version{font-size:8.5px}
+.app[data-style="blueprint"] .doc-scroll{padding:38px 46px 50px}
+.app[data-style="blueprint"] .doc-section{position:relative;padding-left:40px}
+.app[data-style="blueprint"] .doc-section::before{content:attr(data-no);position:absolute;left:0;top:1px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;color:var(--accent)}
+.app[data-style="blueprint"] .doc-section + .doc-section{margin-top:38px;padding-top:32px;border-top:1.5px solid #101214}
+.app[data-style="blueprint"] .doc-section + .doc-section::before{top:32px}
+.app[data-style="blueprint"] .view-label{font-size:8.5px;letter-spacing:.16em}
+.app[data-style="blueprint"] .doc-title{font-size:31px;line-height:1.22;font-weight:700;letter-spacing:-1.1px;margin-top:10px}
+.app[data-style="blueprint"] .doc-meta{font-family:var(--mono);font-size:9px;margin-top:12px}
+.app[data-style="blueprint"] .tag{font-family:var(--mono);font-size:8px;line-height:15px;text-transform:uppercase;letter-spacing:.08em;border:1px solid #101214;border-radius:0;padding:2px 6px;color:var(--fg)}
+.app[data-style="blueprint"] .doc-lead{font-size:12.5px;line-height:2;color:var(--fg)}
+.app[data-style="blueprint"] .chart{border:1px solid #101214;border-radius:0;padding:14px 16px 10px}
+.app[data-style="blueprint"] .chart figcaption{font-family:var(--mono);font-size:8.5px}
+.app[data-style="blueprint"] .callout{border:1px solid #101214;border-left:3px solid var(--accent);border-radius:0;background:#fff;padding:11px 12px;font-size:10.5px}
+.app[data-style="blueprint"] .question-title{font-size:15px;font-weight:600}
+.app[data-style="blueprint"] .choice{border-radius:0;padding:7px 0;font-size:12px}
+.app[data-style="blueprint"] .choice:hover{background:transparent;color:var(--fg)}
+.app[data-style="blueprint"] .question textarea{border:1px solid #101214;border-radius:0;font-family:var(--ui);font-size:11.5px}
+.app[data-style="blueprint"] .btn{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.06em;border-radius:0;padding:6px 9px}
+.app[data-style="blueprint"] .btn.ghost{border-color:#101214;color:var(--fg)}
+.app[data-style="blueprint"] .btn.primary{background:var(--accent);border-color:var(--accent)}
+.app[data-style="blueprint"] .next-link{border-top:1px solid #101214;font-size:10.5px}
+.app[data-style="blueprint"] .doc-foot{font-family:var(--mono);font-size:8.5px}
+.app[data-style="blueprint"] .agent{border-left:1.5px solid #101214;background:#fbfbf8}
+.app[data-style="blueprint"] .agent-head{height:40px;border-bottom:1px solid #101214;font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em}
+.app[data-style="blueprint"] .agent-state{background:#f2f2ee;border-bottom:1px solid #101214}
+.app[data-style="blueprint"] .msg.user p{border:1px solid #101214;border-radius:0;background:#fff}
+.app[data-style="blueprint"] .tool-line{border:1px dashed #101214;border-radius:0}
+.app[data-style="blueprint"] .approval{border:1px solid #101214;border-left:3px solid var(--warn);border-radius:0}
+.app[data-style="blueprint"] .composer{border-top:1.5px solid #101214;background:#f2f2ee}
+.app[data-style="blueprint"] .composer-box{border:1px solid #101214;border-radius:0;background:#fff}
+.app[data-style="blueprint"] .send{border-radius:0}
+.app[data-style="blueprint"] .statusbar{border-top:1.5px solid #101214;background:#f2f2ee;font-family:var(--mono);font-size:8.5px}
+
+/* ============================ picker ============================ */
+.picker{margin-top:26px}
+.picker-top{display:flex;align-items:baseline;justify-content:space-between;gap:20px;margin-bottom:12px}
+.picker-top h2{font-size:13px;font-weight:600;letter-spacing:-.15px;margin:0}
+.picker-top p{margin:4px 0 0;font-size:11px;line-height:1.6;color:var(--stage-muted)}
+.picker-top .hint{font-family:var(--mono);font-size:9.5px;color:var(--stage-muted);white-space:nowrap}
+.cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+.card{position:relative;display:flex;flex-direction:column;gap:9px;padding:11px 12px 10px;text-align:left;background:#fbfbf8;border:1px solid #d9d8d1;border-radius:8px;transition:background .16s,border-color .16s,box-shadow .16s}
+.card:hover{background:#fff;border-color:#b9b8ae}
+.card[aria-pressed="true"]{background:#fff;border-color:#2f312c;box-shadow:0 0 0 1px #2f312c inset}
+.swatches{display:flex;gap:4px}
+.swatches i{width:17px;height:17px;border-radius:50%;border:1px solid rgba(0,0,0,.12);flex:none}
+.card-copy{display:flex;flex-direction:column;gap:3px;min-width:0;padding-right:14px}
+.card-title{display:flex;align-items:baseline;gap:6px;font-size:12px;font-weight:600;color:#22241f;letter-spacing:-.1px}
+.card-title em{font-style:normal;font-family:var(--mono);font-size:8.5px;font-weight:400;letter-spacing:.06em;text-transform:uppercase;color:#8b8c84}
+.card-desc{font-size:10px;line-height:1.55;color:#6f7168}
+.card .check{position:absolute;top:10px;right:10px;width:15px;height:15px;display:grid;place-items:center;border-radius:50%;background:#2f312c;color:#fff;opacity:0;transform:scale(.75);transition:opacity .16s,transform .16s}
+.card .check .ic{width:9px;height:9px;stroke-width:2.2}
+.card[aria-pressed="true"] .check{opacity:1;transform:none}
+.style-note{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-top:12px;padding-top:12px;border-top:1px solid #d9d8d1}
+.note-name{font-size:11.5px;font-weight:600;color:#2c2e29;white-space:nowrap}
+.note-name em{font-style:normal;font-family:var(--mono);font-size:9px;font-weight:400;letter-spacing:.06em;text-transform:uppercase;color:#8b8c84;margin-left:4px}
+.note-tags{display:flex;gap:5px;flex-wrap:wrap}
+.note-tags span{padding:1px 6px;border:1px solid #d5d4ca;border-radius:999px;font-size:9px;color:#6f7168;background:#f6f5f0;white-space:nowrap}
+.note-text{flex:1;min-width:260px;font-size:10.5px;line-height:1.7;color:#6f7168}
+.page-foot{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-top:22px;font-size:9.5px;color:var(--stage-muted)}
+.page-foot .dot-sep{margin:0 7px;color:#b6b5aa}
+
+/* ============================ responsive ============================ */
+@media (max-width:1240px){
+  .page{padding:30px 28px 46px}
+  .doc-scroll{padding:28px 32px 42px}
+  .app{--sidebar-w:200px;--agent-w:278px}
+}
+@media (max-width:1100px){
+  .cards{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .card-desc{display:none}
+  .page-head h1{font-size:24px}
+}
+@media (max-width:1040px){
+  .app .agent{position:absolute;top:10px;right:10px;bottom:10px;width:294px;z-index:40;border:1px solid var(--line-strong);border-radius:var(--radius-sm);box-shadow:var(--shadow);display:none;overflow:hidden}
+  .app:not(.hide-agent) .agent{display:flex}
+  .app{--agent-w:0px}
+  .tb-center{max-width:46%}
+}
+@media (max-width:980px){
+  .tb-center{display:none}
+  .page-head{flex-direction:column;align-items:flex-start;gap:16px}
+  .head-meta{flex-direction:row;align-items:center;flex-wrap:wrap}
+}
+@media (max-width:820px){
+  .app .sidebar{position:absolute;top:10px;left:10px;bottom:10px;width:232px;z-index:41;border:1px solid var(--line-strong);border-radius:var(--radius-sm);box-shadow:var(--shadow);display:none}
+  .app:not(.hide-sidebar) .sidebar{display:flex}
+  .app{--sidebar-w:0px;height:760px}
+  .doc-scroll{padding:25px 22px 40px}
+  .toolbar{padding:0 13px}
+  .tb-right .optional{display:none}
+  .picker-top{flex-direction:column;align-items:flex-start;gap:6px}
+}
+@media (max-width:820px){
+  .app[data-style="blueprint"] .doc-scroll{padding:24px 20px 40px}
+  .app[data-style="blueprint"] .doc-section{padding-left:30px}
+  .app[data-style="blueprint"] .doc-section + .doc-section::before{top:32px}
+}
+@media (max-width:640px){
+  .page{padding:20px 15px 34px}
+  .page-head h1{font-size:22px;letter-spacing:-.4px}
+  .page-head p{font-size:11.5px}
+  .head-meta .key-hint{display:none}
+  .app{height:700px;--titlebar-h:44px}
+  .app-name{display:none}
+  .titlebar{padding:0 9px 0 12px}
+  .traffic{gap:6px}
+  .traffic i{width:10px;height:10px}
+  .tb-left{margin-left:2px}
+  .tb-divider{display:none}
+  .crumb>span:not(strong){display:none}
+  .crumb{gap:0}
+  .version{display:none}
+  .doc-title{font-size:23px !important;letter-spacing:-.5px}
+  .doc-lead{font-size:12px !important;line-height:1.9 !important}
+  .chart{padding:10px 10px 8px}
+  .chart figcaption span:last-child{display:none}
+  .doc-meta{font-size:9px}
+  .answer-foot{flex-wrap:wrap}
+  .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .card-desc{display:block}
+  .style-note{display:block}
+  .note-text{display:block;margin-top:6px;min-width:0}
+  .app .sidebar{left:8px;right:8px;width:auto;top:8px;bottom:8px}
+  .app .agent{left:8px;right:8px;width:auto;top:8px;bottom:8px}
+  .app[data-style="blueprint"] .doc-scroll{padding:20px 16px 34px}
+  .app[data-style="blueprint"] .doc-section{padding-left:24px}
+  .page-foot{flex-direction:column;align-items:flex-start;gap:5px}
+}
+@media (max-width:400px){
+  .cards{grid-template-columns:1fr 1fr;gap:6px}
+  .card{padding:10px}
+  .app{height:680px}
+}
+@media (prefers-reduced-motion:no-preference){
+  .titlebar,.sidebar,.main,.agent,.statusbar,.chart,.callout,.btn,.tag,.composer-box,.nav-row,.card{transition:background-color .2s ease,color .2s ease,border-color .2s ease}
+}
+
+
+/* ===================== v3 prototype shell ===================== */
+.page{max-width:1500px;padding:24px 32px 26px}
+.proto-head{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:14px}
+.proto-brand{display:flex;align-items:center;gap:9px;min-width:0}
+.proto-mark{width:24px;height:24px;display:grid;place-items:center;flex:none;border-radius:6px;background:#2f322b;color:#f4f3ee}
+.proto-mark .ic{width:15px;height:15px;stroke-width:1.7}
+.proto-name{font-size:13px;font-weight:650;letter-spacing:-.2px;white-space:nowrap}
+.proto-sub{font-size:10.5px;color:var(--stage-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proto-sub::before{content:"/";margin-right:8px;color:#b9b8ae}
+.proto-meta{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}
+.mode-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid #cfcec5;border-radius:999px;background:#f6f5f0;color:#4d5048;font-size:9.5px;white-space:nowrap}
+.mode-badge .dot{width:5px;height:5px;border-radius:50%;background:#5f8f6b;flex:none}
+.proto-hint{font-size:9.5px;color:var(--stage-muted)}
+.page-foot{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin-top:16px;font-size:9px;color:var(--stage-muted)}
+
+/* ===================== views ===================== */
+.app-view{display:none}
+.app-view.active{display:block}
+.page-view{width:100%;max-width:780px;margin:0 auto}
+.page-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.page-kicker{margin-bottom:6px;font-family:var(--mono);font-size:8px;letter-spacing:.14em;text-transform:uppercase;color:var(--quiet)}
+.page-heading h1{margin:0;font-family:var(--title-font);font-size:22px;line-height:1.3;letter-spacing:-.45px;font-weight:600;color:var(--fg)}
+.page-heading p{margin:5px 0 0;font-size:10px;line-height:1.6;color:var(--quiet)}
+.page-heading .btn{flex:none;margin-top:4px}
+.list{display:flex;flex-direction:column;margin-top:10px}
+.list-row{display:flex;align-items:center;gap:11px;width:100%;padding:12px 7px;border-bottom:1px solid var(--line);text-align:left;color:var(--fg)}
+.list-row:hover{background:var(--hover)}
+.list-row.active{background:var(--sel);color:var(--sel-fg)}
+.list-icon{width:28px;height:28px;display:grid;place-items:center;flex:none;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--panel);color:var(--accent)}
+.list-icon .ic{width:14px;height:14px}
+.list-main{flex:1;min-width:0}
+.list-main strong{display:block;font-size:11.5px;font-weight:550;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.list-main small{display:block;margin-top:3px;font-size:9px;line-height:1.5;color:var(--quiet);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.list-row .tag{flex:none;font-size:8.5px;padding:2px 6px}
+.list-arrow{flex:none;display:grid;place-items:center;color:var(--quiet)}
+.list-arrow .ic{width:12px;height:12px}
+.page-note{margin-top:14px;font-size:9px;line-height:1.75;color:var(--quiet)}
+.list-empty{padding:30px 18px;border:1px dashed var(--line-strong);border-radius:var(--radius-sm);background:var(--panel);text-align:center;color:var(--muted);font-size:10px;line-height:1.8}
+.list-empty .btn{margin-top:10px}
+.empty-card{margin-top:20px;padding:30px 24px;border:1px dashed var(--line-strong);border-radius:var(--radius-sm);background:var(--panel);text-align:center}
+.empty-icon{width:38px;height:38px;display:grid;place-items:center;margin:0 auto 12px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--bg);color:var(--accent)}
+.empty-icon .ic{width:18px;height:18px}
+.empty-card h2{margin:0 0 6px;font-size:14px;font-weight:600;letter-spacing:-.2px}
+.empty-card p{max-width:380px;margin:0 auto;font-size:10.5px;line-height:1.8;color:var(--muted)}
+.empty-actions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:16px}
+
+/* ===================== settings ===================== */
+.settings-layout{display:grid;grid-template-columns:164px minmax(0,1fr);gap:24px;margin-top:18px}
+.settings-nav{display:flex;flex-direction:column;gap:2px}
+.settings-tab{padding:7px 9px;border-radius:var(--radius-xs);text-align:left;font-size:10.5px;color:var(--muted)}
+.settings-tab:hover{background:var(--hover);color:var(--fg)}
+.settings-tab.active{background:var(--sel);color:var(--sel-fg);font-weight:500}
+.settings-panel{display:none}
+.settings-panel.active{display:block}
+.settings-panel h2{margin:0 0 6px;font-size:15px;font-weight:600;letter-spacing:-.2px}
+.settings-intro{margin:0 0 14px;font-size:10.5px;line-height:1.75;color:var(--muted)}
+.settings-subhead{margin:18px 0 8px;font-family:var(--mono);font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:var(--quiet)}
+.mode-row{display:flex;align-items:center;gap:10px;width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel);text-align:left}
+.mode-row:hover{border-color:var(--line-strong)}
+.mode-row.selected{border-color:var(--accent);background:var(--accent-soft)}
+.mode-icon{width:28px;height:28px;display:grid;place-items:center;flex:none;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--bg);color:var(--accent)}
+.mode-icon .ic{width:14px;height:14px}
+.mode-copy{flex:1;min-width:0}
+.mode-copy strong{display:block;font-size:10.5px;font-weight:550}
+.mode-copy small{display:block;margin-top:2px;font-size:9px;line-height:1.5;color:var(--quiet)}
+.mode-check{flex:none;display:grid;place-items:center;color:var(--accent);opacity:0}
+.mode-check .ic{width:13px;height:13px;stroke-width:2}
+.mode-row.selected .mode-check{opacity:1}
+.theme-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.theme-option{position:relative;display:flex;align-items:center;gap:8px;padding:8px 9px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--bg);text-align:left}
+.theme-option:hover{border-color:var(--line-strong)}
+.theme-option.selected{border-color:var(--accent);background:var(--accent-soft)}
+.theme-option.resolved:not(.selected)::after{content:"";position:absolute;top:7px;right:7px;width:4px;height:4px;border-radius:50%;background:var(--accent)}
+.theme-dots{display:flex;gap:3px;flex:none}
+.theme-dots i{display:block;width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.12)}
+.theme-name{flex:1;min-width:0;font-size:10px;font-weight:500;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.theme-name em{display:block;margin-top:1px;font-style:normal;font-family:var(--mono);font-size:7px;font-weight:400;letter-spacing:.06em;text-transform:uppercase;color:var(--quiet)}
+.theme-check{flex:none;display:grid;place-items:center;color:var(--accent);opacity:0}
+.theme-check .ic{width:12px;height:12px;stroke-width:2}
+.theme-option.selected .theme-check{opacity:1}
+.theme-status{margin-top:12px;padding:7px 9px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--panel);font-size:9px;line-height:1.6;color:var(--muted)}
+.settings-note{margin-top:14px;padding-top:11px;border-top:1px dashed var(--line);font-size:9px;line-height:1.75;color:var(--quiet)}
+.settings-group{margin-top:10px;padding:2px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel)}
+.setting-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 0;border-bottom:1px solid var(--line);font-size:10px;color:var(--muted)}
+.setting-row:last-child{border-bottom:0}
+.setting-row>span{flex:none}
+.field{width:190px;max-width:56%;padding:6px 8px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--bg);color:var(--fg);font-family:var(--ui);font-size:10px;line-height:1.4}
+.field:disabled{opacity:.55}
+select.field{appearance:auto}
+.status-line{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:9px;color:var(--quiet)}
+
+.btn:disabled{opacity:.45;cursor:default;filter:none}
+
+/* ===================== sheets ===================== */
+.sheet-layer{position:absolute;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:22px;background:rgba(12,14,16,.3)}
+.sheet{display:flex;flex-direction:column;width:100%;max-width:520px;max-height:100%;overflow:hidden;background:var(--bg);border:1px solid var(--line-strong);border-radius:var(--radius);box-shadow:0 24px 70px rgba(0,0,0,.28)}
+.sheet-head{flex:none;height:43px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 12px 0 15px;border-bottom:1px solid var(--line);font-size:11px;font-weight:550}
+.sheet-body{padding:16px;overflow:auto}
+.sheet-actions{flex:none;display:flex;align-items:center;justify-content:flex-end;gap:7px;padding:10px 13px;border-top:1px solid var(--line);background:var(--chrome)}
+.sheet-title{margin:14px 0 7px;font-family:var(--title-font);font-size:17px;line-height:1.4;letter-spacing:-.3px;font-weight:600}
+.sheet-text{margin:0 0 12px;font-size:10.5px;line-height:1.8;color:var(--muted)}
+.details{display:grid;grid-template-columns:70px minmax(0,1fr);gap:7px 12px;margin:13px 0;font-size:9.5px;line-height:1.65}
+.details dt{color:var(--quiet)}
+.details dd{margin:0;color:var(--fg)}
+.form-field{display:block;margin-bottom:12px}
+.form-field>span{display:block;margin-bottom:5px;font-size:9.5px;color:var(--muted)}
+.form-field input,.form-field textarea{width:100%;padding:8px 9px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--bg);color:var(--fg);font-family:var(--ui);font-size:10.5px;line-height:1.6}
+.form-field textarea{min-height:64px;resize:vertical}
+.form-field input:focus,.form-field textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.dropzone{padding:22px 16px;border:1px dashed var(--line-strong);border-radius:var(--radius-sm);background:var(--panel);text-align:center}
+.dropzone .ic{width:22px;height:22px;margin:0 auto 8px;color:var(--accent)}
+.dropzone p{margin:0 0 10px;font-size:9.5px;line-height:1.75;color:var(--muted)}
+.dropzone p span{color:var(--quiet)}
+.pending-file{display:flex;align-items:center;gap:9px;margin-top:9px;padding:8px 9px;border:1px solid var(--line);border-radius:var(--radius-xs);background:var(--panel);font-size:9.5px}
+.pending-file .ic{width:14px;height:14px;color:var(--accent)}
+.pending-file .file-meta{margin-left:auto;font-size:8.5px;color:var(--quiet)}
+.file-badge{width:26px;height:30px;display:grid;place-items:center;flex:none;border:1px solid var(--line);border-radius:3px;background:var(--bg);font-family:var(--mono);font-size:7px;letter-spacing:.04em;color:var(--accent)}
+.row-spread{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.quiet-text{font-size:9px;color:var(--quiet)}
+.sheet-body .chart{margin:8px 0 4px}
+.approval.approved{border-left-color:var(--live);background:var(--accent-soft)}
+.approval.approved .approval-head{color:var(--live)}
+.approval.denied{border-left-color:var(--line-strong)}
+.approval.denied .approval-head{color:var(--muted)}
+
+/* ===================== v3 responsive ===================== */
+@media (max-width:900px){
+  .settings-layout{grid-template-columns:1fr;gap:14px}
+  .settings-nav{flex-direction:row;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .settings-tab{padding:5px 8px}
+}
+@media (max-width:640px){
+  .page{padding:16px 14px 22px}
+  .proto-head{gap:10px}
+  .proto-sub{display:none}
+  .proto-meta{gap:8px}
+  .proto-hint{display:none}
+  .page-heading{flex-direction:column;gap:10px}
+  .page-heading h1{font-size:19px}
+  .page-heading .btn{margin-top:0}
+  .list-row{gap:9px;padding:11px 4px}
+  .list-main strong{font-size:11px}
+  .theme-options{grid-template-columns:1fr}
+  .field{width:150px;max-width:52%}
+  .sheet-layer{padding:10px}
+  .empty-card{padding:22px 16px}
+}
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" focusable="false"> aria-hidden="true" focusable="false">
+  <symbol id="i-trellis" viewBox="0 0 24 24"><path d="M4 4v16M12 4v16M20 4v16M3 9h18M3 15h18"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l5 5"/></symbol>
+  <symbol id="i-focus" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><path d="M20 15a3 3 0 0 1-3 3H8l-4 3V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3z"/><path d="M8 9h8M8 12.5h5"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h7M17 7h3M4 17h3M13 17h7"/><circle cx="14" cy="7" r="2.2"/><circle cx="7" cy="17" r="2.2"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13 3v6h6"/><path d="M9 13h6M9 17h4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-plugin" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><path d="M16.5 13v7M13 16.5h7"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3c.7 4.2 2.8 6.3 7 7-4.2.7-6.3 2.8-7 7-.7-4.2-2.8-6.3-7-7 4.2-.7 6.3-2.8 7-7z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 6.5"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="2.6"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 3v11M8 7l4-4 4 4"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 7.8v.2"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M4 12h15M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+</svg>
+
+<div class="page">
+  <header class="proto-head">
+    <div class="proto-brand">
+      <span class="proto-mark"><svg class="ic"><use href="#i-trellis"/></svg></span>
+      <span class="proto-name">Trellis</span>
+      <span class="proto-sub">桌面原型 · 方案 A · 六种主题</span>
+    </div>
+    <div class="proto-meta">
+      <span class="mode-badge"><span class="dot"></span><span id="mode-badge-text">跟随系统 · 浅色 → 石墨</span></span>
+      <span class="proto-hint">主题在「模型与设置 → 外观」</span>
+    </div>
+  </header>
+
+  <section class="app" id="app" data-style="graphite" aria-label="Trellis 桌面应用原型">
+    <div class="titlebar">
+      <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="tb-left">
+        <button class="icon-btn" id="toggle-sidebar" type="button" aria-label="显示或隐藏任务列表" aria-pressed="true"><svg class="ic"><use href="#i-sidebar"/></svg></button>
+        <span class="app-name">Trellis</span>
+      </div>
+      <div class="tb-center">
+        <svg class="ic"><use href="#i-tasks"/></svg>
+        <span id="tb-title">变化与瞬时变化率</span>
+        <span class="quiet">— 示例任务</span>
+      </div>
+      <div class="tb-right">
+        <button class="icon-btn" type="button" data-action="search" aria-label="搜索与命令"><svg class="ic"><use href="#i-search"/></svg></button>
+        <button class="icon-btn" id="focus-btn" type="button" data-action="focus" aria-label="专注模式"><svg class="ic"><use href="#i-focus"/></svg></button>
+        <button class="icon-btn" id="toggle-agent" type="button" aria-label="显示或隐藏 Agent 面板" aria-pressed="true"><svg class="ic"><use href="#i-agent"/></svg></button>
+        <span class="tb-divider" aria-hidden="true"></span>
+        <button class="icon-btn" type="button" data-action="open-settings" aria-label="模型与设置"><svg class="ic"><use href="#i-settings"/></svg></button>
+      </div>
+    </div>
+
+    <div class="body">
+      <aside class="sidebar" aria-label="任务与资源">
+        <div class="brand">
+          <span class="brand-mark"><svg class="ic"><use href="#i-trellis"/></svg></span>
+          <span class="brand-name">trellis</span>
+          <button class="icon-btn brand-add" type="button" data-action="new-task" aria-label="新建任务"><svg class="ic"><use href="#i-plus"/></svg></button>
+        </div>
+        <div class="side-scroll">
+          <button class="nav-row" id="nav-tasks" type="button" data-nav="tasks">
+            <svg class="ic"><use href="#i-tasks"/></svg>
+            <span class="label">全部任务</span>
+            <span class="count" id="all-count">3</span>
+          </button>
+
+          <div class="side-label"><span>学习任务</span><span class="count" id="task-count">3</span></div>
+          <div id="task-list"></div>
+
+          <div class="side-label"><span>工作区</span></div>
+          <button class="nav-row" type="button" data-action="plugins">
+            <svg class="ic"><use href="#i-plugin"/></svg>
+            <span class="label">插件与能力</span>
+            <span class="count">4</span>
+          </button>
+        </div>
+        <div class="side-foot">
+          <button class="nav-row" id="nav-settings" type="button" data-nav="settings">
+            <svg class="ic"><use href="#i-settings"/></svg>
+            <span class="label">模型与设置</span>
+          </button>
+          <div class="local-note">
+            <svg class="ic"><use href="#i-lock"/></svg>
+            <span>本地数据 · 原型</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="toolbar">
+          <div class="crumb" id="crumb"></div>
+          <div class="toolbar-actions" id="toolbar-actions"></div>
+        </div>
+
+        <div class="doc-scroll" id="main-scroll">
+          <article class="doc app-view active" id="view-surface" data-view="surface">
+            <section class="doc-section" data-no="01">
+              <div class="view-label"><span>讲解</span><span class="line"></span><span>VIEW 01</span></div>
+              <h1 class="doc-title">变化与瞬时变化率</h1>
+              <div class="doc-meta">
+                <span class="tag">示例内容</span>
+                <span>微积分 · Agent 生成于 14:32</span>
+              </div>
+              <p class="doc-lead">看图中的点 P。曲线经过这里时，正在朝什么方向变化？<br>我们可以借助这一点的切线，描述这个瞬间的变化快慢。</p>
+
+              <figure class="chart">
+                <svg viewBox="0 0 560 180" role="img" aria-label="一条曲线与点 P 处的切线">
+                  <g class="grid">
+                    <path d="M60 30H530M60 65H530M60 100H530M60 135H530M100 18V160M160 18V160M220 18V160M280 18V160M340 18V160M400 18V160M460 18V160M520 18V160"/>
+                  </g>
+                  <path class="axis" d="M60 18V160H530"/>
+                  <path class="curve" d="M68 148C150 148 235 132 300 104S420 45 520 34"/>
+                  <path class="tangent" d="M228 137L414 45"/>
+                  <path class="drop" d="M300 104V160"/>
+                  <circle class="point" cx="300" cy="104" r="5.5"/>
+                  <g>
+                    <text x="316" y="96">P</text>
+                    <text x="466" y="64">f(x)</text>
+                    <text x="540" y="164">x</text>
+                    <text x="50" y="24" text-anchor="end">y</text>
+                  </g>
+                </svg>
+                <figcaption><span>图 01 · 曲线与点 P 处的切线</span><span>示例呈现单元</span></figcaption>
+              </figure>
+
+              <div class="callout">
+                <svg class="ic"><use href="#i-info"/></svg>
+                <p>这里是任务生成内容的示例。宿主只提供工作空间，不限定每个任务的教学模板。</p>
+              </div>
+            </section>
+
+            <section class="doc-section" data-no="02">
+              <div class="view-label"><span>你的理解</span><span class="line"></span><span>VIEW 02</span></div>
+              <form class="question" id="answer-form">
+                <div class="question-title">你认为，点 P 处的切线描述了什么？</div>
+                <div class="choices" id="q-choices">
+                  <label class="choice"><input type="radio" name="answer" value="a"><span>这一刻的变化方向与快慢</span></label>
+                  <label class="choice"><input type="radio" name="answer" value="b"><span>整段曲线的平均高度</span></label>
+                </div>
+                <textarea placeholder="补充一句自己的理解（可选）" aria-label="补充你的理解"></textarea>
+                <div class="answer-foot">
+                  <span>仅内存草稿 · 不写入磁盘</span>
+                  <button class="btn primary" type="submit">提交 <svg class="ic"><use href="#i-arrow-right"/></svg></button>
+                </div>
+              </form>
+              <div class="next-link">
+                <span>接下来：用自己的话解释</span>
+                <span class="tiny">待生成 · 示例</span>
+              </div>
+            </section>
+
+            <footer class="doc-foot">
+              <span>任务持有内容</span>
+              <span>当前版本可交互</span>
+              <span>历史版本只读</span>
+            </footer>
+          </article>
+
+          <article class="doc app-view" id="view-empty" data-view="empty">
+            <div class="view-label"><span>任务空间</span><span class="line"></span><span>EMPTY</span></div>
+            <h1 class="doc-title" id="empty-title">新任务</h1>
+            <div class="doc-meta">
+              <span class="tag">尚未生成</span>
+              <span id="empty-meta">未分类 · 刚刚创建</span>
+            </div>
+            <p class="doc-lead">这个任务还没有学习界面。先添加材料，或在右侧让 Agent 从你的问题开始。</p>
+            <div class="empty-card">
+              <div class="empty-icon"><svg class="ic"><use href="#i-trellis"/></svg></div>
+              <h2>从一个问题开始</h2>
+              <p>任务界面会随材料和你提出的问题逐步形成，不需要先选模板。当前原型不会调用模型，只演示入口。</p>
+              <div class="empty-actions">
+                <button class="btn primary" type="button" data-action="import">添加材料</button>
+                <button class="btn ghost" type="button" data-action="focus-composer">在对话中开始</button>
+              </div>
+            </div>
+            <div class="doc-foot">
+              <span>任务持有内容</span>
+              <span>当前为空</span>
+              <span>尚未生成界面</span>
+            </div>
+          </article>
+
+          <section class="page-view app-view" id="view-tasks" data-view="tasks">
+            <header class="page-heading">
+              <div>
+                <div class="page-kicker">工作区</div>
+                <h1>全部任务</h1>
+                <p id="tasks-summary">3 个任务 · 本地工作区</p>
+              </div>
+            </header>
+            <div class="list" id="tasks-list"></div>
+            <div class="page-note">新建任务只保存在本次预览中；真实产品会写入本地工作区。</div>
+          </section>
+
+          <section class="page-view app-view" id="view-materials" data-view="materials">
+            <header class="page-heading">
+              <div>
+                <div class="page-kicker">当前任务</div>
+                <h1>材料</h1>
+                <p id="materials-summary">0 份材料 · 本地副本</p>
+              </div>
+            </header>
+            <div class="list" id="materials-list"></div>
+            <div class="page-note">导入材料不会自动调用模型，也不会执行附件中的内容。原型不读取你的真实文件。</div>
+          </section>
+
+          <section class="page-view app-view" id="view-history" data-view="history">
+            <header class="page-heading">
+              <div>
+                <div class="page-kicker">只读</div>
+                <h1>记录</h1>
+                <p id="history-summary">0 个版本 · 当前任务</p>
+              </div>
+            </header>
+            <div class="list" id="history-list"></div>
+            <div class="page-note">历史快照只读，不会重新执行旧代码、插件或 Agent。作答快照绑定当时的任务内容版本。</div>
+          </section>
+
+          <section class="page-view app-view" id="view-settings" data-view="settings">
+            <header class="page-heading">
+              <div>
+                <div class="page-kicker">设置</div>
+                <h1>模型与设置</h1>
+                <p>外观、模型连接与本地数据。</p>
+              </div>
+            </header>
+            <div class="settings-layout">
+              <nav class="settings-nav" aria-label="设置分类">
+                <button class="settings-tab active" type="button" data-settings-tab="appearance">外观</button>
+                <button class="settings-tab" type="button" data-settings-tab="model">模型服务</button>
+                <button class="settings-tab" type="button" data-settings-tab="data">本地数据</button>
+              </nav>
+              <div class="settings-content">
+                <div class="settings-panel active" data-settings-panel="appearance">
+                  <h2>外观</h2>
+                  <p class="settings-intro">默认跟随系统：浅色使用石墨，深色使用暮色。其余四种主题可随时固定。</p>
+                  <button class="mode-row" id="system-mode-row" type="button" data-theme-mode="system" aria-pressed="true">
+                    <span class="mode-icon"><svg class="ic"><use href="#i-monitor"/></svg></span>
+                    <span class="mode-copy"><strong>跟随系统</strong><small>根据系统外观自动切换 · 浅色石墨 / 深色暮色</small></span>
+                    <span class="mode-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <div class="settings-subhead">固定主题</div>
+                  <div class="theme-options" id="theme-options"></div>
+                  <div class="theme-status" id="theme-status">当前：跟随系统 · 浅色 → 石墨</div>
+                  <div class="settings-note">主题只改变视觉语言，不改变布局、任务内容或数据。</div>
+                </div>
+
+                <div class="settings-panel" data-settings-panel="model">
+                  <h2>模型服务</h2>
+                  <p class="settings-intro">只展示桌面设置样式。原型不保存凭据，也不会发起真实请求。</p>
+                  <div class="settings-group">
+                    <label class="setting-row"><span>接口类型</span><select class="field" aria-label="模型接口类型"><option>OpenAI-compatible</option><option>自定义服务</option></select></label>
+                    <label class="setting-row"><span>服务地址</span><input class="field" aria-label="服务地址" placeholder="https://provider.example/v1"></label>
+                    <label class="setting-row"><span>模型标识</span><input class="field" aria-label="模型标识" placeholder="your-model-id"></label>
+                    <label class="setting-row"><span>API Key</span><input class="field" type="password" aria-label="API Key 原型禁用" placeholder="原型中禁用" disabled></label>
+                  </div>
+                  <div class="status-line"><span class="live-dot"></span><span>未连接</span><span>·</span><span>不会发送凭据</span></div>
+                  <div class="settings-note">
+                    <button class="btn ghost" type="button" data-action="test-model" style="margin-bottom:9px">测试连接</button><br>
+                    真实产品由系统安全存储保存凭据；原型只演示设置界面。
+                  </div>
+                </div>
+
+                <div class="settings-panel" data-settings-panel="data">
+                  <h2>本地数据</h2>
+                  <p class="settings-intro">任务、材料与历史保存在当前设备。原型只保留内存中的示例。</p>
+                  <div class="settings-group">
+                    <div class="setting-row"><span>任务</span><span id="data-tasks">3 个</span></div>
+                    <div class="setting-row"><span>材料</span><span id="data-materials">2 份</span></div>
+                    <div class="setting-row"><span>内容版本</span><span id="data-history">3 个</span></div>
+                    <div class="setting-row"><span>存储位置</span><span>本地工作区 · 示例</span></div>
+                  </div>
+                  <div class="settings-note">
+                    <button class="btn ghost" type="button" data-action="export" style="margin-bottom:9px">导出学习材料</button><br>
+                    导出会生成固定快照的单文件 HTML；原型不写出真实文件。
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <aside class="agent" aria-label="Agent 对话">
+        <div class="agent-head">
+          <div class="agent-title"><svg class="ic"><use href="#i-spark"/></svg><span>Agent</span></div>
+          <button class="icon-btn" type="button" data-action="more" aria-label="Agent 菜单"><svg class="ic"><use href="#i-more"/></svg></button>
+        </div>
+        <div class="agent-state">
+          <span class="live-dot"></span><span>就绪 · 本地上下文</span>
+          <span class="sep">|</span><span class="quiet">未连接模型</span>
+        </div>
+        <div class="agent-feed" id="agent-feed"></div>
+        <div class="composer">
+          <div class="composer-box">
+            <textarea id="composer-input" placeholder="继续追问，或描述你想调整的部分…" aria-label="给 Agent 的消息"></textarea>
+            <div class="composer-foot">
+              <div class="composer-tools">
+                <button class="icon-btn" type="button" data-action="import" aria-label="添加材料"><svg class="ic"><use href="#i-plus"/></svg></button>
+                <span class="model">模型未连接</span>
+              </div>
+              <button class="send" id="send-btn" type="button" data-action="send" aria-label="发送"><svg class="ic"><use href="#i-arrow-up"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="statusbar">
+      <div><span class="live-dot"></span><span>就绪</span><span class="sep">·</span><span>本地工作区</span></div>
+      <div><span>示例数据 · 未联网</span><span class="sep">|</span><span>模型未连接</span><span class="sep">|</span><span>v0.3 原型</span></div>
+    </div>
+
+    <div class="app-toast" id="app-toast" role="status" aria-live="polite"></div>
+    <div id="sheet-root"></div>
+  </section>
+
+  <footer class="page-foot">
+    <span>Trellis · 方案 A · 六种主题全部保留</span>
+    <span>示例内容 · 不调用模型 · 红黄绿仅外观示意，未接入系统窗口</span>
+  </footer>
+</div>
+
+
+<script>
+(function () {
+  'use strict';
+
+  var THEMES = {
+    graphite: { name: '石墨', en: 'Graphite', swatch: ['#ededeb', '#ffffff', '#35617d'] },
+    paper: { name: '暖纸', en: 'Paper', swatch: ['#f3ecdd', '#fbf8f0', '#a1502c'] },
+    midnight: { name: '深夜', en: 'Midnight', swatch: ['#1c2025', '#171a1e', '#7fb0f0'] },
+    dusk: { name: '暮色', en: 'Dusk', swatch: ['#2b3133', '#23282a', '#9ec7b2'] },
+    moss: { name: '苔原', en: 'Moss', swatch: ['#e8eee1', '#f7f9f3', '#4c7150'] },
+    blueprint: { name: '蓝图', en: 'Blueprint', swatch: ['#ffffff', '#101214', '#1f3cff'] }
+  };
+  var ORDER = ['graphite', 'paper', 'midnight', 'dusk', 'moss', 'blueprint'];
+  var media = window.matchMedia('(prefers-color-scheme: dark)');
+
+  var TASKS = [
+    { id: 'calculus', title: '变化与瞬时变化率', section: '微积分', status: '进行中', updated: '今天 14:32', hasSurface: true },
+    { id: 'chain', title: '理解链式法则', section: '微积分', status: '待继续', updated: '昨天', hasSurface: false },
+    { id: 'notes', title: '整理导数笔记', section: '复习', status: '待继续', updated: '10月24日', hasSurface: false }
+  ];
+
+  var MATERIALS = [
+    { id: 'm1', taskId: 'calculus', name: '导数笔记.pdf', type: 'PDF', size: '2.4 MB', version: 'v2', status: '已解析' },
+    { id: 'm2', taskId: 'calculus', name: '课堂板书.jpg', type: '图片', size: '840 KB', version: 'v1', status: '已解析' }
+  ];
+
+  var HISTORY = [
+    { taskId: 'calculus', v: 'v3', time: '今天 14:32', title: '作答已记录', text: '“在这一点，它有自己的变化方向。”', answer: '这一刻的变化方向与快慢' },
+    { taskId: 'calculus', v: 'v2', time: '今天 14:25', title: '讲解单元更新', text: '补充切线示意与问题。', answer: '' },
+    { taskId: 'calculus', v: 'v1', time: '今天 14:18', title: '建立任务界面', text: '添加材料后生成的第一个学习单元。', answer: '' }
+  ];
+
+  var state = {
+    taskId: 'calculus',
+    view: 'surface',
+    themeMode: 'system',
+    settingsTab: 'appearance',
+    approval: 'pending',
+    pendingImport: null
+  };
+
+  var app = document.getElementById('app');
+  var scroll = document.getElementById('main-scroll');
+  var sheetRoot = document.getElementById('sheet-root');
+  var toastEl = document.getElementById('app-toast');
+  var toastTimer = null;
+
+  function $(id) { return document.getElementById(id); }
+  function $$(selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); }
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function icon(id, cls) {
+    return '<svg class="' + (cls || 'ic') + '"><use href="#' + id + '"/></svg>';
+  }
+  function currentTask() {
+    var found = TASKS.filter(function (t) { return t.id === state.taskId; })[0];
+    return found || TASKS[0];
+  }
+  function taskMaterials(id) {
+    return MATERIALS.filter(function (m) { return m.taskId === id; });
+  }
+  function taskHistory(id) {
+    return HISTORY.filter(function (h) { return h.taskId === id; });
+  }
+  function settingsTabName() {
+    return state.settingsTab === 'model' ? '模型服务' : state.settingsTab === 'data' ? '本地数据' : '外观';
+  }
+
+  /* ---------------- theme ---------------- */
+  function systemKey() { return media.matches ? 'dusk' : 'graphite'; }
+  function resolvedTheme() { return state.themeMode === 'system' ? systemKey() : state.themeMode; }
+
+  function modeLabel() {
+    var key = resolvedTheme();
+    if (state.themeMode === 'system') {
+      return '跟随系统 · ' + (media.matches ? '深色' : '浅色') + ' → ' + THEMES[key].name;
+    }
+    return '固定主题 · ' + THEMES[key].name;
+  }
+
+  function applyTheme(key) {
+    app.setAttribute('data-style', key);
+  }
+
+  function updateThemeChrome() {
+    $('mode-badge-text').textContent = modeLabel();
+    renderSettingsTheme();
+    document.title = 'Trellis · ' + THEMES[resolvedTheme()].name + ' · 桌面原型';
+  }
+
+  function setThemeMode(mode) {
+    if (mode !== 'system' && !THEMES[mode]) return;
+    state.themeMode = mode;
+    applyTheme(resolvedTheme());
+    updateThemeChrome();
+    try { localStorage.setItem('trellis.themeMode', mode); } catch (e) {}
+    try {
+      var url = new URL(location.href);
+      if (mode === 'system') url.searchParams.delete('style');
+      else url.searchParams.set('style', mode);
+      history.replaceState(null, '', url);
+    } catch (e) {}
+  }
+
+  function loadMode() {
+    var q = null;
+    try { q = new URLSearchParams(location.search).get('style'); } catch (e) {}
+    if (q && THEMES[q]) return q;
+    var saved = null;
+    try { saved = localStorage.getItem('trellis.themeMode'); } catch (e) {}
+    if (saved && (saved === 'system' || THEMES[saved])) return saved;
+    return 'system';
+  }
+
+  function buildThemeOptions() {
+    $('theme-options').innerHTML = ORDER.map(function (key) {
+      var t = THEMES[key];
+      return '<button class="theme-option" type="button" data-theme-choice="' + key + '" aria-pressed="false">' +
+        '<span class="theme-dots" aria-hidden="true">' + t.swatch.map(function (c) {
+          return '<i style="background:' + c + '"></i>';
+        }).join('') + '</span>' +
+        '<span class="theme-name">' + t.name + '<em>' + t.en + '</em></span>' +
+        '<span class="theme-check" aria-hidden="true">' + icon('i-check') + '</span>' +
+        '</button>';
+    }).join('');
+  }
+
+  function renderSettingsTheme() {
+    var key = resolvedTheme();
+    var sys = $('system-mode-row');
+    if (sys) {
+      sys.classList.toggle('selected', state.themeMode === 'system');
+      sys.setAttribute('aria-pressed', String(state.themeMode === 'system'));
+    }
+    $$('.theme-option').forEach(function (el) {
+      var k = el.getAttribute('data-theme-choice');
+      el.classList.toggle('selected', state.themeMode === k);
+      el.classList.toggle('resolved', key === k);
+      el.setAttribute('aria-pressed', String(state.themeMode === k));
+    });
+    var status = $('theme-status');
+    if (status) {
+      status.textContent = '当前：' + modeLabel() + (state.themeMode === 'system' ? ' · 随系统自动切换' : ' · 手动选择');
+    }
+  }
+
+  /* ---------------- shell rendering ---------------- */
+  function renderSidebar() {
+    var list = $('task-list');
+    list.innerHTML = TASKS.map(function (t, i) {
+      var active = t.id === state.taskId;
+      var mats = taskMaterials(t.id);
+      var history = taskHistory(t.id);
+      var sub = '';
+      if (active) {
+        sub = '<div class="sub">' +
+          '<button class="nav-row sub-row ' + (state.view === 'materials' ? 'active' : '') + '" type="button" data-nav="materials">' +
+          icon('i-file') + '<span class="label">材料</span><span class="count">' + mats.length + '</span></button>' +
+          '<button class="nav-row sub-row ' + (state.view === 'history' ? 'active' : '') + '" type="button" data-nav="history">' +
+          icon('i-clock') + '<span class="label">记录</span><span class="count">' + history.length + '</span></button>' +
+          '</div>';
+      }
+      return '<div class="task-group"><button class="nav-row task-row ' + (active ? 'active' : '') + '" type="button" data-task="' + t.id + '"' +
+        (active ? ' aria-current="page"' : '') + '>' +
+        '<span class="idx">' + String(i + 1).padStart(2, '0') + '</span>' +
+        '<span class="task-dot"></span><span class="label">' + esc(t.title) + '</span></button>' + sub + '</div>';
+    }).join('');
+    $('all-count').textContent = TASKS.length;
+    $('task-count').textContent = TASKS.length;
+    $('nav-tasks').classList.toggle('active', state.view === 'tasks');
+    $('nav-settings').classList.toggle('active', state.view === 'settings');
+  }
+
+  function crumbFor() {
+    var t = currentTask();
+    function path(parents, last) {
+      return parents.map(function (p) {
+        return '<span class="crumb-parent">' + esc(p) + '</span><span class="sep">/</span>';
+      }).join('') + '<strong>' + esc(last) + '</strong>';
+    }
+    if (state.view === 'tasks') return '<strong>全部任务</strong>';
+    if (state.view === 'settings') return '<span class="crumb-parent">设置</span><span class="sep">/</span><strong>' + esc(settingsTabName()) + '</strong>';
+    if (state.view === 'materials') return path(['学习任务', t.section], '材料');
+    if (state.view === 'history') return path(['学习任务', t.section], '记录');
+    return path(['学习任务', t.section], t.title);
+  }
+
+  function actionsFor() {
+    if (state.view === 'surface') {
+      return '<span class="version">内容 v3</span>' +
+        '<button class="btn ghost" type="button" data-action="export">' + icon('i-export') + '导出</button>' +
+        '<button class="icon-btn" type="button" data-action="more" aria-label="更多操作">' + icon('i-more') + '</button>';
+    }
+    if (state.view === 'empty') {
+      return '<button class="btn primary" type="button" data-action="import">' + icon('i-plus') + '添加材料</button>' +
+        '<button class="icon-btn" type="button" data-action="more" aria-label="更多操作">' + icon('i-more') + '</button>';
+    }
+    if (state.view === 'tasks') {
+      return '<button class="btn primary" type="button" data-action="new-task">' + icon('i-plus') + '新建任务</button>';
+    }
+    if (state.view === 'materials') {
+      return '<button class="btn primary" type="button" data-action="import">' + icon('i-plus') + '导入材料</button>' +
+        '<button class="icon-btn" type="button" data-action="more" aria-label="更多操作">' + icon('i-more') + '</button>';
+    }
+    if (state.view === 'history') return '<span class="version">只读</span>';
+    return '<span class="version">本地设置</span>';
+  }
+
+  function renderToolbar() {
+    $('crumb').innerHTML = crumbFor();
+    $('toolbar-actions').innerHTML = actionsFor();
+  }
+
+  function renderTasks() {
+    $('tasks-summary').textContent = TASKS.length + ' 个任务 · 本地工作区';
+    $('tasks-list').innerHTML = TASKS.map(function (t) {
+      var mats = taskMaterials(t.id).length;
+      var active = t.id === state.taskId;
+      return '<button class="list-row ' + (active ? 'active' : '') + '" type="button" data-task="' + t.id + '">' +
+        '<span class="list-icon">' + icon('i-tasks') + '</span>' +
+        '<span class="list-main"><strong>' + esc(t.title) + '</strong><small>' + esc(t.section) + ' · ' + esc(t.status) + ' · ' + esc(t.updated) +
+        (mats ? ' · ' + mats + ' 份材料' : '') + '</small></span>' +
+        '<span class="tag">' + esc(t.status) + '</span>' +
+        '<span class="list-arrow">' + icon('i-arrow-right') + '</span></button>';
+    }).join('');
+  }
+
+  function renderMaterials() {
+    var t = currentTask();
+    var mats = taskMaterials(t.id);
+    $('materials-summary').textContent = mats.length + ' 份材料 · ' + t.title;
+    if (!mats.length) {
+      $('materials-list').innerHTML = '<div class="list-empty">当前任务还没有材料。<br><button class="btn ghost" type="button" data-action="import">导入材料</button></div>';
+      return;
+    }
+    $('materials-list').innerHTML = mats.map(function (m) {
+      return '<button class="list-row" type="button" data-material="' + m.id + '">' +
+        '<span class="file-badge">' + (m.type === 'PDF' ? 'PDF' : 'IMG') + '</span>' +
+        '<span class="list-main"><strong>' + esc(m.name) + '</strong><small>' + esc(m.type) + ' · ' + esc(m.size) + ' · ' + esc(m.version) + ' · ' + esc(m.status) + '</small></span>' +
+        '<span class="tag">' + esc(m.status) + '</span>' +
+        '<span class="list-arrow">' + icon('i-arrow-right') + '</span></button>';
+    }).join('');
+  }
+
+  function renderHistory() {
+    var h = taskHistory(currentTask().id);
+    $('history-summary').textContent = h.length + ' 个版本 · ' + currentTask().title;
+    if (!h.length) {
+      $('history-list').innerHTML = '<div class="list-empty">这个任务还没有记录。<br><button class="btn ghost" type="button" data-action="back-task">回到任务</button></div>';
+      return;
+    }
+    $('history-list').innerHTML = h.map(function (item, i) {
+      return '<button class="list-row" type="button" data-snapshot="' + i + '">' +
+        '<span class="list-icon">' + icon('i-clock') + '</span>' +
+        '<span class="list-main"><strong>' + esc(item.v) + ' · ' + esc(item.title) + '</strong><small>' + esc(item.time) + ' · ' + esc(item.text) + '</small></span>' +
+        '<span class="tag">' + esc(item.v) + '</span>' +
+        '<span class="list-arrow">' + icon('i-arrow-right') + '</span></button>';
+    }).join('');
+  }
+
+  function renderSettings() {
+    $$('.settings-tab').forEach(function (t) {
+      var on = t.getAttribute('data-settings-tab') === state.settingsTab;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', String(on));
+    });
+    $$('.settings-panel').forEach(function (p) {
+      p.classList.toggle('active', p.getAttribute('data-settings-panel') === state.settingsTab);
+    });
+    renderSettingsTheme();
+  }
+
+  function updateDataCounts() {
+    $('data-tasks').textContent = TASKS.length + ' 个';
+    $('data-materials').textContent = MATERIALS.length + ' 份';
+    $('data-history').textContent = HISTORY.length + ' 个';
+  }
+
+  function fillEmpty() {
+    var t = currentTask();
+    $('empty-title').textContent = t.title;
+    $('empty-meta').textContent = t.section + ' · ' + t.updated + ' · 还没有内容';
+  }
+
+  function toggleViews() {
+    $$('.app-view').forEach(function (el) {
+      el.classList.toggle('active', el.getAttribute('data-view') === state.view);
+    });
+  }
+
+  function renderAll() {
+    if (state.view === 'surface' && !currentTask().hasSurface) state.view = 'empty';
+    renderSidebar();
+    renderToolbar();
+    renderTasks();
+    renderMaterials();
+    renderHistory();
+    renderSettings();
+    updateDataCounts();
+    fillEmpty();
+    $('tb-title').textContent = currentTask().title;
+    toggleViews();
+  }
+
+  /* ---------------- agent ---------------- */
+  function renderApproval() {
+    var slot = $('approval-slot');
+    if (!slot) return;
+    if (currentTask().id !== 'calculus') { slot.innerHTML = ''; return; }
+    if (state.approval === 'approved') {
+      slot.innerHTML = '<div class="approval approved"><div class="approval-head">' + icon('i-check') +
+        '<span>本次操作已批准</span></div><p>批准只覆盖这一次替换，不产生长期许可。</p></div>';
+      return;
+    }
+    if (state.approval === 'denied') {
+      slot.innerHTML = '<div class="approval denied"><div class="approval-head">' + icon('i-shield') +
+        '<span>本次操作已拒绝</span></div><p>当前内容不变，仍可继续阅读与作答。</p></div>';
+      return;
+    }
+    slot.innerHTML = '<div class="approval"><div class="approval-head">' + icon('i-shield') +
+      '<span>待确认操作</span><span class="count">1 项</span></div>' +
+      '<p>替换讲解单元，保留兼容的输入状态。</p>' +
+      '<button class="btn small" type="button" data-action="open-approval">查看操作</button></div>';
+  }
+
+  function renderAgent() {
+    var t = currentTask();
+    var feed = $('agent-feed');
+    if (t.id === 'calculus') {
+      feed.innerHTML = '<div class="feed-time">今天 14:32 · 示例对话</div>' +
+        '<div class="msg user"><p>先从图像出发，帮我理解变化率。</p></div>' +
+        '<div class="msg"><div class="msg-head">' + icon('i-spark') + '<span>Trellis</span></div>' +
+        '<p>已根据材料建立当前任务界面。你可以直接在左侧阅读、作答，不必一直停留在对话里。</p></div>' +
+        '<div class="tool-line">' + icon('i-file') + '<span>读取</span><strong>导数笔记.pdf</strong><span class="tail">示例</span></div>' +
+        '<div id="approval-slot"></div>';
+    } else {
+      var mats = taskMaterials(t.id);
+      var line = mats.length ? '已导入 ' + mats.length + ' 份材料。你可以让我从材料开始，或先描述目标。' : '这个任务还没有上下文。添加材料，或直接描述你想从哪里开始。';
+      feed.innerHTML = '<div class="feed-time">刚刚 · 示例对话</div>' +
+        '<div class="msg"><div class="msg-head">' + icon('i-spark') + '<span>Trellis</span></div><p>' + esc(line) + '</p></div>' +
+        '<div id="approval-slot"></div>';
+    }
+    renderApproval();
+  }
+
+  function appendMessage(kind, text) {
+    var feed = $('agent-feed');
+    var div = document.createElement('div');
+    div.className = 'msg' + (kind === 'user' ? ' user' : '');
+    if (kind === 'user') div.innerHTML = '<p>' + esc(text) + '</p>';
+    else div.innerHTML = '<div class="msg-head">' + icon('i-spark') + '<span>Trellis</span></div><p>' + esc(text) + '</p>';
+    feed.appendChild(div);
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  function sendMessage() {
+    var input = $('composer-input');
+    var text = input.value.trim();
+    if (!text) { toast('先输入一句话'); return; }
+    appendMessage('user', text);
+    input.value = '';
+    setTimeout(function () {
+      appendMessage('assistant', '这是交互原型，不会调用模型。真实版本会在这里继续当前任务。');
+    }, 550);
+  }
+
+  /* ---------------- sheets ---------------- */
+  function openSheet(title, body, footer) {
+    sheetRoot.innerHTML = '<div class="sheet-layer" data-sheet-backdrop>' +
+      '<section class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">' +
+      '<header class="sheet-head"><span>' + esc(title) + '</span>' +
+      '<button class="icon-btn" type="button" data-action="close-sheet" aria-label="关闭">' + icon('i-close') + '</button></header>' +
+      '<div class="sheet-body">' + body + '</div>' +
+      '<footer class="sheet-actions">' + (footer || '') + '</footer>' +
+      '</section></div>';
+    setTimeout(function () {
+      var focus = sheetRoot.querySelector('.sheet-body input, .sheet-body textarea, .sheet-body select, .sheet-actions .btn.primary, .sheet-head button');
+      if (focus) focus.focus();
+    }, 0);
+  }
+
+  function closeSheet() {
+    sheetRoot.innerHTML = '';
+  }
+
+  function openNewTask() {
+    openSheet('新建学习任务',
+      '<form id="new-task-form">' +
+      '<label class="form-field"><span>任务名称</span><input id="new-task-name" maxlength="40" required placeholder="你想探索什么？"></label>' +
+      '<label class="form-field"><span>目标（可选）</span><textarea id="new-task-goal" placeholder="描述你的目标，或先从一个问题开始。"></textarea></label>' +
+      '<div class="settings-note">本次只创建内存中的示例任务；正文仍为占位，不调用模型。</div>' +
+      '</form>',
+      '<button class="btn ghost" type="button" data-action="close-sheet">取消</button>' +
+      '<button class="btn primary" type="submit" form="new-task-form">创建任务</button>');
+  }
+
+  function createTask() {
+    var name = $('new-task-name').value.trim();
+    var goal = $('new-task-goal').value.trim();
+    if (!name) { toast('任务名称不能为空'); return; }
+    var id = 'task-' + Date.now();
+    TASKS.push({ id: id, title: name, section: '未分类', status: '新建', updated: '刚刚', hasSurface: false, goal: goal });
+    state.taskId = id;
+    state.view = 'empty';
+    closeSheet();
+    renderAll();
+    renderAgent();
+    scroll.scrollTop = 0;
+    toast('已创建示例任务 · 仅保存在内存');
+  }
+
+  function openImport() {
+    state.pendingImport = null;
+    openSheet('添加任务材料',
+      '<div class="dropzone" id="import-dropzone">' + icon('i-file') +
+      '<p>拖入 PDF、图片或文本<br><span>原型不读取真实文件</span></p>' +
+      '<button class="btn ghost" type="button" data-action="pick-file">选择示例文件</button></div>' +
+      '<div id="import-pending"></div>' +
+      '<div class="settings-note">添加材料不会自动调用模型，也不会执行附件内容。真实产品通过系统文件选择器导入。</div>',
+      '<button class="btn ghost" type="button" data-action="close-sheet">取消</button>' +
+      '<button class="btn primary" id="add-material-btn" type="button" data-action="add-material" disabled>添加材料</button>');
+  }
+
+  function pickImportFile() {
+    state.pendingImport = { name: '导数笔记-补充.pdf', type: 'PDF', size: '1.2 MB' };
+    var zone = $('import-dropzone');
+    if (zone) {
+      zone.innerHTML = icon('i-file') +
+        '<p>已选择 <strong>导数笔记-补充.pdf</strong><br><span>PDF · 1.2 MB · 示例文件</span></p>' +
+        '<button class="btn ghost" type="button" data-action="pick-file">重新选择</button>';
+    }
+    var add = $('add-material-btn');
+    if (add) add.disabled = false;
+  }
+
+  function addMaterial() {
+    if (!state.pendingImport) return;
+    var p = state.pendingImport;
+    MATERIALS.push({
+      id: 'm-' + Date.now(), taskId: state.taskId, name: p.name, type: p.type,
+      size: p.size, version: 'v1', status: '待解析'
+    });
+    state.pendingImport = null;
+    closeSheet();
+    renderSidebar();
+    renderTasks();
+    renderMaterials();
+    updateDataCounts();
+    if (currentTask().id !== 'calculus') renderAgent();
+    toast('已添加示例材料 · 不读取真实文件');
+  }
+
+  function openApproval() {
+    openSheet('确认一次界面修改',
+      '<h2 class="sheet-title">替换当前讲解单元</h2>' +
+      '<p class="sheet-text">审批只覆盖以下具体操作。批准后仍需检查内容版本与执行资格。</p>' +
+      '<dl class="details">' +
+      '<dt>执行方</dt><dd>任务内能力 · 示例动作 A-04</dd>' +
+      '<dt>目标</dt><dd>' + esc(currentTask().title) + ' / 讲解单元 view_01</dd>' +
+      '<dt>操作</dt><dd>write → 整体替换讲解单元</dd>' +
+      '<dt>内容版本</dt><dd>Surface v3 / View v2 · 示例</dd>' +
+      '<dt>输入处理</dt><dd>preserve · 保留兼容状态，不覆盖现有输入</dd>' +
+      '<dt>权限影响</dt><dd>单次操作，不产生永久修改许可</dd>' +
+      '</dl>' +
+      '<div class="settings-note">这是视觉演示，不会真的执行写入或发送模型请求。</div>',
+      '<button class="btn ghost" type="button" data-action="deny">拒绝</button>' +
+      '<button class="btn primary" type="button" data-action="approve">批准本次</button>');
+  }
+
+  function resolveApproval(result) {
+    if (currentTask().id !== 'calculus') return;
+    state.approval = result;
+    closeSheet();
+    renderApproval();
+    toast(result === 'approved' ? '已演示单次批准，未执行实际写入。' : '已拒绝示例动作，当前内容不变。');
+  }
+
+  function openSnapshot(index) {
+    var h = taskHistory(currentTask().id)[index];
+    if (!h) return;
+    var chart = document.querySelector('#view-surface .chart');
+    var chartHTML = chart ? chart.outerHTML : '';
+    openSheet('历史快照 · 只读',
+      '<div class="row-spread"><span class="tag">' + esc(h.v) + ' · ' + esc(h.time) + '</span><span class="quiet-text">只读</span></div>' +
+      '<h2 class="sheet-title">' + esc(currentTask().title) + '</h2>' +
+      '<p class="sheet-text">当时的问题：点 P 处的切线，描述了什么？</p>' +
+      chartHTML +
+      (h.answer ? '<div class="settings-note">当时的作答：' + esc(h.answer) + '</div>' : '') +
+      '<div class="settings-note">历史快照不会重新执行旧代码、插件或 Agent。</div>',
+      '<button class="btn primary" type="button" data-action="close-sheet">回到当前任务</button>');
+  }
+
+  function openMaterial(id) {
+    var m = MATERIALS.filter(function (x) { return x.id === id; })[0];
+    if (!m) return;
+    openSheet('材料信息',
+      '<div class="row-spread"><span class="file-badge">' + (m.type === 'PDF' ? 'PDF' : 'IMG') + '</span><span class="quiet-text">' + esc(m.version) + '</span></div>' +
+      '<h2 class="sheet-title">' + esc(m.name) + '</h2>' +
+      '<dl class="details">' +
+      '<dt>类型</dt><dd>' + esc(m.type) + ' · ' + esc(m.size) + '</dd>' +
+      '<dt>版本</dt><dd>' + esc(m.version) + ' · 不可变副本</dd>' +
+      '<dt>状态</dt><dd>' + esc(m.status) + '</dd>' +
+      '<dt>所属任务</dt><dd>' + esc(currentTask().title) + '</dd>' +
+      '</dl>' +
+      '<div class="settings-note">原型不读取真实文件，也不解析附件内容。添加材料不会自动调用模型。</div>',
+      '<button class="btn primary" type="button" data-action="close-sheet">关闭</button>');
+  }
+
+  function openPlugins() {
+    openSheet('插件与能力',
+      '<p class="sheet-text">插件定义任务可以使用的方法、技能与能力。启用插件不等于授权执行具体动作。</p>' +
+      '<div class="list" style="border-top:0">' +
+      '<div class="list-row"><span class="list-icon">' + icon('i-plugin') + '</span><span class="list-main"><strong>数学讲义</strong><small>贡献讲解流程与呈现能力</small></span><span class="tag">已启用</span></div>' +
+      '<div class="list-row"><span class="list-icon">' + icon('i-file') + '</span><span class="list-main"><strong>本地文件</strong><small>提供材料读取工具 · 仅当前任务</small></span><span class="tag">未启用</span></div>' +
+      '</div>' +
+      '<div class="settings-note">此原型不包含可执行插件，也不会启动本地程序。</div>',
+      '<button class="btn primary" type="button" data-action="close-sheet">了解</button>');
+  }
+
+  /* ---------------- toggles & toast ---------------- */
+  function syncToggles() {
+    var sh = app.classList.contains('hide-sidebar');
+    var ah = app.classList.contains('hide-agent');
+    var sb = $('toggle-sidebar');
+    var ab = $('toggle-agent');
+    var fb = $('focus-btn');
+    sb.classList.toggle('on', !sh);
+    sb.setAttribute('aria-pressed', String(!sh));
+    ab.classList.toggle('on', !ah);
+    ab.setAttribute('aria-pressed', String(!ah));
+    if (fb) fb.classList.toggle('on', sh && ah && window.innerWidth > 1040);
+  }
+
+  function togglePanel(which) {
+    app.classList.toggle(which === 'sidebar' ? 'hide-sidebar' : 'hide-agent');
+    syncToggles();
+  }
+
+  function toggleFocus() {
+    if (window.innerWidth <= 1040) {
+      toast('窄窗口下用标题栏图标分别打开任务列表或 Agent。');
+      return;
+    }
+    var both = app.classList.contains('hide-sidebar') && app.classList.contains('hide-agent');
+    app.classList.toggle('hide-sidebar', !both);
+    app.classList.toggle('hide-agent', !both);
+    syncToggles();
+    toast(both ? '已恢复两侧面板' : '已收起两侧面板');
+  }
+
+  function toast(text) {
+    toastEl.textContent = text;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600);
+  }
+
+  /* ---------------- navigation ---------------- */
+  function showView(view) {
+    state.view = view;
+    if (view === 'surface' && !currentTask().hasSurface) state.view = 'empty';
+    renderAll();
+    scroll.scrollTop = 0;
+  }
+
+  function showTask(id) {
+    var task = TASKS.filter(function (t) { return t.id === id; })[0];
+    if (!task) return;
+    state.taskId = id;
+    state.view = task.hasSurface ? 'surface' : 'empty';
+    renderAll();
+    renderAgent();
+    scroll.scrollTop = 0;
+  }
+
+  /* ---------------- events ---------------- */
+  document.addEventListener('click', function (e) {
+    var task = e.target.closest('[data-task]');
+    if (task) { showTask(task.getAttribute('data-task')); return; }
+
+    var nav = e.target.closest('[data-nav]');
+    if (nav) { showView(nav.getAttribute('data-nav')); return; }
+
+    var theme = e.target.closest('[data-theme-choice]');
+    if (theme) { setThemeMode(theme.getAttribute('data-theme-choice')); return; }
+
+    var mode = e.target.closest('[data-theme-mode]');
+    if (mode) { setThemeMode(mode.getAttribute('data-theme-mode')); return; }
+
+    var tab = e.target.closest('[data-settings-tab]');
+    if (tab) {
+      state.settingsTab = tab.getAttribute('data-settings-tab');
+      renderSettings();
+      renderToolbar();
+      return;
+    }
+
+    var snapshot = e.target.closest('[data-snapshot]');
+    if (snapshot) { openSnapshot(Number(snapshot.getAttribute('data-snapshot'))); return; }
+
+    var material = e.target.closest('[data-material]');
+    if (material) { openMaterial(material.getAttribute('data-material')); return; }
+
+    var action = e.target.closest('[data-action]');
+    if (action) {
+      var a = action.getAttribute('data-action');
+      if (a === 'close-sheet') closeSheet();
+      else if (a === 'new-task') openNewTask();
+      else if (a === 'import') openImport();
+      else if (a === 'pick-file') pickImportFile();
+      else if (a === 'add-material') addMaterial();
+      else if (a === 'open-approval') openApproval();
+      else if (a === 'approve') resolveApproval('approved');
+      else if (a === 'deny') resolveApproval('denied');
+      else if (a === 'snapshot') openSnapshot(0);
+      else if (a === 'plugins') openPlugins();
+      else if (a === 'send') sendMessage();
+      else if (a === 'focus') toggleFocus();
+      else if (a === 'focus-composer') {
+        app.classList.remove('hide-agent');
+        syncToggles();
+        $('composer-input').focus();
+      }
+      else if (a === 'open-settings') showView('settings');
+      else if (a === 'back-task') showTask(state.taskId);
+      else if (a === 'search') toast('示例：命令面板未接入本次原型。');
+      else if (a === 'export') toast('示例：导出功能未接入本次原型。');
+      else if (a === 'test-model') toast('示例：未连接模型，不发起请求。');
+      else if (a === 'more') toast('示例：更多操作未接入本次原型。');
+      return;
+    }
+
+    if (e.target.hasAttribute('data-sheet-backdrop')) closeSheet();
+  });
+
+  document.addEventListener('submit', function (e) {
+    if (e.target.id === 'new-task-form') {
+      e.preventDefault();
+      createTask();
+    } else if (e.target.id === 'answer-form') {
+      e.preventDefault();
+      toast('示例提交已记录 · 仅保存在当前预览');
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && sheetRoot.innerHTML) { closeSheet(); return; }
+    var el = e.target;
+    var typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && el && el.id === 'composer-input') {
+      e.preventDefault();
+      sendMessage();
+      return;
+    }
+    if (typing) return;
+    var n = parseInt(e.key, 10);
+    if (n >= 1 && n <= ORDER.length) {
+      e.preventDefault();
+      setThemeMode(ORDER[n - 1]);
+    }
+  });
+
+  $('toggle-sidebar').addEventListener('click', function () { togglePanel('sidebar'); });
+  $('toggle-agent').addEventListener('click', function () { togglePanel('agent'); });
+
+  function onSystemChange() {
+    if (state.themeMode === 'system') {
+      applyTheme(resolvedTheme());
+      updateThemeChrome();
+    }
+  }
+  if (media.addEventListener) media.addEventListener('change', onSystemChange);
+  else if (media.addListener) media.addListener(onSystemChange);
+
+  if (window.innerWidth < 1080) app.classList.add('hide-agent');
+  if (window.innerWidth < 820) app.classList.add('hide-sidebar');
+
+  buildThemeOptions();
+  state.themeMode = loadMode();
+  applyTheme(resolvedTheme());
+  renderAll();
+  renderAgent();
+  updateThemeChrome();
+  syncToggles();
+})();
+</script>
+</body>
+</html>

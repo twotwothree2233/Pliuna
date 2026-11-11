@@ -1,49 +1,34 @@
-# 当前运行契约
+# 核心实现契约草案
 
-契约以当前源码和测试样例为唯一机器来源。
-本目录保留解释、调用边界与检查入口。
+状态：七轮批量访谈的行为与开发默认值已确认；字段编码、SQL 和模板是据此起草的推荐实现，不是已运行的 harness。版本：0.1，2026-10-26。
 
-## 机器来源
+## 制品与职责
 
-| 内容 | 当前文件 |
+| 制品 | 用途 |
 | --- | --- |
-| JSON Schema 2020-12 | [core.schema.json](../../src/shared/contracts/core.schema.json) |
-| SQLite 初始结构 | [001-core.sql](../../src/shared/contracts/001-core.sql) |
-| 开发默认值 | [development-defaults.json](../../src/shared/contracts/development-defaults.json) |
-| 生成的 TypeScript 类型 | [contracts.generated.ts](../../src/shared/contracts.generated.ts) |
-| 宿主扩展接口 | [types.ts](../../src/shared/types.ts) |
-| 模型工具的服务端参数 | [tools.ts](../../src/runtime/model/tools.ts) |
-| 动态对象与操作指南 | [operation-contracts.ts](../../src/runtime/model/operation-contracts.ts) |
-| 主模型、审批、摘要提示词 | [prompts](../../src/runtime/model/prompts/) |
-| Schema 正反例 | [manifest.json](../../tests/fixtures/contracts/manifest.json) |
+| [对象与四工具](objects-tools.md) | 操作目录、引用、返回与端到端示例 |
+| [受管理界面](managed-v1.md) | bundle、行为、样式及预览/导出规则 |
+| [执行与持久化](execution-storage.md) | 状态转换、竞态、事务、上传和恢复 |
+| [接入与模型](integration.md) | IPC、插件方法、模型映射与提示词 |
+| [开发默认值](development-defaults.json) | 已确认数值的唯一机器可读清单，尚未性能验收 |
+| [核心 schema](schemas/core.schema.json) | JSON Schema 2020-12；通过 `$defs` 验证各契约 |
+| [示例清单](examples/manifest.json) | 正例、结构拒绝例；不冒充行为测试 |
+| [初始 SQL](sql/001-core.sql) | 核心链路结构草案，只在临时数据库验证 |
+| [校验脚本](verify.py) | 文档链接、schema 示例、SQL 基础约束检查 |
+| [校验记录](validation.md) | 本次实测范围及没有测试的部分 |
 
-## 专题
+现有专题继续记录完整产品行为，本目录集中可实现的编码。协议 v0.1 中早期方法和字段例子仍是概念草案；与本目录字段不同处，联调使用这里的统一编码，不混用两套消息。若行为出现冲突，先修正文档，不以编码草案覆盖用户决定。
 
-- [对象与四工具](objects-tools.md)：参数形态、分页和结果。
-- [managed-v1](managed-v1.md)：界面、状态迁移与导出分类。
-- [执行与存储](execution-storage.md)：状态、修订和提交边界。
-- [接入契约](integration.md)：宿主、模型与插件接口。
-- [校验方式](validation.md)：当前契约和文档检查。
+## 覆盖边界
 
-## 版本与校验层
+核心 schema 包含四工具、managed-v1、局部数据 schema、manifest、能力描述、审批结果、摘要、IPC 子集、上传开始/分块及 Monty 返回值。动态能力输入、跨引用校验、DOM/CSS、生命周期与授权不能仅靠 JSON Schema 判断。
 
-核心 Schema 与插件协议目前使用 `0.1`。
-数据库 schema_version 为 `1`。
-默认值文件版本为 `dev-0.2`。
-持久化工作摘要采用 InstalledSummary 的 `version: 2`。
+初始 SQL 覆盖任务、执行、动作、审批、界面、答案、资源和恢复保护；模型配置 UI、完整插件依赖目录及平台凭据实现不在该迁移草案中。插件方法目录和模型配置字段表已定义，尚未全部转成独立 schema。不能将本目录称为完整可发布 SDK。
 
-Schema 校验后，宿主仍检查对象、来源和当前版本。
-界面还经过 HTML/CSS、引用和表单语义检查。
-插件能力另有输入输出 Schema 与权限检查。
-这些检查均发生在实际执行入口。
+自定义 JavaScript profile 的公共边界沿用任务界面专题，具体容器及桥接配置仍需实验。能力未验证时拒绝启用；存在静态表示不等于脚本执行已支持。Monty native ABI、真实清理、类型回传、浏览器负面测试、文件系统崩溃测试和跨平台安装均待实现。
 
-`$defs.summary` 仍存在于核心 Schema。
-当前上下文压缩安装使用[InstalledSummary](../../src/runtime/model/context.ts)。
-模型输出为纯文本摘要，持久化元数据由宿主生成。
+## 检查方式
 
-## 维护方式
+在安装了 `jsonschema` 的 Python 环境运行 `python3 docs/contracts/verify.py`；未安装时脚本明确失败，不跳过 schema 验证。该验证器只服务文档制品，不改变生产 TypeScript/Ajv 技术栈。SQLite 使用 Python 标准库在内存数据库执行草案，不修改用户数据库。
 
-修改 Schema 后运行 `pnpm generate`。
-修改契约时同步调整当前测试样例和行为测试。
-在对应专题补充接口含义及兼容边界。
-文档不再复制 Schema、SQL 或角色提示词。
+工程候选为 pnpm workspace、electron-vite、electron-builder、better-sqlite3、json-schema-to-typescript；精确版本在创建工程、验证 Electron 原生兼容性后锁定。本次不创建业务工程或宣称依赖兼容已通过。

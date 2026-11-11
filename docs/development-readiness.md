@@ -1,84 +1,43 @@
-# 开发与本地验证
+# 开发就绪与剩余验证
 
-当前工程使用锁定的 Node、pnpm 和依赖版本。
-版本入口为 [.node-version](../.node-version)与[package.json](../package.json)。
+更新：2026-10-26。七轮批量访谈已完成并获准落盘。核心行为、对象范围、呈现与恢复策略、开发默认值已收敛；当前仍是文档和契约草案，不是 harness 实现。
 
-## 工具链
+## 可以开始的工作
 
-| 工具 | 当前版本 |
-| --- | --- |
-| Node | 22.23.1；package engines 要求至少 22 |
-| pnpm | 10.20.0 |
-| Electron | 38.2.2 |
-| TypeScript | 5.9.3 |
-| React | 19.2.0 |
-| electron-vite | 4.0.1 |
-| Vitest / Playwright | 3.2.4 / 1.56.1 |
+可以创建工程并实现第一条核心链路，不再等待新的产品方向访谈。起点为[核心实现契约](contracts/README.md)，随后按[实施阶段 A-F](harness/testing-delivery.md#建议交付阶段)推进。工程依赖采用已确认候选，精确版本须验证后锁定。
 
-依赖安装遵循 [pnpm-lock.yaml](../pnpm-lock.yaml)。
-Python 的契约检查依赖见[requirements-dev.txt](../scripts/requirements-dev.txt)。
+推荐切片：创建任务、提交文本、模拟模型经 write 创建 managed-v1、用户保存/提交答案、答案与事件原子提交、新 Run 反馈、重启仅恢复数据。该切片不替代完整首版需求，不要求真实学科插件或 Monty 先上线。
 
-## 安装与构建
+## 已补齐与制品覆盖
 
-```sh
-pnpm install --frozen-lockfile --config.side-effects-cache=false
-python3 -m pip install -r scripts/requirements-dev.txt
-pnpm build
-pnpm dev
-```
+| 原缺口 | 当前制品 | 仍需工程完成 |
+| --- | --- | --- |
+| 对象与四工具 | [操作表与时序](contracts/objects-tools.md)、[schema](contracts/schemas/core.schema.json)、[样例清单](contracts/examples/manifest.json) | 注册表二级校验、动态结果类型和权限实现 |
+| managed-v1 | [bundle/行为/初始允许表](contracts/managed-v1.md)、bundle schema | 精确逐属性/值允许表、CSS解析/作用域、真实浏览器负面测试 |
+| 生命周期 | [状态转换与竞态](contracts/execution-storage.md) | 调度器、计时、占用及取消故障注入测试 |
+| 存储与事务 | [SQL 草案](contracts/sql/001-core.sql)、事务及staging/pin清单 | 外键范围校验、完整迁移、GC与真实文件崩溃测试 |
+| IPC/插件 | [方法目录与同步](contracts/integration.md)、核心 IPC/manifest/上传 schema | 完整RPC方法params schema、能力输出二级验证、preload与进程联调 |
+| 模型与上下文 | 字段映射策略、[版本化模板入口](contracts/integration.md)、审批/摘要 schema | 渠道配置完整schema、streaming adapter、tokenizer/usage校准、效果评测 |
+| 配额与工具链 | [集中开发默认值](contracts/development-defaults.json)、工程候选 | 版本锁、ABI/安装包验证、尚未赋数值的限制在实现时有界化 |
+| 输入/导出 | 完整前端预览方向、片段schema、离线媒体与体积限制 | 原生格式/编码支持、完整性及静态提取、平台保存测试 |
 
-`build` 依次生成类型、执行类型检查并构建应用。
-最后一步复制进程监督器，并按平台构建原生辅助模块。
-生成文件位于 `out/`。
+上述明确区分核心机器契约与方法目录草案，不能称为完整插件 SDK。SQL 覆盖核心链路，不包含完整模型配置/插件安装管理表；schema 结构验证不等于 DOM、安全、授权或状态机通过。
 
-`dev` 会先将 SQLite 模块切换到 Electron ABI。
-Node 测试与 Electron 测试使用不同的原生 ABI。
-相关命令分别提供 `rebuild:node` 和 `rebuild:electron`。
+## 不再视为未决的问题
 
-## 常用检查
+Action 四阶段和独立结果已确认；恢复旧数据本人确认已确认；丢响应且无 ID 使用近期操作定位、不按内容认领或重发已确认。小内容内联、runtime唯一数据库写入者、短事务、UI快照/增量、后台有界重启不续跑、必要清理与磁盘维护分离均已确认。
 
-| 命令 | 检查对象 |
-| --- | --- |
-| `pnpm generate` | 从当前 Schema 生成 TypeScript 类型 |
-| `pnpm typecheck` | 源码、测试和配置的静态类型 |
-| `pnpm verify:contracts` | 当前 Schema 样例及内存 SQL 约束 |
-| `python3 docs/contracts/verify.py` | 运行契约、文档示例及本地链接 |
-| `pnpm test:packaging` | 两套打包流程的结构和隐私保护 |
-| `pnpm test:portable` | 平台候选的便携检查 |
-| `pnpm test:files` | 文件行为、恢复及资源生命周期 |
-| `pnpm test:process` | 进程树、插件和取消清理 |
-| `pnpm test:electron` | Electron 界面和端到端行为 |
+其他既定约束保持：无业务去重，信任本地插件、Monty非插件沙箱，不开发领域插件，不建立完整工作流引擎或全量事件溯源。
 
-完整测试分组见[测试与交付](harness/testing-delivery.md)。
-运行原生测试前，先确认目标平台的验收门槛。
+## 实现和实验门槛
 
-## 数据与诊断入口
+- **独立 JavaScript 区域**：具体容器、桥接、资源耗尽处置未定版；公共外层契约可先建立。未通过隔离验证的 profile 拒绝启用，不退回共享 DOM，静态表示不证明脚本能力可用。
+- **Monty**：生产源码/内存/输出等配额、类型传输、时钟/熵/sleep能力、取消/销毁和Electron分发待实测；不能照搬普通插件时限或声称绝对安全。
+- **资源维护**：stage期限、持续帧错误阈值、重读次数、查询频率、摘要及插件保留说明长度等尚无批准的具体数值；实现时提出集中配置差异并验证，不得无界，也不能复用已撤销的去重窗口。
+- **持久性**：恢复点控制清单、文件发布/DB引用/pin、磁盘满、删除中断及跨文件系统保存需要真实故障测试；内存SQLite装载不证明崩溃安全。
+- **模型质量**：候选提示词需验证摘要事实/推断保留、审批误判与注入材料处理；严格JSON通过不等于内容正确。
+- **交付平台**：macOS为现有基线；Windows/Linux保留适配，未验证不宣称支持。
 
-默认数据目录为 `~/.trellis`。
-`TRELLIS_TEST_DATA` 可指定独立数据目录。
-测试和本地诊断应使用独立目录。
+## 验收纪律
 
-正式启动默认启用界面替换与 Monty 功能入口。
-`TRELLIS_ENABLE_VIEW_REPLACEMENT=0` 可关闭界面替换。
-`TRELLIS_ENABLE_MONTY=0` 可关闭计算入口。
-Monty 仍需通过平台与原生资产门槛。
-
-`fixture` 是设置中可选的固定示例模型。
-它用于本地夹具，不会发送模型网络请求。
-配置和插件启用本身不会自动提交任务。
-
-## 桌面候选包
-
-```sh
-pnpm build
-pnpm rebuild:electron
-node scripts/package-desktop.mjs --output /absolute/new/directory --format dir
-```
-
-输出必须是工作区以外的新绝对路径。
-省略 `--format dir` 时使用平台默认分发格式。
-macOS ARM64 专用入口为 `scripts/package-macos.mjs`。
-它同样要求显式指定新的输出目录。
-
-打包配置禁用自动发布。
-包内文件范围及代理元数据拦截见[交付说明](harness/testing-delivery.md)。
+[校验脚本](contracts/verify.py)验证结构、正反例、SQL基本约束及文档链接；[测试计划](harness/testing-delivery.md)保留完整运行行为验收。实现时逐项转成自动化测试并记录结果。未通过的能力保持未启用；后续如果需要扩大已确认权限或能力范围，再重新评审，不能以实现方便偷改契约。

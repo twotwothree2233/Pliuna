@@ -1,0 +1,15 @@
+{
+  "manifest_version": "0.1",
+  "protocol_version": "0.1",
+  "id": "fixture.reading",
+  "version": "0.1.0",
+  "access_level": "task",
+  "contributes": [
+    {
+      "id": "reading",
+      "kind": "skill",
+      "entry": "skills/reading.md",
+      "description": "契约测试说明，不是教学插件。"
+    }
+  ]
+}

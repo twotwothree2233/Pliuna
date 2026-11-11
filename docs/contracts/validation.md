@@ -1,50 +1,19 @@
-# 契约与文档校验
+# 契约草案校验记录
 
-检查使用当前运行契约和当前测试样例。
-文档目录不再保留旧版验证数据或历史验收记录。
+日期：2026-10-26。对象：文档、机器契约草案和临时数据库，不是 harness 业务实现。
 
-## 当前检查入口
+## 已执行
 
-```sh
-pnpm verify:contracts
-python3 docs/contracts/verify.py
-```
+- JSON Schema 2020-12 元 schema 检查；17 个正反例按预期通过或拒绝，包括额外幂等键、非法局部 schema 关键字、缺少必要字段、bundle 脚本字段及同时使用范围/游标。
+- Python 标准库 SQLite 在内存数据库执行初始 SQL，检查外键、每任务一个未结束 Run、最多一个有效恢复点。
+- 相同业务载荷使用不同宿主记录 ID 可分别插入；任务序号冲突触发事务回滚，先前同事务更新未残留。
+- Markdown 代码围栏、JSON 示例、相对链接和锚点检查。
+- 14 篇决策笔记的目录及格式验证通过；无归档笔记。工作目录不是 Git 仓库，归档追加检查按脚本规则跳过。
 
-Python 依赖来自[requirements-dev.txt](../../scripts/requirements-dev.txt)。
-运行契约检查由[verify-contracts.py](../../scripts/verify-contracts.py)执行。
-文档检查复用该入口，再检查本目录及领域术语。
+使用临时虚拟环境 `/tmp/trellis-contract-validation` 安装 jsonschema，未改变生产依赖或原型锁文件。复跑入口为[verify.py](verify.py)，也可在任意提供 jsonschema 的 Python 环境运行。
 
-## 检查内容
+## 未执行
 
-- 当前 Schema 符合 JSON Schema 2020-12。
-- 当前 manifest 中的正反例按预期接受或拒绝。
-- 当前 SQL 可装载到内存数据库。
-- 未结束 Run、恢复点唯一性及事务回滚约束成立。
-- Markdown 围栏及 JSON 示例语法正确。
-- 标注 Schema 名称的 JSON 示例通过对应定义。
-- 相对文档链接、代码文件链接和本地锚点存在。
+没有运行 Electron、Ajv/TypeScript 类型生成、真实模型、插件进程、DOM/CSS 渲染、Monty 新测试或安装包测试；没有把 SQL 应用于真实数据。进程取消、授权、业务状态机、文件发布/回收竞态、断电持久性及提示词效果均未验证。
 
-## 示例写法
-
-普通 JSON 围栏检查语法。
-在语言后标注定义名，可增加 Schema 检查。
-例如协议页的 `json ipc_request`。
-定义名直接使用核心 Schema 的 $defs 名称。
-
-模型服务端参数由 tools.ts 定义。
-这类示例不与内部 model_request 形态混用。
-转换行为由[tool-input 测试](../../tests/unit/tool-input.test.ts)覆盖。
-
-## 行为证据
-
-| 关注点 | 对应测试 |
-| --- | --- |
-| 当前契约正反例 | [contracts.test.ts](../../tests/unit/contracts.test.ts) |
-| 工具参数与错误诊断 | [tool-input.test.ts](../../tests/unit/tool-input.test.ts) |
-| 契约正文交付 | [contract-delivery.test.ts](../../tests/unit/contract-delivery.test.ts) |
-| 当前角色请求 | [prompt-requests.test.ts](../../tests/unit/prompt-requests.test.ts) |
-| 打包代理元数据保护 | [package-agent-files.test.ts](../../tests/unit/package-agent-files.test.ts) |
-
-Schema 检查负责结构与基础数据库约束。
-状态、审批、文件故障及界面行为使用专门测试。
-完整分组见[测试与交付](../harness/testing-delivery.md)。
+动态业务内容、引用的权限/版本、表单字段与 DOM 绑定、导出片段覆盖及重叠等需要语义验证器；核心 schema 结构通过不证明这些条件成立。SQL 约束测试不等于 runtime 事务协调器已实现。
