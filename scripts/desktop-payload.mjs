@@ -1,7 +1,8 @@
-import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { productionPackages } from './production-packages.mjs'
 import { nativeTargets } from '../src/shared/native-targets.mjs'
+import { assertNoLocalAgentPath, copyPackageTree } from './local-agent-files.mjs'
 
 export const mainEntries = ['index.js', 'runtime.js', 'inspection.js', 'export-check-worker.js', 'export-generation-worker.js', 'monty-worker.js', 'process-control.js', 'process-supervisor.mjs']
 const privateEntry = /(^|\/)(?:\.git|\.trellis|\.env(?:\.[^/]*)?|auth\.json|settings\.json|credentials?(?:\.[^/]*)?|[^/]*\.(?:sqlite|sqlite3|db)(?:-(?:wal|shm))?)(\/|$)/i
@@ -23,7 +24,7 @@ function windowsAclExecutable(file, target) {
 // The stage contains only the build output, the resolved production closure,
 // and this explicit offline reference plugin. Never copy the workspace root.
 function copyTree(source, destination, dependency = false) {
-  cpSync(source, destination, { recursive: true, filter(file) {
+  copyPackageTree(source, destination, { recursive: true, filter(file) {
     const path = relative(source, file).split(sep).join('/')
     if (dependency && /(^|\/)(?:node_modules|test|tests|\.github)(\/|$)/.test(path)) return false
     if (privateEntry.test(path)) throw Error('Private payload rejected: ' + path)
@@ -67,6 +68,7 @@ export function verifyDesktopPayload(app, target, plugin) {
   function visit(folder, root) {
     for (const name of readdirSync(folder)) {
       const file = join(folder, name), path = relative(root, file).split(sep).join('/'), stat = lstatSync(file)
+      assertNoLocalAgentPath(path)
       if (privateEntry.test(path)) throw Error('Private payload rejected: ' + path)
       if (name === 'trellis_acl_probe.exe') throw Error('Diagnostic ACL helper rejected from payload')
       if (stat.isSymbolicLink()) throw Error('Payload symlink rejected: ' + path)
