@@ -32,14 +32,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
  }
 });
 `
-async function setup(options: { timeout?: number; badHandshake?: boolean; global?: boolean; pdf?: boolean; appRuntime?: boolean; hostRuntime?: string } = {}): Promise<void> {
+async function setup(options: { timeout?: number; badHandshake?: boolean; global?: boolean; pdf?: boolean; appRuntime?: boolean; hostRuntime?: string; reverseRead?: () => Promise<unknown> } = {}): Promise<void> {
   const source = join(root, 'source'); await mkdir(source)
   const script = backend.replaceAll('MARKER_PATH', JSON.stringify(join(root, 'started')))
   await writeFile(join(source, 'backend.cjs'), options.badHandshake ? script.replace("protocol_version:'0.1'", "protocol_version:'future'") : script)
   await writeFile(join(source, 'echo.json'), JSON.stringify({ id: 'echo', description: 'fixture', when_to_use: 'testing', input_schema: { type: 'object' }, output_schema: { type: 'object', properties: { value: {} }, required: ['value'], additionalProperties: false }, effect: 'read', timeout_ms: options.timeout ?? 2000, errors: [], examples: [] }))
   await writeFile(join(source, 'manifest.json'), JSON.stringify({ manifest_version: '0.1', protocol_version: '0.1', id: options.pdf ? 'trellis.pdf-text' : 'fixture.process', version: '1.0.0', access_level: options.global ? 'global' : 'task', contributes: [{ id: 'echo', kind: 'tool', entry: 'echo.json', description: 'fixture' }], backend: options.appRuntime ? { runtime: 'app-node', entry: 'backend.cjs' } : { command: process.execPath, args: ['backend.cjs'], entry: 'backend.cjs' } }))
   copy = await control.install(source); await control.grant(copy.digest, { local_code: true, cross_task: options.global ?? false })
-  processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return { value: 'reverse result' } }, () => {}, options.hostRuntime)
+  processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return options.reverseRead ? options.reverseRead() : { value: 'reverse result' } }, () => {}, options.hostRuntime)
 }
 function request(args: Record<string, unknown> = {}, options: Partial<PluginExecution> = {}): PluginExecution {
   return { call_id: crypto.randomUUID(), capability: 'echo', arguments: args, references: [], signal: new AbortController().signal, dispatch() {}, valid() {}, ...options }
@@ -91,9 +91,19 @@ it('serializes simultaneous top-level calls to one instance', async () => {
   expect(values).toEqual([{ value: 1 }, { value: 2 }])
 })
 it('refuses nested busy call immediately instead of queuing behind its parent', async () => {
-  await setup(); let sent!: () => void; const dispatched = new Promise<void>(resolve => { sent = resolve })
-  const first = processes!.execute(copy, task, request({ value: 1, delay: 100 }, { dispatch: sent })); await dispatched
-  await expect(processes!.execute(copy, task, request({ value: 2 }, { nested: true }))).rejects.toMatchObject({ code: 'PLUGIN_INSTANCE_BUSY' }); await first
+  let entered!: () => void, release!: () => void
+  const reading = new Promise<void>(resolve => { entered = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  await setup({ timeout: 10000, reverseRead: async () => { entered(); await held; return { value: 1 } } })
+  // Hold the real backend on its reverse read until the busy assertion finishes.
+  // A fixed backend delay can expire during the nested call's package checks.
+  const first = processes!.execute(copy, task, request({ reverse: true }))
+  await reading
+  const dispatch = vi.fn()
+  try {
+    await expect(processes!.execute(copy, task, request({ value: 2 }, { nested: true, dispatch }))).rejects.toMatchObject({ code: 'PLUGIN_INSTANCE_BUSY' })
+    expect(dispatch).not.toHaveBeenCalled()
+  } finally { release(); await expect(first).resolves.toEqual({ value: 1 }) }
 })
 it('rejects an expanded or incompatible handshake', async () => {
   await setup({ badHandshake: true }); await expect(processes!.execute(copy, task, request())).rejects.toMatchObject({ code: 'PLUGIN_HANDSHAKE_INVALID' })
