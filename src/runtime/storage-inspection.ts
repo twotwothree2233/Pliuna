@@ -10,6 +10,7 @@ import { ExportControl } from './export-control'
 import { validatePluginControl } from './plugins/control'
 import { RecoveryManager } from './recovery'
 import { RestoreJournal } from './restore-journal'
+import { readBusinessSchema } from './schema-upgrade'
 
 type Row = Record<string, any>
 export type InspectionRequest = { scope: 'growth' | 'resources' | 'resource'; resource_id?: string; after?: number }
@@ -80,7 +81,9 @@ export async function inspectStorage(root: string, request: InspectionRequest, p
     const journal = selectedControl(root); check()
     const db = open(root, journal.selected)
     try {
-      if (JSON.stringify(db.prepare('SELECT version FROM schema_version').all()) !== '[{"version":1}]') fail('INSPECT_SCHEMA_UNKNOWN')
+      let businessVersion: 1 | 2
+      try { businessVersion = readBusinessSchema(db) } catch { fail('INSPECT_SCHEMA_UNKNOWN') }
+      result.business_schema_version = businessVersion!
       if (request.scope === 'growth') {
         const recovery = open(root, 'recovery-control.sqlite')
         let gc: Database.Database | undefined

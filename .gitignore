@@ -28,3 +28,26 @@ settings.json
 .env
 .env.*
 !.env.example
+
+# Local AI tooling and OpenSpec files.
+/.codegraph/
+/.agents/
+/.codex/
+/.ai-memory.toml
+/AGENTS.md
+/openspec/
+/.pnpm-store/
+
+# Project documentation and local planning artifacts stay local.
+/docs/
+*.md
+*.mdx
+*.rst
+*.adoc
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx

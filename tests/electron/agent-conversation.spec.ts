@@ -7,7 +7,7 @@ import { configureModel, chooseTheme } from '../helpers/settings-ui'
 import { hostToolStream, modelServer, synthetic, textStream } from '../helpers/model-server'
 
 const executablePath: string = createRequire(import.meta.url)('electron')
-test('Agent status sidebar keeps output central and input fixed at the bottom', async () => {
+test('Agent sidebar keeps replies on the right and input fixed at the bottom', async () => {
   test.setTimeout(90000)
   const pendingResponse: { current: Parameters<typeof textStream>[0] | null } = { current: null }
   const server = await modelServer(({ body }, res) => {
@@ -23,6 +23,8 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     const page = await app.firstWindow(), errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
     await page.setViewportSize({ width: 1440, height: 960 })
+    const agent = page.locator('#pane-right'), center = page.getByRole('main')
+    const reply = agent.getByRole('region', { name: '任务回复', exact: true })
     const call = async (request: any): Promise<any> => page.evaluate(async request => { const response = await window.pliuna.request(request); if (!response.ok) throw Error(response.error.code); return response.data }, request)
     await configureModel(page, { id: 'conversation-main', url: server.url, key: 'isolated-agent-key', model: 'wire-model', context: 100000, output: 2048 })
     await call({ type: 'model.test', model_id: 'conversation-main', role: 'main', confirm_cost: true })
@@ -30,7 +32,7 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     await page.getByLabel('任务名称').fill('Agent 状态栏验收')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     const task = (await call({ type: 'host.tasks' }))[0].id
-    const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送 · 新 Run', exact: true })
+    const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送消息', exact: true })
     await expect(page.locator('.agent-ready')).toContainText('准备就绪')
     await expect(page.locator('.agent-state-scroll .run-outcome')).toHaveCount(0)
     await expect(page.getByRole('region', { name: '请求队列', exact: true })).toHaveCount(0)
@@ -42,13 +44,19 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     await input.dispatchEvent('compositionend')
     await input.press('Control+Enter')
     await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
-    await expect(page.locator('.task-reply')).toContainText('中文回复：原子性');expect(await page.locator('.agent-state-scroll').innerText()).not.toContain('中文回复：原子性');expect(await page.locator('.agent .message,.agent pre,.agent code').count()).toBe(0)
+    await expect(reply).toContainText('中文回复：原子性')
+    await expect(center).not.toContainText('中文回复：原子性')
+    await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
+    await expect(center.getByRole('heading', { name: '尚无已发布内容', exact: true })).toBeVisible()
+    await expect(center.locator('.managed')).toHaveCount(0)
+    expect(await page.locator('.agent .message,.agent pre,.agent code').count()).toBe(0)
     const geometry = await page.evaluate(() => {
       const status = document.querySelector('.agent-status')!, heading = document.querySelector('.agent-heading')!, composer = document.querySelector('.agent-composer')!, agent = document.querySelector('.agent')!
-      return { sameRow: status.parentElement === heading, headingHeight: heading.getBoundingClientRect().height, composerBottom: composer.getBoundingClientRect().bottom, agentBottom: agent.getBoundingClientRect().bottom }
+      return { sameRow: status.parentElement === heading, headingHeight: heading.getBoundingClientRect().height, composerBottom: composer.getBoundingClientRect().bottom, agentBottom: agent.getBoundingClientRect().bottom, agentWidth: agent.getBoundingClientRect().width }
     })
     expect(geometry.sameRow).toBe(true)
     expect(geometry.composerBottom).toBeCloseTo(geometry.agentBottom, 0)
+    expect(geometry.agentWidth).toBeCloseTo(300, 0)
     expect(await page.locator('.agent-state-scroll').innerText()).not.toContain('本次执行已完成')
     await input.fill('打开工具后保留的中文草稿')
     const beforeTools = server.exchanges.length
@@ -80,14 +88,18 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
     await expect(input).toHaveAttribute('data-agent-editor', 'retained')
     await expect(input).toHaveValue('打开工具后保留的中文草稿')
     await expect(page.locator('.composer-materials')).toContainText('中文材料.txt')
+    await expect(reply).toContainText('中文回复：原子性')
     await send.click()
     await expect(page.locator('.composer-materials')).toHaveCount(0)
     await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
     await input.fill('读取长回复');await send.click()
-    await expect(page.locator('.task-reply-text').last()).toContainText('长回复末尾')
+    await expect(reply.locator('.task-reply-text').last()).toContainText('长回复末尾')
     expect((await call({ type: 'task.snapshot', task_id: task })).records.findLast((record: any) => record.kind === 'message.assistant').payload.truncated).toBe(true)
     expect(await page.evaluate(() => (window as any).AGENT_EXECUTED)).toBeUndefined()
-    expect(await page.locator('.agent-state-scroll').innerText()).not.toContain('中文解释')
+    await expect(reply).toContainText('中文解释')
+    await expect(center).not.toContainText('中文解释')
+    await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
+    await expect(center.getByRole('heading', { name: '尚无已发布内容', exact: true })).toBeVisible()
     await page.screenshot({ path: test.info().outputPath('pliuna-agent-status-implemented.png') })
     for (const theme of ['graphite', 'paper', 'midnight', 'dusk', 'moss', 'blueprint']) {
       await chooseTheme(page, theme)
@@ -96,6 +108,8 @@ test('Agent status sidebar keeps output central and input fixed at the bottom', 
         await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
         if (await page.locator('#pane-right').isHidden()) await page.locator('#toggle-right').click()
         await expect(page.locator('#pane-right')).toBeVisible()
+        await expect(reply).toContainText('长回复末尾')
+        await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
         expect(await page.locator('.agent').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
         await expect(send).toBeVisible()
@@ -160,7 +174,7 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('学习计划')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送 · 新 Run', exact: true })
+    const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送消息', exact: true })
     const dynamic = page.getByRole('region', { name: '本次执行动态' })
     for (const [request, operation, result] of [['创建学习进度', '创建任务数据', '已完成'], ['读取学习进度', '读取任务数据', '已完成'], ['读取不存在的进度', '读取任务数据', '未执行']]) {
       await input.fill(request!); await send.click()

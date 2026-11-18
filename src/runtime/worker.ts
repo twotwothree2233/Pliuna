@@ -24,6 +24,9 @@ let store: RuntimeStore | undefined, startupError: ContractError | undefined
 let shuttingDown = false
 try { store = new RuntimeStore(directory, models, runtimeFeatures(process.env), backgroundExport, process.argv[3]) }
 catch (error) { startupError = error instanceof ContractError ? error : new ContractError('MAINTENANCE_BLOCKED', 'Storage startup failed; business access is closed and files are retained') }
+const runnerReady = ready.then(() => store?.recoverRunnerWork()).catch(error => {
+  startupError ??= error instanceof ContractError ? error : new ContractError('RUNNER_RECOVERY_FAILED', 'Execution recovery requires inspection')
+})
 process.parentPort.on('message', async ({ data }: { data: { id: string; request: unknown; vault_response?: string; ok?: boolean; data?: unknown; error?: string; shutdown?: boolean } }) => {
   if (data.vault_response) {
     const waiting = vaultPending.get(data.vault_response)
@@ -36,7 +39,7 @@ process.parentPort.on('message', async ({ data }: { data: { id: string; request:
     catch { process.parentPort!.postMessage({ id: data.id, response: { ok: false, error: { code: 'SHUTDOWN_UNCONFIRMED', message: 'Cleanup is unresolved; files remain protected' } } }) }
     return
   }
-  await ready
+  await runnerReady
   try {
     if (shuttingDown) throw new ContractError('SHUTTING_DOWN', 'Host is shutting down; no new work is accepted')
     if (startupError) {

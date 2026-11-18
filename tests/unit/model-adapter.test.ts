@@ -55,7 +55,7 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     expect(list({ kind: 'credential' })).toBe(false)
     expect(() => modelToolRequest('list', { kind: 'credential' })).toThrow()
     const write = modelTools.find(tool => tool.function.name === 'write')!
-    expect(JSON.parse(JSON.parse(write.function.description.split('示例：')[1]!).input_json).content).toEqual({ type: 'text', text: '正文' })
+    expect(JSON.parse(write.function.description.split('示例：')[1]!).input.content).toEqual({ type: 'text', text: '正文' })
     expect(JSON.stringify(write.function.parameters)).not.toMatch(/oneOf|\$defs/)
   })
   it('declares explicit JSON text with one decoded capability value', () => {
@@ -69,7 +69,9 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     const server = await modelServer((_exchange, res) => textStream(res, 'ok')); cleanups.push(server.close)
     await new ChatAdapter().complete(config(server.url), '', [], modelTools, new AbortController().signal)
     const wire = server.exchanges[0]!.body.tools.find((tool: any) => tool.function.name === 'write').function.parameters
-    expect(wire.required).toEqual(['operation', 'input_json'])
+    expect(wire.required).toEqual(['operation'])
+    expect(wire.properties.input).toEqual({ type: 'object' })
+    expect(wire.properties.input_json).toEqual({ type: 'string' })
     expect(wire).not.toHaveProperty('oneOf'); expect(wire).not.toHaveProperty('$defs')
     const contract = operationContract('task_data.replace') as any
     const validate = new Ajv2020({ strict: false }).compile(contract.input_schema)
@@ -91,6 +93,20 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     const response = await new ChatAdapter().complete(config(server.url), '', [], modelTools, new AbortController().signal)
     expect(response.calls[0]!.function.arguments).toBe(JSON.stringify(args))
     expect(JSON.parse(JSON.parse(response.calls[0]!.function.arguments).input_json).value).toEqual(value)
+  })
+  it('preserves structured resource content across fragmented tool arguments without a second JSON decode', async () => {
+    const input = { display_name: '讲义', content: { type: 'json', value: { html: '<p title="quoted">中😀\nC:\\notes</p>', css: 'p::after { content: "\\\\ value"; }\np { color: red; }' } } }
+    const args = { operation: 'resource.create', input }
+    const encoded = JSON.stringify(args)
+    const server = await modelServer((_exchange, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(frame({ role: 'assistant', tool_calls: [{ index: 0, id: 'create-resource', type: 'function', function: { name: 'write', arguments: '' } }] }))
+      for (const character of encoded) res.write(frame({ tool_calls: [{ index: 0, function: { arguments: character } }] }))
+      res.end(frame({}, 'tool_calls') + 'data: [DONE]\n\n')
+    }); cleanups.push(server.close)
+    const response = await new ChatAdapter().complete(config(server.url), '', [], modelTools, new AbortController().signal)
+    expect(response.calls[0]!.function.arguments).toBe(encoded)
+    expect(modelToolRequest('write', JSON.parse(response.calls[0]!.function.arguments))).toEqual({ type: 'write', input: { type: 'resource.create', ...input } })
   })
   it('explains classified errors without suggesting insecure TLS or automatic retries', () => {
     expect(modelErrorMessage(new Error('MODEL_AUTHENTICATION: Runtime operation failed'))).toContain('检查 API Key')

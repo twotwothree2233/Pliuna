@@ -31,7 +31,7 @@ it('stores exact-version data references with registry protection, without recur
   expect(read(source.data.id)).toMatchObject({ value: target.data.id, references: [reference(target.data.id)] })
   expect(rows()).toEqual([{ source_id: source.data.id, target_kind: 'task_data', target_id: target.data.id, expected_revision: 1, protects_resource: 0, blocks_remove: 1 }])
   expect(query('task_data', source.data.id).data).not.toHaveProperty('expanded')
-  expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 1 })
+  expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 2 })
   await create([], target.data.id); expect(rows()).toHaveLength(1)
 })
 it.each(['missing revision', 'wrong revision', 'missing target', 'cross task', 'duplicate name', 'unsupported type'] as const)('rejects invalid references before action registration: %s', async fault => {

@@ -9,6 +9,7 @@ import { operationContract, operationDirectory, contractRepresentation } from '.
 import { modelReadOptions } from './model/tool-input'
 import { readTextSelection } from './plugins/text-selection'
 import { RepresentationPager } from './model/representation'
+import { runnerFailureReason } from './runner/failure-reason'
 
 type Row = Record<string, any>
 type Query = Extract<ModelRequest, { type: 'list' | 'read' }>
@@ -270,7 +271,7 @@ export class ObjectQueries {
       result.view_history = this.readHistory(history!)
       Object.assign(result, { raw: JSON.parse(row.raw_json), value: JSON.parse(row.value_json), view_history_id: row.view_history_id, form_id: row.form_id })
     }
-    if (kind === 'run') Object.assign(result, { primary_reason: row.primary_reason, wait_reason: row.wait_reason, budget: JSON.parse(row.budget_json), accounting: readRequestAccounting(this.db, row.task_id, row.id), ended_at: row.ended_at })
+    if (kind === 'run') Object.assign(result, { primary_reason: row.state === 'failed' ? runnerFailureReason(this.db, row.task_id, row.id, row.primary_reason) : row.primary_reason, wait_reason: row.wait_reason, budget: JSON.parse(row.budget_json), accounting: readRequestAccounting(this.db, row.task_id, row.id), ended_at: row.ended_at })
     if (kind === 'action') { const approval = this.db.prepare('SELECT binding_json FROM approvals WHERE action_id=?').get(row.id) as Row | undefined; if (approval) { const binding = JSON.parse(approval.binding_json); if (binding.version === 2) result.resolved_approval = binding.resolved } }
     if (kind === 'action') Object.assign(result, { source: JSON.parse(row.source_json), request: JSON.parse(row.request_json), result_data: row.result_json ? JSON.parse(row.result_json) : null, wait_reason: row.wait_reason, ended_at: row.ended_at })
     if (kind === 'approval') Object.assign(result, { mode: row.mode, evaluation: row.evaluation_json ? JSON.parse(row.evaluation_json) : null, expires_at: row.expires_at, action_state: row.action_state, action_result: row.action_result, result_data: row.action_result_json ? JSON.parse(row.action_result_json) : null })

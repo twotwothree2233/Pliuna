@@ -1,15 +1,21 @@
 import type Database from 'better-sqlite3'
 import { assertContract, ContractError } from '../../shared/validation'
+import { validateRunnerContract } from '../../shared/runner-validation'
 import type { RequestAccounting } from './accounting'
 
 type Row = { id: string; payload_json: string }
 export function accountingFacts(rows: Row[]) {
   const requests = new Map<string, RequestAccounting & { event_id: string; dispatched: boolean }>()
+  const owners = new Map<string, string>()
   for (const row of rows) {
-    const { run_id: _, ...value } = JSON.parse(row.payload_json)
+    const { run_id: runId, owner: rawOwner, ...value } = JSON.parse(row.payload_json)
+    const owner = rawOwner === undefined ? undefined : validateRunnerContract('runner_execution_scope', rawOwner)
+    if (owner && owner.run_id !== runId) throw new ContractError('ACCOUNTING_INVALID', 'Accounting owner belongs to another Run')
     assertContract<RequestAccounting>('request_accounting', value)
     if (value.version === 2 && ((value.output_policy === 'service-default') !== (value.output_reserve === null))) throw new ContractError('ACCOUNTING_INVALID', 'Output policy and reserve conflict')
     const old = requests.get(value.request_id)
+    const binding = JSON.stringify(owner ? Object.fromEntries(Object.entries(owner).sort(([a], [b]) => a.localeCompare(b))) : null)
+    if (old && owners.get(value.request_id) !== binding) throw new ContractError('ACCOUNTING_INVALID', 'Accounting owner changed within one request')
     if (!old && value.phase !== 'reserved') throw new ContractError('ACCOUNTING_INVALID', 'Accounting sequence has no reservation')
     const next = old?.phase === 'reserved' ? ['dispatched', 'failed'] : old?.phase === 'dispatched' ? ['completed', 'unknown'] : []
     const identity = (item: RequestAccounting) => JSON.stringify([item.version, item.output_policy, item.model_id, item.model_revision, item.purpose, item.input_bytes, item.estimated_input_tokens, item.output_reserve, item.context_tokens, ...Object.keys(item.components).sort().map(key => [key, item.components[key as keyof typeof item.components]])])
@@ -17,6 +23,7 @@ export function accountingFacts(rows: Row[]) {
     if (!Number.isFinite(Date.parse(value.at)) || new Date(value.at).toISOString() !== value.at) throw new ContractError('ACCOUNTING_INVALID', 'Accounting timestamp is invalid')
     if (Object.values(value.components).reduce((sum, bytes) => sum + bytes, 0) !== value.input_bytes || (value.phase !== 'completed' && value.usage !== null) || (!['unknown', 'failed'].includes(value.phase) && value.error !== null)) throw new ContractError('ACCOUNTING_INVALID', 'Accounting fields are inconsistent')
     requests.set(value.request_id, { ...value, event_id: row.id, dispatched: old?.dispatched === true || value.phase === 'dispatched' })
+    owners.set(value.request_id, binding)
   }
   return { version: 1, recorded: !!rows.length, requests: [...requests.values()].map(item => ({ ...item, phase: item.phase === 'dispatched' ? 'unknown' : item.phase, notice: item.phase === 'reserved' ? 'No dispatch record; no automatic retry.' : !item.usage ? 'Usage unavailable; not zero and not an invoice.' : 'Provider usage, not a monetary invoice.' })) }
 }

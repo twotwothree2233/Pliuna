@@ -23,12 +23,12 @@ for (const scenario of ['save-cancel-replace-delete', 'input-conflict', 'save-fa
     await page.getByRole('button', { name: '创建第一个任务' }).click(); await page.getByLabel('任务名称').fill('维护输入验收'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await chooseModel(page, 'fixture'); await page.getByLabel('想从哪里开始？').fill('fixture')
     if (scenario === 'active-run') {
-      await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+      await page.getByRole('button', { name: /发送消息/ }).click()
       const result = await page.evaluate(() => window.pliuna.request({ type: 'maintenance.begin' }))
       expect(result.ok).toBe(false); if (!result.ok) expect(result.error.code).toBe('MAINTENANCE_EXECUTION_ACTIVE')
       await expect(page.locator('.agent-status')).toContainText('已完成')
     } else {
-      await page.getByRole('button', { name: /发送 · 新 Run/ }).click(); await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
+      await page.getByRole('button', { name: /发送消息/ }).click(); await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
     }
     await page.getByLabel('你的想法').fill('已保存答案'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     if (scenario === 'answer-unknown') await app.evaluate(({ ipcMain }) => {

@@ -7,6 +7,7 @@ import { lstatSync } from 'node:fs'
 import { entryExistsSync as existsSync,flushDirectorySync,flushFileSync,managedRegularFile } from '../platform/files'
 import { protectPrivatePath } from '../platform/permissions'
 import { ContractError } from '../shared/validation'
+import { exportCompositionIssue, exportCompositionSummary, validateExportComposition, withExportComposition, type FrozenExportComposition } from './export-composition'
 
 export interface ExportResource { id: string; storage_key: string; sha256: string; byte_length: number; media_type: string; display_name: string }
 export type ExportPhase = 'preparing' | 'preview' | 'saving' | 'saved' | 'cancelled' | 'failed' | 'interrupted' | 'unknown'
@@ -66,7 +67,11 @@ export class ExportControl {
     if (snapshot && typeof snapshot === 'object' && 'version' in snapshot) {
       const keys = (value: any, expected: string) => !!value && typeof value === 'object' && Object.keys(value).sort().join(',') === expected
       const unique = (values: unknown[]) => values.every(v => typeof v === 'string' && uuid.test(v)) && new Set(values).size === values.length
-      if (!keys(snapshot, 'answer_ids,title,version,views') || snapshot.version !== 1 || typeof snapshot.title !== 'string' || !Array.isArray(snapshot.views) || !snapshot.views.length || snapshot.views.length > 50 || !Array.isArray(snapshot.answer_ids) || snapshot.answer_ids.length > 50 || !unique(snapshot.answer_ids) || !unique(snapshot.views.map((v: any) => v?.view_id))) fail()
+      if (!keys(snapshot, snapshot.version === 2 ? 'answer_ids,runner,title,version,views' : 'answer_ids,title,version,views') || ![1, 2].includes(snapshot.version) || typeof snapshot.title !== 'string' || !Array.isArray(snapshot.views) || !snapshot.views.length || snapshot.views.length > 50 || !Array.isArray(snapshot.answer_ids) || snapshot.answer_ids.length > 50 || !unique(snapshot.answer_ids) || !unique(snapshot.views.map((v: any) => v?.view_id))) fail()
+      if (snapshot.version === 2) {
+        validateExportComposition(snapshot.runner, job.task_id)
+        if (snapshot.runner.publications.some((entry: FrozenExportComposition['publications'][number]) => !snapshot.views.some((view: any) => view.view_id === entry.view_id && view.view_revision === entry.view_revision) || !job.resources.some(resource => resource.id === entry.published_bundle_resource_id))) fail()
+      }
       for (const view of snapshot.views) {
         if (!keys(view, 'fragments,history_id,view_id,view_revision') || !uuid.test(view.history_id) || !Number.isSafeInteger(view.view_revision) || view.view_revision < 1 || !Array.isArray(view.fragments) || new Set(view.fragments.map((f: any) => f?.id)).size !== view.fragments.length) fail()
         for (const f of view.fragments) {
@@ -97,10 +102,15 @@ export class ExportControl {
     this.put(job); return job
   }
   generationFailed(id: string, reason: string): void { const job = this.get(id); if (job.phase !== 'preparing') fail('EXPORT_STATE_CHANGED'); this.put({ ...job, phase: 'failed', reason }) }
-  preview(id: string, html: string, issues: string[]): ExportJob { const job = this.get(id); if (job.phase !== 'preparing') fail('EXPORT_STATE_CHANGED'); this.put({ ...job, phase: 'preview', html, issues }); return this.get(id) }
+  preview(id: string, html: string, issues: string[]): ExportJob {
+    const job = this.get(id), runner = (job.snapshot as { runner?: FrozenExportComposition } | null)?.runner
+    if (job.phase !== 'preparing') fail('EXPORT_STATE_CHANGED')
+    this.put({ ...job, phase: 'preview', html: runner ? withExportComposition(html, runner) : html, issues: [...new Set([...issues, ...exportCompositionIssue(runner)])] })
+    return this.get(id)
+  }
   beginSave(id: string, target: string, temporary: string, partial: boolean): ExportJob {
     const job = this.get(id)
-    if (job.phase !== 'preview' || (job.issues.length && !partial)) fail('EXPORT_CONFIRMATION_REQUIRED')
+    if (job.phase !== 'preview' || ((job.issues.length || (job.snapshot as { runner?: FrozenExportComposition } | null)?.runner?.state === 'partial') && !partial)) fail('EXPORT_CONFIRMATION_REQUIRED')
     this.put({ ...job, phase: 'saving', destination: { target, temporary, identity: null }, partial_confirmed: partial }); return this.get(id)
   }
   created(id: string, identity: IdentityInput): void {
@@ -129,7 +139,7 @@ export class ExportControl {
     for (const r of this.db.prepare("SELECT id FROM export_jobs WHERE phase NOT IN ('saved','cancelled','failed')").iterate() as Iterable<any>) if (this.get(r.id).resources.some(resource => resource.id === key || resource.storage_key === key)) return true
     return false
   }
-  public(id: string): Record<string, unknown> { const j = this.get(id); return { id: j.id, task_id: j.task_id, phase: j.phase, created_at: j.created_at, resource_count: j.resources.length, issues: j.issues, reason: j.reason, pinned: !terminal.has(j.phase), bytes: j.html ? Buffer.byteLength(j.html) : 0 } }
+  public(id: string): Record<string, unknown> { const j = this.get(id), runner = (j.snapshot as { runner?: FrozenExportComposition } | null)?.runner; return { id: j.id, task_id: j.task_id, phase: j.phase, created_at: j.created_at, resource_count: j.resources.length, issues: j.issues, reason: j.reason, pinned: !terminal.has(j.phase), bytes: j.html ? Buffer.byteLength(j.html) : 0, ...(runner ? { selection: exportCompositionSummary(runner) } : {}) } }
   list(task: string): Record<string, unknown>[] { return (this.db.prepare('SELECT id FROM export_jobs WHERE task_id=? ORDER BY rowid DESC LIMIT 20').all(task) as any[]).map(r => this.public(r.id)) }
   close(): void { if (this.db.open) this.db.close() }
 }

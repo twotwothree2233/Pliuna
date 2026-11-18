@@ -20,6 +20,10 @@ function material(): string {
   store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run }); vi.useRealTimers()
   return result.data.id
 }
+function runnerBatch(resourceId: string): void {
+  db.prepare("INSERT INTO runner_scopes VALUES (?,1,'{}')").run(task.task.id)
+  db.prepare('INSERT INTO runner_batches VALUES (?,?,1,?)').run('unpublished-batch', task.task.id, JSON.stringify({ dependencies: [{ kind: 'resource', resource_id: resourceId }] }))
+}
 it('creates a WAL-safe verified backup, persists status across restart and leaves all execution features closed', async () => {
   const resource = material(), value = await create()
   expect(value).toMatchObject({ phase: 'idle', restore_enabled: true, gc_enabled: false, migration_enabled: false, active: { resource_count: 1, task_ids: [task.task.id] }, last: { outcome: 'created' } })
@@ -41,6 +45,37 @@ it('keeps both old and candidate resource pins throughout asynchronous backup, t
   const next = await create(); expect(next.active.id).not.toBe(old)
   expect(db.prepare("SELECT count(*) n FROM recovery_points WHERE state='valid'").get()).toEqual({ n: 1 })
   expect(control().retired).toContain(old); expect(readdirSync(join(root, 'recovery')).filter(f => f.endsWith('.sqlite'))).toHaveLength(2)
+})
+it('retains unpublished runner dependencies without a current View in the verified recovery point', async () => {
+  const resource = material(); runnerBatch(resource)
+  const value = await create(), backup = new Database(join(root, 'recovery', value.active.id + '.sqlite'), { readonly: true })
+  try {
+    expect(backup.prepare('SELECT id FROM views').all()).toEqual([])
+    expect(backup.prepare('SELECT resource_id FROM task_resources WHERE task_id=?').all(task.task.id)).toEqual([{ resource_id: resource }])
+    expect(backup.prepare('SELECT payload_json FROM runner_batches').get()).toEqual({ payload_json: JSON.stringify({ dependencies: [{ kind: 'resource', resource_id: resource }] }) })
+  } finally { backup.close() }
+  restart(); expect(state()).toMatchObject({ phase: 'idle', active: { id: value.active.id } })
+})
+it('rejects a missing live runner association before preparing a candidate or replacing the old recovery point', async () => {
+  const resource = material(), old = (await create()).active.id; runnerBatch(resource)
+  db.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(task.task.id, resource)
+  const backup = vi.spyOn(Database.prototype, 'backup')
+  await expect(create()).rejects.toThrow(/failed/)
+  expect(backup).not.toHaveBeenCalled()
+  expect(control()).toMatchObject({ active: { id: old }, candidates: [] })
+  expect(state()).toMatchObject({ phase: 'blocked', last: { outcome: 'failed' } })
+})
+it('rejects a runner association lost inside a completed backup before switching recovery control', async () => {
+  const resource = material(), old = (await create()).active.id; runnerBatch(resource)
+  const original = Database.prototype.backup
+  vi.spyOn(Database.prototype, 'backup').mockImplementation(async function (this: Database.Database, ...args: Parameters<typeof original>) {
+    const result = await original.apply(this, args), candidate = new Database(args[0])
+    try { candidate.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(task.task.id, resource) } finally { candidate.close() }
+    return result
+  })
+  await expect(create()).rejects.toThrow(/failed/)
+  expect(control().active.id).toBe(old); expect(control().candidates).toHaveLength(1)
+  expect(db.prepare('SELECT resource_id FROM task_resources WHERE task_id=?').all(task.task.id)).toEqual([{ resource_id: resource }])
 })
 it('cancels preparation without creating a point or sending a model request', () => { const token = begin(); store.handle({ type: 'maintenance.cancel', token }); expect(state()).toMatchObject({ phase: 'idle', active: null, last: { outcome: 'cancelled' } }); expect(readdirSync(join(root, 'recovery'))).toEqual([]) })
 it('expires abandoned preparation without stealing an active backup', () => { vi.useFakeTimers(); begin(); vi.advanceTimersByTime(60001); expect(state()).toMatchObject({ phase: 'idle', last: { outcome: 'expired' } }); expect(store.create('after timeout')).toBeTruthy() })

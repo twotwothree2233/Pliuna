@@ -2,17 +2,20 @@ import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { assertContract, ContractError } from '../../shared/validation'
+import { assertContract, ContractError, validateModel } from '../../shared/validation'
 import { digest } from '../resources'
 import type { StorageLifecycle } from '../storage-lifecycle'
 import { montyAssets, type MontyAssets } from './assets'
 import { MONTY_ID, montyLimits, validateMontyInput } from './contract'
 import { materializeValue, type MontyResource } from './value'
 import { nativeMonty, type MontyRunner, type MontyExecution } from './runner'
+import type { ExecutionScope, ModelRequest } from '../../shared/contracts.generated'
+import { captureExecutionScope } from '../model/request-evidence'
 
 type Row = Record<string, any>
 const now = () => new Date().toISOString()
-type Active = { task: string; run: string; controller: AbortController; execution?: MontyExecution; done: Promise<void>; cleanupUnknown: boolean }
+export type MontyCallSource = { owner?: ExecutionScope; valid(): void; authorize?(request: ModelRequest): void }
+type Active = { task: string; run: string; owner?: ExecutionScope; controller: AbortController; execution?: MontyExecution; done: Promise<void>; cleanupUnknown: boolean }
 export class MontyCalls {
   private active = new Map<string, Active>()
   private closed = false
@@ -24,7 +27,9 @@ export class MontyCalls {
   }
   get available(): boolean { return !!this.assets && !this.closed }
   busy(task?: string): boolean { return [...this.active.values()].some(entry => !task || entry.task === task) }
+  busyRun(run: string): boolean { return [...this.active.values()].some(entry => entry.run === run) }
   cancelRun(run: string): void { for (const [id, entry] of this.active) if (entry.run === run) { this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(id); entry.controller.abort() } }
+  cancelAttempt(attempt: string): void { for (const [id, entry] of this.active) if (entry.owner?.attempt_id === attempt) { this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(id); entry.controller.abort() } }
   async shutdown(): Promise<void> {
     this.closed = true
     for (const [id, entry] of this.active) { this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(id); entry.controller.abort() }
@@ -35,27 +40,34 @@ export class MontyCalls {
     }
     if (this.busy()) throw new ContractError('MONTY_CLEANUP_UNCONFIRMED', 'Calculation cleanup is unresolved; storage remains protected')
   }
-  async call(task: string, run: string, raw: unknown, references: any[], signal: AbortSignal): Promise<unknown> {
+  async call(task: string, run: string, raw: unknown, references: any[], signal: AbortSignal, source?: MontyCallSource): Promise<unknown> {
     if (!this.available || !this.assets) throw new ContractError(this.unavailable ?? 'MONTY_DISABLED', 'Native calculation is unavailable; no host execution fallback')
+    const owner = captureExecutionScope(source?.owner, task)
+    if (owner && owner.run_id !== run) throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Calculation belongs to another Run')
+    source = source ? { ...source, ...(owner ? { owner } : {}) } : undefined
+    const request = source?.authorize ? structuredClone(validateModel({ type: 'call', input: { capability: MONTY_ID, arguments: raw, references } })) : undefined
+    if (request?.type === 'call') { raw = request.input.arguments; references = request.input.references }
+    const checkSource = () => { source?.valid(); if (request) source?.authorize?.(request); this.validSource(task, run) }
+    checkSource()
     const input = validateMontyInput(raw)
-    this.validSource(task, run); this.references(task, references)
+    this.references(task, references)
     if (signal.aborted) throw new ContractError('MONTY_CANCELLED', 'Source cancelled before calculation')
     if (this.busy(task) || this.active.size >= montyLimits.active_app) throw new ContractError('MONTY_BUSY', 'Published calculation concurrency is occupied; no execution was registered')
     const call = randomUUID(), action = randomUUID(), controller = new AbortController(), expires = performance.now() + montyLimits.wall_ms
     let settled!: () => void
-    const entry: Active = { task, run, controller, done: new Promise(resolve => { settled = resolve }), cleanupUnknown: false }
+    const entry: Active = { task, run, ...(owner ? { owner } : {}), controller, done: new Promise(resolve => { settled = resolve }), cleanupUnknown: false }
     const invalidate = () => { this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(call); controller.abort() }
     const valid = () => {
       if (this.closed || controller.signal.aborted) throw new ContractError('MONTY_CANCELLED', 'Calculation no longer has commit permission')
       if (performance.now() >= expires) { this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(call); controller.abort(); throw new ContractError('MONTY_TIMEOUT', 'Published whole-call deadline elapsed; no result is committed') }
-      this.validSource(task, run); this.references(task, references)
+      checkSource(); this.references(task, references)
       const row = this.db.prepare('SELECT commit_valid,state FROM calls WHERE id=?').get(call) as Row | undefined
       if (!row?.commit_valid || row.state === 'ended') throw new ContractError('MONTY_SOURCE_INVALID', 'Calculation source ended; late result rejected')
     }
     this.db.transaction(() => {
-      this.db.prepare("INSERT INTO calls (id,task_id,run_id,capability_id,state,dispatch,delivery,input_json,limits_json,commit_valid,created_at) VALUES (?,?,?,?,'registered','not_sent','pending',?,?,1,?)").run(call, task, run, MONTY_ID, JSON.stringify({arguments:input,references}), JSON.stringify({version:1,...montyLimits,binary_sha256:this.assets!.binary_sha256}), now())
-      this.db.prepare("INSERT INTO actions (id,task_id,run_id,call_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,?,'mutation','registered',?,?,1,?)").run(action, task, run, call, JSON.stringify({type:'run',id:run}), JSON.stringify({type:'monty.output',call_id:call}), now())
-      this.record(task, 'monty.call.registered', {call_id:call,action_id:action,contract_version:1})
+      this.db.prepare("INSERT INTO calls (id,task_id,run_id,capability_id,state,dispatch,delivery,input_json,limits_json,commit_valid,created_at) VALUES (?,?,?,?,'registered','not_sent','pending',?,?,1,?)").run(call, task, run, MONTY_ID, JSON.stringify({arguments:input,references}), JSON.stringify({version:1,...montyLimits,binary_sha256:this.assets!.binary_sha256,...(owner ? {owner} : {})}), now())
+      this.db.prepare("INSERT INTO actions (id,task_id,run_id,call_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,?,'mutation','registered',?,?,1,?)").run(action, task, run, call, JSON.stringify({type:'run',id:run,...(owner ? {owner} : {})}), JSON.stringify({type:'monty.output',call_id:call}), now())
+      this.record(task, 'monty.call.registered', {call_id:call,action_id:action,contract_version:1,...(owner ? {owner:{...owner}} : {})})
     })()
     this.active.set(call, entry); signal.addEventListener('abort', invalidate, {once:true}); if(signal.aborted)invalidate()
     let executed = false, committed = false, failedExecution: 'failure' | 'unknown' | undefined
@@ -85,8 +97,8 @@ export class MontyCalls {
       for (const stage of stages) { valid(); this.storage.publish({id:stage.stage,taskId:task,actionId:action,key:stage.resource.id,bytes:stage.resource.body.length,sha256:stage.sha256},stage.resource.body) }
       this.db.transaction(() => {
         valid()
-        const owner = this.db.prepare('SELECT commit_valid,state FROM actions WHERE id=?').get(action) as Row
-        if (!owner.commit_valid || owner.state === 'ended') throw new ContractError('MONTY_SOURCE_INVALID', 'Output action no longer eligible')
+        const actionRow = this.db.prepare('SELECT commit_valid,state FROM actions WHERE id=?').get(action) as Row
+        if (!actionRow.commit_valid || actionRow.state === 'ended') throw new ContractError('MONTY_SOURCE_INVALID', 'Output action no longer eligible')
         for (const stage of stages) {
           this.db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?)').run(stage.resource.id,stage.resource.id,stage.sha256,stage.resource.body.length,stage.resource.media_type,stage.resource.display_name,now())
           this.db.prepare('INSERT INTO task_resources VALUES (?,?)').run(task,stage.resource.id);this.storage.commit(stage.stage,stage.resource.id)
@@ -95,21 +107,22 @@ export class MontyCalls {
         // Return one root reference; its typed bytes are still protected by task_resources.
         this.db.prepare("UPDATE actions SET state='ended',result='success',commit_valid=0,authorization_json=?,result_json=?,ended_at=? WHERE id=?").run(JSON.stringify({basis:'default_calculation_output'}),JSON.stringify({call_id:call,resources:stages.map(s=>s.resource.id)}),now(),action)
         this.db.prepare("UPDATE calls SET state='ended',wait_reason=NULL,execution='success',delivery='delivered',commit_valid=0,result_json=?,ended_at=? WHERE id=?").run(JSON.stringify(result),now(),call)
-        this.record(task,'monty.call.ended',{call_id:call,execution:'success',delivery:'delivered',resource_count:stages.length})
+        this.record(task,'monty.call.ended',{call_id:call,execution:'success',delivery:'delivered',resource_count:stages.length,...(owner ? {owner:{...owner}} : {})})
       })()
       committed = true
       return result
     } catch(error) {
       const code = error instanceof ContractError ? error.code : 'MONTY_SAVE_FAILED'
       if (code === 'MONTY_CLEANUP_UNCONFIRMED') entry.cleanupUnknown=true
-      const row = this.db.prepare('SELECT dispatch FROM calls WHERE id=?').get(call) as Row
+      const row = this.db.prepare('SELECT dispatch,state,result_json FROM calls WHERE id=?').get(call) as Row
+      if (row.state === 'ended' && row.result_json) return JSON.parse(row.result_json)
       const execution = row.dispatch === 'not_sent' ? 'not_executed' : executed ? 'success' : controller.signal.aborted ? 'cancelled' : failedExecution ?? (code === 'MONTY_EXECUTION_FAILED' ? 'failure' : 'unknown')
       const message = error instanceof ContractError ? error.message : 'Calculation result could not be saved'
       const result = {request_type:'call',operation_id:call,execution,delivery:executed?'failed':'delivered',truncated:false,error:{code,message:message + '. No new result was published; original execution is not replayed.'}}
       this.db.transaction(()=>{
         this.db.prepare("UPDATE calls SET state='ended',execution=?,delivery=?,commit_valid=0,result_json=?,ended_at=? WHERE id=?").run(execution,result.delivery,JSON.stringify(result),now(),call)
         this.db.prepare("UPDATE actions SET state='ended',result=?,commit_valid=0,result_json=?,ended_at=? WHERE id=? AND state!='ended'").run(controller.signal.aborted?'cancelled':executed?'failure':row.dispatch==='not_sent'?'not_executed':'unknown',JSON.stringify({code}),now(),action)
-        this.record(task,'monty.call.ended',{call_id:call,execution,delivery:result.delivery,error:code})
+        this.record(task,'monty.call.ended',{call_id:call,execution,delivery:result.delivery,error:code,...(owner ? {owner:{...owner}} : {})})
       })()
       return result
     } finally {

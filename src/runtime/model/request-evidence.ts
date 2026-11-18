@@ -1,8 +1,18 @@
 import type { ChatMessage } from './adapter'
+import type { ExecutionScope } from '../../shared/contracts.generated'
+import { validateRunnerContract } from '../../shared/runner-validation'
+import { ContractError } from '../../shared/validation'
 
 export interface RequestLink { request_id: string; evidence_event_id: string }
-export interface RequestEvidence { version: 1; request_id: string; purpose: string; stage: string | null; entries: Record<string, any>[]; originals: Record<string, any>[]; supplements: Record<string, any>[]; reviewed_requests: RequestLink[] }
+export interface ConversationSource { task_id: string; id: string; sequence: number; kind: string }
+export interface RequestEvidence { version: 1; request_id: string; purpose: string; stage: string | null; entries: Record<string, any>[]; originals: Record<string, any>[]; supplements: Record<string, any>[]; reviewed_requests: RequestLink[]; owner?: ExecutionScope }
 
+export function captureExecutionScope(value: unknown, task?: string): ExecutionScope | undefined {
+  if (value === undefined) return
+  const owner = validateRunnerContract('runner_execution_scope', value)
+  if (task !== undefined && owner.task_id !== task) throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Execution owner belongs to another task')
+  return { ...owner }
+}
 
 export interface MessageEvidence {
   kind: string
@@ -15,30 +25,34 @@ export interface MessageEvidence {
   reuse_tool_call_id?: string
   linked_action?: { kind: 'action'; id: string }
   owner_run_id?: string
+  owner?: ExecutionScope
+  conversation_source?: ConversationSource
   reviewed_requests?: RequestLink[]
 }
 
 // Weak metadata never enters stored records or the provider's message schema.
 const evidence = new WeakMap<ChatMessage, MessageEvidence>()
 export function attachEvidence<T extends ChatMessage>(message: T, value: MessageEvidence): T {
-  evidence.set(message, value)
+  evidence.set(message, value.owner === undefined ? value : { ...value, owner: captureExecutionScope(value.owner) })
   return message
 }
 export const evidenceMessage = attachEvidence
 export const messageEvidence = (message: ChatMessage): MessageEvidence | undefined => evidence.get(message)
 export function copyEvidence<T extends ChatMessage>(from: ChatMessage, to: T, changes?: Partial<MessageEvidence>): T {
   const value = evidence.get(from)
-  if (value) evidence.set(to, { ...value, ...changes })
+  if (value) attachEvidence(to, { ...value, ...changes })
   return to
 }
 
-export function requestEvidence(messages: ChatMessage[], request_id: string, purpose: string): RequestEvidence {
+export function requestEvidence(messages: ChatMessage[], request_id: string, purpose: string, owner?: ExecutionScope): RequestEvidence {
+  const capturedOwner = captureExecutionScope(owner)
   const bodies = new Map<string, number>()
   const entries = messages.flatMap((message, index) => {
     const original = evidence.get(message)
     if (!original) return []
-    const { reuse_tool_call_id, response_request, owner_run_id: _owner, reviewed_requests: _reviewed, ...facts } = original
-    const entry: Record<string, unknown> = { message: index, ...facts, ...(response_request ? { response_request_id: response_request.request_id } : {}) }
+    const { reuse_tool_call_id, response_request, owner_run_id: _owner, reviewed_requests: _reviewed, conversation_source: _conversation, owner: messageOwner, ...facts } = original
+    const capturedMessageOwner = captureExecutionScope(messageOwner, capturedOwner?.task_id)
+    const entry: Record<string, unknown> = { message: index, ...facts, ...(capturedMessageOwner ? { owner: capturedMessageOwner } : {}), ...(response_request ? { response_request_id: response_request.request_id } : {}) }
     if (message.role === 'tool') {
       try {
         const value = JSON.parse(message.content ?? '')
@@ -61,5 +75,5 @@ export function requestEvidence(messages: ChatMessage[], request_id: string, pur
     return [entry]
   })
   const originals = entries.filter(entry => entry.source).map(entry => ({ at: `messages/${entry.message}`, source: entry.source, recorded_sequence: entry.recorded_sequence, representation: entry.representation }))
-  return { version: 1, request_id, purpose, stage: purpose === 'summary' ? 'current-context' : null, entries, originals, supplements: [], reviewed_requests: [] }
+  return { version: 1, request_id, purpose, stage: purpose === 'summary' ? 'current-context' : null, entries, originals, supplements: [], reviewed_requests: [], ...(capturedOwner ? { owner: capturedOwner } : {}) }
 }

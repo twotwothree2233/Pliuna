@@ -19,7 +19,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     await page.getByLabel('任务名称').fill('连续阅读验收')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await chooseModel(page, 'fixture')
-    const send = async (text: string) => { await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: /发送 · 新 Run/ }).click() }
+    const send = async (text: string) => { await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: /发送消息/ }).click() }
     await send('理解原子性')
     await expect(page.getByRole('heading', { name: '思考与记录' })).toBeVisible()
     await page.getByLabel('你的想法').fill('第一份中文作答')
@@ -147,7 +147,7 @@ test('windowed answer actions use the selected answer independently of segmented
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('分段作答操作')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    const send = async (text: string) => { await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: '发送 · 新 Run', exact: true }).click() }
+    const send = async (text: string) => { await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: '发送消息', exact: true }).click() }
     await send('创建长作答练习')
     await expect(page.getByRole('heading', { name: '长作答练习', exact: true })).toBeVisible()
     await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')

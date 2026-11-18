@@ -110,7 +110,7 @@ export const modelTools: ToolDefinition[] = [
     "type": "function",
     "function": {
       "name": "write",
-      "description": "写入任务内容。input_json 是操作输入的 JSON 文本，按契约解码一次。示例：{\"operation\":\"resource.create\",\"input_json\":\"{\\\"display_name\\\":\\\"说明\\\",\\\"content\\\":{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"正文\\\"}}\"}",
+      "description": "写入任务内容。resource.create 优先用 input 对象，避免重复转义。其他操作用 input_json JSON 文本。二者恰一，仍按操作契约校验。示例：{\"operation\":\"resource.create\",\"input\":{\"display_name\":\"说明\",\"content\":{\"type\":\"text\",\"text\":\"正文\"}}}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -120,12 +120,15 @@ export const modelTools: ToolDefinition[] = [
           },
           "input_json": {
             "type": "string"
+          },
+          "input": {
+            "type": "object"
           }
         },
         "required": [
-          "operation",
-          "input_json"
+          "operation"
         ],
+        "anyOf": [{ "required": ["input"] }, { "required": ["input_json"] }],
         "additionalProperties": false
       }
     }

@@ -1,0 +1,8 @@
+{
+  "type": "maintenance.replica.reauthorize.confirm",
+  "token": "10000000-0000-4000-8000-000000000001",
+  "operation_id": "20000000-0000-4000-8000-000000000001",
+  "authorization_id": "30000000-0000-4000-8000-000000000001",
+  "inputs_saved": true,
+  "confirm_reauthorize_replica": true
+}

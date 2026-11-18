@@ -1,8 +1,9 @@
 import { expect, it } from 'vitest'
+import Ajv2020 from 'ajv/dist/2020.js'
 import { assembleContext, historyGroups, type HistoryRecord } from '../../src/runtime/model/context'
 import { RunBudget } from '../../src/runtime/model/agent'
 import { messageEvidence } from '../../src/runtime/model/request-evidence'
-import { operationContract } from '../../src/runtime/model/operation-contracts'
+import { contractRepresentation, operationContract } from '../../src/runtime/model/operation-contracts'
 import { staticDocument } from '../../src/runtime/static-export'
 import type { Bundle } from '../../src/shared/contracts.generated'
 import { modelTools } from '../../src/runtime/model/tools'
@@ -51,6 +52,22 @@ it('exposes an exact discovery entry without expanding the constant tool schemas
     expect((tool.function.parameters as any).required.length).toBeLessThanOrEqual(2)
     expect(JSON.stringify(tool.function.parameters)).not.toMatch(/\$defs|oneOf|view_op|bundle/)
   }
+})
+
+it('discovers the resource bundle contract and validates nested references through its delivered schema', () => {
+  const contract = operationContract('resource.create')!
+  const guide = contractRepresentation(contract, {}) as { sections: { id: string; read: { kind: string; id: string; selection: { view: 'schema'; section: string } } }[] }
+  const link = guide.sections.find(section => section.id === 'bundle.references')!.read
+  expect(link).toEqual({ kind: 'object_type', id: 'resource.create', selection: { view: 'schema', section: 'bundle.references' } })
+
+  const schema = contractRepresentation(contract, link.selection) as Record<string, unknown>
+  const check = new Ajv2020({ strict: false, allErrors: true }).compile(schema)
+  expect(check([{ name: 'source', target: { kind: 'resource', id: 'source-resource' } }])).toBe(true)
+  expect(check([])).toBe(true)
+  expect(check([{ kind: 'resource', id: 'source-resource', name: 'source.md' }])).toBe(false)
+  expect(check.errors).toContainEqual(expect.objectContaining({ instancePath: '/0', keyword: 'required', params: { missingProperty: 'target' } }))
+
+  expect(contractRepresentation(contract, { view: 'schema', section: 'bundle' })).toEqual(contractRepresentation(operationContract('surface.update')!, { view: 'schema', section: 'bundle' }))
 })
 
 it('exports the exact Surface contract example as classified learning, without omissions or active content', () => {

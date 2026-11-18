@@ -23,7 +23,7 @@ function nextRun() { store.handle({ type: 'run.cancel', task_id: task.task.id, r
 it.each([null, true, 42, 'JSON-looking {"a":1}', [1, '中😀'], { a: [true, null], text: '中文😀' }])('preserves actual JSON resource value %j', value => {
   const result = create({ type: 'json', value }); expect(result.execution).toBe('success')
   expect(read(result.data.id).data.content).toEqual({ type: 'json', value })
-  expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 1 })
+  expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 2 })
 })
 it('stores plain text without executing markup or interpreting display names as paths', () => {
   const text = '<script>globalThis.SHOULD_NOT_RUN=1</script>\n中文😀'

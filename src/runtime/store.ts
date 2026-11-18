@@ -1,14 +1,13 @@
 import { newTestIdentityEncoding } from './file-format'
-import { assertDirectorySync, managedRegularFile } from '../platform/files'
-import { protectPrivatePath } from '../platform/permissions'
+import { assertDirectorySync } from '../platform/files'
 import { MontyCalls } from './monty/calls'
 import { MONTY_ID, montyContract } from './monty/contract'
-import { deadline } from './model/limits'
 import Database from 'better-sqlite3'
 import { randomUUID, createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import coreSql from '../shared/contracts/001-core.sql?raw'
+import { openBusinessDatabase, prepareBusinessDatabase, purgeRunnerTask } from './schema-upgrade'
+import { productionRunsPerTask } from './features'
 import Ajv2020 from 'ajv/dist/2020.js'
 import approvalTemplate from './model/prompts/approval-v0.1.txt?raw'
 import coreSchema from '../shared/contracts/core.schema.json'
@@ -28,7 +27,7 @@ import { ReadCursors } from './model/read-cursor'
 import { ModelError, type ChatMessage } from './model/adapter'
 import defaults from '../shared/contracts/development-defaults.json'
 import type { Bundle, IpcRequest, ModelRequest } from '../shared/contracts.generated'
-import type { Snapshot, Task } from '../shared/types'
+import type { Snapshot, Task, RunnerProjection } from '../shared/types'
 import { ContractError, assertContract, validateIpc, validateModel } from '../shared/validation'
 import { answerValues, checkBundle, checkDraft, fieldSchema, getField, setField, schemaCheck } from './managed'
 import { replacementDraft } from './surface-transition'
@@ -45,7 +44,7 @@ import { MaterialImports } from './material-imports'
 import { RequestQueue } from './request-queue'
 import { PluginControl } from './plugins/control'
 import { PluginDirectory } from './plugins/directory'
-import { PluginProcesses, type PluginIdentity } from './plugins/process'
+import { PluginProcesses, type PluginIdentity, type PluginInstanceEvent } from './plugins/process'
 import { PluginActions, type PluginActionContext } from './plugins/actions'
 import { PluginUploads } from './plugins/uploads'
 import { PluginCalls } from './plugins/calls'
@@ -62,12 +61,43 @@ import { backgroundCheck } from './export-check-runner'
 import { RpcError } from './plugins/rpc'
 import { boundedRecent, snapshotValue } from './snapshot-summary'
 import { runActivity } from './run-activity'
+import { RunnerWorkState, type QualifiedAttempt } from './runner/work-state'
+import { WorkerContext } from './runner/worker-context'
+import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory } from './runner/conversation'
+import type { WorkerProfile } from './runner/worker-profile'
+import { captureExecutionScope } from './model/request-evidence'
+import type { ExecutionScope, ExecutionAttempt, InputEvent, GoalRevision } from '../shared/contracts.generated'
+import { aggregateRunOutcome, type WorkRunState } from './runner/run-outcome'
+import { runnerFailureReason } from './runner/failure-reason'
+import { TaskRunner, type TaskRunnerRoute, type TaskRunnerInstallation, type TaskRunnerEffect, type TaskRunnerStatusQuery, type TaskRunnerStatusPage } from './runner/task-runner'
+import { RunnerArtifactState } from './runner/artifact-state'
+import { RunnerCompositionState } from './runner/composition-state'
+import { RunnerBudgetLedger } from './runner/budget'
+import { RunnerBudgetAccounting, type ToolAccountingPhase } from './runner/budget-accounting'
+import type { Collator } from './runner/collator'
+import { RunnerAdmission, admissionWork, type RunnerAdmissionWork } from './runner/admission'
+import { createProducerProfile, ruleRouterOutline, validateProducerBundle, type ProducerResult } from './runner/production-profile'
+import { RunnerHostProduction } from './runner/host-production'
+import { RunnerHostRecovery } from './runner/host-recovery'
+import { RunnerHostProgress } from './runner/host-progress'
+import { createRunnerDiagnostic, type RunnerDiagnostic } from './runner/diagnostic'
+import type { ProgressDiagnosis } from './runner/progress-observer'
+import { RunnerHostStatus } from './runner/host-status'
+import { assertRunnerId, compositionReadyAt, RUNNER_LIMITS } from './runner/limits'
+import { RunnerHostComposition, type PrepareRunnerCompositionOptions, type PreparedRunnerComposition, type PublishRunnerCompositionOptions, type CompositionPublicationHooks } from './runner/host-composition'
+import type { PublicationOperation, PublicationResult } from './runner/publication-state'
+import { freezeExportComposition } from './runner/export-selection'
+import { exportCompositionIssue, exportCompositionSummary, type FrozenExportComposition } from './export-composition'
+import type { LogicalWork, PresentationPlan } from '../shared/contracts.generated'
 
 const id = () => randomUUID()
 const now = () => new Date().toISOString()
 const json = JSON.stringify
 function fail(code: string, message: string): never { throw new ContractError(code, message) }
 type Row = Record<string, any>
+type ExecutionActionContext = (PluginActionContext | { id: string; signal: AbortSignal; owner: ExecutionScope; authorize(request: unknown): void; valid(): void; identity?: never }) & { hostPublication?: boolean }
+type WorkerAgent = { owner: ExecutionScope; controller: AbortController; main: ModelLease; compact?: ModelLease; approval?: ModelLease; budget: RunBudget; mode: 'manual' | 'assisted'; context: WorkerContext; profile: WorkerProfile<unknown>; collator?: Collator; diagnostic?: RunnerDiagnostic; messages?: ChatMessage[]; state: 'running' | 'waiting'; reason?: string }
+type WorkerInput = { text: string; conversation?: ConversationHistory }
 type SurfaceWrite = Extract<ModelRequest, { type: 'write' }> & { input: Extract<Extract<ModelRequest, { type: 'write' }>['input'], { type: 'surface.update' }> }
 type SurfaceOperation = SurfaceWrite['input']['operations'][number]
 type PreparedView = { op: Extract<SurfaceOperation, { type: 'view.create' | 'view.replace' | 'view.remove' }>; viewId: string; resourceId: string; stageId: string; hash: string; body: Buffer; bundle: Bundle; draft: Record<string, unknown>; auto: boolean; answers: number; direct: import('./export-control').ExportResource[]; source?: BundleSource }
@@ -101,7 +131,6 @@ export class RuntimeStore {
   private pluginChildOwners = new Map<string, string>()
   epoch = id()
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
-  private runDeadlines = new Map<string, () => void>()
   private storage!: StorageLifecycle
   private queries: ObjectQueries
   private root: string
@@ -111,13 +140,27 @@ export class RuntimeStore {
   private closed = false
   private closing = false
   private acceptWork(): void { if (this.closing || this.closed) fail('SHUTTING_DOWN', 'Host is shutting down; no new work is accepted') }
-  private agents = new Map<string, { controller: AbortController; main: ModelLease; compact?: ModelLease; manualCompact?: boolean; compactOnly?: boolean; compactUnchanged?: string; messages?: ChatMessage[]; approval?: ModelLease; budget: RunBudget; mode: 'manual' | 'assisted' }>()
+  private agents = new Map<string, { controller: AbortController; main: ModelLease; compact?: ModelLease; manualCompact?: boolean; compactOnly?: boolean; compactUnchanged?: string; messages?: ChatMessage[]; approval?: ModelLease; budget: RunBudget; mode: 'manual' | 'assisted'; managed?: boolean }>()
+  private workers = new Map<string, WorkerAgent>()
+  private taskRunner?: TaskRunner
+  private runnerArtifactState?: RunnerArtifactState
+  private runnerCompositionState?: RunnerCompositionState
+  private compositionPublications = new Map<string, Promise<PublicationResult>>()
+  private runnerAdmission = new RunnerAdmission()
+  private pendingWorkers = new Map<string, { task: string; work: RunnerAdmissionWork; start(): void; reject(error: unknown): void }>()
+  private pumpingWorkers = new Set<string>()
+  private preparingRunnerGoals = new Set<string>()
+  private recoveringRunnerInputs = new Set<string>()
+  private runnerRecoveryFlight?: Promise<void>
+  private runnerProgressObservedAt = new Map<string, number>()
+  private runnerCompositionMerges = new Map<string, { first: number; latest: number; trigger: string; timer: ReturnType<typeof setTimeout> }>()
+  private runnerCompositionWaiting = new Map<string, { trigger: string; previousBatchId?: string }>()
   private approvalMode: 'manual' | 'assisted' = 'manual'
   private approvalModel = ''
   private approvalWaiters = new Map<string, { resolve: () => void; timer: ReturnType<typeof setTimeout> }>()
-  private surfaceWaiters = new Map<string, { taskId: string; runId: string | null; context?: PluginActionContext; request: SurfaceWrite; reset: boolean; expires: string; check(): void; resolve: (proceed: boolean | ContractError) => void; timer: ReturnType<typeof setTimeout> }>()
+  private surfaceWaiters = new Map<string, { taskId: string; runId: string | null; context?: ExecutionActionContext; request: SurfaceWrite; reset: boolean; expires: string; check(): void; resolve: (proceed: boolean | ContractError) => void; timer: ReturnType<typeof setTimeout> }>()
   private surfaceCompletions = new Map<string, { promise: Promise<void>; resolve(): void }>()
-  constructor(directory: string, readonly models = new ModelService(), private features: { viewReplacement: boolean; monty?: boolean } = { viewReplacement: false }, private exportRunner?: ExportRunner, private appRuntime?: string, checkRunner: CheckRunner = backgroundCheck) {
+  constructor(directory: string, readonly models = new ModelService(), private features: { viewReplacement: boolean; monty?: boolean; runner?: { productionRuns: 1 | 2; collator?: 'rule' | 'model'; diagnostics?: boolean } } = { viewReplacement: false }, private exportRunner?: ExportRunner, private appRuntime?: string, checkRunner: CheckRunner = backgroundCheck) {
     this.exportChecks = new ExportChecks(checkRunner)
     this.root = directory
     mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -130,15 +173,7 @@ export class RuntimeStore {
     this.journal = new RestoreJournal(directory, createEncoding)
     this.journal.selected()
     this.exports = new ExportControl(directory, true, true, this.journal.identityEncoding)
-    this.db = new Database(managedRegularFile(directory, this.journal.selected()))
-    protectPrivatePath(managedRegularFile(directory, this.journal.selected()), 'file')
-    this.db.pragma('foreign_keys = ON')
-    this.db.pragma('journal_mode = WAL')
-    this.db.pragma('synchronous = FULL')
-    const version = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").get()
-    if (!version) this.db.transaction(() => { this.db.exec(coreSql); this.db.prepare('UPDATE schema_version SET applied_at=?').run(now()) })()
-    const versions = this.db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]
-    if (versions.length !== 1 || versions[0]?.version !== 1) { fail('SCHEMA_VERSION', 'Unsupported database version; migration required') }
+    this.db = prepareBusinessDatabase(directory, this.journal, () => this.plugins.list())
     this.storage = new StorageLifecycle(this.db, this.root, this.epoch, (action, task) => this.pluginActions?.owner(action, task) || this.pluginUploads?.owns(action, task) || false)
     this.recovery = new RecoveryManager(this.db, this.root, () => this.executionBusy(), held => this.storage.pause(held), () => ({ models: this.models.recoverySettings(), approval: { mode: this.approvalMode, model_id: this.approvalModel }, features: { ...this.features } }), this.journal, file => this.rebindDatabase(file), () => this.plugins.list(), () => this.pluginProcesses.stopForRebind())
     this.gc = new RestrictedGc(this.root, () => this.db, () => this.journal.selected(), () => this.journal.retainedDatabases(), key => this.exports.protects(key) || this.journal.resourceRetired(key) || this.recovery.protects(key), () => this.recovery.retainedPointIds(), file => this.journal.retired(file), file => this.journal.released(file), this.journal.identityEncoding)
@@ -146,9 +181,10 @@ export class RuntimeStore {
     this.replicas = new ReplicaRetirement(this.root, this.journal, this.recovery, (exclude?: string) => this.gc.assertDependencies(exclude))
     this.materials = new MaterialImports(this.db, this.root, this.epoch, this.storage, this.journal, (task, kind, data) => { this.record(task, kind, data) })
     if ((this.recovery.status() as Row).phase !== 'blocked') this.db.transaction(() => {
+      new RunnerHostRecovery(this.db, this.epoch).recover()
       this.db.prepare("UPDATE runs SET state=COALESCE(intended_terminal,'interrupted'), primary_reason=COALESCE(primary_reason,'runtime_restart'), commit_valid=0,ended_at=? WHERE state IN ('running','waiting')").run(now())
       this.db.prepare("UPDATE calls SET state='ended',commit_valid=0,execution=COALESCE(execution,CASE WHEN dispatch='not_sent' THEN 'not_executed' ELSE 'unknown' END),ended_at=? WHERE state!='ended'").run(now())
-      this.db.prepare("UPDATE actions SET state='ended',result=COALESCE(result,'not_executed'),commit_valid=0,ended_at=? WHERE state!='ended'").run(now())
+      this.db.prepare("UPDATE actions SET state='ended',result=COALESCE(result,CASE WHEN state IN ('registered','waiting') AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.id=actions.call_id AND c.dispatch!='not_sent') THEN 'not_executed' ELSE 'unknown' END),commit_valid=0,ended_at=? WHERE state!='ended'").run(now())
       this.db.prepare("UPDATE approvals SET validity='revoked' WHERE validity='valid'").run()
       this.db.prepare("UPDATE requests SET state='cancelled' WHERE state IN ('queued','confirmation_required')").run()
       this.db.prepare("UPDATE tasks SET state='stopped' WHERE state='stopping'").run()
@@ -170,7 +206,7 @@ export class RuntimeStore {
     this.derivations = new PluginDerivations(this.db, this.root)
     this.derivations.validateStored()
     this.pluginDrafts = new PluginDrafts(defaults.approval.ttl_ms, (identity, task) => this.qualifyPlugin(identity, task))
-    this.monty = new MontyCalls(this.db,this.root,this.storage,(task,run)=>{this.qualify(task,run)},(task,refs)=>this.validateDataReferences(task,refs),(task,kind,value)=>this.record(task,kind,value),this.appRuntime ?? process.execPath,!!this.features.monty)
+    this.monty = new MontyCalls(this.db,this.root,this.storage,(task,run)=>{this.qualify(task,run)},(task,refs)=>this.validateDataReferences(task,refs),(task,kind,value)=>this.operationEvent(task,kind,value),this.appRuntime ?? process.execPath,!!this.features.monty)
     this.pluginDirectory = new PluginDirectory(this.root, this.plugins, this.monty.available ? {id:MONTY_ID,description:montyContract.description,contract:montyContract} : undefined)
     this.pluginQueries = new PluginQueries(this.pluginDirectory)
     this.pluginProcesses = new PluginProcesses(this.root, async (copy, task) => {
@@ -178,15 +214,15 @@ export class RuntimeStore {
       this.task(task)
       if (!this.plugins.available(task, copy.digest)) fail('PLUGIN_DISABLED', 'Plugin is not currently enabled for this task')
       await this.plugins.executable(copy.digest)
-    }, (identity, method, params) => this.pluginCallback(identity, method, params), () => { if (!this.closed) { this.pluginActions?.check(); this.pluginUploads?.check(); for (const pending of this.pluginIndependentCalls.values()) { try { pending.context.valid() } catch { pending.controller.abort() } } } }, this.appRuntime)
-    this.pluginActions = new PluginActions(this.db, this.epoch, (identity, task) => this.qualifyPlugin(identity, task), (task, raw, context) => this.executePluginAction(task, raw, context), (identity, action, status) => this.pluginProcesses.changed(identity, action, status))
+    }, (identity, method, params) => this.pluginCallback(identity, method, params), () => { if (!this.closed) { this.pluginActions?.check(); this.pluginUploads?.check(); for (const pending of this.pluginIndependentCalls.values()) { try { pending.context.valid() } catch { pending.controller.abort() } }; this.settlePluginCleanup() } }, this.appRuntime, event => this.pluginInstanceEvent(event))
+    this.pluginActions = new PluginActions(this.db, this.epoch, (identity, task) => this.qualifyPlugin(identity, task), (task, raw, context) => this.executePluginAction(task, raw, context), (identity, action, status) => this.pluginProcesses.changed(identity, action, status), identity => identity.call_id ? this.pluginCalls.source(identity.call_id)?.source : undefined)
     this.pluginUploads = new PluginUploads(this.db, this.root, this.epoch, this.storage, (identity, task, call) => {
       this.qualifyPlugin({ ...identity, call_id: call }, task)
       if (identity.call_id !== call) fail('PLUGIN_UPLOAD_SOURCE_INVALID', 'Upload must belong to the active call on this connection')
       const source = this.pluginCalls.source(call), row = this.db.prepare('SELECT commit_valid,state FROM calls WHERE id=?').get(call) as Row | undefined
       if (!source || source.digest !== identity.digest || !row?.commit_valid || !['executing', 'finalizing'].includes(row.state)) fail('PLUGIN_UPLOAD_SOURCE_INVALID', 'Call is no longer executable')
     }, resource => this.journal.assertResource({ id: resource, storage_key: resource }), (identity, task) => this.qualifyPlugin(identity, task))
-    this.pluginCalls = new PluginCalls(this.db, this.epoch, this.plugins, this.pluginDirectory, this.pluginProcesses, (task, references) => this.validateDataReferences(task, references as any), (task, kind, data) => { this.record(task, kind, data) }, call => this.pluginUploads.commit(call), (call, success) => { this.pluginUploads.settled(call, success); this.pluginActions.check() }, (task, call, instance, digest, global, bytes) => this.pluginUploads.receiveResult({ instance_id: instance, digest, task_id: global ? null : task, call_id: call }, task, call, bytes), this.derivations)
+    this.pluginCalls = new PluginCalls(this.db, this.epoch, this.plugins, this.pluginDirectory, this.pluginProcesses, (task, references) => this.validateDataReferences(task, references as any), (task, kind, data) => { this.operationEvent(task, kind, data) }, call => this.pluginUploads.commit(call), (call, success) => { this.pluginUploads.settled(call, success); this.pluginActions.check() }, (task, call, instance, digest, global, bytes) => this.pluginUploads.receiveResult({ instance_id: instance, digest, task_id: global ? null : task, call_id: call }, task, call, bytes), this.derivations)
   }
   private qualifyPlugin(identity: PluginIdentity, task: string): void {
     this.acceptWork()
@@ -201,6 +237,7 @@ export class RuntimeStore {
   private executePluginAction(task: string, raw: unknown, context: PluginActionContext): Promise<unknown> {
     context.valid()
     const request = validateModel({ type: 'write', input: raw })
+    context.authorize?.(request)
     if (request.type !== 'write') fail('INVALID_REQUEST', 'Mutation required')
     if (request.input.type === 'task_data.create' || request.input.type === 'task_data.replace' || request.input.type === 'task_data.remove') return this.dataWrite(task, null, request.input, context.signal, context)
     if (request.input.type === 'resource.create') return Promise.resolve(this.resourceCreate(task, null, request.input, context))
@@ -211,13 +248,33 @@ export class RuntimeStore {
     }
     return Promise.reject(new ContractError('PLUGIN_ACTION_UNSUPPORTED', 'Mutation unsupported'))
   }
-  private sourceValid(task: string, run: string | null, context?: PluginActionContext): void {
+  private sourceValid(task: string, run: string | null, context?: ExecutionActionContext): void {
     if (context) context.valid()
     else if (run) this.qualify(task, run)
     else fail('SOURCE_INVALID', 'No live execution source')
   }
-  private invokePlugin(task: string, run: string, input: Extract<ModelRequest, { type: 'call' }>['input'], signal: AbortSignal): Promise<unknown> {
-    return this.pluginCalls.call(task, input.capability, input.arguments, input.references, { run_id: run, chain: [], signal, valid: () => { this.qualify(task, run) }, approve: (action, request, cancellation) => this.awaitApproval(task, run, action, request, cancellation, 'plugin-invoke-v1'), checkApproval: (action, request) => this.checkApproval(action, request, task, run, 'plugin-invoke-v1') })
+  private actionState(runId: string | null, state: 'running' | 'waiting', reason?: string, context?: ExecutionActionContext): void {
+    if (context?.hostPublication && context.owner) {
+      context.valid()
+      const work = new RunnerWorkState(this.db, this.epoch), attempt = work.attempt(context.owner.attempt_id)
+      work.updateAttempt({ ...attempt, state })
+      this.db.prepare('UPDATE runs SET state=?,wait_reason=? WHERE id=? AND commit_valid=1').run(state, reason ?? null, runId)
+    } else if (context?.owner) {
+      const worker = this.workers.get(context.owner.attempt_id)
+      if (!worker) fail('RUNNER_OWNERSHIP_INVALID', 'Action attempt is unavailable')
+      this.workerState(worker!, state, reason)
+    } else this.db.prepare('UPDATE runs SET state=?,wait_reason=? WHERE id=? AND commit_valid=1').run(state, reason ?? null, runId)
+  }
+  private restoreActionState(runId: string | null, context?: ExecutionActionContext): void {
+    if (this.closed) return
+    try { this.actionState(runId, 'running', undefined, context) } catch (error) {
+      if (!context?.owner || !(error instanceof ContractError)) throw error
+    }
+  }
+  private invokePlugin(task: string, run: string, input: Extract<ModelRequest, { type: 'call' }>['input'], signal: AbortSignal, worker?: WorkerAgent): Promise<unknown> {
+    const valid = () => { this.qualify(task, run); if (worker) this.qualifyWorker(worker.owner.attempt_id) }
+    const context = (action: string, cancellation: AbortSignal): ExecutionActionContext | undefined => worker ? { id: action, signal: cancellation, owner: worker.owner, valid, authorize: (request: ModelRequest) => worker.profile.authorize(request) } : undefined
+    return this.pluginCalls.call(task, input.capability, input.arguments, input.references, { run_id: run, chain: [], signal, valid, ...(worker ? { owner: worker.owner, authorize: (request: ModelRequest) => worker.profile.authorize(request) } : {}), approve: (action, request, cancellation) => this.awaitApproval(task, run, action, request, cancellation, 'plugin-invoke-v1', context(action, cancellation)), checkApproval: (action, request) => this.checkApproval(action, request, task, run, 'plugin-invoke-v1') })
   }
   private pluginCallback(identity: { instance_id: string; digest: string; task_id: string | null; call_id: string | null }, method: string, params: Record<string, unknown>): unknown {
     if (!this.pluginProcesses.live(identity)) fail('PLUGIN_SOURCE_INVALID', 'Connection is no longer valid')
@@ -238,12 +295,19 @@ export class RuntimeStore {
       if (Object.keys(params).sort().join(',') !== 'input,task_id') throw new RpcError(-32602, 'Invalid query params')
       const target = allowed(task), query = validateModel({ type: method === 'objects.list' ? 'list' : 'read', input: params.input })
       if (query.type !== 'list' && query.type !== 'read') throw new RpcError(-32602, 'Invalid query')
-      return Promise.resolve(this.query(target, query, 'plugin:' + identity.instance_id)).then(result => { if (!this.pluginProcesses.live(identity)) fail('PLUGIN_SOURCE_INVALID', 'Connection ended during query'); allowed(target); return result })
+      const source = identity.call_id ? this.pluginCalls.source(identity.call_id)?.source : undefined
+      source?.authorize?.(query)
+      return Promise.resolve(this.query(target, query, source?.owner?.attempt_id ?? 'plugin:' + identity.instance_id)).then(result => { if (!this.pluginProcesses.live(identity)) fail('PLUGIN_SOURCE_INVALID', 'Connection ended during query'); allowed(target); source?.authorize?.(query); return result })
     }
     if (method === 'resources.read_bytes' || method === 'materials.derive') {
       const target = allowed(task)
       if (!identity.call_id) fail('PLUGIN_SOURCE_INVALID', 'Binary reads and derivation require a live Call')
       const call = identity.call_id!
+      const source = this.pluginCalls.source(call)?.source
+      if (source?.authorize) {
+        if (method === 'materials.derive') fail('WORKER_CAPABILITY_DENIED', 'Worker profile does not grant this host operation')
+        source.authorize(validateModel({ type: 'read', input: { target: { kind: 'resource', id: params.resource_id } } }))
+      }
       const valid = () => {
         allowed(target); this.qualifyPlugin(identity, target)
         const row = this.db.prepare('SELECT state,commit_valid FROM calls WHERE id=?').get(call) as Row | undefined
@@ -281,8 +345,10 @@ export class RuntimeStore {
       if (Object.keys(params).sort().join(',') !== 'mutation,task_id') throw new RpcError(-32602, 'Invalid Surface draft params')
       const target = allowed(task), request = validateModel({ type: 'write', input: params.mutation })
       if (request.type !== 'write' || request.input.type !== 'surface.update') throw new RpcError(-32602, 'Surface mutation required')
+      const source = identity.call_id ? this.pluginCalls.source(identity.call_id)?.source : undefined
+      source?.authorize?.(request)
       if (request.input.operations.some(op => op.type !== 'view.create') && !this.features.viewReplacement) fail('CAPABILITY_DISABLED', 'View replacement remains disabled')
-      const context: PluginActionContext = { id: '', identity, signal: new AbortController().signal, valid: () => this.qualifyPlugin(identity, target) }
+      const context: PluginActionContext = { id: '', identity, signal: new AbortController().signal, ...(source?.owner ? { owner: source.owner } : {}), ...(source?.authorize ? { authorize: source.authorize } : {}), valid: () => { this.qualifyPlugin(identity, target); source?.authorize?.(request) } }
       return this.pluginDrafts.stage(identity, target, request.input, () => {
         const prepared = this.inspectReplacement(target, null, request.input as SurfaceWrite['input'], context)
         captureEvidence(this.db, this.root, target, request.input.type === 'surface.update' ? request.input.snapshot_sources : undefined)
@@ -298,7 +364,11 @@ export class RuntimeStore {
       }
       if (Object.keys(params).sort().join(',') === 'action,task_id') {
         const action = params.action as Row | null
-        if (action?.type === 'resource.upload') { const { type: _, ...declaration } = action; return this.pluginUploads.register(identity, allowed(task), declaration) }
+        if (action?.type === 'resource.upload') {
+          const source = identity.call_id ? this.pluginCalls.source(identity.call_id)?.source : undefined
+          if (source?.authorize) fail('WORKER_CAPABILITY_DENIED', 'Worker profile does not grant this host operation')
+          const { type: _, ...declaration } = action; return this.pluginUploads.register(identity, allowed(task), declaration)
+        }
         if (!action || Object.keys(action).sort().join(',') !== 'draft_id,type' || action.type !== 'surface.commit' || typeof action.draft_id !== 'string') throw new RpcError(-32602, 'Immutable Surface draft selector required')
         const target = allowed(task)
         const draft = action.draft_id
@@ -347,6 +417,21 @@ export class RuntimeStore {
   private pluginToolCallback(identity: PluginIdentity, method: string, params: Record<string, unknown>): unknown {
     if (method === 'tools.get' || method === 'tools.cancel') {
       if (Object.keys(params).join(',') !== 'call_id' || typeof params.call_id !== 'string' || this.pluginChildOwners.get(params.call_id) !== identity.instance_id || !this.pluginProcesses.live(identity)) throw new RpcError(-32602, 'Call does not belong to this connection')
+      const unavailable = (): never => { throw new RpcError(-32602, 'Call does not belong to this connection') }
+      const row = this.db.prepare('SELECT task_id,parent_call_id,limits_json FROM calls WHERE id=?').get(params.call_id) as Row | undefined
+      if (!row || identity.task_id !== null && identity.task_id !== row.task_id) return unavailable()
+      const source = identity.call_id ? this.pluginCalls.source(identity.call_id) : undefined
+      if (source && (source.task !== row.task_id || source.instance !== identity.instance_id)) return unavailable()
+      let current: ExecutionScope | undefined, stored: ExecutionScope | undefined
+      try {
+        current = captureExecutionScope(source?.source.owner, row.task_id)
+        stored = captureExecutionScope(JSON.parse(row.limits_json).owner, row.task_id)
+      } catch { return unavailable() }
+      if (current) {
+        if (!stored || Object.keys(current).length !== Object.keys(stored).length || Object.entries(current).some(([key, value]) => Reflect.get(stored!, key) !== value)) return unavailable()
+      } else if (stored && row.parent_call_id !== identity.call_id) return unavailable()
+      this.qualifyPlugin(identity, row.task_id)
+      source?.source.valid()
       if (method === 'tools.cancel') this.pluginCalls.cancel(params.call_id)
       return this.pluginCalls.status(params.call_id)
     }
@@ -365,11 +450,14 @@ export class RuntimeStore {
       const row = this.db.prepare('SELECT state,commit_valid FROM calls WHERE id=?').get(identity.call_id!) as Row | undefined
       if (!row?.commit_valid || row.state === 'ended' || active.controller.signal.aborted) fail('PLUGIN_SOURCE_INVALID', 'Parent call ended or was cancelled')
     }
+    const owner = active.source.owner
+    const accounting = owner ? new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: task, budget_id: new RunnerWorkState(this.db, this.epoch).run(owner.run_id).budget_id, attempt_id: owner.attempt_id }) : undefined
     return new Promise((resolve, reject) => {
       void this.pluginCalls.call(task, request.input.capability, request.input.arguments, request.input.references, {
-        run_id: active.source.run_id, parent_call_id: identity.call_id!, instance_id: identity.instance_id, chain: active.source.chain, budget: active.source.budget, signal: active.controller.signal, valid,
+        run_id: active.source.run_id, parent_call_id: identity.call_id!, instance_id: identity.instance_id, chain: active.source.chain, signal: active.controller.signal, valid, ...(active.source.owner ? { owner: active.source.owner } : {}), ...(active.source.authorize ? { authorize: active.source.authorize } : {}),
+        ...(accounting ? { accountTool: (operation: string, phase: ToolAccountingPhase) => { accounting.tool(operation, phase) } } : {}),
         approve: async (action, input, signal) => {
-          const context: PluginActionContext = { id: action, identity, signal, valid }
+          const context: PluginActionContext = { id: action, identity, signal, valid, ...(active.source.owner ? { owner: active.source.owner } : {}), ...(active.source.authorize ? { authorize: active.source.authorize } : {}) }
           this.pluginInvocationSources.set(action, context)
           try { await this.awaitApproval(task, active.source.run_id, action, input, signal, 'plugin-invoke-v1', context) }
           finally { this.pluginInvocationSources.delete(action) }
@@ -415,7 +503,11 @@ export class RuntimeStore {
         const current = this.one('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', task, resource.id)
         if (json(current) !== json(row)) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Material changed during final verification')
       }
-    })
+    }, (task, request) => this.runnerRunAvailable(task, request), this.features.runner ? (task, request, input) => {
+      const conversation = captureConversation(this.db, task)
+      const record = this.record(task, 'message.user', { text: input.text, request_id: request, resource_ids: input.resource_ids, import_ids: input.import_ids })
+      return { conversation, user_record_id: record }
+    } : undefined)
     if (this.closing) this.requests.close()
   }
   private requestSelection(config: string): Row {
@@ -426,6 +518,10 @@ export class RuntimeStore {
     if (this.approvalMode === 'assisted' && (!approval || !approval.roles.includes('approval') || approval.credential_missing)) fail('MODEL_NOT_VERIFIED', 'Approval configuration is unavailable')
     return { id: config, revision: main.revision, ...(config !== 'fixture' ? { base_url: main.base_url, wire_model_id: main.wire_model_id, compatibility_profile: main.compatibility_profile } : {}), approval_mode: this.approvalMode, ...(approval ? { approval_id: approval.id, approval_revision: approval.revision } : {}) }
   }
+  private runnerRunAvailable(task: string, request: string): boolean {
+    const active = (this.db.prepare("SELECT r.id run_id,r.task_id,r.request_id FROM runs r LEFT JOIN runner_runs n ON n.run_id=r.id WHERE r.task_id=? AND r.state IN ('running','waiting') AND (n.purpose IS NULL OR n.purpose='production')").all(task) as { task_id: string; run_id: string; request_id: string }[])
+    return this.runnerAdmission.runWait(task, request, active, this.features.runner?.productionRuns ?? productionRunsPerTask) === null
+  }
   private requestMaterial(task: string, id: string): Row {
     const row = this.one('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE r.id=? AND t.task_id=?', id, task)
     this.journal.assertResource(row)
@@ -435,14 +531,22 @@ export class RuntimeStore {
   private rebindDatabase(file: string): Database.Database {
     void this.exportChecks.stop().catch(() => {})
     if(this.monty?.busy()) fail('MONTY_CLEANUP_ACTIVE','Calculation cleanup must end before database switch')
+    for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
+    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
+    for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Database changed before dispatch'))
+    this.pendingWorkers.clear(); this.preparingRunnerGoals.clear(); this.recoveringRunnerInputs.clear(); this.runnerProgressObservedAt.clear()
+    this.runnerRecoveryFlight = undefined
+    this.runnerAdmission = new RunnerAdmission()
     this.requests?.close()
     this.materials.close()
     this.pluginDrafts.close(); for (const pending of this.pluginIndependentCalls.values()) pending.controller.abort(); this.pluginIndependentCalls.clear(); this.pluginUploads.close(); this.pluginActions.close(); this.pluginCalls.close(); this.pluginProcesses.close()
     this.storage.close()
     if (this.db.open) this.db.close()
-    this.db = new Database(managedRegularFile(this.root, file), { fileMustExist: true })
-    this.db.pragma('foreign_keys=ON'); this.db.pragma('journal_mode=WAL'); this.db.pragma('synchronous=FULL')
+    this.db = openBusinessDatabase(this.root, file)
     this.epoch = id(); this.sync.clear(); this.syncFacts.clear()
+    new RunnerHostRecovery(this.db, this.epoch).recover()
+    this.taskRunner = undefined
+    this.runnerArtifactState = undefined; this.runnerCompositionState = undefined
     this.storage = new StorageLifecycle(this.db, this.root, this.epoch, (action, task) => this.pluginActions?.owner(action, task) || this.pluginUploads?.owns(action, task) || false)
     this.materials = new MaterialImports(this.db, this.root, this.epoch, this.storage, this.journal, (task, kind, data) => { this.record(task, kind, data) })
     this.storage.pause(true)
@@ -451,14 +555,39 @@ export class RuntimeStore {
     this.readCursors.reset()
     this.initializePlugins()
     this.initializeRequests()
+    setImmediate(() => { if (!this.closed && !this.closing) void this.recoverRunnerWork().catch(() => {}) })
     return this.db
   }
   private executionBusy(): boolean {
     return !!(this.pluginProcesses?.cleaning() || this.monty?.busy() || this.exports?.busy() || this.requests?.busy() || this.agents.size || this.surfaceWaiters.size || this.surfaceCompletions.size || this.approvalWaiters.size || this.models.busy() || this.db.prepare("SELECT id FROM runs WHERE state IN ('running','waiting') UNION ALL SELECT id FROM actions WHERE state!='ended' UNION ALL SELECT id FROM calls WHERE state!='ended' UNION ALL SELECT id FROM cleanup_jobs WHERE necessary=1 AND state!='done' LIMIT 1").get())
   }
+  private pluginInstanceEvent(event: PluginInstanceEvent): void {
+    if (this.closed || !this.db?.open) return
+    const affected = event.call_ids.flatMap(call => {
+      const row = this.db.prepare('SELECT id,task_id,run_id FROM calls WHERE id=?').get(call) as Row | undefined
+      return row ? [row] : []
+    })
+    this.db.transaction(() => {
+      for (const task of new Set(affected.map(call => call.task_id as string))) {
+        const job = this.db.prepare("SELECT id,state,detail_json FROM cleanup_jobs WHERE task_id=? AND owner_kind='plugin_instance' AND owner_id=?").get(task, event.instance_id) as Row | undefined
+        const state = event.kind === 'cleanup_confirmed' ? 'done' : event.kind === 'cleanup_failed' ? 'failed' : 'pending'
+        const detail = json({ instance_id: event.instance_id, instance_key: event.instance_key, call_ids: event.call_ids, reason: event.reason })
+        if (job?.state === 'done') continue
+        if (job) this.db.prepare('UPDATE cleanup_jobs SET state=?,detail_json=?,next_attempt_at=NULL WHERE id=?').run(state, detail, job.id)
+        else this.db.prepare("INSERT INTO cleanup_jobs(id,task_id,owner_kind,owner_id,necessary,state,detail_json) VALUES (?,?,'plugin_instance',?,1,?,?)").run(id(), task, event.instance_id, state, detail)
+        this.record(task, `plugin.instance.${event.kind}`, { ...event })
+      }
+    })()
+    setImmediate(() => {
+      if (this.closed || !this.db.open) return
+      for (const call of affected) if (call.run_id) this.aggregateWorkerRun(call.task_id, call.run_id)
+      this.settlePluginCleanup()
+    })
+  }
   private settlePluginCleanup(): void {
     if (this.closed || !this.db?.open) return
     for (const row of this.db.prepare("SELECT id,task_id FROM runs WHERE commit_valid=0 AND intended_terminal IS NOT NULL AND state IN ('running','waiting')").all() as Row[]) {
+      if (this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(row.id)) { this.aggregateWorkerRun(row.task_id, row.id); continue }
       if (!this.agents.has(row.id) && !this.pluginCalls.busyRun(row.id) && !this.pluginProcesses.cleaning(row.task_id)) this.db.prepare("UPDATE runs SET state=intended_terminal,wait_reason=NULL,ended_at=? WHERE id=?").run(now(), row.id)
     }
     for (const row of this.db.prepare("SELECT id FROM tasks WHERE state='stopping'").all() as Row[]) {
@@ -489,6 +618,10 @@ export class RuntimeStore {
   }
   close(): void {
     if (this.closed) return
+    for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
+    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
+    for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Runtime closed before worker dispatch'))
+    this.pendingWorkers.clear()
     void this.exportChecks.stop().catch(() => {})
     if (this.monty?.busy()) fail('MONTY_CLEANUP_ACTIVE', 'Wait for calculation shutdown before closing storage')
     if (this.exportReaders.size) fail('EXPORT_GENERATION_ACTIVE', 'Wait for shutdown before closing an active export reader')
@@ -498,11 +631,12 @@ export class RuntimeStore {
     this.materials.close()
     this.storage.close()
     for (const agent of this.agents.values()) agent.controller.abort()
+    for (const worker of this.workers.values()) worker.controller.abort()
     for (const waiter of this.approvalWaiters.values()) { clearTimeout(waiter.timer); waiter.resolve() }
     this.approvalWaiters.clear(); this.models.close()
     for (const waiter of this.surfaceWaiters.values()) { clearTimeout(waiter.timer); waiter.resolve(false) }; this.surfaceWaiters.clear()
     for (const completion of this.surfaceCompletions.values()) completion.resolve(); this.surfaceCompletions.clear()
-    for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); for (const clear of this.runDeadlines.values()) clear(); this.runDeadlines.clear(); this.exports.close(); this.gc.close(); this.recovery.close(); this.journal.close(); this.plugins.close(); if (this.db.open) this.db.close(); this.owner.close() }
+    for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); this.exports.close(); this.gc.close(); this.recovery.close(); this.journal.close(); this.plugins.close(); if (this.db.open) this.db.close(); this.owner.close() }
   private one(sql: string, ...args: unknown[]): Row { const row = this.db.prepare(sql).get(...args) as Row | undefined; if (!row) fail('NOT_FOUND', 'Object not found'); return row }
   private task(taskId: string): Row { const t = this.one('SELECT * FROM tasks WHERE id=?', taskId); if (t.state === 'deleting') fail('NOT_FOUND', 'Task deleted'); return t }
   tasks(): Task[] { return this.db.prepare("SELECT id,title,state,revision FROM tasks WHERE state!='deleting' ORDER BY rowid DESC").all() as Task[] }
@@ -510,6 +644,21 @@ export class RuntimeStore {
     const t = this.task(taskId), eventId = id()
     this.db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)').run(eventId, taskId, t.next_sequence, kind, json(payload), now())
     this.db.prepare('UPDATE tasks SET next_sequence=next_sequence+1,revision=revision+1 WHERE id=?').run(taskId)
+    return eventId
+  }
+  private operationEvent(taskId: string, kind: string, payload: Row): string {
+    const eventId = this.record(taskId, kind, payload)
+    if (payload.owner && kind.endsWith('.ended') && typeof payload.call_id === 'string') {
+      const inputId = `operation:${payload.call_id}`
+      if (!this.db.prepare('SELECT 1 FROM runner_inputs WHERE input_event_id=?').get(inputId)) {
+        const owner = captureExecutionScope(payload.owner, taskId)!
+        this.runner().receive({ input_event_id: inputId, task_id: taskId, kind: 'operation_completed', record_id: eventId, operation_id: payload.call_id, run_id: owner.run_id, work_id: owner.work_id, ...(owner.purpose === 'production' ? { request_id: owner.request_id } : {}), stage: 'received' })
+      }
+      this.runner().advance(inputId)
+    }
+    if (payload.owner?.run_id) setImmediate(() => {
+      if (!this.closed && this.db.open) this.aggregateWorkerRun(taskId, payload.owner.run_id)
+    })
     return eventId
   }
   create(title: string): Snapshot {
@@ -562,7 +711,7 @@ export class RuntimeStore {
     const generated = generateExport({ root: this.root, title: this.task(task).title, resources: [...resources.values()], views: [{ bundle_id: view.bundle_resource_id, resource_ids: resourceIds, fragment_ids: bundle.export.filter(f => f.category === 'learning').map(f => f.id) }], answers: [] }, issue => diagnostics.push(issue))
     return { id: view.id, revision, view_id: historical ? view.view_id : view.id, history_id: history.id, selection: 'default-learning-only', complete: generated.issues.length === 0, issues: diagnostics, issue_codes: generated.issues, excluded_personal_fragments: bundle.export.filter(f => ['answer', 'feedback', 'mixed_personal'].includes(f.category)).map(f => f.id), notice: 'Checks this View revision only, not a saved file or semantic classification. No export job was created.' }
   }
-  private resolveExportSelection(r: Row): { rows: Row[]; selected: Row[]; resources: Map<string, any>; input: ExportInput } {
+  private resolveExportSelection(r: Row): { rows: Row[]; selected: Row[]; resources: Map<string, any>; input: ExportInput; composition?: FrozenExportComposition } {
     if (!['answer_ids,task_id,type', 'answer_ids,task_id,type,view_ids', 'answer_ids,expected_revision,task_id,type,view_ids', 'answer_ids,expected_revision,fragment_selection,task_id,type,view_ids'].includes(Object.keys({ ...r, type: 'export.prepare' }).filter(key => key !== 'offset').sort().join(',')) || (r.view_ids !== undefined && (!Array.isArray(r.view_ids) || !r.view_ids.length || r.view_ids.length > 50 || new Set(r.view_ids).size !== r.view_ids.length || r.view_ids.some((value: unknown) => typeof value !== 'string'))) || !Array.isArray(r.answer_ids) || r.answer_ids.length > 50 || new Set(r.answer_ids).size !== r.answer_ids.length || r.answer_ids.some((x: unknown) => typeof x !== 'string')) fail('INVALID_REQUEST', 'Invalid explicit answer selection')
     if (r.fragment_selection !== undefined && (!Array.isArray(r.fragment_selection) || r.fragment_selection.length !== r.view_ids.length || new Set(r.fragment_selection.map((s: Row) => s?.view_id)).size !== r.view_ids.length || r.fragment_selection.some((s: Row) => !s || Object.keys(s).sort().join(',') !== 'fragment_ids,view_id' || !r.view_ids.includes(s.view_id) || !Array.isArray(s.fragment_ids) || new Set(s.fragment_ids).size !== s.fragment_ids.length || s.fragment_ids.some((id: unknown) => typeof id !== 'string')))) fail('INVALID_REQUEST', 'Fragment selection must cover each explicitly selected View exactly once')
     if (r.expected_revision !== undefined && (!Number.isSafeInteger(r.expected_revision) || this.one('SELECT revision FROM surfaces WHERE task_id=?', r.task_id).revision !== r.expected_revision)) fail('VERSION_CONFLICT', 'Surface changed; reopen the export selection')
@@ -583,6 +732,7 @@ export class RuntimeStore {
         if (fragment.category !== 'learning' && (!fragment.personal_binding || !r.answer_ids.includes(fragment.personal_binding.answer_id))) fail('EXPORT_PERSONAL_SELECTION_REQUIRED', 'Explicitly select the matching answer and original question for each personal fragment')
         return fragment
       }) : bundle.export.filter(f => f.category === 'learning')).map((f: Bundle['export'][number]) => ({ id: f.id, category: f.category, ...(f.personal_binding ? { personal_binding: f.personal_binding } : {}) }))
+      v.learning_complete = v.fragments.length > 0 && bundle.export.filter(f => f.category === 'learning').every(fragment => v.fragments.some((selected: Row) => selected.id === fragment.id))
     })
     let answerBytes = 0
     for (const answer of r.answer_ids) { answerBytes += this.one('SELECT length(CAST(value_json AS BLOB)) n FROM answers WHERE id=? AND task_id=?', answer, r.task_id).n; if (answerBytes > 8 * 1024 * 1024) fail('EXPORT_ANSWER_SIZE_LIMIT', 'Selected answer values exceed enabled 8 MiB limit; reduce the selection') }
@@ -593,7 +743,9 @@ export class RuntimeStore {
     if ([...resources.values()].reduce((bytes, resource) => bytes + resource.byte_length, 0) > 8 * 1024 * 1024) fail('EXPORT_RESOURCE_SIZE_LIMIT', 'Selected immutable resources exceed the enabled 8 MiB source limit; reduce the selection')
     const task = this.task(r.task_id)
     const input: ExportInput = { root: this.root, title: task.title, resources: [...resources.values()], views: rows.map(v => ({ bundle_id: v.bundle_resource_id, resource_ids: v.resource_ids, fragment_ids: v.fragments.map((f: Row) => f.id) })), answers: selected.map((row: Row) => ({ bundle_id: row.bundle_resource_id, resource_ids: row.resource_ids, value: JSON.parse(row.value_json), label: `正式作答 · 原题版本 ${row.view_revision}` })) }
-    return { rows, selected, resources, input }
+    const composition = freezeExportComposition(this.db, this.epoch, r.task_id, rows.map(view => ({ id: view.id, revision: view.revision, bundle_resource_id: view.bundle_resource_id, learning_complete: view.learning_complete })))
+    if (composition) input.composition = composition
+    return { rows, selected, resources, input, ...(composition ? { composition } : {}) }
   }
   private exportRequest(r: Row): unknown {
     if (typeof r.task_id !== 'string') fail('INVALID_REQUEST', 'Export requires a task')
@@ -612,20 +764,21 @@ export class RuntimeStore {
     }
     if (r.type === 'export.check') {
       if (r.offset !== undefined && (!Number.isSafeInteger(r.offset) || r.offset < 0)) fail('INVALID_REQUEST', 'Invalid export diagnosis offset')
-      const { rows, selected, input } = this.resolveExportSelection(r)
+      const { rows, selected, input, composition } = this.resolveExportSelection(r)
       const issues: Row[] = []
       const generated = generateExport(input, issue => {
         const original = issue.answer_index !== undefined, source = original ? selected[issue.answer_index!]! : rows[issue.view_index]!
         issues.push({ ...issue, source: original ? 'original_question' : 'current_view', view_id: original ? source.view_id : source.id, revision: original ? source.view_revision : source.revision, history_id: source.history_id, ...(original ? { answer_id: source.id } : {}) })
       })
+      for (const code of exportCompositionIssue(composition)) issues.push({ code, source: 'composition' })
       const offset = r.offset ?? 0
-      return { complete: generated.issues.length === 0, selection_hash: createHash('sha256').update(json([input, issues, generated.issues])).digest('hex'), issues: issues.slice(offset, offset + 50), issue_count: issues.length, offset, next_offset: offset + 50 < issues.length ? offset + 50 : null, notice: 'Read-only check of this exact selection, including frozen original questions. No job or pin was created. Actual export validates again.' }
+      return { complete: generated.issues.length === 0 && !exportCompositionIssue(composition).length, selection_hash: createHash('sha256').update(json([input, issues, generated.issues, composition])).digest('hex'), issues: issues.slice(offset, offset + 50), issue_count: issues.length, offset, next_offset: offset + 50 < issues.length ? offset + 50 : null, ...(composition ? { selection: exportCompositionSummary(composition) } : {}), notice: 'Read-only check of this exact selection, including frozen original questions. No job or pin was created. Actual export validates again.' }
     }
     if (r.type === 'export.check.start') {
       if (Object.hasOwn(r, 'offset')) fail('INVALID_REQUEST', 'Start does not accept a diagnosis offset')
       if (this.exportChecks.busy()) fail('EXPORT_CHECK_BUSY', 'Cancel the active check and wait for worker exit before starting another')
       const request = JSON.parse(json(r)), resolved = this.resolveExportSelection(request)
-      const identity = (value: typeof resolved) => json([value.rows.map(v => [v.id, v.revision, v.history_id, v.fragments]), value.selected.map(v => [v.id, v.history_id, v.view_revision]), value.input])
+      const identity = (value: typeof resolved) => json([value.rows.map(v => [v.id, v.revision, v.history_id, v.fragments]), value.selected.map(v => [v.id, v.history_id, v.view_revision]), value.input, value.composition])
       const source = identity(resolved), captured = captureCheck(resolved.input), fingerprint = captured.fingerprint, epoch = this.epoch
       const current = resolved.rows.map(v => ({ view_id: v.id, revision: v.revision, history_id: v.history_id }))
       const originals = resolved.selected.map(v => ({ view_id: v.view_id, revision: v.view_revision, history_id: v.history_id, answer_id: v.id }))
@@ -634,7 +787,7 @@ export class RuntimeStore {
         this.task(request.task_id)
         const next = this.resolveExportSelection(request)
         if (identity(next) !== source || captureCheck(next.input).fingerprint !== fingerprint) fail('EXPORT_SOURCE_CHANGED', 'Selection or verified resource source changed')
-      }, result => ({ ...result, issues: result.issues.map(issue => ({ ...issue, source: issue.answer_index === undefined ? 'current_view' : 'original_question', ...(issue.answer_index === undefined ? current[issue.view_index] : originals[issue.answer_index]) })) }))
+      }, result => ({ ...result, complete: result.complete && !exportCompositionIssue(resolved.composition).length, issue_codes: [...result.issue_codes, ...exportCompositionIssue(resolved.composition)], ...(resolved.composition ? { selection: exportCompositionSummary(resolved.composition) } : {}), issues: [...result.issues.map(issue => ({ ...issue, source: issue.answer_index === undefined ? 'current_view' : 'original_question', ...(issue.answer_index === undefined ? current[issue.view_index] : originals[issue.answer_index]) })), ...exportCompositionIssue(resolved.composition).map(code => ({ code, view_index: -1, source: 'composition' }))] }))
     }
     if (r.type === 'export.check.status' || r.type === 'export.check.cancel') {
       if (Object.keys(r).filter(key => key !== 'offset').sort().join(',') !== 'check_id,task_id,type' || typeof r.check_id !== 'string' || (r.offset !== undefined && (r.type !== 'export.check.status' || !Number.isSafeInteger(r.offset) || r.offset < 0))) fail('INVALID_REQUEST', 'Invalid ephemeral check lookup')
@@ -643,10 +796,10 @@ export class RuntimeStore {
     if (r.type === 'export.prepare') {
       if (Object.hasOwn(r, 'offset')) fail('INVALID_REQUEST', 'Export prepare does not accept a diagnosis offset')
       this.recovery.assertWrite()
-      const { rows, resources, input } = this.resolveExportSelection(r)
-      const task = this.task(r.task_id), job = this.exports.create(task.id, this.epoch, this.journal.selected(), [...resources.values()], { version: 1, title: task.title, views: rows.map(v => ({ view_id: v.id, history_id: v.history_id, view_revision: v.revision, fragments: v.fragments })), answer_ids: r.answer_ids })
+      const { rows, resources, input, composition } = this.resolveExportSelection(r)
+      const task = this.task(r.task_id), job = this.exports.create(task.id, this.epoch, this.journal.selected(), [...resources.values()], { version: composition ? 2 : 1, title: task.title, views: rows.map(v => ({ view_id: v.id, history_id: v.history_id, view_revision: v.revision, fragments: v.fragments })), answer_ids: r.answer_ids, ...(composition ? { runner: composition } : {}) })
       if (!this.exportRunner) {
-        try { const result = generateExport(input); this.exports.preview(job.id, result.html, result.issues); return { ...this.exports.public(job.id), html: result.html } }
+        try { const result = generateExport(input), preview = this.exports.preview(job.id, result.html, result.issues); return { ...this.exports.public(job.id), html: preview.html } }
         catch (error) { this.exports.generationFailed(job.id, error instanceof ContractError ? error.code : 'EXPORT_GENERATION_FAILED'); throw error }
       }
       try {
@@ -712,13 +865,14 @@ export class RuntimeStore {
     })
     return {
       runtime_epoch: this.epoch, task, surface: { id: surface.id, revision: surface.revision, layout }, view_page: { offset, limit: 10, total },
+      ...(this.features.runner || this.db.prepare('SELECT 1 FROM runner_goal_heads WHERE task_id=? LIMIT 1').get(taskId) ? { runner: this.runnerGoals({ task_id: taskId, limit: 16 }) } : {}),
       task_data: { items: this.db.prepare('SELECT id,revision FROM task_data WHERE task_id=? ORDER BY rowid DESC LIMIT 200').all(taskId) as { id: string; revision: number }[], total: this.one('SELECT count(*) AS total FROM task_data WHERE task_id=?', taskId).total },
       views,
       approval_total: this.one('SELECT count(*) n FROM approvals p JOIN actions a ON a.id=p.action_id WHERE a.task_id=?', taskId).n,
       record_total: this.one('SELECT count(*) n FROM records WHERE task_id=?', taskId).n,
       approvals: this.approvals(taskId),
       surface_updates: [...this.surfaceWaiters].filter(([, w]) => w.taskId === taskId).map(([action_id, w]) => ({ action_id, run_id: w.runId, request: { input: { operations: (w.request as Row).input.operations.map((op: Row) => ({ type: op.type, ...(op.view_id ? { view_id: op.view_id } : {}) })) } }, request_truncated: true, reset_requires_confirmation: w.reset, expires_at: w.expires })),
-      runs: this.db.prepare('SELECT id,state,primary_reason,wait_reason,budget_json FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 50').all(taskId) as Snapshot['runs'],
+      runs: (this.db.prepare('SELECT id,state,primary_reason,wait_reason,budget_json FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 50').all(taskId) as Snapshot['runs']).map(run => run.state === 'failed' ? { ...run, primary_reason: runnerFailureReason(this.db, taskId, run.id, run.primary_reason) } : run),
       records: boundedRecent((this.db.prepare("SELECT id,kind,created_at,CASE WHEN length(CAST(payload_json AS BLOB))<=4096 THEN payload_json ELSE json_object('text',substr(json_extract(payload_json,'$.text'),1,600),'truncated',json('true'),'original_event_id',id) END payload_json FROM records WHERE task_id=? ORDER BY sequence DESC LIMIT 200").all(taskId) as Row[]).map(r => ({ id: r.id, kind: r.kind, payload: snapshotValue(r.payload_json, { kind: 'event', id: r.id }), created_at: r.created_at })), 96 * 1024).reverse(),
       answer_total: this.one('SELECT count(*) AS n FROM answers WHERE task_id=?', taskId).n,
       answers: boundedRecent((this.db.prepare("SELECT id,created_at,CASE WHEN length(CAST(raw_json AS BLOB))+length(CAST(value_json AS BLOB))<=4096 THEN raw_json ELSE 'null' END raw_json,CASE WHEN length(CAST(raw_json AS BLOB))+length(CAST(value_json AS BLOB))<=4096 THEN value_json END value_json FROM answers WHERE task_id=? ORDER BY rowid DESC LIMIT 200").all(taskId) as Row[]).map(a => ({ id: a.id, raw: JSON.parse(a.raw_json), value: a.value_json === null ? null : JSON.parse(a.value_json), ...(a.value_json === null ? { truncated: true } : {}), created_at: a.created_at })), 96 * 1024).reverse()
@@ -771,42 +925,1054 @@ export class RuntimeStore {
     const runId = id(), requestId = queuedRequestId ?? id()
     try { this.db.transaction(() => {
       if (this.task(taskId).state !== 'active') fail('TASK_STOPPED', 'Explicitly resume the task first')
-      if (this.db.prepare("SELECT id FROM runs WHERE task_id=? AND state IN ('running','waiting')").get(taskId)) fail('RUN_BUSY', 'An unfinished Run already exists')
+      if (!this.runnerRunAvailable(taskId, requestId)) fail('RUN_BUSY', 'Production admission is currently occupied')
+      const conversation = !queuedRequestId && this.features.runner ? captureConversation(this.db, taskId) : undefined
+      let userRecord: string | undefined
       if (queuedRequestId) {
         const request = this.one("SELECT state,input_json FROM requests WHERE id=? AND task_id=?", requestId, taskId)
-        if (request.state !== 'queued' || JSON.parse(request.input_json).epoch !== this.epoch) fail('REQUEST_SOURCE_INVALID', 'Request is no longer eligible')
-        this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE id=?").run(json({ ...JSON.parse(request.input_json), bound_materials: boundMaterials, code: null }), requestId)
-      } else this.db.prepare("INSERT INTO requests VALUES (?,?,'started',?,?,?)").run(requestId, taskId, json({ id: config, revision: main?.revision ?? 1, approval_id: approval?.id, approval_revision: approval?.revision, approval_mode: this.approvalMode }), json({ text, attachments }), now())
+        const input = JSON.parse(request.input_json)
+        if (request.state !== 'queued' || input.epoch !== this.epoch) fail('REQUEST_SOURCE_INVALID', 'Request is no longer eligible')
+        userRecord = input.user_record_id
+        if (userRecord) {
+          const source = this.one("SELECT payload_json FROM records WHERE id=? AND task_id=? AND kind='message.user'", userRecord, taskId)
+          const payload = JSON.parse(source.payload_json)
+          if (payload.request_id !== requestId || payload.text !== text) fail('REQUEST_SOURCE_INVALID', 'Original conversation input changed')
+        }
+        this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE id=?").run(json({ ...input, bound_materials: boundMaterials, code: null }), requestId)
+      } else this.db.prepare("INSERT INTO requests VALUES (?,?,'started',?,?,?)").run(requestId, taskId, json({ id: config, revision: main?.revision ?? 1, approval_id: approval?.id, approval_revision: approval?.revision, approval_mode: this.approvalMode }), json({ text, attachments, ...(conversation ? { conversation } : {}) }), now())
       this.db.prepare("INSERT INTO runs (id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, taskId, requestId, this.epoch, json({ ...defaults, run: main?.config.limits ?? {}, output_policy: main?.config.max_output_tokens === undefined ? 'service-default' : 'configured' }), json({ model_requests: 0, tool_requests: 0, tokens: 0, fixture: config === 'fixture' }), now())
-      this.record(taskId, 'message.user', { text, run_id: runId, ...(queuedRequestId ? { request_id: requestId, materials: boundMaterials } : {}) })
+      const recordId = userRecord ?? this.record(taskId, 'message.user', { text, run_id: runId, request_id: requestId, ...(queuedRequestId ? { materials: boundMaterials } : {}) })
+      if (main && this.features.runner) {
+        const event = this.runner().receive({ input_event_id: `request:${requestId}`, task_id: taskId, request_id: requestId, record_id: recordId, kind: 'request', stage: 'received' })
+        this.runner().advance(event.input_event_id)
+        this.installRunnerProduction(taskId, requestId, runId, main, boundMaterials)
+      }
     })()
     } catch (e) { main?.release(); compact?.release(); approval?.release(); throw e }
     if (main) {
       const controller = new AbortController(), budget = new RunBudget(main.config)
       this.accountLease(taskId, runId, main); if (compact) this.accountLease(taskId, runId, compact); if (approval) this.accountLease(taskId, runId, approval)
-      this.agents.set(runId, { controller, main, compact, approval, budget, mode: this.approvalMode })
-      this.runDeadlines.set(runId, deadline(main.config.limits?.run_wall_ms, () => { this.finish(taskId, runId, 'failed', 'RUN_WALL_LIMIT') }))
-      void this.agent(taskId, runId, text)
+      this.agents.set(runId, { controller, main, compact, approval, budget, mode: this.approvalMode, ...(this.features.runner ? { managed: true } : {}) })
+      if (this.features.runner) {
+        const work = new RunnerWorkState(this.db, this.epoch).taskWorks(taskId).find(work => work.run_id === runId)!
+        void this.executeRunnerProduction(work.current_attempt_id!).catch(() => {})
+      } else void this.agent(taskId, runId, text)
     } else this.timers.set(runId, setTimeout(() => { this.timers.delete(runId); this.fixture(taskId, runId, text) }, 150))
     return runId
   }
+  private installRunnerProduction(taskId: string, requestId: string, runId: string, main: ModelLease, materials: Row[]): void {
+    const state = new RunnerWorkState(this.db, this.epoch), goal = state.goal(requestId)
+    const ledger = new RunnerBudgetLedger(this.db)
+    const previous = this.db.prepare("SELECT budget_id FROM runner_budgets WHERE task_id=? AND request_id=? AND purpose='production' ORDER BY rowid LIMIT 1").get(taskId, requestId) as Row | undefined
+    const budgetId = previous?.budget_id ?? id()
+    if (!previous) ledger.create({ budget_id: budgetId, task_id: taskId, purpose: 'production', request_id: requestId })
+    state.registerRun({ run_id: runId, task_id: taskId, runtime_epoch: this.epoch, state: 'running', commit_valid: true, budget_id: budgetId, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision })
+    const workId = id(), attemptId = id()
+    const work: LogicalWork = { work_id: workId, task_id: taskId, run_id: runId, plan_revision: 1, role: 'producer', required: true, requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), dependencies: [{ kind: 'goal', task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision }, ...materials.map(resource => ({ kind: 'resource' as const, task_id: taskId, resource_id: resource.id }))], state: 'planned', max_attempts: 2, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision }
+    state.installPlan([work])
+    state.createAttempt({ attempt_id: attemptId, task_id: taskId, run_id: runId, work_id: workId, runtime_epoch: this.epoch, attempt_number: 1, profile_id: 'producer-output-v1', model_config_id: main.id, model_config_revision: main.revision, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision })
+    this.runnerComposition().designateSource({ task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision, work_id: workId, plan_revision: work.plan_revision })
+    this.record(taskId, 'runner.plan.installed', { run_id: runId, request_id: requestId, intent_revision: goal.intent_revision, work_id: workId, attempt_id: attemptId, plan_revision: work.plan_revision })
+  }
+  private runnerGoalText(task: string, request: string, revision: number): string {
+    const original = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', task, request).input_json).text
+    const changes = (this.db.prepare("SELECT r.payload_json FROM runner_goal_revisions g JOIN runner_inputs i ON i.input_event_id=g.input_event_id JOIN records r ON r.id=i.record_id AND r.task_id=i.task_id WHERE g.task_id=? AND g.request_id=? AND g.intent_revision<=? AND i.kind='correction' ORDER BY g.intent_revision").all(task, request, revision) as Row[]).map(row => JSON.parse(row.payload_json).text)
+    if (typeof original !== 'string' || changes.some(text => typeof text !== 'string')) fail('RUNNER_INPUT_CONFLICT', 'Goal input history requires inspection')
+    const text = changes.length ? json({ original_request: original, corrections: changes }) : original
+    if (!text.trim() || Buffer.byteLength(text) > defaults.data.object_bytes) fail('INVALID_INPUT', 'Goal input history exceeds the enabled input limit')
+    return text
+  }
+  private runnerConversation(task: string, request: string, revision: number): ConversationHistory {
+    const source = this.one('SELECT r.sequence,r.payload_json FROM runner_goal_revisions g JOIN runner_inputs i ON i.input_event_id=g.input_event_id JOIN records r ON r.id=i.record_id AND r.task_id=i.task_id WHERE g.task_id=? AND g.request_id=? AND g.intent_revision=?', task, request, revision)
+    const payload = JSON.parse(source.payload_json)
+    const input = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', task, request).input_json)
+    // Old requests have no snapshot. Their own input still fixes the boundary;
+    // replay and restart must never pull in later Task or sibling-worker events.
+    const binding: ConversationBinding = payload.conversation ?? (revision === 1 ? input.conversation : undefined) ?? { version: 1, through_sequence: source.sequence - 1, reply_to_request_id: null }
+    return loadConversation(this.db, task, binding)
+  }
+  private pumpRunnerGoals(task: string): void {
+    if (!this.features.runner || this.closing || this.closed || this.recoveringRunnerInputs.has(task) || this.task(task).state !== 'active') return
+    const goals = this.db.prepare("SELECT h.request_id,h.intent_revision FROM runner_goal_heads h JOIN runner_goal_revisions g ON g.request_id=h.request_id AND g.intent_revision=h.intent_revision WHERE h.task_id=? AND json_extract(g.payload_json,'$.state')='active' AND NOT EXISTS (SELECT 1 FROM runner_runs r WHERE r.task_id=h.task_id AND r.request_id=h.request_id AND r.intent_revision=h.intent_revision AND r.purpose='production') ORDER BY h.rowid LIMIT 32").all(task) as Row[]
+    for (const goal of goals) {
+      if (this.preparingRunnerGoals.has(goal.request_id) || !this.runnerRunAvailable(task, goal.request_id)) continue
+      this.preparingRunnerGoals.add(goal.request_id)
+      const epoch = this.epoch
+      void this.startRunnerGoal(task, goal.request_id, goal.intent_revision).catch(error => {
+        if (!this.closed && this.db.open && this.epoch === epoch) this.record(task, 'runner.goal.waiting', { request_id: goal.request_id, intent_revision: goal.intent_revision, reason: error instanceof ContractError ? error.code : 'RUNNER_PREPARATION_FAILED' })
+      }).finally(() => { if (this.epoch === epoch) this.preparingRunnerGoals.delete(goal.request_id) })
+    }
+  }
+  private async startRunnerGoal(task: string, request: string, revision: number): Promise<string | null> {
+    const epoch = this.epoch
+    const row = this.one('SELECT config_selection_json,input_json FROM requests WHERE task_id=? AND id=?', task, request), selection = JSON.parse(row.config_selection_json), input = JSON.parse(row.input_json)
+    const materials = (input.bound_materials ?? []).map((source: Row) => this.requestMaterial(task, source.id))
+    if (json(materials) !== json(input.bound_materials ?? [])) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Original material binding changed')
+    for (const resource of materials) if (resource.byte_length > 262144) {
+      const source = this.one('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', task, resource.id)
+      await readPluginResource(this.root, source as any, 0, true)
+    }
+    if (this.epoch !== epoch) return null
+    this.acceptWork(); this.recovery.assertWrite()
+    const state = new RunnerWorkState(this.db, this.epoch), goal = state.goal(request)
+    if (goal.task_id !== task || goal.intent_revision !== revision || goal.state !== 'active' || !this.runnerRunAvailable(task, request)) return null
+    const main = this.models.acquire(selection.id, 'main')
+    let compact: ModelLease | undefined, approval: ModelLease | undefined
+    const runId = id()
+    try {
+      if (main.revision !== selection.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Corrected goal retains its original model selection')
+      compact = this.models.acquireCompaction(main)
+      if (selection.approval_mode === 'assisted') {
+        approval = this.models.acquire(selection.approval_id, 'approval')
+        if (approval.revision !== selection.approval_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Corrected goal retains its original approval selection')
+      }
+      this.db.transaction(() => {
+        if (this.task(task).state !== 'active' || state.goal(request).intent_revision !== revision || !this.runnerRunAvailable(task, request)) fail('RUN_BUSY', 'Goal is no longer eligible for production')
+        if (this.db.prepare("SELECT 1 FROM runner_runs WHERE task_id=? AND request_id=? AND intent_revision=? AND purpose='production'").get(task, request, revision)) fail('RUNNER_INPUT_CONFLICT', 'This goal revision already has a production source')
+        if (this.one('SELECT config_selection_json FROM requests WHERE id=? AND task_id=?', request, task).config_selection_json !== row.config_selection_json || json(materials.map((source: Row) => this.requestMaterial(task, source.id))) !== json(materials)) fail('REQUEST_SOURCE_INVALID', 'Goal bindings changed during preparation')
+        const previous = this.db.prepare("SELECT run_id FROM runner_runs WHERE task_id=? AND request_id=? AND purpose='production' ORDER BY rowid DESC LIMIT 1").get(task, request) as Row | undefined
+        this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, task, request, this.epoch, json({ ...defaults, run: main.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now())
+        this.installRunnerProduction(task, request, runId, main, materials)
+        this.record(task, 'runner.production.started', { run_id: runId, request_id: request, intent_revision: revision, input_event_id: goal.input_event_id, previous_run_id: previous?.run_id ?? null })
+      })()
+    } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
+    this.agents.set(runId, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
+    const work = state.taskWorks(task).find(work => work.run_id === runId)!
+    void this.executeRunnerProduction(work.current_attempt_id!).catch(() => {})
+    return runId
+  }
+  recoverRunnerWork(): Promise<void> {
+    if (!this.features.runner || this.closing || this.closed || (this.recovery.status() as Row).phase !== 'idle') return Promise.resolve()
+    if (this.runnerRecoveryFlight) return this.runnerRecoveryFlight
+    const epoch = this.epoch, flight = this.recoverRunnerWorkPass(epoch)
+    this.runnerRecoveryFlight = flight
+    void flight.finally(() => { if (this.runnerRecoveryFlight === flight) this.runnerRecoveryFlight = undefined }).catch(() => {})
+    return flight
+  }
+  private async recoverRunnerWorkPass(epoch: string): Promise<void> {
+    const recovery = new RunnerHostRecovery(this.db, epoch)
+    const tasks = this.db.prepare("SELECT DISTINCT t.id FROM tasks t JOIN runner_inputs i ON i.task_id=t.id WHERE t.state='active' ORDER BY t.rowid").all() as Row[]
+    for (const { id: task } of tasks) {
+      if (this.closed || this.closing || this.epoch !== epoch) return
+      this.recoveringRunnerInputs.add(task)
+      try {
+        let cursor: string | undefined
+        do {
+          const page = recovery.pendingInputs(task, cursor)
+          for (const input of page.items) {
+            if (this.task(task).state !== 'active') break
+            try { this.advanceRunnerInput(input.input_event_id) }
+            catch (error) { this.record(task, 'runner.recovery.blocked', { input_event_id: input.input_event_id, reason: error instanceof ContractError ? error.code : 'RUNNER_INPUT_RECOVERY_FAILED' }) }
+          }
+          cursor = page.next_cursor ?? undefined
+        } while (cursor && this.task(task).state === 'active')
+      } finally { this.recoveringRunnerInputs.delete(task) }
+      if (this.task(task).state !== 'active') continue
+      const runs = this.db.prepare("SELECT r.run_id FROM runner_runs r JOIN runs c ON c.id=r.run_id WHERE r.task_id=? AND r.purpose='production' AND c.state='interrupted' AND c.runtime_epoch!=? ORDER BY r.rowid").all(task, epoch) as Row[]
+      for (const row of runs) {
+        if (this.closed || this.closing || this.epoch !== epoch) return
+        const state = new RunnerWorkState(this.db, epoch), previous = state.run(row.run_id)
+        if (previous.purpose !== 'production' || !this.runnerRunAvailable(task, previous.request_id)) continue
+        const blocked = (reason: string): void => {
+          if (!this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND kind='runner.goal.waiting' AND json_extract(payload_json,'$.previous_run_id')=? AND json_extract(payload_json,'$.reason')=? LIMIT 1").get(task, previous.run_id, reason)) this.record(task, 'runner.goal.waiting', { request_id: previous.request_id, intent_revision: previous.intent_revision, previous_run_id: previous.run_id, reason })
+        }
+        const interruptedWorks = state.taskWorks(task).filter(work => work.run_id === previous.run_id)
+        const unknownDiagnosis = interruptedWorks.filter(work => work.role === 'diagnostic').some(work => state.attempts(work.work_id).some(attempt =>
+          attempt.run_id === previous.run_id && (attempt.state === 'unknown' || attempt.dispatch_state === 'unknown' || attempt.operation_id && recovery.queryOperation(task, attempt.operation_id)?.state === 'unknown')
+        ))
+        if (unknownDiagnosis) { blocked('RUNNER_OPERATION_UNKNOWN'); continue }
+        // Diagnosis opportunities remain historical evidence. Only their original
+        // operation can resolve unknown usage; they never resume as content work.
+        const works = interruptedWorks.filter(work => work.role !== 'diagnostic' && ['planned', 'queued', 'running', 'waiting'].includes(work.state))
+        if (!works.length) continue
+        const unavailable = works.map(work => {
+          const attempt = work.current_attempt_id ? state.attempt(work.current_attempt_id) : undefined
+          if (!attempt) return 'RUNNER_RECOVERY_INELIGIBLE'
+          if (attempt.state === 'unknown' || attempt.dispatch_state !== 'not_dispatched') return 'RUNNER_OPERATION_UNKNOWN'
+          if (attempt.profile_id !== 'producer-output-v1') return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
+          if (attempt.attempt_number >= work.max_attempts) return 'RUNNER_ATTEMPTS_EXHAUSTED'
+          return attempt.state !== 'revoked' ? 'RUNNER_RECOVERY_INELIGIBLE' : null
+        }).find(reason => reason !== null)
+        if (unavailable) { blocked(unavailable); continue }
+        try { await this.resumeRunnerProduction(task, previous.run_id, works, epoch) }
+        catch (error) {
+          if (this.epoch !== epoch || this.closed) return
+          blocked(error instanceof ContractError ? error.code : 'RUNNER_RECOVERY_FAILED')
+        }
+      }
+      const batches = this.db.prepare("SELECT b.batch_id,b.payload_json FROM runner_batches b JOIN runs c ON c.id=json_extract(b.payload_json,'$.run_id') WHERE b.task_id=? AND c.state='interrupted' AND c.runtime_epoch!=? AND NOT EXISTS (SELECT 1 FROM runner_batches next WHERE next.task_id=b.task_id AND json_extract(next.payload_json,'$.previous_batch_id')=b.batch_id) ORDER BY b.rowid").all(task, epoch) as Row[]
+      for (const row of batches) {
+        const batch = JSON.parse(row.payload_json)
+        void this.executeAutomaticComposition(task, batch.trigger_request_id, row.batch_id).catch(error => {
+          if (!this.closed && this.epoch === epoch) this.record(task, 'runner.recovery.blocked', { batch_id: row.batch_id, operation_id: batch.operation_id, reason: error instanceof ContractError ? error.code : 'COMPOSITION_RECOVERY_FAILED' })
+        })
+      }
+      this.pumpRunnerWorkers(task)
+      this.pumpRunnerGoals(task)
+    }
+  }
+  private async resumeRunnerProduction(task: string, previousRunId: string, works: LogicalWork[], epoch: string): Promise<void> {
+    const state = new RunnerWorkState(this.db, epoch), previous = state.run(previousRunId)
+    if (previous.purpose !== 'production') fail('RUNNER_RECOVERY_INELIGIBLE', 'Only undispatched production can resume')
+    const request = previous.request_id, row = this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, request)
+    const input = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json)
+    const materials = (input.bound_materials ?? []).map((source: Row) => this.requestMaterial(task, source.id))
+    if (json(materials) !== json(input.bound_materials ?? [])) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Recovery retains exact original materials')
+    for (const resource of materials) if (resource.byte_length > defaults.resource.inline_bytes) {
+      const source = this.one('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', task, resource.id)
+      await readPluginResource(this.root, source as any, 0, true)
+    }
+    if (this.epoch !== epoch) return
+    this.acceptWork(); this.recovery.assertWrite()
+    const main = this.models.acquire(selection.id, 'main')
+    let compact: ModelLease | undefined, approval: ModelLease | undefined
+    const runId = id()
+    try {
+      if (main.revision !== selection.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovery requires the original model revision')
+      compact = this.models.acquireCompaction(main)
+      if (selection.approval_mode === 'assisted') {
+        approval = this.models.acquire(selection.approval_id, 'approval')
+        if (approval.revision !== selection.approval_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovery requires the original approval revision')
+      }
+      const attempts: ExecutionAttempt[] = works.map(work => {
+        const original = state.attempt(work.current_attempt_id!)
+        if (original.model_config_id !== main.id || original.model_config_revision !== main.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovered attempts retain their model binding')
+        const { result_ref: _result, operation_id: _operation, ...binding } = original
+        return { ...binding, attempt_id: id(), previous_attempt_id: original.attempt_id, run_id: runId, runtime_epoch: epoch, attempt_number: original.attempt_number + 1, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }
+      })
+      this.db.transaction(() => {
+        new RunnerHostRecovery(this.db, epoch).resume({ run: { ...previous, run_id: runId, previous_run_id: previous.run_id, runtime_epoch: epoch, state: 'running', commit_valid: true }, attempts }, {
+          recheck: () => {
+            this.acceptWork(); this.recovery.assertWrite()
+            if (!this.runnerRunAvailable(task, request)) fail('RUN_BUSY', 'Recovery awaits production admission')
+            if (this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, request).config_selection_json !== row.config_selection_json || json(materials.map((source: Row) => this.requestMaterial(task, source.id))) !== json(materials)) fail('REQUEST_SOURCE_INVALID', 'Recovery bindings changed during preparation')
+          },
+          installRun: () => { this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, task, request, epoch, json({ ...defaults, run: main.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now()) }
+        })
+        const source = this.runnerComposition().source(task, request, previous.intent_revision)
+        if (source && works.some(work => work.work_id === source.work_id)) this.runnerComposition().designateSource({ ...source, plan_revision: state.work(source.work_id).plan_revision }, { work_id: source.work_id, plan_revision: source.plan_revision })
+        this.record(task, 'runner.production.resumed', { run_id: runId, previous_run_id: previous.run_id, request_id: request, intent_revision: previous.intent_revision, work_ids: works.map(work => work.work_id), attempt_ids: attempts.map(attempt => attempt.attempt_id), budget_id: previous.budget_id })
+      })()
+      this.agents.set(runId, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
+      for (const attempt of attempts) void this.executeRunnerProduction(attempt.attempt_id).catch(() => {})
+    } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
+  }
+  async executeRunnerProduction(attemptId: string): Promise<ProducerResult> {
+    const state = new RunnerWorkState(this.db, this.epoch), qualified = state.qualify(attemptId, 'dispatch'), { work, goal } = qualified
+    if (!goal || work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role)) fail('RUNNER_OWNERSHIP_INVALID', 'Content execution requires current production work')
+    const owner = this.workerOwner(qualified), sections = this.runnerArtifacts().outline(work.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
+    const integration = work.role === 'integrator' ? this.runnerComposition().integrationInputs(attemptId) : undefined
+    const resources = integration?.resources ?? work.dependencies.flatMap(dependency => dependency.kind === 'resource' ? [dependency.resource_id] : dependency.kind === 'artifact' ? [this.runnerArtifacts().artifact(work.task_id, dependency.artifact_id, dependency.artifact_revision)?.bundle_resource_id].filter((value): value is string => !!value) : [])
+    const capabilities = this.pluginDirectory.discovery(work.task_id).map(capability => capability.id as string)
+    const conversation = this.runnerConversation(work.task_id, work.request_id, work.intent_revision)
+    const conversationResources = conversation.resource_ids.filter(resource => this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(work.task_id, resource))
+    const profile = createProducerProfile({ owner, work, goal, sections, grants: [
+      { type: 'read', kind: 'resource', ids: [...new Set([...resources, ...conversationResources])] },
+      { type: 'read', kind: 'event', ids: [...new Set([...conversation.refs.map(ref => ref.id), ...conversation.messages.map(item => item.source.id)])] },
+      { type: 'read', kind: 'task_data' }, { type: 'list', kind: 'task_data' },
+      { type: 'list', kind: 'capability' }, { type: 'read', kind: 'capability', ids: capabilities },
+      ...capabilities.map(capability => ({ type: 'call' as const, capability }))
+    ] })
+    const host = new RunnerHostProduction(this.db, this.epoch)
+    let result: ProducerResult
+    const text = this.runnerGoalText(work.task_id, work.request_id, work.intent_revision)
+    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation }
+    try { result = await this.executeWorker(attemptId, profile, input, (result, source) => {
+      const accepted = host.accept(result, source, resourceId => {
+        const loaded = loadBundleSource(this.db, this.root, work.task_id, { type: 'resource', resource: { kind: 'resource', id: resourceId } }, row => this.journal.assertResource(row))
+        validateProducerBundle(loaded.bundle); this.checkedBundle(work.task_id, loaded.bundle, source.attempt_id)
+      })
+      if (result.answer !== null) this.record(work.task_id, 'runner.answer', { owner: source, purpose: 'final_answer', text: result.answer, request_id: work.request_id, input_event_id: goal.input_event_id, run_id: work.run_id, intent_revision: work.intent_revision, result_ref: accepted.output.result_ref })
+      this.record(work.task_id, 'runner.output.accepted', { owner: source, run_id: work.run_id, plan_revision: work.plan_revision, result_revision: accepted.output.result_revision, requirement_ids: accepted.output.requirement_ids, artifacts: accepted.output.artifacts, inventory_revision: accepted.inventory?.inventory_revision ?? null })
+      this.refreshRunnerScope(work.task_id)
+    }) } catch (error) {
+      if (!this.closed && this.db.open) host.retainFailure(error)
+      throw error
+    }
+    if (result.artifacts.length) this.scheduleRunnerComposition(work.task_id, work.request_id)
+    return result
+  }
+  private scheduleRunnerComposition(task: string, trigger: string): void {
+    if (!this.features.runner || this.closing || this.closed || this.task(task).state !== 'active') return
+    const at = Date.now(), previous = this.runnerCompositionMerges.get(task), first = previous?.first ?? at
+    if (previous) clearTimeout(previous.timer)
+    const firstPublication = !this.db.prepare('SELECT 1 FROM runner_view_mappings WHERE task_id=? LIMIT 1').get(task)
+    const readyAt = compositionReadyAt(first, at, firstPublication)
+    const timer = setTimeout(() => {
+      this.runnerCompositionMerges.delete(task)
+      void this.executeAutomaticComposition(task, trigger).catch(error => {
+        if (!this.closed && this.db.open) this.record(task, 'runner.composition.blocked', { trigger_request_id: trigger, code: error instanceof ContractError ? error.code : 'COMPOSITION_EXECUTION_FAILED' })
+      })
+    }, Math.max(0, readyAt - at))
+    timer.unref?.()
+    this.runnerCompositionMerges.set(task, { first, latest: at, trigger, timer })
+  }
+  private async executeAutomaticComposition(task: string, trigger: string, previousBatchId?: string): Promise<void> {
+    if (this.closing || this.closed || this.task(task).state !== 'active') return
+    let prepared: PreparedRunnerComposition
+    try { prepared = this.prepareRunnerComposition(task, trigger, previousBatchId ? { previous_batch_id: previousBatchId } : {}) }
+    catch (error) {
+      if (error instanceof ContractError && error.code === 'COMPOSITION_NOT_READY') return
+      if (error instanceof ContractError && error.code === 'RUN_BUSY') {
+        const waiting = this.runnerCompositionWaiting.get(task)
+        if (!waiting?.previousBatchId) this.runnerCompositionWaiting.set(task, { trigger, ...(previousBatchId ? { previousBatchId } : {}) })
+        return
+      }
+      throw error
+    }
+    let plan: PresentationPlan
+    try {
+      plan = this.features.runner?.collator === 'model'
+        ? await this.executeWorker(prepared.attempt_id, prepared.collator.profile, undefined, undefined, prepared.collator)
+        : prepared.collator.rulePlan()
+    } catch (error) {
+      this.finish(task, prepared.run_id, 'failed', error instanceof ContractError ? error.code : 'COLLATOR_FAILED')
+      throw error
+    }
+    const result = await this.publishRunnerComposition(task, prepared.batch.batch_id, plan)
+    if (result.state === 'published') {
+      this.refreshRunnerScope(task)
+      this.scheduleRunnerComposition(task, trigger)
+    } else if (result.state === 'failure' && ['VERSION_CONFLICT', 'RESOURCE_CHANGED'].includes(result.code ?? '')) {
+      await this.executeAutomaticComposition(task, trigger, prepared.batch.batch_id)
+    }
+  }
   private accountLease(taskId: string, runId: string, lease: ModelLease): void {
+    const owner = captureExecutionScope(lease.owner, taskId)
+    if (owner && owner.run_id !== runId) fail('RUNNER_OWNERSHIP_INVALID', 'Model lease belongs to another Run')
+    const valid = () => { this.qualify(taskId, runId); if (owner) this.qualifyWorker(owner.attempt_id) }
+    const run = this.db.prepare('SELECT budget_id FROM runner_runs WHERE run_id=? AND task_id=?').get(runId, taskId) as Row | undefined
+    const accounting = run ? new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: taskId, budget_id: run.budget_id, ...(owner ? { attempt_id: owner.attempt_id } : {}) }) : undefined
     lease.evidence = (event: RequestEvidence) => {
-      this.qualify(taskId, runId)
+      valid()
       assertContract('request_evidence', event)
+      if (owner && json(event.owner) !== json(owner)) fail('RUNNER_OWNERSHIP_INVALID', 'Model evidence belongs to another attempt')
       if (Buffer.byteLength(json({ ...event, run_id: runId })) > 1048576) throw new ModelError('CONTEXT_RECORD_LIMIT')
       return this.db.transaction(() => this.record(taskId, 'model.request.evidence', { ...event, run_id: runId }))()
     }
     lease.accounting = (event: RequestAccounting) => {
       if (this.closed || !this.db.open) throw new ModelError('ACCOUNTING_UNAVAILABLE')
       assertContract('request_accounting', event)
+      this.one('SELECT state FROM runs WHERE id=? AND task_id=?', runId, taskId)
+      if (['reserved', 'dispatched'].includes(event.phase)) valid()
+      if (event.phase === 'reserved' && owner) this.workers.get(owner.attempt_id)?.diagnostic?.reserve()
+      let accountingError: unknown
+      try { accounting?.model(event) } catch (error) { accountingError = error }
       this.db.transaction(() => {
-        this.one('SELECT state FROM runs WHERE id=? AND task_id=?', runId, taskId)
-        if (['reserved', 'dispatched'].includes(event.phase)) this.qualify(taskId, runId)
         // Late accounting is factual only: it never resumes a terminal Run.
-        this.record(taskId, 'model.request.accounting', { ...event, run_id: runId })
+        this.record(taskId, 'model.request.accounting', { ...event, run_id: runId, ...(owner ? { owner } : {}) })
       })()
+      if (owner && ['completed', 'failed'].includes(event.phase)) this.aggregateWorkerRun(taskId, runId)
+      if (accountingError) throw accountingError
     }
+  }
+  private qualifyWorker(attemptId: string): QualifiedAttempt {
+    const value = new RunnerWorkState(this.db, this.epoch).qualify(attemptId)
+    this.qualify(value.task_id, value.run.run_id)
+    const worker = this.workers.get(attemptId)
+    if (!worker || worker.controller.signal.aborted || !['dispatched', 'running', 'waiting'].includes(value.attempt.state) || value.attempt.profile_id !== worker.profile.id || value.work.role !== worker.profile.role) fail('RUNNER_OWNERSHIP_INVALID', 'Worker attempt is no longer executable')
+    if (worker.diagnostic) {
+      const source = worker.diagnostic.source, subject = new RunnerWorkState(this.db, this.epoch).work(source.work_id)
+      if (!this.features.runner || this.features.runner.diagnostics === false || subject.purpose !== 'production' || subject.task_id !== source.task_id || subject.request_id !== source.request_id || subject.intent_revision !== source.intent_revision || subject.plan_revision !== source.plan_revision || subject.run_id !== value.run.run_id || !['running', 'waiting', 'failed'].includes(subject.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Diagnosis source or capability is no longer current')
+    }
+    return value
+  }
+  private workerOwner(value: QualifiedAttempt): ExecutionScope {
+    const common = { task_id: value.task_id, run_id: value.run.run_id, work_id: value.work.work_id, attempt_id: value.attempt.attempt_id, role: value.work.role }
+    return value.run.purpose === 'production'
+      ? { ...common, purpose: 'production', request_id: value.run.request_id, intent_revision: value.run.intent_revision }
+      : { ...common, purpose: 'composition', batch_id: value.run.batch_id, composition_version: value.run.composition_version, trigger_request_id: value.run.trigger_request_id }
+  }
+  // The Run owns configuration leases and the cumulative budget. Each attempt
+  // gets its own messages, cancellation source, read cursors and evidence owner.
+  async executeWorker<Result>(attemptId: string, profile: WorkerProfile<Result>, input?: WorkerInput, installResult?: (result: Result, owner: ExecutionScope) => void, collator?: Collator, diagnostic?: RunnerDiagnostic): Promise<Result> {
+    const state = new RunnerWorkState(this.db, this.epoch), attempt = state.attempt(attemptId), work = state.work(attempt.work_id)
+    if (this.pendingWorkers.has(attemptId) || this.workers.has(attemptId) || profile.id !== attempt.profile_id || profile.role !== work.role || !['registered', 'queued'].includes(attempt.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Worker attempt cannot enter the dispatch queue')
+    state.updateAttempt({ ...attempt, state: 'queued' })
+    return new Promise<Result>((resolve, reject) => {
+      this.pendingWorkers.set(attemptId, { task: work.task_id, work: admissionWork(work), reject, start: () => {
+        void this.executeAdmittedWorker(attemptId, profile, input, installResult, collator, diagnostic).then(resolve, reject).finally(() => this.pumpRunnerWorkers(work.task_id))
+      } })
+      this.pumpRunnerWorkers(work.task_id)
+    })
+  }
+  private activeRunnerWorks(task: string): RunnerAdmissionWork[] {
+    const state = new RunnerWorkState(this.db, this.epoch)
+    return state.taskWorks(task).filter(work => this.workers.has(work.current_attempt_id ?? '') || state.attempts(work.work_id).some(attempt =>
+      ['dispatched', 'running', 'waiting', 'unknown'].includes(attempt.state)
+    ) || !!this.db.prepare("SELECT 1 FROM calls WHERE run_id=? AND json_extract(limits_json,'$.owner.work_id')=? AND (state!='ended' OR execution='unknown') LIMIT 1").get(work.run_id, work.work_id) || this.runnerCleanupPending(work.run_id)).map(admissionWork)
+  }
+  private pumpRunnerWorkers(task: string): void {
+    if (this.pumpingWorkers.has(task) || this.recoveringRunnerInputs.has(task) || this.closed || !this.db.open) return
+    this.pumpingWorkers.add(task)
+    try {
+      const state = new RunnerWorkState(this.db, this.epoch)
+      state.reconcileDependencies(task)
+      for (;;) {
+        const candidates = [...this.pendingWorkers].filter(([, pending]) => pending.task === task).map(([attempt_id, pending]) => ({ ...pending.work, attempt_id }))
+        const ready = new Set<string>()
+        for (const candidate of candidates) {
+          try { state.qualify(candidate.attempt_id, 'dispatch'); ready.add(candidate.attempt_id) }
+          catch (error) {
+            if (error instanceof ContractError && error.code === 'RUNNER_DEPENDENCY_INVALID') continue
+            const pending = this.pendingWorkers.get(candidate.attempt_id)
+            this.pendingWorkers.delete(candidate.attempt_id); pending?.reject(error)
+          }
+        }
+        const next = this.runnerAdmission.next(task, candidates.filter(candidate => this.pendingWorkers.has(candidate.attempt_id)), this.activeRunnerWorks(task), candidate => ready.has(candidate.attempt_id))
+        if (!next) break
+        const pending = this.pendingWorkers.get(next.attempt_id)!
+        this.pendingWorkers.delete(next.attempt_id)
+        pending.start()
+      }
+    } catch (error) {
+      for (const [attemptId, pending] of this.pendingWorkers) if (pending.task === task) {
+        this.pendingWorkers.delete(attemptId); pending.reject(error)
+      }
+    } finally {
+      this.pumpingWorkers.delete(task)
+      const waiting = this.runnerCompositionWaiting.get(task)
+      const previous = waiting?.previousBatchId ? this.runnerComposition().batch(task, waiting.previousBatchId) : null
+      const settling = previous && !['completed', 'failed', 'cancelled', 'interrupted'].includes(new RunnerWorkState(this.db, this.epoch).run(previous.run_id).state)
+      if (waiting && !settling && !this.closing && this.task(task).state === 'active' && Number((this.db.prepare("SELECT COUNT(*) n FROM runner_runs r JOIN runs c ON c.id=r.run_id WHERE r.task_id=? AND r.purpose='composition' AND c.state IN ('running','waiting')").get(task) as Row).n) < RUNNER_LIMITS.admission.composition_batches_per_task) {
+        this.runnerCompositionWaiting.delete(task)
+        void this.executeAutomaticComposition(task, waiting.trigger, waiting.previousBatchId).catch(error => {
+          if (!this.closed && this.db.open) this.record(task, 'runner.composition.blocked', { trigger_request_id: waiting.trigger, code: error instanceof ContractError ? error.code : 'COMPOSITION_EXECUTION_FAILED' })
+        })
+      }
+    }
+  }
+  private async executeAdmittedWorker<Result>(attemptId: string, profile: WorkerProfile<Result>, input?: WorkerInput, installResult?: (result: Result, owner: ExecutionScope) => void, collator?: Collator, diagnostic?: RunnerDiagnostic): Promise<Result> {
+    const state = new RunnerWorkState(this.db, this.epoch), qualified = state.qualify(attemptId, 'dispatch')
+    const { attempt, work, run } = qualified, taskId = qualified.task_id, runId = run.run_id
+    this.qualify(taskId, runId)
+    if (profile.id !== attempt.profile_id || profile.role !== work.role || this.workers.has(attemptId)) fail('RUNNER_OWNERSHIP_INVALID', 'Worker profile does not match its registered attempt')
+    if (profile.role === 'collator' ? !collator || collator.profile !== profile : collator !== undefined) fail('INVALID_COLLATOR_CONTEXT', 'Collator execution requires its dedicated metadata context')
+    if (profile.role === 'diagnostic' ? !diagnostic || diagnostic.profile !== profile || !this.features.runner || this.features.runner.diagnostics === false : diagnostic !== undefined) fail('INVALID_DIAGNOSTIC_CONTEXT', 'Diagnosis execution requires its dedicated metadata context and capability')
+    let agent = this.agents.get(runId)
+    if (agent && !agent.managed) fail('RUNNER_EXECUTION_CONFLICT', 'Run already has a legacy execution loop')
+    if (!agent) {
+      const main = this.models.acquire(attempt.model_config_id, 'main')
+      let compact: ModelLease | undefined, approval: ModelLease | undefined
+      try {
+        compact = this.models.acquireCompaction(main)
+        if (this.approvalMode === 'assisted') approval = this.models.acquire(this.approvalModel, 'approval')
+        if (main.revision !== attempt.model_config_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Worker configuration changed before dispatch')
+        agent = { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: this.approvalMode, managed: true }
+        this.agents.set(runId, agent)
+      } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
+    }
+    if (agent.main.id !== attempt.model_config_id || agent.main.revision !== attempt.model_config_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Worker does not match the Run configuration lease')
+    const owner = this.workerOwner(qualified), controller = new AbortController()
+    const cancel = () => controller.abort()
+    agent.controller.signal.addEventListener('abort', cancel, { once: true })
+    if (agent.controller.signal.aborted) cancel()
+    const clone = (lease: ModelLease): ModelLease => ({ ...lease, owner: { ...owner }, release() {} })
+    const worker: WorkerAgent = { owner, controller, main: clone(agent.main), ...(agent.compact ? { compact: clone(agent.compact) } : {}), ...(agent.approval ? { approval: clone(agent.approval) } : {}), budget: agent.budget, mode: agent.mode, context: new WorkerContext(this.db, owner), profile, ...(collator ? { collator } : {}), ...(diagnostic ? { diagnostic } : {}), state: 'running' }
+    this.workers.set(attemptId, worker)
+    let result!: Result, accepted = false
+    try {
+      this.accountLease(taskId, runId, worker.main)
+      if (worker.compact) this.accountLease(taskId, runId, worker.compact)
+      if (worker.approval) this.accountLease(taskId, runId, worker.approval)
+      let conversation = collator || diagnostic ? undefined : input?.conversation
+      const body = collator || diagnostic ? { metadata: (collator ?? diagnostic!).initial() } : (() => {
+        const text = input?.text ?? (run.purpose === 'production' ? this.runnerGoalText(taskId, run.request_id, run.intent_revision) : JSON.parse(this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.trigger_request_id, taskId).input_json).text)
+        if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > defaults.data.object_bytes) fail('INVALID_INPUT', 'Worker input must be nonempty and bounded')
+        const materials = worker.context.navigation(attempt.input_versions)
+        const navigation = (history?: ConversationHistory) => history ? { conversation_history: { refs: history.refs, truncated: history.truncated, notice: 'Earlier messages belong to this Task conversation. Use the read event tool with these exact IDs for complete originals when needed.' } } : {}
+        if (conversation) conversation = fitConversation(conversation, history => !worker.budget.plan([
+          { role: 'system', content: profile.system }, ...history.messages.map(item => item.message),
+          { role: 'user', content: JSON.stringify({ request: text, request_materials: materials, ...navigation(history) }) }
+        ], profile.tools).needsCompaction)
+        return { text, materials, ...navigation(conversation) }
+      })()
+      this.db.transaction(() => {
+        state.qualify(attemptId, 'dispatch')
+        state.updateAttempt({ ...attempt, operation_id: attempt.operation_id ?? id(), state: 'dispatched', dispatch_state: 'dispatched' })
+        if (!collator && !diagnostic) for (const message of conversation?.messages ?? []) {
+          this.record(taskId, 'worker.conversation', { message: message.message, conversation_source: message.source, run_id: runId, owner })
+        }
+        this.record(taskId, 'worker.input', { ...body, run_id: runId, owner, plan_revision: work.plan_revision })
+      })()
+      await runAgent(this.models, worker.main, taskId, [], {
+        context: (messages, recovery) => this.prepareWorkerContext(worker, messages, recovery),
+        valid: () => { this.qualifyWorker(attemptId) },
+        state: (value, reason) => this.workerState(worker, value, reason),
+        budget: value => { this.qualifyWorker(attemptId); this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(value), runId) },
+        record: (kind, payload) => {
+          this.qualifyWorker(attemptId)
+          if (diagnostic && ['message.assistant', 'message.assistant.partial'].includes(kind)) return
+          const body = { ...payload, run_id: runId, owner, model_config_id: worker.main.id }
+          this.db.transaction(() => {
+            const recordId = this.record(taskId, kind, body)
+            if (payload.message) recordedMessage({ id: recordId, sequence: this.task(taskId).next_sequence - 1, kind, payload: body })
+          })()
+          if (kind === 'model.tool_result') this.observeRunnerGoal(owner, true)
+        },
+        tool: (request, signal) => this.workerTool(attemptId, request, signal)
+      }, controller.signal, worker.budget, {
+        profile,
+        onResult: value => {
+          this.db.transaction(() => {
+            this.qualifyWorker(attemptId)
+            let serialized: string | undefined
+            try { serialized = json(value) } catch { fail('INVALID_WORKER_RESULT', 'Worker result is not finite JSON') }
+            if (!serialized || Buffer.byteLength(serialized) > 1048576) fail('INVALID_WORKER_RESULT', 'Worker result exceeds its record limit')
+            this.record(taskId, 'worker.result', { value: JSON.parse(serialized), run_id: runId, owner })
+            result = value; accepted = true
+          })()
+        }
+      })
+      this.db.transaction(() => {
+        this.qualifyWorker(attemptId)
+        if (!accepted) fail('INVALID_WORKER_RESULT', 'Worker completed without an accepted result')
+        const resultRecord = this.one("SELECT id FROM records WHERE task_id=? AND kind='worker.result' AND json_extract(payload_json,'$.owner.attempt_id')=? ORDER BY sequence DESC LIMIT 1", taskId, attemptId)
+        state.updateAttempt({ ...state.attempt(attemptId), state: 'succeeded', result_ref: { task_id: taskId, kind: 'record', id: resultRecord.id } })
+        const installed = installResult?.(result, { ...owner }) as unknown
+        if (installed && typeof (installed as { then?: unknown }).then === 'function') {
+          void Promise.resolve(installed).catch(() => {})
+          fail('INVALID_WORKER_RESULT', 'Worker result installation must be synchronous')
+        }
+        this.record(taskId, 'worker.ended', { state: 'succeeded', run_id: runId, owner })
+      })()
+      return result
+    } catch (error) {
+      if (!this.closed && this.db.open) this.db.transaction(() => {
+        const current = state.attempt(attemptId)
+        const code = error instanceof ContractError || error instanceof ModelError ? error.code : 'MODEL_EXECUTION_FAILED'
+        if (['dispatched', 'running', 'waiting'].includes(current.state)) state.updateAttempt({ ...current, state: controller.signal.aborted ? 'cancelled' : 'failed' })
+        this.record(taskId, 'worker.ended', { state: state.attempt(attemptId).state, code, run_id: runId, owner })
+      })()
+      throw error
+    } finally {
+      agent.controller.signal.removeEventListener('abort', cancel)
+      this.workers.delete(attemptId)
+      if (!this.closed) this.aggregateWorkerRun(taskId, runId)
+    }
+  }
+  private workerState(worker: WorkerAgent, state: 'running' | 'waiting', reason?: string): void {
+    const { owner } = worker, qualified = this.qualifyWorker(owner.attempt_id)
+    this.db.transaction(() => {
+      new RunnerWorkState(this.db, this.epoch).updateAttempt({ ...qualified.attempt, state })
+      this.record(owner.task_id, 'worker.state', { run_id: owner.run_id, owner, state, ...(reason ? { reason } : {}) })
+    })()
+    worker.state = state; worker.reason = reason
+    this.aggregateWorkerRun(owner.task_id, owner.run_id)
+    if (state === 'waiting' && ['approval', 'input', 'input_required', 'user_input'].includes(reason ?? '')) this.observeRunnerGoal(owner, true)
+  }
+  private async prepareWorkerContext(worker: WorkerAgent, live: ChatMessage[], recovery?: import('./model/agent').ContextRecovery): Promise<ChatMessage[]> {
+    const { owner, context } = worker
+    this.qualifyWorker(owner.attempt_id)
+    if (worker.collator) return worker.collator.context(live, recovery)
+    if (worker.diagnostic) return worker.diagnostic.context(live, recovery)
+    this.observeRunnerGoal(worker.owner)
+    const old = context.summary(), messages = worker.messages ? live : context.load(live[0]!)
+    annotateReads(messages); worker.messages = messages
+    if (!recovery && !worker.budget.plan(messages, worker.profile.tools).needsCompaction) return messages
+    if (!recovery && !context.hasFresh(old?.through_sequence ?? 0)) {
+      if (!worker.budget.fits(messages, worker.profile.tools)) throw worker.budget.rejection(messages, worker.profile.tools, 'protected-input', 'CONTEXT_MINIMUM_TOO_LARGE')
+      return messages
+    }
+    const through = context.sequence()
+    const updated = await compactContext(this.models, worker.compact ?? worker.main, owner.task_id, worker.budget, worker.controller.signal, messages, through, worker.profile.tools, {
+      valid: () => { this.qualifyWorker(owner.attempt_id) },
+      state: reason => this.workerState(worker, 'waiting', reason),
+      budget: () => { this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(worker.budget.state), owner.run_id) },
+      install: value => {
+        this.qualifyWorker(owner.attempt_id)
+        context.installSummary(value)
+      }
+    }, recovery)
+    worker.messages = updated
+    this.workerState(worker, 'running')
+    return updated
+  }
+  private observeRunnerGoal(owner: ExecutionScope, force = false): void {
+    if (owner.purpose !== 'production' || owner.role === 'diagnostic' || this.closing || this.closed || !this.db.open) return
+    const key = `${owner.request_id}:${owner.intent_revision}`, at = Date.now(), previous = this.runnerProgressObservedAt.get(key) ?? 0
+    if (!force && at - previous < 1000) return
+    this.runnerProgressObservedAt.set(key, at)
+    try {
+      const allowed = !!this.features.runner && this.features.runner.diagnostics !== false
+      const observed = new RunnerHostProgress(this.db, this.epoch).observe(owner.task_id, owner.request_id, { capability_allowed: allowed })
+      for (const diagnosis of observed.diagnoses) if (diagnosis.model_diagnosis === 'eligible') this.executeRunnerDiagnosis(diagnosis)
+    }
+    catch (error) { this.record(owner.task_id, 'runner.progress.blocked', { request_id: owner.request_id, intent_revision: owner.intent_revision, reason: error instanceof ContractError ? error.code : 'PROGRESS_FACTS_UNAVAILABLE' }) }
+  }
+  private executeRunnerDiagnosis(source: ProgressDiagnosis): void {
+    const state = new RunnerWorkState(this.db, this.epoch), subject = state.work(source.work_id)
+    if (subject.purpose !== 'production' || subject.task_id !== source.task_id || subject.request_id !== source.request_id || subject.intent_revision !== source.intent_revision || subject.plan_revision !== source.plan_revision || !subject.current_attempt_id) fail('RUNNER_OWNERSHIP_INVALID', 'Diagnosis requires the observed current production work')
+    const original = state.attempt(subject.current_attempt_id), run = state.run(subject.run_id), diagnostic = createRunnerDiagnostic(source)
+    const workId = id(), attemptId = id(), dependency = { kind: 'goal' as const, task_id: source.task_id, request_id: source.request_id, intent_revision: source.intent_revision }
+    const binding = { request_id: source.request_id, intent_revision: source.intent_revision, work_id: source.work_id, plan_revision: source.plan_revision, through_sequence: source.through_sequence }
+    this.db.transaction(() => {
+      state.installPlan([{ work_id: workId, task_id: source.task_id, run_id: run.run_id, plan_revision: 1, role: 'diagnostic', required: false, requirement_ids: [], dependencies: [dependency], state: 'planned', max_attempts: 1, purpose: 'production', request_id: source.request_id, intent_revision: source.intent_revision }])
+      state.createAttempt({ attempt_id: attemptId, work_id: workId, task_id: source.task_id, run_id: run.run_id, runtime_epoch: this.epoch, attempt_number: 1, profile_id: diagnostic.profile.id, model_config_id: original.model_config_id, model_config_revision: original.model_config_revision, input_versions: [dependency], state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: source.request_id, intent_revision: source.intent_revision })
+      this.record(source.task_id, 'runner.progress.diagnostic.queued', { subject: binding, run_id: run.run_id, work_id: workId, attempt_id: attemptId, automatic_replay: false, execution_permission: false, recovery_permission: false })
+    })()
+    void this.executeWorker(attemptId, diagnostic.profile, undefined, (result, owner) => {
+      this.record(source.task_id, 'runner.progress.diagnostic.result', { subject: binding, run_id: run.run_id, owner, result })
+    }, undefined, diagnostic).catch(error => {
+      if (!this.closing && !this.closed && this.db.open) {
+        if (state.attempt(attemptId).dispatch_state === 'not_dispatched') state.revokeWork(workId)
+        this.record(source.task_id, 'runner.progress.diagnostic.ended', { subject: binding, run_id: run.run_id, work_id: workId, attempt_id: attemptId, code: error instanceof ContractError || error instanceof ModelError ? error.code : 'DIAGNOSIS_FAILED', automatic_replay: false, execution_permission: false, recovery_permission: false })
+        this.aggregateWorkerRun(source.task_id, run.run_id)
+      }
+    })
+  }
+  private aggregateWorkerRun(taskId: string, runId: string): void {
+    if (this.closed || !this.db.open || !this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(runId)) return
+    const state = new RunnerWorkState(this.db, this.epoch)
+    state.reconcileDependencies(taskId)
+    const run = state.run(runId), works = state.taskWorks(taskId).filter(work => work.run_id === runId)
+    const attempts = works.flatMap(work => state.attempts(work.work_id)), states: WorkRunState[] = []
+    for (const work of works) {
+      if (!work.current_attempt_id) continue
+      const row = this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='worker.state' AND json_extract(payload_json,'$.owner.attempt_id')=? ORDER BY sequence DESC LIMIT 1").get(taskId, work.current_attempt_id) as Row | undefined
+      if (row) {
+        const value = JSON.parse(row.payload_json)
+        states.push({ work_id: work.work_id, attempt_id: work.current_attempt_id, state: value.state, ...(value.reason ? { reason: value.reason } : {}) })
+      }
+    }
+    const cancelled = this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='runner.cancelled' AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1").get(taskId, runId) as Row | undefined
+    const cancellation = cancelled ? JSON.parse(cancelled.payload_json).scope === 'task' ? 'task' as const : 'run' as const : undefined
+    const proposed = aggregateRunOutcome({ run, works, attempts, states, ...(cancellation ? { cancellation } : {}) })
+    const terminal = this.one('SELECT intended_terminal,primary_reason FROM runs WHERE id=?', runId)
+    const interrupted = terminal.intended_terminal === 'interrupted'
+    const outcome = interrupted && proposed.phase !== 'terminal' ? {
+      phase: 'closing' as const, outcome: 'interrupted' as const,
+      cancel_work_ids: works.filter(work => ['planned', 'queued', 'running', 'waiting'].includes(work.state) && !(terminal.primary_reason === 'host_shutdown' && this.undispatchedShutdownWork(work))).map(work => work.work_id),
+      unknown_attempt_ids: attempts.filter(attempt => attempt.state === 'unknown' || attempt.dispatch_state === 'unknown').map(attempt => attempt.attempt_id)
+    } : proposed
+    if (outcome.phase === 'terminal') return
+    if (outcome.phase === 'active') {
+      this.db.prepare('UPDATE runs SET state=?,wait_reason=? WHERE id=? AND commit_valid=1').run(outcome.state, outcome.state === 'waiting' ? outcome.waits[0]?.reason ?? 'work_waiting' : null, runId)
+      return
+    }
+    state.closeRun(runId)
+    for (const workId of outcome.cancel_work_ids) state.revokeWork(workId)
+    const cancelledAttempts = attempts.filter(attempt => outcome.cancel_work_ids.includes(attempt.work_id)).map(attempt => attempt.attempt_id)
+    if (cancelledAttempts.length) this.revokeRunActions(runId, cancelledAttempts)
+    for (const [attemptId, worker] of this.workers) if (worker.owner.run_id === runId && outcome.cancel_work_ids.includes(worker.owner.work_id)) {
+      this.pluginCalls.cancelAttempt(attemptId); this.monty.cancelAttempt(attemptId); worker.controller.abort()
+    }
+    this.pumpRunnerWorkers(taskId)
+    if (!outcome.outcome) return
+    // Missing token usage remains an accounting fact after the request ends.
+    // Only execution ownership and unconfirmed effects keep a Run closing.
+    const unresolved = this.workersForRun(runId) || this.pluginCalls.busyRun(runId) || this.runnerCleanupPending(runId) || this.monty.busyRun(runId) || outcome.unknown_attempt_ids.length > 0 || !!this.db.prepare("SELECT 1 FROM calls WHERE run_id=? AND (state!='ended' OR execution='unknown') LIMIT 1").get(runId)
+    const reason = (outcome.outcome === 'failed' ? runnerFailureReason(this.db, taskId, runId, terminal.primary_reason) : terminal.primary_reason) ?? (cancellation ? 'user_cancelled' : 'required_work_settled')
+    this.db.prepare("UPDATE runs SET state='waiting',wait_reason=?,intended_terminal=?,primary_reason=CASE WHEN primary_reason IS NULL OR primary_reason='required_work_settled' THEN ? ELSE primary_reason END WHERE id=? AND state IN ('running','waiting')").run(unresolved ? 'ending_cleanup' : 'runner_closing', outcome.outcome, reason, runId)
+    if (unresolved) return
+    const agent = this.agents.get(runId)
+    if (agent?.managed) {
+      agent.main.release(); agent.compact?.release(); agent.approval?.release(); this.agents.delete(runId)
+    }
+    this.finish(taskId, runId, outcome.outcome, reason, true)
+    this.pumpRunnerWorkers(taskId)
+  }
+  private workersForRun(runId: string): boolean { return [...this.workers.values()].some(worker => worker.owner.run_id === runId) }
+  private runnerCleanupPending(runId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM cleanup_jobs j
+      WHERE j.necessary=1 AND j.state!='done' AND (
+        (j.owner_kind='call' AND EXISTS (SELECT 1 FROM calls c WHERE c.id=j.owner_id AND c.run_id=@run)) OR
+        (j.owner_kind='action' AND EXISTS (SELECT 1 FROM actions a WHERE a.id=j.owner_id AND (a.run_id=@run OR json_extract(a.source_json,'$.owner.run_id')=@run))) OR
+        (j.owner_kind='staging' AND EXISTS (SELECT 1 FROM staging s JOIN actions a ON a.id=s.owner_id WHERE s.id=j.owner_id AND s.owner_kind='action' AND (a.run_id=@run OR json_extract(a.source_json,'$.owner.run_id')=@run))) OR
+        (j.owner_kind='plugin_instance' AND EXISTS (SELECT 1 FROM json_each(j.detail_json,'$.call_ids') affected JOIN calls c ON c.id=affected.value WHERE c.run_id=@run)) OR
+        (j.owner_kind NOT IN ('call','action','staging','plugin_instance') AND j.task_id=(SELECT task_id FROM runs WHERE id=@run))
+      ) LIMIT 1`).get({ run: runId })
+  }
+  private runnerArtifacts(): RunnerArtifactState { return this.runnerArtifactState ??= new RunnerArtifactState(this.db, new RunnerWorkState(this.db, this.epoch)) }
+  private runnerComposition(): RunnerCompositionState { return this.runnerCompositionState ??= new RunnerCompositionState(this.db, new RunnerWorkState(this.db, this.epoch), this.runnerArtifacts()) }
+  private runnerHostComposition(): RunnerHostComposition { return new RunnerHostComposition(this.db, new RunnerWorkState(this.db, this.epoch), this.runnerArtifacts(), this.runnerComposition()) }
+  prepareRunnerComposition(taskId: string, triggerRequestId: string, options: PrepareRunnerCompositionOptions = {}): PreparedRunnerComposition {
+    this.acceptWork(); this.recovery.assertWrite(); this.task(taskId)
+    const request = this.one('SELECT config_selection_json FROM requests WHERE task_id=? AND id=?', taskId, triggerRequestId), selection = JSON.parse(request.config_selection_json)
+    const main = this.models.acquire(selection.id, 'main')
+    let approval: ModelLease | undefined, prepared: PreparedRunnerComposition | undefined
+    try {
+      if (main.revision !== selection.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Composition trigger configuration changed')
+      if (selection.approval_mode === 'assisted') {
+        if (!selection.approval_id) fail('MODEL_CONFIGURATION_CHANGED', 'Composition requires the original approval configuration')
+        approval = this.models.acquire(selection.approval_id, 'approval')
+        if (approval.revision !== selection.approval_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Composition approval configuration changed')
+      }
+      this.refreshRunnerScope(taskId)
+      prepared = this.runnerHostComposition().prepare(taskId, triggerRequestId, main, options)
+      const controller = new AbortController(), budget = new RunBudget(main.config)
+      this.agents.set(prepared.run_id, { controller, main, ...(approval ? { approval } : {}), budget, mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
+      this.record(taskId, 'runner.composition.prepared', { run_id: prepared.run_id, batch_id: prepared.batch.batch_id, composition_version: prepared.batch.composition_version, trigger_request_id: triggerRequestId, operation_id: prepared.batch.operation_id })
+      return prepared
+    } catch (error) {
+      if (!prepared) { main.release(); approval?.release() }
+      if (!(error instanceof ContractError && error.code === 'COMPOSITION_NOT_READY')) this.record(taskId, 'runner.composition.blocked', { trigger_request_id: triggerRequestId, code: error instanceof ContractError ? error.code : 'COMPOSITION_PREPARATION_FAILED' })
+      throw error
+    }
+  }
+  runnerPublicationOperation(taskId: string, operationId: string): PublicationOperation | null {
+    this.task(taskId)
+    return this.runnerHostComposition().operation(taskId, operationId)
+  }
+  publishRunnerComposition(taskId: string, batchId: string, plan: PresentationPlan, options: PublishRunnerCompositionOptions = {}): Promise<PublicationResult> {
+    const host = this.runnerHostComposition(), batch = this.runnerComposition().batch(taskId, batchId)
+    if (!batch?.operation_id) return Promise.reject(new ContractError('RUNNER_NOT_FOUND', 'Composition publication is unavailable'))
+    const original = host.operation(taskId, batch.operation_id)
+    if (original?.result) return Promise.resolve(original.result)
+    const pending = this.compositionPublications.get(batch.operation_id)
+    if (pending) return pending
+    const epoch = this.epoch, state = new RunnerWorkState(this.db, epoch), owner = host.publisher(taskId, batchId), attempt = state.attempt(owner.attempt_id)
+    if (!['registered', 'queued'].includes(attempt.state)) return Promise.reject(new ContractError('RUNNER_PUBLICATION_CONFLICT', 'Query the original publication before another dispatch'))
+    state.updateAttempt({ ...attempt, state: 'queued' })
+    const promise = new Promise<PublicationResult>((resolve, reject) => {
+      const failedBeforeDispatch = (error: unknown) => {
+        if (this.closed || !this.db.open || this.epoch !== epoch) { reject(error); return }
+        try {
+          let code = error instanceof ContractError ? error.code : 'COMPOSITION_ADMISSION_FAILED'
+          try { this.runnerComposition().checkBatch(taskId, batchId) } catch (cause) { if (cause instanceof ContractError) code = cause.code }
+          const cancelled = !!options.signal?.aborted || !!this.agents.get(batch.run_id)?.controller.signal.aborted || this.task(taskId).state !== 'active'
+          const result = host.recordFailure(taskId, batchId, plan, code, cancelled)
+          host.setBatchState(taskId, batchId, cancelled ? 'cancelled' : 'failed')
+          this.record(taskId, 'runner.composition.blocked', { run_id: batch.run_id, batch_id: batchId, operation_id: batch.operation_id, code, state: result.state })
+          this.finish(taskId, batch.run_id, cancelled ? 'cancelled' : 'failed', code)
+          resolve(result)
+        } catch (failure) { reject(failure) }
+      }
+      this.pendingWorkers.set(owner.attempt_id, { task: taskId, work: admissionWork(state.work(owner.work_id)), reject: failedBeforeDispatch, start: () => {
+        void this.executeRunnerCompositionPublication(taskId, batchId, plan, options).then(resolve, reject).finally(() => this.pumpRunnerWorkers(taskId))
+      } })
+    })
+    this.compositionPublications.set(batch.operation_id, promise)
+    void promise.finally(() => this.compositionPublications.delete(batch.operation_id!)).catch(() => {})
+    this.pumpRunnerWorkers(taskId)
+    return promise
+  }
+  private async executeRunnerCompositionPublication(taskId: string, batchId: string, plan: PresentationPlan, options: PublishRunnerCompositionOptions): Promise<PublicationResult> {
+    const state = new RunnerWorkState(this.db, this.epoch), host = this.runnerHostComposition(), batch = this.runnerComposition().batch(taskId, batchId)!
+    const owner = host.publisher(taskId, batchId), agent = this.agents.get(batch.run_id)
+    if (!agent?.managed) fail('RUNNER_OWNERSHIP_INVALID', 'Composition configuration lease is unavailable')
+    const signal = options.signal ? AbortSignal.any([agent!.controller.signal, options.signal]) : agent!.controller.signal
+    const valid = () => {
+      if (signal.aborted) fail('SOURCE_INVALID', 'Composition publication was cancelled')
+      const qualified = state.qualify(owner.attempt_id)
+      this.qualify(taskId, batch.run_id)
+      if (qualified.work.work_id !== owner.work_id || qualified.run.purpose !== 'composition' || qualified.run.batch_id !== batchId) fail('RUNNER_OWNERSHIP_INVALID', 'Composition publisher ownership changed')
+      this.runnerComposition().checkBatch(taskId, batchId)
+    }
+    const accounting = new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: taskId, budget_id: state.run(batch.run_id).budget_id, attempt_id: owner.attempt_id })
+    let dispatched = false
+    try {
+      valid()
+      host.checkInputs(taskId, batch.trigger_request_id, batch.indexes.map(index => this.runnerArtifacts().artifact(taskId, index.artifact_id, index.artifact_revision)!), agent!.main)
+      const collatorWork = state.taskWorks(taskId).find(work => work.run_id === batch.run_id && work.current_attempt_id && state.attempt(work.current_attempt_id).profile_id === 'collator-indexed-v1')!
+      const collatorAttempt = state.attempt(collatorWork.current_attempt_id!)
+      if (['registered', 'queued'].includes(collatorAttempt.state)) {
+        state.updateAttempt({ ...collatorAttempt, state: 'dispatched', dispatch_state: 'dispatched', operation_id: id() })
+        const recordId = this.record(taskId, 'runner.composition.rule_plan', { run_id: batch.run_id, batch_id: batchId, plan })
+        state.updateAttempt({ ...state.attempt(collatorAttempt.attempt_id), state: 'succeeded', result_ref: { task_id: taskId, kind: 'record', id: recordId } })
+      } else if (collatorAttempt.state !== 'succeeded') fail('RUNNER_OWNERSHIP_INVALID', 'Composition requires its finished exact Collator plan')
+      accounting.tool(batch.operation_id!, 'reserved')
+      state.updateAttempt({ ...state.attempt(owner.attempt_id), state: 'dispatched', dispatch_state: 'dispatched', operation_id: batch.operation_id })
+      state.updateAttempt({ ...state.attempt(owner.attempt_id), state: 'running' })
+      accounting.tool(batch.operation_id!, 'dispatched'); dispatched = true
+      const publication = host.publication(taskId, batchId, plan, this.features, resource => {
+        const loaded = loadBundleSource(this.db, this.root, taskId, { type: 'resource', resource: { kind: 'resource', id: resource } }, source => this.journal.assertResource(source))
+        return { bundle: loaded.bundle, byte_length: loaded.source!.byte_length }
+      }, options)
+      const context: ExecutionActionContext = { id: publication.action_id, owner, signal, hostPublication: true, valid, authorize: request => { if (json(request) !== json(publication.request)) fail('WORKER_CAPABILITY_DENIED', 'Composition publisher can execute only its exact compiled action') } }
+      host.setBatchState(taskId, batchId, 'publishing')
+      await this.replaceSurface(taskId, batch.run_id, publication.request, signal, context, publication.hooks)
+      const result = host.operation(taskId, publication.operation_id)?.result
+      if (!result || result.state !== 'published') fail('RUNNER_PUBLICATION_CONFLICT', 'Publication must be queried by its original operation identity')
+      accounting.tool(batch.operation_id!, 'completed')
+      const recordId = this.record(taskId, 'runner.composition.ended', { run_id: batch.run_id, batch_id: batchId, operation_id: batch.operation_id, result })
+      state.updateAttempt({ ...state.attempt(owner.attempt_id), state: 'succeeded', result_ref: { task_id: taskId, kind: 'record', id: recordId } })
+      return result!
+    } catch (error) {
+      const original = host.operation(taskId, batch.operation_id!)
+      if (original?.result?.state === 'published') {
+        accounting.tool(batch.operation_id!, 'completed')
+        const attempt = state.attempt(owner.attempt_id)
+        if (!['succeeded', 'failed', 'cancelled', 'revoked'].includes(attempt.state)) state.updateAttempt({ ...attempt, state: 'succeeded' })
+        return original.result
+      }
+      const code = error instanceof ContractError ? error.code : 'COMPOSITION_PUBLICATION_FAILED'
+      const action = this.db.prepare('SELECT state,result FROM actions WHERE id=? AND task_id=?').get(batch.action_id, taskId) as Row | undefined
+      const unknown = !!original && (!action || action.state !== 'ended' || !['not_executed', 'failure'].includes(action.result))
+      if (dispatched) accounting.tool(batch.operation_id!, unknown ? 'unknown' : 'failed')
+      let result: PublicationResult
+      if (original) result = host.publications.recordOutcome(taskId, batch.operation_id!, { state: unknown ? 'unknown' : signal.aborted ? 'cancelled' : 'failure', code })
+      else {
+        try { result = host.recordFailure(taskId, batchId, plan, code, signal.aborted) }
+        catch { result = { operation_id: batch.operation_id!, state: signal.aborted ? 'cancelled' : 'failure', code } }
+      }
+      host.setBatchState(taskId, batchId, result.state === 'unknown' ? 'unknown' : result.state === 'cancelled' ? 'cancelled' : 'failed')
+      this.record(taskId, 'runner.composition.blocked', { run_id: batch.run_id, batch_id: batchId, operation_id: batch.operation_id, code, state: result.state })
+      const attempt = state.attempt(owner.attempt_id)
+      if (!['succeeded', 'failed', 'cancelled', 'revoked'].includes(attempt.state)) {
+        if (dispatched) state.updateAttempt({ ...attempt, state: unknown ? 'unknown' : signal.aborted ? 'cancelled' : 'failed', dispatch_state: unknown ? 'unknown' : attempt.dispatch_state })
+        else state.revokeWork(owner.work_id)
+      }
+      return result
+    } finally {
+      if (!this.closed) this.aggregateWorkerRun(taskId, batch.run_id)
+    }
+  }
+  private async assessRunnerComposition(taskId: string, runId: string, approvalId: string, input: unknown, context: ExecutionActionContext, signal: AbortSignal): Promise<void> {
+    const agent = this.agents.get(runId), owner = context.owner!
+    if (!agent?.approval) return
+    const run = new RunnerWorkState(this.db, this.epoch).run(runId)
+    if (run.purpose !== 'composition') fail('RUNNER_OWNERSHIP_INVALID', 'Host publication requires a Composition Run')
+    const accounting = new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: taskId, budget_id: run.budget_id, attempt_id: owner.attempt_id })
+    const lease: ModelLease = { ...agent.approval, owner, release() {} }
+    lease.evidence = event => { context.valid(); return this.record(taskId, 'model.request.evidence', { ...event, run_id: runId }) }
+    lease.accounting = event => {
+      if (['reserved', 'dispatched'].includes(event.phase)) context.valid()
+      accounting.model(event)
+      this.record(taskId, 'model.request.accounting', { ...event, run_id: runId, owner })
+    }
+    try {
+      context.valid()
+      const request = this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.trigger_request_id, taskId)
+      const messages: ChatMessage[] = [{ role: 'system', content: approvalTemplate }, { role: 'user', content: json({ source: owner, action: input, permission: 'Only this exact compiled Surface action. Input discard requires separate explicit human confirmation.', user_request: request.input_json }) }]
+      const reservation = agent.budget.reserve(messages, undefined, lease.config, 'approval-input')
+      const response = await this.models.request(lease, taskId, messages, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'approval')
+      context.valid(); agent.budget.settle(reservation, response)
+      const evaluation: unknown = JSON.parse(response.text)
+      assertContract<{ decision: 'approve' | 'deny' | 'escalate'; reason: string }>('approval_decision', evaluation)
+      const approval = this.one('SELECT validity,decision FROM approvals WHERE id=?', approvalId)
+      if (approval.validity !== 'valid' || approval.decision !== 'pending') return
+      this.db.prepare('UPDATE approvals SET evaluation_json=? WHERE id=?').run(json({ ...evaluation, model_id: lease.id, model_revision: lease.revision, template: 'approval-v0.1' }), approvalId)
+      if (evaluation.decision === 'escalate') this.db.prepare("UPDATE approvals SET handling='awaiting_human' WHERE id=?").run(approvalId)
+      else this.decide(taskId, approvalId, evaluation.decision, 'model', evaluation.reason)
+    } catch (error) {
+      if (!this.closed && !signal.aborted) this.db.prepare("UPDATE approvals SET handling='awaiting_human',evaluation_json=? WHERE id=? AND decision='pending' AND validity='valid'").run(json({ code: error instanceof ModelError || error instanceof ContractError ? error.code : 'INVALID_APPROVAL_RESPONSE', template: 'approval-v0.1' }), approvalId)
+    } finally {
+      if (!this.closed) this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(agent.budget.state), runId)
+    }
+  }
+  private refreshRunnerScope(task: string): void {
+    const composition = this.runnerComposition(), previous = composition.scope(task)
+    const goals = (this.db.prepare('SELECT g.payload_json FROM runner_goal_heads h JOIN runner_goal_revisions g ON g.request_id=h.request_id AND g.intent_revision=h.intent_revision WHERE h.task_id=? ORDER BY h.rowid').all(task) as Row[]).map(row => JSON.parse(row.payload_json) as GoalRevision).filter(goal => goal.state === 'active')
+    const inventories = new Map(goals.map(goal => {
+      let inventory = composition.inventory(task, goal.request_id, goal.intent_revision)
+      if (inventory) {
+        try { composition.checkInventory(task, goal.request_id, goal.intent_revision, inventory.inventory_revision) }
+        catch (error) {
+          if (!(error instanceof ContractError) || !['RUNNER_OUTPUT_INCOMPLETE', 'RUNNER_OWNERSHIP_INVALID', 'RUNNER_DEPENDENCY_INVALID'].includes(error.code)) throw error
+          inventory = null
+        }
+      }
+      return [goal.request_id, inventory] as const
+    }))
+    const targets = goals.map(goal => {
+      const inventory = inventories.get(goal.request_id)
+      return { request_id: goal.request_id, intent_revision: goal.intent_revision, required: goal.requirements.some(requirement => requirement.required), requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), ...(inventory ? { contribution_inventory: { task_id: task, request_id: goal.request_id, intent_revision: goal.intent_revision, inventory_revision: inventory.inventory_revision } } : {}) }
+    })
+    const unresolved = goals.flatMap(goal => inventories.get(goal.request_id)?.unresolved ?? goal.requirements.filter(requirement => requirement.required).map(requirement => ({ task_id: task, request_id: goal.request_id, intent_revision: goal.intent_revision, requirement_id: requirement.requirement_id })))
+    if (previous && json(previous.targets) === json(targets) && json(previous.unresolved) === json(unresolved) && (previous.state !== 'complete' || this.runnerHostComposition().completeness(task).state === 'complete')) return
+    composition.installScope({ task_id: task, composition_version: (previous?.composition_version ?? 0) + 1, ...(previous ? { previous_version: previous.composition_version } : {}), state: 'working', targets, unresolved })
+  }
+  private runner(): TaskRunner {
+    return this.taskRunner ??= new TaskRunner(new RunnerWorkState(this.db, this.epoch), {
+      goal: (input, current) => {
+        if (input.kind !== 'request' && !current) fail('RUNNER_NOT_FOUND', 'The target goal does not exist')
+        if (input.kind === 'request' && current) fail('RUNNER_INPUT_CONFLICT', 'A new goal cannot replace an existing goal')
+        return {
+          task_id: input.task_id, request_id: input.request_id!, input_event_id: input.input_event_id,
+          intent_revision: (current?.intent_revision ?? 0) + 1,
+          state: input.kind === 'withdraw_goal' ? 'withdrawn' : 'active',
+          requirements: current?.requirements ?? [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }],
+          ...(current ? { previous_revision: current.intent_revision } : {})
+        }
+      },
+      install: (input, route, goal) => this.installRunnerInput(input, route, goal),
+      operationOwner: input => this.runnerOperationOwner(input),
+      status: query => this.runnerStatusPage(query)
+    })
+  }
+  receiveRunnerInput(input: InputEvent): InputEvent {
+    this.acceptWork(); this.recovery.assertWrite(); this.task(input.task_id)
+    return this.runner().receive(input)
+  }
+  advanceRunnerInput(inputId: string): TaskRunnerInstallation {
+    this.acceptWork(); this.recovery.assertWrite()
+    const receipt = this.runner().advance(inputId)
+    if (receipt.state === 'installed') {
+      const state = new RunnerWorkState(this.db, this.epoch)
+      for (const work of state.taskWorks(receipt.task_id)) if (['cancelled', 'dependency_cancelled', 'invalidated', 'dependency_failed', 'failed'].includes(work.state)) {
+        const attempts = state.attempts(work.work_id).map(attempt => attempt.attempt_id)
+        this.revokeRunActions(work.run_id, attempts)
+        for (const attemptId of attempts) {
+          this.pluginCalls.cancelAttempt(attemptId); this.monty.cancelAttempt(attemptId)
+          this.workers.get(attemptId)?.controller.abort()
+        }
+      }
+      if (receipt.route.route === 'direct' && receipt.route.kind === 'cancel_run') this.finish(receipt.task_id, receipt.route.run_id, 'cancelled', 'user_cancelled')
+      if (receipt.route.route === 'direct' && receipt.route.kind === 'stop_task') this.handle({ type: 'task.stop', task_id: receipt.task_id })
+      for (const row of this.db.prepare("SELECT id FROM runs WHERE task_id=? AND state IN ('running','waiting')").all(receipt.task_id) as Row[]) this.aggregateWorkerRun(receipt.task_id, row.id)
+      this.pumpRunnerWorkers(receipt.task_id)
+      this.pumpRunnerGoals(receipt.task_id)
+    }
+    return receipt
+  }
+  runnerStatus(query: TaskRunnerStatusQuery): TaskRunnerStatusPage { this.task(query.task_id); return this.runner().status(query) }
+  runnerGoals(query: TaskRunnerStatusQuery): RunnerProjection { this.task(query.task_id); return new RunnerHostStatus(this.db, this.epoch).page(query) }
+  private runnerHostInput(raw: Row): TaskRunnerInstallation {
+    const allowed = ['type', 'task_id', 'input_event_id', 'kind', 'text', 'request_id', 'run_id', 'work_id']
+    if (Array.isArray(raw) || Object.keys(raw).some(key => !allowed.includes(key)) || !['query', 'explanation', 'correction', 'cancel_work', 'cancel_run', 'stop_task', 'withdraw_goal'].includes(raw.kind)) fail('INVALID_REQUEST', 'Invalid runner input')
+    for (const key of ['task_id', 'input_event_id']) assertRunnerId(raw[key], key)
+    for (const key of ['request_id', 'run_id', 'work_id']) if (raw[key] !== undefined) assertRunnerId(raw[key], key)
+    if (raw.text !== undefined && (typeof raw.text !== 'string' || !raw.text.trim() || Buffer.byteLength(raw.text) > defaults.data.object_bytes) || raw.kind === 'correction' && raw.text === undefined) fail('INVALID_INPUT', 'Correction input requires nonempty bounded text')
+    this.task(raw.task_id); this.recovery.assertWrite()
+    const original = { task_id: raw.task_id, input_event_id: raw.input_event_id, kind: raw.kind, ...(raw.text !== undefined ? { text: raw.text } : {}), ...(raw.request_id !== undefined ? { request_id: raw.request_id } : {}), ...(raw.run_id !== undefined ? { run_id: raw.run_id } : {}), ...(raw.work_id !== undefined ? { work_id: raw.work_id } : {}) }
+    this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT i.task_id,r.payload_json FROM runner_inputs i JOIN records r ON r.id=i.record_id AND r.task_id=i.task_id WHERE i.input_event_id=?').get(raw.input_event_id) as Row | undefined
+      if (existing) {
+        if (existing.task_id !== raw.task_id || json(JSON.parse(existing.payload_json).runner_input) !== json(original)) fail('RUNNER_INPUT_CONFLICT', 'Input event identity retains its original payload')
+        return
+      }
+      const recordId = this.record(raw.task_id, 'runner.input.received', { runner_input: original, text: raw.text ?? '', purpose: 'control_input', ...(raw.kind === 'correction' ? { conversation: captureConversation(this.db, raw.task_id) } : {}) })
+      this.receiveRunnerInput({ input_event_id: raw.input_event_id, task_id: raw.task_id, kind: raw.kind, record_id: recordId, stage: 'received', ...(raw.request_id !== undefined ? { request_id: raw.request_id } : {}), ...(raw.run_id !== undefined ? { run_id: raw.run_id } : {}), ...(raw.work_id !== undefined ? { work_id: raw.work_id } : {}) })
+    })()
+    return this.advanceRunnerInput(raw.input_event_id)
+  }
+  private installRunnerInput(input: InputEvent, route: TaskRunnerRoute, goal?: GoalRevision): TaskRunnerEffect {
+    const state = new RunnerWorkState(this.db, this.epoch), task = input.task_id
+    const refs: TaskRunnerEffect['refs'] = [{ task_id: task, kind: 'input', id: input.input_event_id }]
+    if (route.route === 'clarification') return { refs, waits: [{ reason: route.reason }] }
+    if (goal) refs.push({ task_id: task, kind: 'goal', id: goal.request_id, revision: goal.intent_revision })
+    if (goal) {
+      for (const row of this.db.prepare("SELECT run_id FROM runner_runs WHERE task_id=? AND request_id=? AND intent_revision!=?").all(task, goal.request_id, goal.intent_revision) as Row[]) {
+        const run = state.run(row.run_id)
+        if (['completed', 'failed', 'cancelled', 'interrupted'].includes(run.state)) continue
+        state.closeRun(row.run_id)
+        this.db.prepare("UPDATE runs SET intended_terminal='interrupted',primary_reason='goal_revision_changed' WHERE id=?").run(row.run_id)
+      }
+      state.reconcileDependencies(task)
+      const current = this.runnerArtifacts().outline(task)
+      if (goal.state === 'active') this.runnerArtifacts().installOutline(ruleRouterOutline(goal, current))
+      else if (current?.sections.some(section => section.request_id === goal.request_id)) this.runnerArtifacts().installOutline({ ...current, base_outline_revision: current.outline_revision, outline_revision: current.outline_revision + 1, sections: current.sections.filter(section => section.request_id !== goal.request_id) })
+      this.refreshRunnerScope(task)
+    }
+    if (route.kind === 'cancel_work') {
+      const work = state.work(route.work_id)
+      if (work.task_id !== task || work.run_id !== route.run_id) fail('RUNNER_OWNERSHIP_INVALID', 'Cancellation target belongs to another Task')
+      state.revokeWork(work.work_id)
+      refs.push({ task_id: task, kind: 'work', id: work.work_id })
+    } else if (route.kind === 'cancel_run' || route.kind === 'stop_task') {
+      const runs = route.kind === 'cancel_run' ? [state.run(route.run_id)] : (this.db.prepare("SELECT run_id FROM runner_runs WHERE task_id=?").all(task) as Row[]).map(row => state.run(row.run_id))
+      if (route.kind === 'stop_task') this.db.prepare("UPDATE tasks SET state='stopping' WHERE id=? AND state='active'").run(task)
+      for (const run of runs) {
+        if (run.task_id !== task) fail('RUNNER_OWNERSHIP_INVALID', 'Cancellation target belongs to another Task')
+        if (['completed', 'failed', 'cancelled', 'interrupted'].includes(run.state)) continue
+        state.closeRun(run.run_id)
+        const work = state.taskWorks(task).find(work => work.run_id === run.run_id)
+        if (work) state.revokeRun(run.run_id, { kind: 'cancellation', work_id: work.work_id })
+        this.db.prepare('UPDATE actions SET commit_valid=0 WHERE run_id=? OR json_extract(source_json,\'$.owner.run_id\')=?').run(run.run_id, run.run_id)
+        this.db.prepare("UPDATE approvals SET validity='revoked' WHERE validity='valid' AND action_id IN (SELECT id FROM actions WHERE run_id=? OR json_extract(source_json,'$.owner.run_id')=?)").run(run.run_id, run.run_id)
+        this.record(task, 'runner.cancelled', { run_id: run.run_id, scope: route.kind === 'stop_task' ? 'task' : 'run', input_event_id: input.input_event_id })
+      }
+    } else if (route.kind === 'query' || route.kind === 'explanation') {
+      const page = this.runnerStatusPage({ task_id: task, ...(route.request_id ? { request_id: route.request_id } : {}), limit: 16 })
+      const record = this.record(task, 'runner.status.reply', { input_event_id: input.input_event_id, purpose: 'query_reply', ...page })
+      refs.push({ task_id: task, kind: 'record', id: record })
+    } else if (route.kind === 'operation_completed' || route.kind === 'approval_decided') {
+      refs.push({ task_id: task, kind: 'operation', id: route.operation_id }, { task_id: task, kind: 'work', id: route.owner.work_id })
+      this.record(task, 'runner.operation.installed', { input_event_id: input.input_event_id, operation_id: route.operation_id, owner: route.owner })
+    }
+    this.record(task, 'runner.input.installed', { input_event_id: input.input_event_id, route, ...(goal ? { goal: { request_id: goal.request_id, intent_revision: goal.intent_revision, state: goal.state } } : {}) })
+    return { refs, waits: [] }
+  }
+  private runnerOperationOwner(input: InputEvent): { operation_id: string; owner: ExecutionScope } | null {
+    if (!input.operation_id) return null
+    const call = this.db.prepare('SELECT limits_json FROM calls WHERE task_id=? AND id=?').get(input.task_id, input.operation_id) as Row | undefined
+    const action = call ? undefined : this.db.prepare('SELECT source_json FROM actions WHERE task_id=? AND id=?').get(input.task_id, input.operation_id) as Row | undefined
+    const attempt = !call && !action ? this.db.prepare("SELECT payload_json FROM runner_attempts WHERE task_id=? AND json_extract(payload_json,'$.operation_id')=?").get(input.task_id, input.operation_id) as Row | undefined : undefined
+    let owner: ExecutionScope | undefined
+    if (call || action) owner = captureExecutionScope(JSON.parse(call?.limits_json ?? action!.source_json).owner, input.task_id)
+    else if (attempt) {
+      const state = new RunnerWorkState(this.db, this.epoch), value = state.attempt(JSON.parse(attempt.payload_json).attempt_id), work = state.work(value.work_id), run = state.run(value.run_id)
+      owner = this.workerOwner({ task_id: input.task_id, runtime_epoch: value.runtime_epoch, run, work, attempt: value })
+    }
+    return owner ? { operation_id: input.operation_id, owner } : null
+  }
+  private runnerStatusPage(query: TaskRunnerStatusQuery): TaskRunnerStatusPage {
+    const { task_id: task, request_id: request } = query, limit = query.limit ?? 32
+    let after = 0
+    if (query.cursor) {
+      let value: Row
+      try { value = JSON.parse(Buffer.from(query.cursor, 'base64url').toString()) } catch { fail('INVALID_CURSOR', 'Runner status cursor is invalid') }
+      if (value!.epoch !== this.epoch || value!.task !== task || value!.request !== (request ?? null) || !Number.isSafeInteger(value!.after) || value!.after < 0) fail('INVALID_CURSOR', 'Runner status cursor belongs to another query')
+      after = value!.after
+    }
+    const rows = this.db.prepare("SELECT h.rowid position,h.request_id,h.intent_revision,g.payload_json FROM runner_goal_heads h JOIN runner_goal_revisions g ON g.request_id=h.request_id AND g.intent_revision=h.intent_revision WHERE h.task_id=? AND (? IS NULL OR h.request_id=?) AND h.rowid>? ORDER BY h.rowid LIMIT ?").all(task, request ?? null, request ?? null, after, limit + 1) as Row[]
+    const items = rows.slice(0, limit).map(row => {
+      const goal = JSON.parse(row.payload_json) as GoalRevision
+      const runs = this.db.prepare("SELECT run_id FROM runner_runs WHERE task_id=? AND request_id=? ORDER BY rowid DESC LIMIT 8").all(task, row.request_id) as Row[]
+      const waits = (this.db.prepare("SELECT id,wait_reason FROM runs WHERE task_id=? AND request_id=? AND state='waiting' LIMIT 8").all(task, row.request_id) as Row[]).map(run => ({ reason: /^[A-Za-z0-9_.:-]{1,128}$/.test(run.wait_reason ?? '') ? run.wait_reason : 'work_waiting', ref: { task_id: task, kind: 'run' as const, id: run.id } }))
+      return { ref: { task_id: task, kind: 'goal' as const, id: row.request_id, revision: row.intent_revision }, state: goal.state, refs: runs.map(run => ({ task_id: task, kind: 'run' as const, id: run.run_id })), waits }
+    })
+    return { task_id: task, items, next_cursor: rows.length > limit ? Buffer.from(json({ epoch: this.epoch, task, request: request ?? null, after: rows[limit - 1]!.position })).toString('base64url') : null }
+  }
+  async workerTool(attemptId: string, raw: unknown, signal: AbortSignal): Promise<unknown> {
+    const { run, task_id: task } = this.qualifyWorker(attemptId), worker = this.workers.get(attemptId)!
+    worker.profile.authorize(raw)
+    const accounting = new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: task, budget_id: run.budget_id, attempt_id: attemptId })
+    const operation = id()
+    accounting.tool(operation, 'reserved')
+    try {
+      this.qualifyWorker(attemptId); worker.profile.authorize(raw)
+      accounting.tool(operation, 'dispatched')
+      const request = validateModel(raw)
+      this.record(task, 'worker.tool.started', { operation_id: operation, owner: worker.owner, run_id: run.run_id, plan_revision: new RunnerWorkState(this.db, this.epoch).work(worker.owner.work_id).plan_revision, request_type: request.type, ...(request.type === 'call' ? { capability: request.input.capability } : request.type === 'read' || request.type === 'list' ? { kind: request.input.kind } : {}) })
+      const value = await this.dispatchWorkerTool(attemptId, raw, signal)
+      const result = value as Row | null
+      accounting.tool(operation, result?.execution === 'unknown' ? 'unknown' : 'completed')
+      this.record(task, 'worker.tool.ended', { operation_id: operation, ...(typeof result?.operation_id === 'string' ? { source_operation_id: result.operation_id } : {}), owner: worker.owner, run_id: run.run_id, state: result?.execution === 'unknown' ? 'unknown' : 'completed' })
+      return value
+    } catch (error) {
+      if (!this.closed && this.db.open) {
+        const unknown = !!this.db.prepare("SELECT 1 FROM calls WHERE run_id=? AND json_extract(limits_json,'$.owner.attempt_id')=? AND (state!='ended' OR execution='unknown') LIMIT 1").get(run.run_id, attemptId)
+        accounting.tool(operation, unknown ? 'unknown' : 'failed')
+        this.record(task, 'worker.tool.ended', { operation_id: operation, owner: worker.owner, run_id: run.run_id, state: unknown ? 'unknown' : 'failed', code: error instanceof ContractError ? error.code : 'TOOL_EXECUTION_FAILED' })
+      }
+      throw error
+    }
+  }
+  private async dispatchWorkerTool(attemptId: string, raw: unknown, signal: AbortSignal): Promise<unknown> {
+    const qualified = this.qualifyWorker(attemptId), worker = this.workers.get(attemptId)!, { owner } = worker
+    worker.profile.authorize(raw)
+    const request = validateModel(raw)
+    if (Buffer.byteLength(json(raw)) > defaults.transport.rpc_message_bytes) fail('INPUT_TOO_LARGE', 'Model request exceeds transport limit')
+    assertReadDispatch(worker.state === 'waiting' ? worker.reason : null)
+    const valid = () => {
+      this.qualifyWorker(attemptId); worker.profile.authorize(request)
+      if (signal.aborted || worker.controller.signal.aborted) fail('RUNNER_OWNERSHIP_INVALID', 'Worker execution cancelled')
+    }
+    valid()
+    if (worker.collator) return worker.collator.read(request)
+    let value: unknown
+    if (request.type === 'list' || request.type === 'read') value = await this.query(owner.task_id, request, attemptId)
+    else if (request.type === 'call') {
+      if (request.input.capability === MONTY_ID && this.monty.available) value = await this.monty.call(owner.task_id, owner.run_id, request.input.arguments, request.input.references, signal, { owner, valid, authorize: current => worker.profile.authorize(current) })
+      else if (request.input.capability.startsWith('plugin:')) value = await this.invokePlugin(owner.task_id, owner.run_id, request.input, signal, worker)
+      else value = this.modelTool(owner.task_id, owner.run_id, request)
+      valid()
+      return value
+    } else {
+      const actionId = id(), context: ExecutionActionContext = { id: actionId, signal, owner, authorize: current => worker.profile.authorize(current), valid }
+      this.db.transaction(() => {
+        valid()
+        this.db.prepare("INSERT INTO actions (id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, owner.task_id, owner.run_id, json({ type: 'worker', owner, epoch: this.epoch }), json(request.input), now())
+      })()
+      if (request.input.type === 'resource.create') return this.resourceCreate(owner.task_id, owner.run_id, request.input, context)
+      if (request.input.type === 'task_data.create' || request.input.type === 'task_data.replace' || request.input.type === 'task_data.remove') return this.dataWrite(owner.task_id, owner.run_id, request.input, signal, context)
+      if (request.input.operations.some(operation => operation.type !== 'view.create')) value = await this.replaceSurface(owner.task_id, owner.run_id, request as SurfaceWrite, signal, context)
+      else value = this.publish(owner.task_id, owner.run_id, request, context)
+    }
+    valid()
+    return { request_type: request.type, execution: 'success', delivery: 'delivered', truncated: false, data: value }
   }
   private recordContextRejection(taskId: string, runId: string, error: ContextRejectedError, lease?: ModelLease): string {
     try {
@@ -1002,7 +2168,6 @@ export class RuntimeStore {
     const controller = new AbortController(), budget = new RunBudget(main.config)
     this.accountLease(taskId, runId, main); if (compact) this.accountLease(taskId, runId, compact)
     this.agents.set(runId, { controller, main, compact, budget, mode: 'manual', compactOnly: true, manualCompact: true })
-    this.runDeadlines.set(runId, deadline(main.config.limits?.run_wall_ms, () => this.finish(taskId, runId, 'failed', 'RUN_WALL_LIMIT')))
     void this.agent(taskId, runId, '')
     return { run_id: runId, scheduled: false }
   }
@@ -1106,7 +2271,7 @@ export class RuntimeStore {
     const incoming = this.db.prepare("SELECT 1 FROM object_references WHERE task_id=? AND target_kind='task_data' AND target_id=? AND blocks_remove=1 LIMIT 1").get(taskId, dataId)
     if (incoming) fail('OBJECT_REFERENCED', 'Current business references (including stale versions) block removal. Explicitly unlink referencing objects first; nothing was removed or cascaded.')
   }
-  private resourceCreate(taskId: string, runId: string | null, input: Extract<Extract<ModelRequest, { type: 'write' }>['input'], { type: 'resource.create' }>, context?: PluginActionContext): unknown {
+  private resourceCreate(taskId: string, runId: string | null, input: Extract<Extract<ModelRequest, { type: 'write' }>['input'], { type: 'resource.create' }>, context?: ExecutionActionContext): unknown {
     const serialized = input.content.type === 'text' ? input.content.text : json(input.content.value)
     const body = Buffer.from(serialized)
     if (input.content.type === 'text' && body.toString('utf8') !== serialized) fail('INVALID_DATA', 'Text must contain valid Unicode scalar values')
@@ -1114,6 +2279,10 @@ export class RuntimeStore {
     const actionId = context?.id ?? id(), resourceId = id(), stageId = id(), sha256 = digest(body)
     if (!context) this.db.prepare("INSERT INTO actions (id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, taskId, runId, json({ type: 'run', id: runId, level: 'task' }), json(input), now())
     try {
+      if (context?.owner?.purpose === 'production' && input.content.type === 'json') {
+        const value = input.content.value
+        if (value && typeof value === 'object' && !Array.isArray(value) && value.profile === 'managed-v1') this.checkedBundle(taskId, validateProducerBundle(value), context.owner.attempt_id)
+      }
       this.journal.assertResource({ id: resourceId, storage_key: resourceId })
       this.storage.publish({ id: stageId, taskId, actionId, key: resourceId, bytes: body.length, sha256 }, body)
       const mediaType = input.content.type === 'text' ? 'text/plain; charset=utf-8' : 'application/json'
@@ -1155,7 +2324,7 @@ export class RuntimeStore {
     if (signal.aborted) fail('SOURCE_INVALID', 'Execution cancelled during tool read')
     return { request_type: request.type, execution: 'success', delivery: 'delivered', truncated: false, data: value }
   }
-  private dataWrite(taskId: string, runId: string | null, input: Extract<ModelRequest, { type: 'write' }>['input'] & { type: 'task_data.create' | 'task_data.replace' | 'task_data.remove' }, signal: AbortSignal, context?: PluginActionContext): Promise<unknown> {
+  private dataWrite(taskId: string, runId: string | null, input: Extract<ModelRequest, { type: 'write' }>['input'] & { type: 'task_data.create' | 'task_data.replace' | 'task_data.remove' }, signal: AbortSignal, context?: ExecutionActionContext): Promise<unknown> {
     const isNew = input.type === 'task_data.create'
     const removing = input.type === 'task_data.remove'
     const policy = removing ? 'task-data-remove-v1' : 'task-data-v1'
@@ -1225,14 +2394,16 @@ export class RuntimeStore {
     if (approval.decision !== 'approve' || approval.validity !== 'valid' || Date.parse(approval.expires_at) <= Date.now()) fail('APPROVAL_INVALID', 'Approval denied, expired or revoked')
     if (this.one('SELECT request_json FROM actions WHERE id=?', actionId).request_json !== json(input)) fail('APPROVAL_BINDING_CHANGED', 'Action payload changed')
     if (binding.action_id !== actionId || binding.policy !== policy || binding.task_id !== taskId || binding.run_id !== runId || binding.runtime_epoch !== this.epoch || binding.request !== json(input)) fail('APPROVAL_BINDING_CHANGED', 'Single action binding changed')
+    const source = JSON.parse(this.one('SELECT source_json FROM actions WHERE id=? AND task_id=?', actionId, taskId).source_json)
+    if (json(binding.owner) !== json(source.owner)) fail('APPROVAL_BINDING_CHANGED', 'Approval execution ownership changed')
   }
-  private async awaitApproval(taskId: string, runId: string | null, actionId: string, input: unknown, signal: AbortSignal, policy = 'task-data-v1', context?: PluginActionContext, resolved?: { version: number; effective_request: unknown; sources: BundleSource[] }): Promise<void> {
-    const agent = runId ? this.agents.get(runId) : undefined, mode = policy === 'task-data-remove-v1' ? 'manual' : agent?.mode ?? 'manual', approvalId = id(), expiry = new Date(Date.now() + defaults.approval.ttl_ms).toISOString()
+  private async awaitApproval(taskId: string, runId: string | null, actionId: string, input: unknown, signal: AbortSignal, policy = 'task-data-v1', context?: ExecutionActionContext, resolved?: { version: number; effective_request: unknown; sources: BundleSource[] }): Promise<void> {
+    const agent = context?.hostPublication && runId ? this.agents.get(runId) : context?.owner ? this.workers.get(context.owner.attempt_id) : runId ? this.agents.get(runId) : undefined, mode = policy === 'task-data-remove-v1' ? 'manual' : agent?.mode ?? 'manual', approvalId = id(), expiry = new Date(Date.now() + defaults.approval.ttl_ms).toISOString()
     this.db.transaction(() => {
       this.sourceValid(taskId, runId, context)
       this.db.prepare("UPDATE actions SET state='waiting',wait_reason='approval' WHERE id=?").run(actionId)
-      this.db.prepare('INSERT INTO approvals VALUES (?,?,\'pending\',\'valid\',?,?,?,NULL,?)').run(approvalId, actionId, mode, mode === 'assisted' ? 'evaluating' : 'awaiting_human', expiry, json({ action_id: actionId, task_id: taskId, run_id: runId, runtime_epoch: this.epoch, request: json(input), policy, created_at: now(), ...(resolved ? { version: 2, resolved } : {}) }))
-      this.db.prepare("UPDATE runs SET state='waiting',wait_reason='approval' WHERE id=?").run(runId)
+      this.db.prepare('INSERT INTO approvals VALUES (?,?,\'pending\',\'valid\',?,?,?,NULL,?)').run(approvalId, actionId, mode, mode === 'assisted' ? 'evaluating' : 'awaiting_human', expiry, json({ action_id: actionId, task_id: taskId, run_id: runId, runtime_epoch: this.epoch, request: json(input), policy, created_at: now(), ...(context?.owner ? { owner: context.owner } : {}), ...(resolved ? { version: 2, resolved } : {}) }))
+      this.actionState(runId, 'waiting', 'approval', context)
     })()
     const waiting = new Promise<void>(resolve => {
       const timer = setTimeout(() => { this.expireApproval(approvalId); resolve() }, defaults.approval.ttl_ms)
@@ -1244,7 +2415,7 @@ export class RuntimeStore {
     const assessmentController = new AbortController()
     const stopAssessment = () => assessmentController.abort()
     signal.addEventListener('abort', stopAssessment, { once: true })
-    const assessment = mode === 'assisted' && agent?.approval && runId ? this.assess(taskId, runId, approvalId, resolved?.effective_request ?? input, agent, assessmentController.signal) : Promise.resolve()
+    const assessment = mode === 'assisted' && agent?.approval && runId ? context?.hostPublication ? this.assessRunnerComposition(taskId, runId, approvalId, resolved?.effective_request ?? input, context, assessmentController.signal) : this.assess(taskId, runId, approvalId, resolved?.effective_request ?? input, agent, assessmentController.signal) : Promise.resolve()
     try {
       await waiting
       assessmentController.abort(); await assessment
@@ -1255,8 +2426,8 @@ export class RuntimeStore {
       assessmentController.abort(); await assessment
       signal.removeEventListener('abort', stopAssessment)
       signal.removeEventListener('abort', abort); this.wakeApproval(approvalId)
-      if (context?.identity.call_id) { this.pluginProcesses.waiting(context.identity.call_id, false); if (!this.closed) this.db.prepare("UPDATE calls SET wait_reason=NULL WHERE id=? AND wait_reason='plugin_approval'").run(context.identity.call_id) }
-      if (!this.closed && runId) this.db.prepare("UPDATE runs SET state='running',wait_reason=NULL WHERE id=? AND commit_valid=1").run(runId)
+      if (context?.identity?.call_id) { this.pluginProcesses.waiting(context.identity.call_id, false); if (!this.closed) this.db.prepare("UPDATE calls SET wait_reason=NULL WHERE id=? AND wait_reason='plugin_approval'").run(context.identity.call_id) }
+      this.restoreActionState(runId, context)
     }
   }
   private wakeApproval(approvalId: string): void { const waiter = this.approvalWaiters.get(approvalId); if (waiter) { clearTimeout(waiter.timer); this.approvalWaiters.delete(approvalId); waiter.resolve() } }
@@ -1269,18 +2440,25 @@ export class RuntimeStore {
     const expiring = this.one('SELECT p.expires_at FROM approvals p JOIN actions a ON a.id=p.action_id WHERE p.id=? AND a.task_id=?', approvalId, taskId)
     if (Date.parse(expiring.expires_at) <= Date.now()) { this.expireApproval(approvalId); fail('APPROVAL_EXPIRED', 'Approval expired') }
     return this.db.transaction(() => {
-      const p = this.one('SELECT p.*,a.task_id,a.run_id,a.commit_valid,a.state AS action_state FROM approvals p JOIN actions a ON a.id=p.action_id WHERE p.id=? AND a.task_id=?', approvalId, taskId)
+      const p = this.one('SELECT p.*,a.task_id,a.run_id,a.commit_valid,a.source_json,a.state AS action_state FROM approvals p JOIN actions a ON a.id=p.action_id WHERE p.id=? AND a.task_id=?', approvalId, taskId)
       if (p.validity !== 'valid' || p.decision !== 'pending' || !p.commit_valid || p.action_state !== 'waiting') fail('APPROVAL_INVALID', 'Approval is no longer pending/executable')
       if (Date.parse(p.expires_at) <= Date.now()) { this.expireApproval(approvalId); fail('APPROVAL_EXPIRED', 'Approval expired') }
       if (p.run_id) this.qualify(taskId, p.run_id)
       else { const source = this.pluginInvocationSources.get(p.action_id); if (source) source.valid(); else if (!this.pluginActions.owner(p.action_id, taskId)) fail('PLUGIN_SOURCE_INVALID', 'Independent action source ended') }
       if (actor === 'human' && p.handling !== 'awaiting_human') fail('APPROVAL_EVALUATING', 'Assisted evaluation is still in progress')
       this.db.prepare("UPDATE approvals SET decision=?,handling='resolved',evaluation_json=? WHERE id=?").run(decision, json({ ...(p.evaluation_json ? JSON.parse(p.evaluation_json) : {}), decided_by: actor, decided_at: now(), reason: reason ?? 'Explicit host UI choice' }), approvalId)
+      const record = this.record(taskId, 'approval.decided', { approval_id: approvalId, action_id: p.action_id, decision, actor })
+      const owner = captureExecutionScope(JSON.parse(p.source_json).owner, taskId)
+      if (owner) {
+        const inputId = `approval:${approvalId}`
+        this.runner().receive({ input_event_id: inputId, task_id: taskId, kind: 'approval_decided', record_id: record, operation_id: p.action_id, run_id: owner.run_id, work_id: owner.work_id, ...(owner.purpose === 'production' ? { request_id: owner.request_id } : {}), stage: 'received' })
+        this.runner().advance(inputId)
+      }
       this.wakeApproval(approvalId)
       return { decision, validity: 'valid', action_id: p.action_id }
     })()
   }
-  private async assess(taskId: string, runId: string, approvalId: string, input: unknown, agent: { approval?: ModelLease; controller: AbortController; budget: RunBudget }, signal: AbortSignal): Promise<void> {
+  private async assess(taskId: string, runId: string, approvalId: string, input: unknown, agent: { approval?: ModelLease; controller: AbortController; budget: RunBudget; owner?: ExecutionScope }, signal: AbortSignal): Promise<void> {
     const lease = agent.approval!
     const surface = (input as { type?: string }).type === 'surface.update'
     const messages: ChatMessage[] = [{ role: 'system', content: approvalTemplate }, { role: 'user', content: json({ source: { type: 'run', id: runId, task_id: taskId, level: 'task' }, action: input, permission: surface ? 'This exact Surface View replacement only. Input discard requires separate human confirmation; your approval cannot supply it. No trust, deletion, new capability or cross-task permission.' : 'This exact existing task_data replacement only. No trust, deletion, input discard, new capability or cross-task permission.', user_request: this.one('SELECT q.input_json FROM requests q JOIN runs r ON r.request_id=q.id WHERE r.id=?', runId).input_json }) }]
@@ -1288,7 +2466,7 @@ export class RuntimeStore {
       const reservation = agent.budget.reserve(messages, undefined, lease.config, 'approval-input')
       this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(agent.budget.state), runId)
       const response = await this.models.request(lease, taskId, messages, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'approval')
-      this.qualify(taskId, runId); agent.budget.settle(reservation, response)
+      this.qualify(taskId, runId); if (agent.owner) this.qualifyWorker(agent.owner.attempt_id); agent.budget.settle(reservation, response)
       const evaluation: unknown = JSON.parse(response.text)
       assertContract<{ decision: 'approve' | 'deny' | 'escalate'; reason: string }>('approval_decision', evaluation)
       const approval = this.one('SELECT * FROM approvals WHERE id=?', approvalId)
@@ -1298,12 +2476,12 @@ export class RuntimeStore {
       else this.decide(taskId, approvalId, evaluation.decision, 'model', evaluation.reason)
     } catch (e) {
       if (this.closed || signal.aborted) return
-      if (e instanceof ContextRejectedError) { this.finish(taskId, runId, 'failed', this.recordContextRejection(taskId, runId, e, lease)); return }
-      if (e instanceof ModelError && (e.code.includes('BUDGET') || e.code === 'RUN_WALL_LIMIT')) { this.finish(taskId, runId, 'failed', e.code); return }
+      if (!agent.owner && e instanceof ContextRejectedError) { this.finish(taskId, runId, 'failed', this.recordContextRejection(taskId, runId, e, lease)); return }
+      if (!agent.owner && e instanceof ModelError && (e.code.includes('BUDGET') || e.code === 'RUN_WALL_LIMIT')) { this.finish(taskId, runId, 'failed', e.code); return }
       this.db.prepare("UPDATE approvals SET handling='awaiting_human',evaluation_json=? WHERE id=? AND decision='pending' AND validity='valid'").run(json({ error: e instanceof ModelError ? e.code : 'INVALID_APPROVAL_RESPONSE', template: 'approval-v0.1' }), approvalId)
     } finally { if (!this.closed) this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(agent.budget.state), runId) }
   }
-  private inspectReplacement(taskId: string, runId: string | null, input: SurfaceWrite['input'], context?: PluginActionContext): PreparedView[] {
+  private inspectReplacement(taskId: string, runId: string | null, input: SurfaceWrite['input'], context?: ExecutionActionContext): PreparedView[] {
     this.sourceValid(taskId, runId, context)
     const surface = this.one('SELECT * FROM surfaces WHERE id=? AND task_id=?', input.surface_id, taskId)
     if (surface.revision !== input.expected_revision) fail('VERSION_CONFLICT', 'Surface version changed; read again and submit a new action')
@@ -1363,12 +2541,12 @@ export class RuntimeStore {
     if (seen.size !== current.size) fail('INVALID_LAYOUT', 'Layout may not silently hide a current View; use view.remove')
     return { slots: [{ id: 'main', groups: resolved }] }
   }
-  private async replaceSurface(taskId: string, runId: string | null, request: SurfaceWrite, signal: AbortSignal, context?: PluginActionContext): Promise<unknown> {
+  private async replaceSurface(taskId: string, runId: string | null, request: SurfaceWrite, signal: AbortSignal, context?: ExecutionActionContext, publication?: CompositionPublicationHooks): Promise<unknown> {
     if (!this.features.viewReplacement) fail('CAPABILITY_DISABLED', 'View replacement is not yet verified and remains disabled')
     const input = request.input, prepared = this.inspectReplacement(taskId, runId, input, context)
     const resolved = prepared.some(p => p.source) ? { version: 1, effective_request: { ...input, operations: input.operations.map(op => { const p = prepared.find(p => p.op === op); return p?.source && op.type !== 'view.remove' && op.type !== 'layout.set' ? { ...op, bundle: { type: 'inline', bundle: p.bundle } } : op }) }, sources: prepared.filter(p => p.source).map(p => p.source!) } : undefined
     const evidence = captureEvidence(this.db, this.root, taskId, input.snapshot_sources)
-    const check = (verifyFiles = true) => { this.checkSurfaceVersions(taskId, runId, input, prepared, context); checkEvidence(this.db, this.root, taskId, evidence, verifyFiles) }
+    const check = (verifyFiles = true) => { this.checkSurfaceVersions(taskId, runId, input, prepared, context); checkEvidence(this.db, this.root, taskId, evidence, verifyFiles); publication?.check() }
     const actionId = context?.id ?? id(), needsApproval = prepared.some(p => !p.auto) || input.operations.some(op => op.type === 'layout.set')
     if (!context) this.db.prepare("INSERT INTO actions (id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, taskId, runId, json({ type: 'run', id: runId, level: 'task' }), json(input), now())
     try {
@@ -1409,10 +2587,12 @@ export class RuntimeStore {
           this.storage.commit(p.stageId, p.resourceId)
           views.push({ ...(p.op.type === 'view.create' ? { client_ref: p.op.client_ref } : {}), view_id: p.viewId, revision })
         }
+        publication?.prepared(prepared)
         this.db.prepare('UPDATE surfaces SET revision=revision+1,layout_json=? WHERE id=?').run(json(layout), surface.id)
         const result = { action_id: actionId, revision: surface.revision + 1, views }
-        this.record(taskId, 'surface.published', result)
+        const recordId = this.record(taskId, 'surface.published', result)
         this.db.prepare("UPDATE actions SET state='ended',wait_reason=NULL,result='success',commit_valid=0,authorization_json=?,result_json=?,ended_at=? WHERE id=?").run(json({ basis: needsApproval ? 'single_approval' : 'default', host_checked: true, reset_confirmed: prepared.some(p => p.op.type === 'view.replace' && p.op.state_transition.type === 'reset'), confirmed_by: 'human', ...confirmation }), json(result), now(), actionId)
+        publication?.committed(recordId, result.revision)
         return result
       })()
     } catch (error) {
@@ -1425,11 +2605,11 @@ export class RuntimeStore {
       this.surfaceCompletions.get(actionId)?.resolve(); this.surfaceCompletions.delete(actionId)
       if (!this.closed) {
         this.db.prepare("UPDATE approvals SET validity='revoked' WHERE action_id=? AND validity='valid'").run(actionId)
-        this.db.prepare("UPDATE runs SET state='running',wait_reason=NULL WHERE id=? AND commit_valid=1").run(runId)
+        this.restoreActionState(runId, context)
       }
     }
   }
-  private checkSurfaceVersions(taskId: string, runId: string | null, input: SurfaceWrite['input'], prepared: PreparedView[], context?: PluginActionContext): void {
+  private checkSurfaceVersions(taskId: string, runId: string | null, input: SurfaceWrite['input'], prepared: PreparedView[], context?: ExecutionActionContext): void {
     this.sourceValid(taskId, runId, context)
     if (this.one('SELECT revision FROM surfaces WHERE id=? AND task_id=?', input.surface_id, taskId).revision !== input.expected_revision) fail('VERSION_CONFLICT', 'Surface version changed; submit a new action')
     for (const p of prepared) {
@@ -1445,12 +2625,12 @@ export class RuntimeStore {
       if (p.auto && (current.creator_run_id !== runId || !current.auto_edit_valid)) fail('AUTHORIZATION_CHANGED', 'Automatic modification eligibility changed')
     }
   }
-  private async awaitSurfaceHost(taskId: string, runId: string | null, actionId: string, request: SurfaceWrite, signal: AbortSignal, check: () => void, context?: PluginActionContext): Promise<{ confirmed_at: string; expires_at: string }> {
+  private async awaitSurfaceHost(taskId: string, runId: string | null, actionId: string, request: SurfaceWrite, signal: AbortSignal, check: () => void, context?: ExecutionActionContext): Promise<{ confirmed_at: string; expires_at: string }> {
     this.sourceValid(taskId, runId, context)
     const expires = new Date(Date.now() + defaults.approval.ttl_ms).toISOString()
     const reset = request.input.operations.some(op => op.type === 'view.remove' || op.type === 'view.replace' && op.state_transition.type === 'reset')
     this.db.prepare("UPDATE actions SET state='waiting',wait_reason='surface_host' WHERE id=? AND commit_valid=1").run(actionId)
-    this.db.prepare("UPDATE runs SET state='waiting',wait_reason='surface_host' WHERE id=? AND commit_valid=1").run(runId)
+    this.actionState(runId, 'waiting', 'surface_host', context)
     let resolve!: (proceed: boolean | ContractError) => void
     const waiting = new Promise<boolean | ContractError>(done => { resolve = done })
     let completed!: () => void
@@ -1497,7 +2677,7 @@ export class RuntimeStore {
     if (r.proceed && result.result !== 'success') fail('SURFACE_NOT_COMMITTED', 'Replacement did not commit; query the action result, never automatically replay')
     return { accepted: true, ...result }
   }
-  private publish(taskId: string, runId: string | null, request: Extract<ModelRequest, { type: 'write' }>, context?: PluginActionContext): unknown {
+  private publish(taskId: string, runId: string | null, request: Extract<ModelRequest, { type: 'write' }>, context?: ExecutionActionContext): unknown {
     const input = request.input
     if (input.type !== 'surface.update') fail('UNSUPPORTED_OPERATION', 'Unsupported write')
     const evidence = captureEvidence(this.db, this.root, taskId, input.snapshot_sources)
@@ -1550,8 +2730,39 @@ export class RuntimeStore {
       throw error
     }
   }
-  private finish(taskId: string, runId: string, state: string, reason: string): void {
-    const active = this.agents.has(runId) || this.pluginCalls.busyRun(runId) || this.pluginProcesses.cleaning(taskId)
+  private undispatchedShutdownWork(work: LogicalWork): boolean {
+    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state) || !work.current_attempt_id) return false
+    const attempt = new RunnerWorkState(this.db, this.epoch).attempt(work.current_attempt_id)
+    return attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
+  }
+  private finish(taskId: string, runId: string, state: string, reason: string, runnerFinal = false): void {
+    if (!runnerFinal && this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(runId)) {
+      const core = this.one('SELECT state FROM runs WHERE id=? AND task_id=?', runId, taskId)
+      if (!['running', 'waiting'].includes(core.state)) return
+      const workState = new RunnerWorkState(this.db, this.epoch)
+      this.db.transaction(() => {
+        if (state === 'cancelled') this.record(taskId, 'runner.cancelled', { run_id: runId, scope: this.task(taskId).state === 'stopping' ? 'task' : 'run', reason })
+        if (state === 'interrupted') this.db.prepare('UPDATE runs SET intended_terminal=COALESCE(intended_terminal,?),primary_reason=COALESCE(primary_reason,?) WHERE id=?').run(state, reason, runId)
+        workState.closeRun(runId)
+        const works = workState.taskWorks(taskId).filter(work => work.run_id === runId)
+        const terminal = this.one('SELECT intended_terminal,primary_reason FROM runs WHERE id=?', runId)
+        if (terminal.intended_terminal === 'interrupted' && terminal.primary_reason === 'host_shutdown') {
+          // Host exit revokes this Run, while definitely undispatched content
+          // remains eligible for a new Run and attempt after restart.
+          for (const work of works) if (!this.undispatchedShutdownWork(work)) workState.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id })
+        } else if (works.length) workState.revokeRun(runId, { kind: state === 'cancelled' ? 'cancellation' : 'failure', work_id: works[0]!.work_id })
+        this.revokeRunActions(runId)
+      })()
+      this.pluginCalls.cancelRun(runId); this.monty.cancelRun(runId)
+      this.agents.get(runId)?.controller.abort()
+      for (const worker of this.workers.values()) if (worker.owner.run_id === runId) worker.controller.abort()
+      this.aggregateWorkerRun(taskId, runId)
+      this.pumpRunnerWorkers(taskId)
+      return
+    }
+    const active = runnerFinal
+      ? this.workersForRun(runId) || this.pluginCalls.busyRun(runId) || this.runnerCleanupPending(runId) || this.monty.busyRun(runId)
+      : this.agents.has(runId) || this.pluginCalls.busyRun(runId) || this.pluginProcesses.cleaning(taskId)
     this.db.prepare("UPDATE runs SET commit_valid=0,intended_terminal=COALESCE(intended_terminal,?),primary_reason=COALESCE(primary_reason,?),state=?,wait_reason=?,ended_at=? WHERE id=? AND task_id=? AND state IN ('running','waiting')").run(state, reason, active ? 'waiting' : state, active ? 'ending_cleanup' : null, active ? null : now(), runId, taskId)
     this.monty.cancelRun(runId)
     this.pluginCalls.cancelRun(runId)
@@ -1564,10 +2775,36 @@ export class RuntimeStore {
     }
     for (const waiter of this.surfaceWaiters.values()) if (waiter.runId === runId) waiter.resolve(false)
     const timer = this.timers.get(runId); if (timer) clearTimeout(timer); this.timers.delete(runId)
-    this.runDeadlines.get(runId)?.(); this.runDeadlines.delete(runId)
+    if (!active && runnerFinal && !this.closed && !this.closing) queueMicrotask(() => {
+      if (!this.closed && !this.closing) {
+        void this.recoverRunnerWork().catch(() => {})
+        this.pumpRunnerGoals(taskId)
+        this.pumpRunnerWorkers(taskId)
+      }
+    })
+  }
+  private revokeRunActions(runId: string, attempts?: readonly string[]): void {
+    const actions = (this.db.prepare("SELECT id,source_json FROM actions WHERE run_id=? OR json_extract(source_json,'$.owner.run_id')=?").all(runId, runId) as Row[]).filter(action => !attempts || attempts.includes(JSON.parse(action.source_json).owner?.attempt_id))
+    for (const action of actions) {
+      this.db.prepare('UPDATE actions SET commit_valid=0 WHERE id=?').run(action.id)
+      this.db.prepare("UPDATE approvals SET validity='revoked' WHERE action_id=? AND validity='valid'").run(action.id)
+    }
+    const ids = new Set(actions.map(action => action.id))
+    for (const approvalId of this.approvalWaiters.keys()) {
+      const approval = this.db.prepare('SELECT action_id FROM approvals WHERE id=?').get(approvalId) as Row | undefined
+      if (approval && ids.has(approval.action_id)) this.wakeApproval(approvalId)
+    }
+    for (const [actionId, waiter] of this.surfaceWaiters) if (ids.has(actionId)) waiter.resolve(false)
+    for (const action of actions) this.pluginActions.cancel(action.id)
   }
   handle(raw: unknown): unknown {
     this.acceptWork()
+    if (raw && typeof raw === 'object' && (raw as Row).type === 'host.runner.input') return this.runnerHostInput(raw as Row)
+    if (raw && typeof raw === 'object' && (raw as Row).type === 'host.runner.status') {
+      const { type: _type, ...query } = raw as Row
+      if (Object.keys(query).some(key => !['task_id', 'request_id', 'cursor', 'limit'].includes(key))) fail('INVALID_REQUEST', 'Invalid runner status lookup')
+      return this.runnerGoals(query as unknown as TaskRunnerStatusQuery)
+    }
     if (raw && typeof raw === 'object' && (raw as Row).type === 'host.run.activity') {
       const r = raw as Row
       if (Object.keys(r).sort().join(',') !== 'run_id,task_id,type' || typeof r.task_id !== 'string' || typeof r.run_id !== 'string') fail('INVALID_REQUEST', 'Invalid Run activity lookup')
@@ -1627,10 +2864,12 @@ export class RuntimeStore {
       case 'maintenance.resource.execute': return this.recovery.collect(r.token, () => this.resourceCleanup.execute(r.token, r.operation_id, false))
       case 'maintenance.resource.retry': return this.recovery.collect(r.token, () => this.resourceCleanup.execute(r.token, r.operation_id, true))
       case 'maintenance.replica.list': return this.replicas.list(r.summary, r.before)
-      case 'maintenance.replica.status': return this.replicas.status(r.operation_id)
+      case 'maintenance.replica.status': return this.replicas.status(r.operation_id, r.authorization_id)
       case 'maintenance.replica.preview': this.recovery.checkPreparation(r.token); return this.replicas.preview(r.token, r.replica_id)
       case 'maintenance.replica.execute': return this.recovery.collect(r.token, () => this.replicas.execute(r.token, r.operation_id, false))
       case 'maintenance.replica.retry': return this.recovery.collect(r.token, () => this.replicas.execute(r.token, r.operation_id, true))
+      case 'maintenance.replica.reauthorize.preview': this.recovery.checkPreparation(r.token); return this.replicas.previewReauthorization(r.token, r.operation_id)
+      case 'maintenance.replica.reauthorize.confirm': return this.replicas.reauthorizationConfirmed(r.operation_id, r.authorization_id) ? this.replicas.status(r.operation_id, r.authorization_id) : this.recovery.collect(r.token, () => this.replicas.confirmReauthorization(r.token, r.operation_id, r.authorization_id))
       case 'maintenance.gc.status': return this.gc.status(r.operation_id)
       case 'maintenance.gc.list': return this.gc.list(r.before)
       case 'maintenance.gc.preview': this.recovery.checkPreparation(r.token); return this.gc.preview(r.token, r.after)
@@ -1655,7 +2894,27 @@ export class RuntimeStore {
       case 'draft.save': if (r.maintenance_token) this.recovery.consumeInput(r.maintenance_token, r.task_id, r.view_id); return this.saveDraft(r)
       case 'answer.submit': return this.submitAnswer(r)
       case 'run.cancel': return this.db.transaction(() => { this.task(r.task_id); this.one('SELECT id FROM runs WHERE id=? AND task_id=?', r.run_id, r.task_id); this.finish(r.task_id, r.run_id, 'cancelled', 'user_cancelled'); return this.snapshot(r.task_id) })()
-      case 'task.stop': this.pluginUploads.cancelTask(r.task_id); for (const pending of this.pluginIndependentCalls.values()) if (pending.task === r.task_id) pending.controller.abort(); this.pluginDrafts.cancelTask(r.task_id); this.pluginActions.cancelTask(r.task_id); this.pluginCalls.cancelTask(r.task_id); this.pluginProcesses.stopTask(r.task_id); this.requests.cancelTask(r.task_id); this.materials.cancelTask(r.task_id); return this.db.transaction(() => { this.task(r.task_id); this.db.prepare("UPDATE tasks SET state='stopping' WHERE id=?").run(r.task_id); for (const run of this.db.prepare("SELECT id FROM runs WHERE task_id=? AND state IN ('running','waiting')").all(r.task_id) as Row[]) this.finish(r.task_id, run.id, 'cancelled', 'task_stopped'); this.settlePluginCleanup(); return this.snapshot(r.task_id) })()
+      case 'task.stop': {
+        this.db.transaction(() => {
+          this.task(r.task_id)
+          this.db.prepare("UPDATE tasks SET state='stopping' WHERE id=?").run(r.task_id)
+          this.db.prepare('UPDATE runs SET commit_valid=0 WHERE task_id=?').run(r.task_id)
+          this.db.prepare('UPDATE actions SET commit_valid=0 WHERE task_id=?').run(r.task_id)
+          this.db.prepare("UPDATE approvals SET validity='revoked' WHERE action_id IN (SELECT id FROM actions WHERE task_id=?) AND validity='valid'").run(r.task_id)
+          const state = new RunnerWorkState(this.db, this.epoch)
+          for (const row of this.db.prepare("SELECT run_id FROM runner_runs WHERE task_id=? AND json_extract(payload_json,'$.state') IN ('running','waiting','closing')").all(r.task_id) as Row[]) {
+            state.closeRun(row.run_id)
+            const work = state.taskWorks(r.task_id).find(work => work.run_id === row.run_id)
+            if (work) state.revokeRun(row.run_id, { kind: 'cancellation', work_id: work.work_id })
+          }
+        })()
+        for (const run of this.db.prepare("SELECT id FROM runs WHERE task_id=? AND state IN ('running','waiting')").all(r.task_id) as Row[]) this.finish(r.task_id, run.id, 'cancelled', 'task_stopped')
+        this.pluginUploads.cancelTask(r.task_id)
+        for (const pending of this.pluginIndependentCalls.values()) if (pending.task === r.task_id) pending.controller.abort()
+        this.pluginDrafts.cancelTask(r.task_id); this.pluginActions.cancelTask(r.task_id); this.pluginCalls.cancelTask(r.task_id); this.pluginProcesses.stopTask(r.task_id); this.requests.cancelTask(r.task_id); this.materials.cancelTask(r.task_id)
+        this.settlePluginCleanup()
+        return this.snapshot(r.task_id)
+      }
       case 'task.resume': this.settlePluginCleanup(); if (this.pluginProcesses.cleaning(r.task_id)) fail('PLUGIN_CLEANUP_PENDING', 'Wait for confirmed plugin process exit before resuming'); return this.db.transaction(() => { const task = this.task(r.task_id); if (task.state !== 'stopped') fail('INVALID_STATE', 'Only stopped tasks may resume'); this.db.prepare("UPDATE tasks SET state='active',revision=revision+1 WHERE id=?").run(r.task_id); return this.snapshot(r.task_id) })()
       case 'task.delete': this.task(r.task_id); void this.exportChecks.stop(r.task_id).catch(() => {}); if (this.monty.busy(r.task_id)) fail('MONTY_EXECUTION_ACTIVE', 'Stop calculation and wait for confirmed cleanup before deleting the task'); if ([...this.exportReaders.keys()].some(id => this.exports.get(id).task_id === r.task_id)) return Promise.all([...this.exportReaders.keys()].filter(id => this.exports.get(id).task_id === r.task_id).map(id => this.cancelExport(id))).then(() => this.handle(r)); this.exports.cancelTask(r.task_id); if (this.pluginProcesses.ownsTask(r.task_id) || this.pluginCalls.busy(r.task_id) || this.pluginActions.busy(r.task_id) || this.pluginUploads.busy(r.task_id)) fail('PLUGIN_EXECUTION_ACTIVE', 'Stop plugin work and wait for its recorded result before deleting the task'); this.recovery.invalidateForDelete(r.task_id, r.invalidate_recovery_id); this.handle({ type: 'task.stop', task_id: r.task_id }); this.db.prepare("UPDATE tasks SET state='deleting' WHERE id=?").run(r.task_id); if (!this.db.prepare("SELECT id FROM runs WHERE task_id=? AND state IN ('running','waiting')").get(r.task_id)) this.purge(r.task_id); return { deleted: true, resource_cleanup: 'retained_pending_explicit_confirmation' }
       case 'approval.decide': return this.decide(r.task_id, r.approval_id, r.decision, 'human')
@@ -1695,6 +2954,7 @@ export class RuntimeStore {
     if(this.monty?.busy(taskId))return
     this.journal.beforeDelete(taskId, this.db)
     this.db.transaction(() => {
+      purgeRunnerTask(this.db, taskId)
       this.db.prepare('DELETE FROM approvals WHERE action_id IN (SELECT id FROM actions WHERE task_id=?)').run(taskId)
       for (const table of ['answers', 'view_history', 'object_references', 'staging', 'cleanup_jobs', 'task_resources', 'task_data', 'actions', 'calls']) this.db.prepare(`DELETE FROM ${table} WHERE task_id=?`).run(taskId)
       this.db.prepare('DELETE FROM views WHERE surface_id IN (SELECT id FROM surfaces WHERE task_id=?)').run(taskId)

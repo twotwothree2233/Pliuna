@@ -103,5 +103,25 @@
     "file": "invalid-08.json",
     "definition": "installed_summary",
     "valid": false
+  },
+  {
+    "file": "14-replica-reauthorize-preview.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "15-replica-reauthorize-confirm.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "invalid-09.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "invalid-10.json",
+    "definition": "ipc_request",
+    "valid": false
   }
 ]

@@ -309,6 +309,7 @@ before?: number
 } | {
 type: "maintenance.replica.status"
 operation_id: string
+authorization_id?: string
 } | {
 type: "maintenance.replica.preview"
 token: string
@@ -326,6 +327,18 @@ token: string
 inputs_saved: true
 operation_id: string
 confirm_retire_replica: true
+} | {
+type: "maintenance.replica.reauthorize.preview"
+token: string
+operation_id: string
+inputs_saved: true
+} | {
+type: "maintenance.replica.reauthorize.confirm"
+token: string
+operation_id: string
+authorization_id: string
+inputs_saved: true
+confirm_reauthorize_replica: true
 } | {
 type: "maintenance.resource.list"
 before?: number
@@ -514,7 +527,7 @@ type: "list"
 input: ModelRequestList
 } | {
 type: "read"
-input: ModelRequestRead
+input: ModelRequestModelRead
 } | {
 type: "write"
 input: ModelRequestWrite
@@ -522,10 +535,10 @@ input: ModelRequestWrite
 type: "call"
 input: ModelRequestCall
 })
-export type ModelRequestRead = ({
+export type ModelRequestModelRead = ({
 [k: string]: unknown
 } & {
-target: ModelRequestTarget
+target: ModelRequestModelTarget
 range?: {
 start_line: number
 end_line: number
@@ -682,8 +695,8 @@ until?: string
 limit?: number
 cursor?: string
 }
-export interface ModelRequestTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+export interface ModelRequestModelTarget {
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "runner_outline" | "runner_batch" | "runner_artifact_index" | "runner_layout")
 id: string
 expected_revision?: number
 }
@@ -732,6 +745,11 @@ fields: [ModelRequestJsonPointer, ...(ModelRequestJsonPointer)[]]
 export interface ModelRequestReference {
 name: string
 target: ModelRequestTarget
+}
+export interface ModelRequestTarget {
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+id: string
+expected_revision?: number
 }
 export interface ModelRequestExportFragment {
 id: string
@@ -841,10 +859,6 @@ base_url: string
 limits?: {
 request_timeout_ms?: number
 response_bytes?: number
-run_tokens?: number
-run_model_requests?: number
-run_tool_requests?: number
-run_wall_ms?: number
 }
 channel_id?: string
 display_name?: string
@@ -959,10 +973,6 @@ base_url: string
 limits?: {
 request_timeout_ms?: number
 response_bytes?: number
-run_tokens?: number
-run_model_requests?: number
-run_tool_requests?: number
-run_wall_ms?: number
 }
 channel_id?: string
 display_name?: string
@@ -1036,3 +1046,661 @@ digest: string
 contribution_id: string
 offset?: number
 })
+export type InputEventRunnerId = string
+export type InputEventRunnerConsumptionStage = ("received" | "routed" | "installed")
+
+export interface InputEvent {
+input_event_id: InputEventRunnerId
+task_id: InputEventRunnerId
+kind: ("request" | "query" | "explanation" | "correction" | "cancel_work" | "cancel_run" | "stop_task" | "withdraw_goal" | "operation_completed" | "approval_decided")
+record_id: InputEventRunnerId
+caused_by_event_id?: InputEventRunnerId
+request_id?: InputEventRunnerId
+work_id?: InputEventRunnerId
+run_id?: InputEventRunnerId
+operation_id?: InputEventRunnerId
+stage: InputEventRunnerConsumptionStage
+route?: ("direct" | "clarification" | "semantic")
+result_ref?: InputEventRunnerProvenanceRef
+}
+export interface InputEventRunnerProvenanceRef {
+task_id: InputEventRunnerId
+kind: ("record" | "resource" | "action")
+id: InputEventRunnerId
+}
+export type ConsumptionStage = ("received" | "routed" | "installed")
+export type OutcomeRequirementRunnerId = string
+
+export interface OutcomeRequirement {
+requirement_id: OutcomeRequirementRunnerId
+kind: ("answer" | "artifact" | "content_check")
+required: boolean
+provenance_required: boolean
+}
+export type GoalRevisionRunnerId = string
+
+export interface GoalRevision {
+task_id: GoalRevisionRunnerId
+request_id: GoalRevisionRunnerId
+intent_revision: number
+input_event_id: GoalRevisionRunnerId
+state: ("active" | "withdrawn")
+requirements: GoalRevisionRunnerOutcomeRequirement[]
+previous_revision?: number
+}
+export interface GoalRevisionRunnerOutcomeRequirement {
+requirement_id: GoalRevisionRunnerId
+kind: ("answer" | "artifact" | "content_check")
+required: boolean
+provenance_required: boolean
+}
+export type WorkDependency = ({
+kind: "goal"
+task_id: WorkDependencyRunnerId
+request_id: WorkDependencyRunnerId
+intent_revision: number
+} | {
+kind: "work"
+task_id: WorkDependencyRunnerId
+work_id: WorkDependencyRunnerId
+result_revision: number
+} | {
+kind: "artifact"
+task_id: WorkDependencyRunnerId
+artifact_id: WorkDependencyRunnerId
+artifact_revision: number
+} | {
+kind: "resource"
+task_id: WorkDependencyRunnerId
+resource_id: WorkDependencyRunnerId
+})
+export type WorkDependencyRunnerId = string
+export type RunnerRun = ({
+run_id: RunnerRunRunnerId
+task_id: RunnerRunRunnerId
+runtime_epoch: RunnerRunRunnerId
+state: ("queued" | "running" | "waiting" | "closing" | "completed" | "failed" | "cancelled" | "interrupted")
+commit_valid: boolean
+budget_id: RunnerRunRunnerId
+previous_run_id?: RunnerRunRunnerId
+purpose: "production"
+request_id: RunnerRunRunnerId
+intent_revision: number
+} | {
+run_id: RunnerRunRunnerId
+task_id: RunnerRunRunnerId
+runtime_epoch: RunnerRunRunnerId
+state: ("queued" | "running" | "waiting" | "closing" | "completed" | "failed" | "cancelled" | "interrupted")
+commit_valid: boolean
+budget_id: RunnerRunRunnerId
+previous_run_id?: RunnerRunRunnerId
+purpose: "composition"
+batch_id: RunnerRunRunnerId
+composition_version: number
+trigger_request_id: RunnerRunRunnerId
+})
+export type RunnerRunRunnerId = string
+export type LogicalWork = ({
+work_id: LogicalWorkRunnerId
+task_id: LogicalWorkRunnerId
+run_id: LogicalWorkRunnerId
+plan_revision: number
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+required: boolean
+requirement_ids: LogicalWorkRunnerId[]
+dependencies: LogicalWorkRunnerWorkDependency[]
+state: ("planned" | "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "invalidated" | "dependency_failed" | "dependency_cancelled")
+current_attempt_id?: LogicalWorkRunnerId
+root_cause?: LogicalWorkRunnerWorkCause
+result_revision?: number
+max_attempts: number
+purpose: "production"
+request_id: LogicalWorkRunnerId
+intent_revision: number
+} | {
+work_id: LogicalWorkRunnerId
+task_id: LogicalWorkRunnerId
+run_id: LogicalWorkRunnerId
+plan_revision: number
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+required: boolean
+requirement_ids: LogicalWorkRunnerId[]
+dependencies: LogicalWorkRunnerWorkDependency[]
+state: ("planned" | "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "invalidated" | "dependency_failed" | "dependency_cancelled")
+current_attempt_id?: LogicalWorkRunnerId
+root_cause?: LogicalWorkRunnerWorkCause
+result_revision?: number
+max_attempts: number
+purpose: "composition"
+batch_id: LogicalWorkRunnerId
+composition_version: number
+trigger_request_id: LogicalWorkRunnerId
+})
+export type LogicalWorkRunnerId = string
+export type LogicalWorkRunnerWorkDependency = ({
+kind: "goal"
+task_id: LogicalWorkRunnerId
+request_id: LogicalWorkRunnerId
+intent_revision: number
+} | {
+kind: "work"
+task_id: LogicalWorkRunnerId
+work_id: LogicalWorkRunnerId
+result_revision: number
+} | {
+kind: "artifact"
+task_id: LogicalWorkRunnerId
+artifact_id: LogicalWorkRunnerId
+artifact_revision: number
+} | {
+kind: "resource"
+task_id: LogicalWorkRunnerId
+resource_id: LogicalWorkRunnerId
+})
+
+export interface LogicalWorkRunnerWorkCause {
+kind: ("failure" | "cancellation" | "invalidation")
+work_id: LogicalWorkRunnerId
+attempt_id?: LogicalWorkRunnerId
+operation_id?: LogicalWorkRunnerId
+}
+export type ExecutionAttempt = ({
+attempt_id: ExecutionAttemptRunnerId
+task_id: ExecutionAttemptRunnerId
+run_id: ExecutionAttemptRunnerId
+work_id: ExecutionAttemptRunnerId
+runtime_epoch: ExecutionAttemptRunnerId
+attempt_number: number
+profile_id: ExecutionAttemptRunnerId
+model_config_id: ExecutionAttemptRunnerId
+model_config_revision: number
+input_versions: ExecutionAttemptRunnerWorkDependency[]
+state: ("registered" | "queued" | "dispatched" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "unknown" | "revoked")
+dispatch_state: ("not_dispatched" | "dispatched" | "unknown")
+previous_attempt_id?: ExecutionAttemptRunnerId
+operation_id?: ExecutionAttemptRunnerId
+result_ref?: ExecutionAttemptRunnerProvenanceRef
+usage_refs: ExecutionAttemptRunnerId[]
+purpose: "production"
+request_id: ExecutionAttemptRunnerId
+intent_revision: number
+} | {
+attempt_id: ExecutionAttemptRunnerId
+task_id: ExecutionAttemptRunnerId
+run_id: ExecutionAttemptRunnerId
+work_id: ExecutionAttemptRunnerId
+runtime_epoch: ExecutionAttemptRunnerId
+attempt_number: number
+profile_id: ExecutionAttemptRunnerId
+model_config_id: ExecutionAttemptRunnerId
+model_config_revision: number
+input_versions: ExecutionAttemptRunnerWorkDependency[]
+state: ("registered" | "queued" | "dispatched" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "unknown" | "revoked")
+dispatch_state: ("not_dispatched" | "dispatched" | "unknown")
+previous_attempt_id?: ExecutionAttemptRunnerId
+operation_id?: ExecutionAttemptRunnerId
+result_ref?: ExecutionAttemptRunnerProvenanceRef
+usage_refs: ExecutionAttemptRunnerId[]
+purpose: "composition"
+batch_id: ExecutionAttemptRunnerId
+composition_version: number
+trigger_request_id: ExecutionAttemptRunnerId
+})
+export type ExecutionAttemptRunnerId = string
+export type ExecutionAttemptRunnerWorkDependency = ({
+kind: "goal"
+task_id: ExecutionAttemptRunnerId
+request_id: ExecutionAttemptRunnerId
+intent_revision: number
+} | {
+kind: "work"
+task_id: ExecutionAttemptRunnerId
+work_id: ExecutionAttemptRunnerId
+result_revision: number
+} | {
+kind: "artifact"
+task_id: ExecutionAttemptRunnerId
+artifact_id: ExecutionAttemptRunnerId
+artifact_revision: number
+} | {
+kind: "resource"
+task_id: ExecutionAttemptRunnerId
+resource_id: ExecutionAttemptRunnerId
+})
+
+export interface ExecutionAttemptRunnerProvenanceRef {
+task_id: ExecutionAttemptRunnerId
+kind: ("record" | "resource" | "action")
+id: ExecutionAttemptRunnerId
+}
+export type ExecutionScope = ({
+task_id: ExecutionScopeRunnerId
+run_id: ExecutionScopeRunnerId
+work_id: ExecutionScopeRunnerId
+attempt_id: ExecutionScopeRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "production"
+request_id: ExecutionScopeRunnerId
+intent_revision: number
+} | {
+task_id: ExecutionScopeRunnerId
+run_id: ExecutionScopeRunnerId
+work_id: ExecutionScopeRunnerId
+attempt_id: ExecutionScopeRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "composition"
+batch_id: ExecutionScopeRunnerId
+composition_version: number
+trigger_request_id: ExecutionScopeRunnerId
+})
+export type ExecutionScopeRunnerId = string
+export type OutlineRunnerId = string
+
+export interface Outline {
+task_id: OutlineRunnerId
+outline_revision: number
+base_outline_revision: number
+sections: OutlineRunnerOutlineSection[]
+}
+export interface OutlineRunnerOutlineSection {
+section_id: OutlineRunnerId
+request_id: OutlineRunnerId
+intent_revision: number
+order_key: OutlineRunnerId
+position_revision: number
+title?: string
+}
+export type OutlineSectionRunnerId = string
+
+export interface OutlineSection {
+section_id: OutlineSectionRunnerId
+request_id: OutlineSectionRunnerId
+intent_revision: number
+order_key: OutlineSectionRunnerId
+position_revision: number
+title?: string
+}
+export type ArtifactIndexRunnerId = string
+export type ArtifactIndexRunnerPresentationKind = "managed-v1"
+export type ArtifactIndexRunnerWidthConstraint = ("full" | "flexible")
+export type ArtifactIndexRunnerInteractionKind = ("none" | "input")
+
+export interface ArtifactIndex {
+task_id: ArtifactIndexRunnerId
+request_id: ArtifactIndexRunnerId
+run_id: ArtifactIndexRunnerId
+work_id: ArtifactIndexRunnerId
+attempt_id: ArtifactIndexRunnerId
+intent_revision: number
+artifact_id: ArtifactIndexRunnerId
+artifact_revision: number
+bundle_resource_id: ArtifactIndexRunnerId
+section_id: ArtifactIndexRunnerId
+order_key: ArtifactIndexRunnerId
+presentation_kind: ArtifactIndexRunnerPresentationKind
+width_constraint: ArtifactIndexRunnerWidthConstraint
+interaction_kind: ArtifactIndexRunnerInteractionKind
+provenance_ref: ArtifactIndexRunnerProvenanceRef
+acceptance_state: "accepted"
+title?: string
+}
+export interface ArtifactIndexRunnerProvenanceRef {
+task_id: ArtifactIndexRunnerId
+kind: ("record" | "resource" | "action")
+id: ArtifactIndexRunnerId
+}
+export type ArtifactCandidateRunnerId = string
+export type ArtifactCandidateRunnerPresentationKind = "managed-v1"
+export type ArtifactCandidateRunnerWidthConstraint = ("full" | "flexible")
+export type ArtifactCandidateRunnerInteractionKind = ("none" | "input")
+export type ArtifactCandidateRunnerWorkDependency = ({
+kind: "goal"
+task_id: ArtifactCandidateRunnerId
+request_id: ArtifactCandidateRunnerId
+intent_revision: number
+} | {
+kind: "work"
+task_id: ArtifactCandidateRunnerId
+work_id: ArtifactCandidateRunnerId
+result_revision: number
+} | {
+kind: "artifact"
+task_id: ArtifactCandidateRunnerId
+artifact_id: ArtifactCandidateRunnerId
+artifact_revision: number
+} | {
+kind: "resource"
+task_id: ArtifactCandidateRunnerId
+resource_id: ArtifactCandidateRunnerId
+})
+
+export interface ArtifactCandidate {
+task_id: ArtifactCandidateRunnerId
+request_id: ArtifactCandidateRunnerId
+run_id: ArtifactCandidateRunnerId
+work_id: ArtifactCandidateRunnerId
+attempt_id: ArtifactCandidateRunnerId
+intent_revision: number
+artifact_id: ArtifactCandidateRunnerId
+bundle_resource_id: ArtifactCandidateRunnerId
+section_id: ArtifactCandidateRunnerId
+order_key: ArtifactCandidateRunnerId
+presentation_kind: ArtifactCandidateRunnerPresentationKind
+width_constraint: ArtifactCandidateRunnerWidthConstraint
+interaction_kind: ArtifactCandidateRunnerInteractionKind
+provenance_ref: ArtifactCandidateRunnerProvenanceRef
+title?: string
+candidate_id: ArtifactCandidateRunnerId
+base_artifact_revision: number
+plan_revision: number
+section_position_revision: number
+dependencies: ArtifactCandidateRunnerWorkDependency[]
+requirement_ids: ArtifactCandidateRunnerId[]
+unresolved: ArtifactCandidateRunnerRequirementRef[]
+}
+export interface ArtifactCandidateRunnerProvenanceRef {
+task_id: ArtifactCandidateRunnerId
+kind: ("record" | "resource" | "action")
+id: ArtifactCandidateRunnerId
+}
+export interface ArtifactCandidateRunnerRequirementRef {
+task_id: ArtifactCandidateRunnerId
+request_id: ArtifactCandidateRunnerId
+intent_revision: number
+requirement_id: ArtifactCandidateRunnerId
+}
+export type PresentationPlanRunnerId = string
+export type PresentationPlanRunnerWidthConstraint = ("full" | "flexible")
+
+export interface PresentationPlan {
+task_id: PresentationPlanRunnerId
+run_id: PresentationPlanRunnerId
+batch_id: PresentationPlanRunnerId
+composition_version: number
+/**
+ * @maxItems 16
+ */
+intents: []|[PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]|[PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent, PresentationPlanRunnerPresentationIntent]
+}
+export interface PresentationPlanRunnerPresentationIntent {
+artifact: PresentationPlanRunnerArtifactRef
+section_id: PresentationPlanRunnerId
+section_position_revision: number
+order_key: PresentationPlanRunnerId
+slot_id: "main"
+layout_mode: ("column" | "responsive_columns")
+width_constraint: PresentationPlanRunnerWidthConstraint
+}
+export interface PresentationPlanRunnerArtifactRef {
+task_id: PresentationPlanRunnerId
+artifact_id: PresentationPlanRunnerId
+artifact_revision: number
+}
+export type CompositionScopeRunnerId = string
+
+export interface CompositionScope {
+task_id: CompositionScopeRunnerId
+composition_version: number
+previous_version?: number
+targets: CompositionScopeRunnerScopeTarget[]
+state: ("working" | "complete")
+unresolved: CompositionScopeRunnerRequirementRef[]
+publication_manifest_id?: CompositionScopeRunnerId
+}
+export interface CompositionScopeRunnerScopeTarget {
+request_id: CompositionScopeRunnerId
+intent_revision: number
+required: boolean
+requirement_ids: CompositionScopeRunnerId[]
+contribution_inventory?: CompositionScopeRunnerContributionInventoryRef
+}
+export interface CompositionScopeRunnerContributionInventoryRef {
+task_id: CompositionScopeRunnerId
+request_id: CompositionScopeRunnerId
+intent_revision: number
+inventory_revision: number
+}
+export interface CompositionScopeRunnerRequirementRef {
+task_id: CompositionScopeRunnerId
+request_id: CompositionScopeRunnerId
+intent_revision: number
+requirement_id: CompositionScopeRunnerId
+}
+export type CompositionBatchRunnerId = string
+
+export interface CompositionBatch {
+task_id: CompositionBatchRunnerId
+batch_id: CompositionBatchRunnerId
+composition_version: number
+run_id: CompositionBatchRunnerId
+trigger_request_id: CompositionBatchRunnerId
+model_config_id: CompositionBatchRunnerId
+model_config_revision: number
+state: ("queued" | "preparing" | "prepared" | "waiting" | "publishing" | "published" | "failed" | "unknown" | "cancelled" | "invalidated")
+targets: CompositionBatchRunnerGoalRef[]
+/**
+ * @maxItems 16
+ */
+indexes: []|[CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]|[CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef, CompositionBatchRunnerArtifactRef]
+/**
+ * @maxItems 16
+ */
+sections: []|[CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]|[CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint, CompositionBatchRunnerSectionConstraint]
+previous_batch_id?: CompositionBatchRunnerId
+operation_id?: CompositionBatchRunnerId
+action_id?: CompositionBatchRunnerId
+}
+export interface CompositionBatchRunnerGoalRef {
+task_id: CompositionBatchRunnerId
+request_id: CompositionBatchRunnerId
+intent_revision: number
+}
+export interface CompositionBatchRunnerArtifactRef {
+task_id: CompositionBatchRunnerId
+artifact_id: CompositionBatchRunnerId
+artifact_revision: number
+}
+export interface CompositionBatchRunnerSectionConstraint {
+section_id: CompositionBatchRunnerId
+position_revision: number
+order_key: CompositionBatchRunnerId
+}
+export type DeliveryRecord = ({
+delivery_id: DeliveryRecordRunnerId
+task_id: DeliveryRecordRunnerId
+run_id: DeliveryRecordRunnerId
+work_id: DeliveryRecordRunnerId
+attempt_id: DeliveryRecordRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+record_id: DeliveryRecordRunnerId
+input_event_id: DeliveryRecordRunnerId
+request_id: DeliveryRecordRunnerId
+intent_revision: number
+purpose: "final_answer"
+} | {
+delivery_id: DeliveryRecordRunnerId
+task_id: DeliveryRecordRunnerId
+run_id: DeliveryRecordRunnerId
+work_id: DeliveryRecordRunnerId
+attempt_id: DeliveryRecordRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+record_id: DeliveryRecordRunnerId
+input_event_id?: DeliveryRecordRunnerId
+request_id?: DeliveryRecordRunnerId
+intent_revision?: number
+purpose: ("progress" | "diagnostic")
+} | {
+delivery_id: DeliveryRecordRunnerId
+task_id: DeliveryRecordRunnerId
+run_id: DeliveryRecordRunnerId
+work_id: DeliveryRecordRunnerId
+attempt_id: DeliveryRecordRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+record_id: DeliveryRecordRunnerId
+input_event_id?: DeliveryRecordRunnerId
+purpose: "composition"
+batch_id: DeliveryRecordRunnerId
+composition_version: number
+publication_manifest_id?: DeliveryRecordRunnerId
+})
+export type DeliveryRecordRunnerId = string
+export type DeliveryQueryRunnerId = string
+
+export interface DeliveryQuery {
+task_id: DeliveryQueryRunnerId
+purpose: ("final_answer" | "progress" | "diagnostic" | "composition")
+request_id?: DeliveryQueryRunnerId
+input_event_id?: DeliveryQueryRunnerId
+limit: number
+after_delivery_id?: DeliveryQueryRunnerId
+}
+export type PublicationManifestRunnerId = string
+
+export interface PublicationManifest {
+manifest_id: PublicationManifestRunnerId
+task_id: PublicationManifestRunnerId
+composition_version: number
+operation_id: PublicationManifestRunnerId
+action_id: PublicationManifestRunnerId
+surface_id: PublicationManifestRunnerId
+surface_revision: number
+state: ("partial" | "complete")
+targets: PublicationManifestRunnerGoalRef[]
+contributions: PublicationManifestRunnerPublicationEntry[]
+unresolved: PublicationManifestRunnerRequirementRef[]
+}
+export interface PublicationManifestRunnerGoalRef {
+task_id: PublicationManifestRunnerId
+request_id: PublicationManifestRunnerId
+intent_revision: number
+}
+export interface PublicationManifestRunnerPublicationEntry {
+task_id: PublicationManifestRunnerId
+batch_id: PublicationManifestRunnerId
+request_id: PublicationManifestRunnerId
+intent_revision: number
+artifact_id: PublicationManifestRunnerId
+artifact_revision: number
+section_id: PublicationManifestRunnerId
+source_bundle_resource_id: PublicationManifestRunnerId
+published_bundle_resource_id: PublicationManifestRunnerId
+view_id: PublicationManifestRunnerId
+view_revision: number
+state_revision: number
+surface_history_id: PublicationManifestRunnerId
+}
+export interface PublicationManifestRunnerRequirementRef {
+task_id: PublicationManifestRunnerId
+request_id: PublicationManifestRunnerId
+intent_revision: number
+requirement_id: PublicationManifestRunnerId
+}
+export type PublicationEntryRunnerId = string
+
+export interface PublicationEntry {
+task_id: PublicationEntryRunnerId
+batch_id: PublicationEntryRunnerId
+request_id: PublicationEntryRunnerId
+intent_revision: number
+artifact_id: PublicationEntryRunnerId
+artifact_revision: number
+section_id: PublicationEntryRunnerId
+source_bundle_resource_id: PublicationEntryRunnerId
+published_bundle_resource_id: PublicationEntryRunnerId
+view_id: PublicationEntryRunnerId
+view_revision: number
+state_revision: number
+surface_history_id: PublicationEntryRunnerId
+}
+export type WorkOutputDeclarationRunnerId = string
+
+export interface WorkOutputDeclaration {
+task_id: WorkOutputDeclarationRunnerId
+request_id: WorkOutputDeclarationRunnerId
+intent_revision: number
+run_id: WorkOutputDeclarationRunnerId
+work_id: WorkOutputDeclarationRunnerId
+attempt_id: WorkOutputDeclarationRunnerId
+plan_revision: number
+result_revision: number
+result_ref: WorkOutputDeclarationRunnerProvenanceRef
+complete: true
+artifacts: WorkOutputDeclarationRunnerArtifactRef[]
+requirement_ids: WorkOutputDeclarationRunnerId[]
+unresolved: WorkOutputDeclarationRunnerRequirementRef[]
+}
+export interface WorkOutputDeclarationRunnerProvenanceRef {
+task_id: WorkOutputDeclarationRunnerId
+kind: ("record" | "resource" | "action")
+id: WorkOutputDeclarationRunnerId
+}
+export interface WorkOutputDeclarationRunnerArtifactRef {
+task_id: WorkOutputDeclarationRunnerId
+artifact_id: WorkOutputDeclarationRunnerId
+artifact_revision: number
+}
+export interface WorkOutputDeclarationRunnerRequirementRef {
+task_id: WorkOutputDeclarationRunnerId
+request_id: WorkOutputDeclarationRunnerId
+intent_revision: number
+requirement_id: WorkOutputDeclarationRunnerId
+}
+export type ContributionInventoryRunnerId = string
+
+export interface ContributionInventory {
+task_id: ContributionInventoryRunnerId
+request_id: ContributionInventoryRunnerId
+intent_revision: number
+inventory_revision: number
+previous_revision?: number
+sealed_by: ContributionInventoryRunnerContributionSource
+required_works: ContributionInventoryRunnerWorkOutputDeclaration[]
+requirement_ids: ContributionInventoryRunnerId[]
+unresolved: ContributionInventoryRunnerRequirementRef[]
+}
+export interface ContributionInventoryRunnerContributionSource {
+run_id: ContributionInventoryRunnerId
+work_id: ContributionInventoryRunnerId
+attempt_id: ContributionInventoryRunnerId
+plan_revision: number
+role: ("router" | "producer")
+}
+export interface ContributionInventoryRunnerWorkOutputDeclaration {
+task_id: ContributionInventoryRunnerId
+request_id: ContributionInventoryRunnerId
+intent_revision: number
+run_id: ContributionInventoryRunnerId
+work_id: ContributionInventoryRunnerId
+attempt_id: ContributionInventoryRunnerId
+plan_revision: number
+result_revision: number
+result_ref: ContributionInventoryRunnerProvenanceRef
+complete: true
+artifacts: ContributionInventoryRunnerArtifactRef[]
+requirement_ids: ContributionInventoryRunnerId[]
+unresolved: ContributionInventoryRunnerRequirementRef[]
+}
+export interface ContributionInventoryRunnerProvenanceRef {
+task_id: ContributionInventoryRunnerId
+kind: ("record" | "resource" | "action")
+id: ContributionInventoryRunnerId
+}
+export interface ContributionInventoryRunnerArtifactRef {
+task_id: ContributionInventoryRunnerId
+artifact_id: ContributionInventoryRunnerId
+artifact_revision: number
+}
+export interface ContributionInventoryRunnerRequirementRef {
+task_id: ContributionInventoryRunnerId
+request_id: ContributionInventoryRunnerId
+intent_revision: number
+requirement_id: ContributionInventoryRunnerId
+}
+export type ContributionInventoryRefRunnerId = string
+
+export interface ContributionInventoryRef {
+task_id: ContributionInventoryRefRunnerId
+request_id: ContributionInventoryRefRunnerId
+intent_revision: number
+inventory_revision: number
+}

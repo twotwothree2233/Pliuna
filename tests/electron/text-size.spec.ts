@@ -10,7 +10,6 @@ async function metrics(page: Page) {
   return page.evaluate(() => ({
     left: document.querySelector('#pane-left')!.getBoundingClientRect().width,
     right: document.querySelector('#pane-right')!.getBoundingClientRect().width,
-    title: parseFloat(getComputedStyle(document.querySelector('.document-heading h1')!).fontSize),
     task: parseFloat(getComputedStyle(document.querySelector('.task-row')!).fontSize),
     heading: parseFloat(getComputedStyle(document.querySelector('.view-boundary>div')!.shadowRoot!.querySelector('h2')!).fontSize),
     input: parseFloat(getComputedStyle(document.querySelector('.view-boundary>div')!.shadowRoot!.querySelector('textarea')!).fontSize)
@@ -33,14 +32,14 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await chooseTheme(page, 'graphite')
     await chooseModel(page, 'fixture')
     await page.getByLabel('想从哪里开始？').fill('生成可编辑内容')
-    await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('button', { name: /发送消息/ }).click()
     await expect(page.getByRole('heading', { name: '思考与记录' })).toBeVisible()
     await page.getByLabel('你的想法').fill('调整字号后保留的正文草稿')
     await page.getByLabel('你的想法').evaluate(el => el.setAttribute('data-retained-editor', 'yes'))
     await page.getByLabel('想从哪里开始？').fill('调整字号后保留的请求草稿')
     await page.getByLabel('想从哪里开始？').evaluate(el => el.setAttribute('data-retained-editor', 'yes'))
     const initial = await metrics(page)
-    expect(initial).toMatchObject({ left: 220, right: 300, title: 27, task: 11, heading: 22 })
+    expect(initial).toMatchObject({ left: 220, right: 300, task: 11, heading: 22 })
     await openSettings(page, '外观')
     await expect(page.getByRole('radio', { name: '100%（默认）', exact: true })).toBeChecked()
     for (const size of [90, 100, 110, 125, 140]) {
@@ -48,7 +47,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
       await expect.poll(async () => (await metrics(page)).heading).toBeCloseTo(initial.heading * size / 100, 1)
       const scaled = await metrics(page)
       expect(scaled.left).toBe(initial.left); expect(scaled.right).toBe(initial.right)
-      for (const field of ['title', 'task', 'input'] as const) expect(scaled[field]).toBeCloseTo(initial[field] * size / 100, 1)
+      for (const field of ['task', 'input'] as const) expect(scaled[field]).toBeCloseTo(initial[field] * size / 100, 1)
     }
     // Native radio buttons keep arrow-key navigation and selection together.
     await page.getByRole('radio', { name: '140%', exact: true }).focus()
@@ -62,7 +61,6 @@ test('text size scales UI and managed text without remounting drafts, then persi
       await expect(page.getByLabel(name)).toHaveValue(name === '你的想法' ? '调整字号后保留的正文草稿' : '调整字号后保留的请求草稿')
     }
     await chooseTheme(page, 'paper')
-    expect((await metrics(page)).title).toBeCloseTo(31 * 1.4, 1)
     expect((await metrics(page)).heading).toBeCloseTo(22 * 1.4, 1)
     await openSettings(page, '外观')
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(390, 850))

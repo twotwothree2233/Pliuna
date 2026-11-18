@@ -30,7 +30,8 @@ export async function pluginCapabilities(root: string, copy: PluginCopy): Promis
 }
 export type PluginExecution = { call_id: string; capability: string; arguments: unknown; references: unknown[]; signal: AbortSignal; nested?: boolean; dispatch(state: 'sent' | 'unknown'): void; valid(): void; started?(instance: string): void; ended?(reason: string): void; settle?(output: unknown): unknown | Promise<unknown> }
 export type PluginIdentity = { instance_id: string; digest: string; task_id: string | null; call_id: string | null }
-type Instance = { id: string; copy: PluginCopy; task: string | null; activeTask?: string; process: ChildProcessWithoutNullStreams; tree: ManagedProcessTree; rpc: PluginRpc; ready: Promise<void>; exited: Promise<void>; exitConfirmed: boolean; terminating?: boolean; cleanup_error?: string; cleanupTimer?: ReturnType<typeof setTimeout>; active: PluginExecution | null; pending: number; tail: Promise<void>; invalid: boolean; stderr_bytes: number }
+export type PluginInstanceEvent = { kind: 'interrupted' | 'cleanup_confirmed' | 'cleanup_failed'; instance_id: string; instance_key: string; call_ids: string[]; reason: string }
+type Instance = { id: string; key: string; copy: PluginCopy; task: string | null; activeTask?: string; process: ChildProcessWithoutNullStreams; tree: ManagedProcessTree; rpc: PluginRpc; ready: Promise<void>; exited: Promise<void>; exitConfirmed: boolean; terminating?: boolean; cleanup_error?: string; cleanupTimer?: ReturnType<typeof setTimeout>; active: PluginExecution | null; pending: number; calls: Map<string, PluginExecution>; interruption?: { call_ids: string[]; emitted: Set<PluginInstanceEvent['kind']> }; tail: Promise<void>; invalid: boolean; stderr_bytes: number }
 
 export class PluginProcesses {
   private instances = new Map<string, Instance>()
@@ -40,7 +41,7 @@ export class PluginProcesses {
   private generation = 0
   private pdfTasks = new Set<string>()
   private clocks = new Map<string, { remaining: number; started: number; timer?: ReturnType<typeof setTimeout>; timeout(): void; paused: boolean }>()
-  constructor(private root: string, private qualify: (copy: PluginCopy, task: string) => Promise<void>, private callback: (identity: PluginIdentity, method: string, params: Record<string, unknown>) => unknown | Promise<unknown>, private disconnected: () => void = () => {}, private appRuntime?: string) {}
+  constructor(private root: string, private qualify: (copy: PluginCopy, task: string) => Promise<void>, private callback: (identity: PluginIdentity, method: string, params: Record<string, unknown>) => unknown | Promise<unknown>, private disconnected: () => void = () => {}, private appRuntime?: string, private onInstanceEvent?: (event: PluginInstanceEvent) => void) {}
   live(identity: PluginIdentity): boolean { return [...this.children].some(i => !i.invalid && i.id === identity.instance_id && i.copy.digest === identity.digest && i.task === identity.task_id) }
   status(task: string, digest: string): unknown[] { return [...this.children].filter(i => i.copy.digest === digest && (i.task === null || i.task === task)).map(i => ({ instance_id: i.id, access_level: i.task === null ? 'global' : 'task', state: i.cleanup_error ? 'cleanup_failed' : i.invalid ? 'stopping' : i.active ? 'executing_or_finalizing' : 'idle', call_id: i.active?.call_id ?? null, pending: i.pending, ...(i.cleanup_error ? { cleanup_error: i.cleanup_error } : {}) })) }
   cleaning(task?: string): boolean { return [...this.children].some(i => i.invalid && !i.exitConfirmed && (task === undefined || i.task === task || i.activeTask === task)) }
@@ -88,18 +89,19 @@ export class PluginProcesses {
         beforeStart: () => { if (this.closed || generation !== this.generation) fail('PLUGIN_PROCESS_REVOKED') },
         failed: code => {
           if (!instance) return
-          if (code === 'PROCESS_TREE_CLEANUP_UNCONFIRMED') { instance.cleanup_error = 'PLUGIN_TERMINATION_UNCONFIRMED'; this.disconnected() }
+          if (code === 'PROCESS_TREE_CLEANUP_UNCONFIRMED') { instance.cleanup_error = 'PLUGIN_TERMINATION_UNCONFIRMED'; this.interrupt(instance, instance.cleanup_error); this.instanceEvent(instance, 'cleanup_failed', instance.cleanup_error); this.disconnected() }
           else this.terminate(instance, code === 'PROCESS_TREE_IPC_LOST' ? 'PLUGIN_CONNECTION_CLOSED' : 'PLUGIN_START_FAILED')
         }
       })
     } catch { return fail('PLUGIN_START_FAILED') }
     const child = tree.process as ChildProcessWithoutNullStreams
-    instance = { id: randomUUID(), copy, task: copy.manifest.access_level === 'global' ? null : task, process: child, tree, active: null, pending: 0, tail: Promise.resolve(), invalid: false, exitConfirmed: false, stderr_bytes: 0 } as unknown as Instance
+    instance = { id: randomUUID(), key: this.key(copy, task), copy, task: copy.manifest.access_level === 'global' ? null : task, process: child, tree, active: null, pending: 0, calls: new Map(), tail: Promise.resolve(), invalid: false, exitConfirmed: false, stderr_bytes: 0 } as unknown as Instance
     instance.exited = new Promise(resolve => {
       const exited = () => {
         if (instance.exitConfirmed) return
         instance.exitConfirmed = true; clearTimeout(instance.cleanupTimer)
         this.terminate(instance, 'PLUGIN_PROCESS_EXITED')
+        this.instanceEvent(instance, 'cleanup_confirmed', 'PLUGIN_PROCESS_EXITED')
         if (this.instances.get(this.key(copy, task)) === instance) this.instances.delete(this.key(copy, task))
         this.children.delete(instance); resolve(); this.disconnected()
       }
@@ -144,6 +146,7 @@ export class PluginProcesses {
     if (request.nested && (instance.active || instance.pending)) fail('PLUGIN_INSTANCE_BUSY')
     if (instance.pending >= defaults.queues.plugin_top_level_pending) fail('PLUGIN_QUEUE_FULL')
     instance.pending++
+    instance.calls.set(request.call_id, request)
     const previous = instance.tail
     let release!: () => void
     instance.tail = new Promise(resolve => { release = resolve })
@@ -157,7 +160,7 @@ export class PluginProcesses {
       let grace: ReturnType<typeof setTimeout> | undefined
       const cancel = () => {
         if (grace || instance.exitConfirmed) return
-        instance.invalid = true
+        this.interrupt(instance, 'PLUGIN_CALL_CANCELLED', false)
         // Owner revokes commit eligibility before aborting the signal; notification is not a stop guarantee.
         try { instance.rpc.notify('tools.cancel', { call_id: request.call_id }) } catch {}
         grace = setTimeout(() => this.terminate(instance, 'PLUGIN_CANCEL_GRACE_EXCEEDED'), defaults.cleanup.cancel_grace_ms); grace.unref?.()
@@ -167,7 +170,7 @@ export class PluginProcesses {
       const clock = { remaining: descriptor.capability.timeout_ms, started: Date.now(), paused: false, timeout: () => this.terminate(instance, 'PLUGIN_REQUEST_TIMEOUT'), timer: undefined as ReturnType<typeof setTimeout> | undefined }
       clock.timer = setTimeout(clock.timeout, clock.remaining); clock.timer.unref?.(); this.clocks.set(request.call_id, clock)
       try {
-        const result = await instance.rpc.request('tools.execute', { call_id: request.call_id, task_id: task, capability: request.capability, arguments: request.arguments, references: request.references }, { timeout: defaults.run.wall_ms, signal: request.signal, dispatch: request.dispatch })
+        const result = await instance.rpc.request('tools.execute', { call_id: request.call_id, task_id: task, capability: request.capability, arguments: request.arguments, references: request.references }, { timeout: defaults.tool.operation_timeout_ms, signal: request.signal, dispatch: request.dispatch })
         request.valid()
         if (request.signal.aborted || instance.invalid) fail('PLUGIN_CALL_CANCELLED')
         if (!descriptor.output(result)) fail('PLUGIN_OUTPUT_INVALID')
@@ -177,7 +180,7 @@ export class PluginProcesses {
         else if (request.signal.aborted && isReferencePdfPlugin(copy.manifest.id)) this.terminate(instance, 'PLUGIN_CALL_CANCELLED')
         else if (request.signal.aborted) {
           // An aborted RPC cannot prove the plugin has stopped; do not reuse its serial slot.
-          instance.invalid = true
+          this.interrupt(instance, 'PLUGIN_CALL_CANCELLED', false)
         }
         throw error
       } finally {
@@ -189,7 +192,7 @@ export class PluginProcesses {
         instance.active = null
         instance.activeTask = undefined
       }
-    } finally { instance.pending--; void previous.finally(release) }
+    } finally { instance.pending--; instance.calls.delete(request.call_id); void previous.finally(release) }
   }
   private wait(previous: Promise<void>, signal: AbortSignal): Promise<void> {
     if (signal.aborted) return Promise.reject(new ContractError('PLUGIN_CALL_CANCELLED', 'Queued call was cancelled before dispatch'))
@@ -199,13 +202,25 @@ export class PluginProcesses {
       void previous.then(() => { signal.removeEventListener('abort', abort); resolve() }, error => { signal.removeEventListener('abort', abort); reject(error) })
     })
   }
+  private instanceEvent(instance: Instance, kind: PluginInstanceEvent['kind'], reason: string): void {
+    const interruption = instance.interruption ??= { call_ids: [...instance.calls.keys()], emitted: new Set() }
+    if (interruption.emitted.has(kind)) return
+    interruption.emitted.add(kind)
+    this.onInstanceEvent?.({ kind, instance_id: instance.id, instance_key: instance.key, call_ids: [...interruption.call_ids], reason })
+  }
+  private interrupt(instance: Instance, reason: string, notify = true): void {
+    const first = !instance.invalid
+    instance.invalid = true
+    this.instanceEvent(instance, 'interrupted', reason)
+    if (first && notify) instance.active?.ended?.(reason)
+  }
   private terminate(instance: Instance, reason: string): void {
     // RPC close synchronously calls back into termination. Coalesce that stack
     // only; later cleanup retries must still be allowed to signal the tree.
     if (instance.terminating) return
     instance.terminating = true
     try {
-      if (!instance.invalid) { instance.invalid = true; instance.active?.ended?.(reason) }
+      this.interrupt(instance, reason)
       instance.rpc.close(reason)
       if (!instance.exitConfirmed) {
         clearTimeout(instance.cleanupTimer)
@@ -213,7 +228,8 @@ export class PluginProcesses {
           if (!instance.tree.terminate()) instance.cleanup_error = 'PLUGIN_TERMINATION_UNCONFIRMED'
           else instance.cleanup_error = undefined
         } catch { instance.cleanup_error = 'PLUGIN_TERMINATION_FAILED' }
-        instance.cleanupTimer = setTimeout(() => { if (!instance.exitConfirmed) { instance.cleanup_error ??= 'PLUGIN_EXIT_UNCONFIRMED'; this.disconnected() } }, defaults.cleanup.cancel_grace_ms)
+        if (instance.cleanup_error) this.instanceEvent(instance, 'cleanup_failed', instance.cleanup_error)
+        instance.cleanupTimer = setTimeout(() => { if (!instance.exitConfirmed) { instance.cleanup_error ??= 'PLUGIN_EXIT_UNCONFIRMED'; this.instanceEvent(instance, 'cleanup_failed', instance.cleanup_error); this.disconnected() } }, defaults.cleanup.cancel_grace_ms)
         instance.cleanupTimer.unref?.()
       }
       this.disconnected()

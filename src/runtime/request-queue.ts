@@ -9,9 +9,12 @@ export class RequestQueue {
  private timer:ReturnType<typeof setTimeout>|undefined
  private closed=false
  private after=0
+ private through=0
  private checking=new Set<string>()
  busy():boolean{return this.checking.size>0}
- constructor(private db:Database.Database,private epoch:string,private selection:(id:string)=>Row,private validateResource:(task:string,id:string)=>Row,private start:(task:string,text:string,config:string,attachments:Row[],requestId:string)=>string,private available:()=>boolean,private preflight?:(task:string,resources:Row[])=>Promise<void>){this.schedule()}
+ // A host admission adapter owns Run limits and actual call/cleanup conflicts.
+ // Without it, the legacy single-Run and Task-wide resource guards still apply.
+ constructor(private db:Database.Database,private epoch:string,private selection:(id:string)=>Row,private validateResource:(task:string,id:string)=>Row,private start:(task:string,text:string,config:string,attachments:Row[],requestId:string)=>string,private available:()=>boolean,private preflight?:(task:string,resources:Row[])=>Promise<void>,private canAdmit?:(task:string,request:string)=>boolean,private receive?:(task:string,request:string,input:Row)=>Row){this.schedule()}
  close():void{this.closed=true;clearTimeout(this.timer)}
  private task(id:string):void{const t=this.db.prepare('SELECT state FROM tasks WHERE id=?').get(id) as Row|undefined;if(t?.state!=='active')fail('REQUEST_TASK_INACTIVE')}
  private row(task:string,id:string):Row{const row=this.db.prepare('SELECT * FROM requests WHERE id=? AND task_id=?').get(id,task) as Row|undefined;if(!row||JSON.parse(row.input_json).binding_version!==1)fail('REQUEST_NOT_FOUND');return row!}
@@ -23,7 +26,7 @@ export class RequestQueue {
   for(const id of input.import_ids){const a=this.action(row.task_id,id),request=JSON.parse(a.request_json),result=a.result_json?JSON.parse(a.result_json):null;if(a.state!=='ended'){waiting=true;items.push({operation_id:id,display_name:request.display_name,state:'waiting'})}else if(a.result==='success'&&result?.resource?.id){if(!ids.has(result.resource.id)){ids.add(result.resource.id);items.push({...result.resource,operation_id:id,state:'success'})}}else{failed=true;items.push({operation_id:id,display_name:request.display_name,state:'failed',retryable:['failure','not_executed'].includes(a.result),code:result?.code??'IMPORT_INTERRUPTED'})}}
   return {items,waiting,failed}
  }
- private public(row:Row):Row{const input=JSON.parse(row.input_json),run=this.db.prepare('SELECT id,state FROM runs WHERE request_id=?').get(row.id) as Row|undefined;return {request_id:row.id,task_id:row.task_id,state:row.state,code:input.code??null,text:input.text.slice(0,500),text_truncated:input.text.length>500,model_selection:JSON.parse(row.config_selection_json),materials:this.inspect(row).items,run_id:run?.id??null,run_state:run?.state??null,created_at:row.created_at}}
+ private public(row:Row):Row{const input=JSON.parse(row.input_json),run=this.db.prepare("SELECT r.id,r.state FROM runs r LEFT JOIN runner_runs n ON n.run_id=r.id WHERE r.request_id=? AND (n.purpose IS NULL OR n.purpose='production') ORDER BY (r.state IN ('running','waiting')) DESC,r.rowid DESC LIMIT 1").get(row.id) as Row|undefined;return {request_id:row.id,task_id:row.task_id,state:row.state,code:input.code??null,text:input.text.slice(0,500),text_truncated:input.text.length>500,model_selection:JSON.parse(row.config_selection_json),materials:this.inspect(row).items,run_id:run?.id??null,run_state:run?.state??null,created_at:row.created_at}}
  handle(r:Row):Row{
   if(r.type==='request.list'){const rows=this.db.prepare("SELECT rowid ordinal,* FROM requests WHERE task_id=? AND json_extract(input_json,'$.binding_version')=1 AND rowid<? ORDER BY rowid DESC LIMIT 21").all(r.task_id,r.before??Number.MAX_SAFE_INTEGER) as Row[];const items:Row[]=[];let bytes=0;for(const row of rows.slice(0,20)){const value=this.public(row),size=Buffer.byteLength(JSON.stringify(value));if(items.length&&bytes+size>defaults.transport.rpc_message_bytes/2)break;items.push(value);bytes+=size}const counts=this.db.prepare("SELECT count(*) pending,COALESCE(sum(state='confirmation_required'),0) confirmation FROM requests WHERE task_id=? AND json_extract(input_json,'$.binding_version')=1 AND state IN ('queued','confirmation_required')").get(r.task_id);return {items,next_before:rows.length>items.length?rows[items.length-1]!.ordinal:null,summary:counts}}
   if(r.type==='request.submit'){
@@ -33,7 +36,10 @@ export class RequestQueue {
    for(const id of resourceIds)this.validateResource(r.task_id,id)
    for(const id of importIds)this.action(r.task_id,id)
    const config=this.selection(r.model_config_id),id=randomUUID(),input={binding_version:1,epoch:this.epoch,text:r.text,resource_ids:resourceIds,import_ids:importIds,code:null}
-   this.db.prepare("INSERT INTO requests VALUES (?,?,'queued',?,?,?)").run(id,r.task_id,JSON.stringify(config),JSON.stringify(input),new Date().toISOString())
+   this.db.transaction(()=>{
+    const received={...input,...this.receive?.(r.task_id,id,input)}
+    this.db.prepare("INSERT INTO requests VALUES (?,?,'queued',?,?,?)").run(id,r.task_id,JSON.stringify(config),JSON.stringify(received),new Date().toISOString())
+   })()
    this.tickTask(r.task_id);return this.public(this.row(r.task_id,id))
   }
   const row=this.row(r.task_id,r.request_id)
@@ -54,13 +60,29 @@ export class RequestQueue {
  private update(row:Row,state:string,input:Row):void{this.db.prepare(`UPDATE requests SET state=?,input_json=? WHERE id=? AND ${pending}`).run(state,JSON.stringify(input),row.id)}
  invalidateConfiguration():void{for(const row of this.db.prepare(`SELECT * FROM requests WHERE ${pending} AND json_extract(input_json,'$.binding_version')=1`).all() as Row[])this.update(row,'confirmation_required',{...JSON.parse(row.input_json),code:'REQUEST_CONFIGURATION_CHANGED'})}
  cancelTask(task:string):void{for(const row of this.db.prepare(`SELECT * FROM requests WHERE task_id=? AND ${pending} AND json_extract(input_json,'$.binding_version')=1`).all(task) as Row[])this.update(row,'cancelled',{...JSON.parse(row.input_json),code:'TASK_STOPPED'})}
+ private admitted(task:string,request:string):boolean{
+  if(this.closed||!this.available())return false
+  if(this.canAdmit)return this.canAdmit(task,request)===true
+  if(this.db.prepare("SELECT 1 FROM runs WHERE task_id=? AND state IN ('running','waiting')").get(task))return false
+  return !this.db.prepare("SELECT 1 FROM calls WHERE task_id=? AND state!='ended' UNION ALL SELECT 1 FROM cleanup_jobs WHERE task_id=? AND necessary=1 AND state!='done' LIMIT 1").get(task,task)
+ }
  private tickTask(task:string):void{
-  if(this.closed||this.checking.has(task)||!this.available())return
-  if(this.db.prepare("SELECT 1 FROM runs WHERE task_id=? AND state IN ('running','waiting')").get(task))return
-  if(this.db.prepare("SELECT 1 FROM calls WHERE task_id=? AND state!='ended' UNION ALL SELECT 1 FROM cleanup_jobs WHERE task_id=? AND necessary=1 AND state!='done' LIMIT 1").get(task,task))return
-  const row=this.db.prepare(`SELECT * FROM requests WHERE task_id=? AND ${pending} ORDER BY rowid LIMIT 1`).get(task) as Row|undefined
-  if(!row||row.state!=='queued')return
+  if(this.closed||!this.available())return
+  const rows=this.db.prepare("SELECT * FROM requests WHERE task_id=? AND state='queued' AND json_extract(input_json,'$.binding_version')=1 ORDER BY rowid LIMIT ?").all(task,defaults.queues.task_pending) as Row[]
+  for(const row of rows)this.tickRequest(row)
+ }
+ private startFailed(row:Row,error:unknown):void{
+  if(this.closed)return
+  const fresh=this.db.prepare('SELECT * FROM requests WHERE id=? AND task_id=?').get(row.id,row.task_id) as Row|undefined
+  if(fresh?.state==='queued'&&fresh.input_json===row.input_json&&fresh.config_selection_json===row.config_selection_json)this.update(row,'confirmation_required',{...JSON.parse(row.input_json),code:error instanceof ContractError?error.code:'REQUEST_START_FAILED'})
+ }
+ private tickRequest(row:Row):void{
+  if(this.closed||this.checking.has(row.id)||!this.available())return
+  const task=row.task_id
+  let deferred=false
   try{
+   if(!this.admitted(task,row.id))return
+   this.checking.add(row.id)
    this.task(task);const input=this.inputs(row),inspection=this.inspect(row)
    if(inspection.waiting)return
    if(inspection.failed){this.update(row,'confirmation_required',{...input,code:'REQUEST_MATERIALS_INCOMPLETE'});return}
@@ -68,20 +90,29 @@ export class RequestQueue {
    if(JSON.stringify(saved)!==JSON.stringify(current))fail('REQUEST_CONFIGURATION_CHANGED')
    const resources=inspection.items.map((item:Row)=>this.validateResource(task,item.id))
    const start=()=>{
-    if(this.closed||!this.available())return
+    if(!this.admitted(task,row.id))return
     this.task(task);const fresh=this.row(task,row.id)
     if(fresh.state!=='queued'||fresh.input_json!==row.input_json||fresh.config_selection_json!==row.config_selection_json)return
     if(JSON.stringify(this.selection(saved.id))!==JSON.stringify(saved))fail('REQUEST_CONFIGURATION_CHANGED')
-    if(this.db.prepare("SELECT 1 FROM runs WHERE task_id=? AND state IN ('running','waiting')").get(task))return
-    const checked=resources.map((resource:Row)=>this.validateResource(task,resource.id))
+    const latest=this.inspect(fresh)
+    if(latest.waiting)return
+    if(latest.failed)fail('REQUEST_MATERIALS_INCOMPLETE')
+    const checked=latest.items.map((resource:Row)=>this.validateResource(task,resource.id))
     if(JSON.stringify(checked)!==JSON.stringify(resources))fail('REQUEST_MATERIAL_UNAVAILABLE')
     this.start(task,input.text,saved.id,resources.map((x:Row)=>({kind:'resource',id:x.id})),row.id)
    }
    if(this.preflight&&resources.some((resource:Row)=>resource.byte_length>262144)){
-    this.checking.add(task)
-    void this.preflight(task,resources).then(start).catch(error=>{if(!this.closed){const fresh=this.row(task,row.id);if(fresh.state==='queued'&&fresh.input_json===row.input_json&&fresh.config_selection_json===row.config_selection_json)this.update(row,'confirmation_required',{...JSON.parse(row.input_json),code:error instanceof ContractError?error.code:'REQUEST_START_FAILED'})}}).finally(()=>this.checking.delete(task))
+    const check=this.preflight(task,resources)
+    deferred=true
+    void check.then(start).catch(error=>this.startFailed(row,error)).finally(()=>this.checking.delete(row.id))
    }else start()
-  }catch(error){this.update(row,'confirmation_required',{...JSON.parse(row.input_json),code:error instanceof ContractError?error.code:'REQUEST_START_FAILED'})}
+  }catch(error){this.startFailed(row,error)}finally{if(!deferred)this.checking.delete(row.id)}
  }
- private schedule():void{this.timer=setTimeout(()=>{if(this.closed)return;try{const rows=this.db.prepare(`SELECT rowid ordinal,task_id FROM requests WHERE ${pending} AND json_extract(input_json,'$.binding_version')=1 AND rowid>? ORDER BY rowid LIMIT 50`).all(this.after) as Row[];for(const task of new Set(rows.map(row=>row.task_id)))this.tickTask(task);this.after=rows.length===50?rows.at(-1)!.ordinal:0}catch{/* Original persistent requests remain queryable after a scheduling failure. */}this.schedule()},250);this.timer.unref?.()}
+ private schedule():void{this.timer=setTimeout(()=>{if(this.closed)return;try{
+  // Fix each sweep's end so continuous arrivals cannot starve an earlier wait.
+  if(this.after===0)this.through=(this.db.prepare('SELECT COALESCE(max(rowid),0) ordinal FROM requests').get() as Row).ordinal
+  const rows=this.db.prepare("SELECT rowid ordinal,* FROM requests WHERE state='queued' AND json_extract(input_json,'$.binding_version')=1 AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 50").all(this.after,this.through) as Row[]
+  for(const row of rows)this.tickRequest(row)
+  this.after=rows.length===50&&rows.at(-1)!.ordinal<this.through?rows.at(-1)!.ordinal:0
+ }catch{/* Original persistent requests remain queryable after a scheduling failure. */}this.schedule()},250);this.timer.unref?.()}
 }

@@ -5,10 +5,12 @@ import { imageBodyUrl } from './view-resources'
 import { staticDocument, type ExportIssue } from './static-export'
 import { ContractError } from '../shared/validation'
 import { isBundleMediaType } from '../shared/branding'
+import type { FrozenExportComposition } from './export-composition'
 
 export interface ExportInput {
   root: string; title: string; resources: ExportResource[]; views: { bundle_id: string; resource_ids: string[]; fragment_ids?: string[] }[];
   answers: { bundle_id: string; resource_ids: string[]; value: unknown; label: string }[]
+  composition?: FrozenExportComposition
 }
 export interface ExportResult { html: string; issues: string[] }
 export interface ExportGeneration { result: Promise<ExportResult>; stop(): Promise<void> }

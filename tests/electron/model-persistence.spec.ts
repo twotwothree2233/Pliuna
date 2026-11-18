@@ -55,10 +55,10 @@ test('Plain-file remembered connection survives restart, edits invalidate and cr
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await chooseModel(page, mainId)
     await page.getByLabel('想从哪里开始？').fill('仅回复 RESTORED_CONNECTION_OK')
-    await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('button', { name: /发送消息/ }).click()
     await expect(page.getByText('RESTORED_CONNECTION_OK', { exact: true })).toBeVisible()
     expect(server.exchanges.at(-1)!.authorization).toBe('Bearer ' + sentinel)
-    const send = async (request: string) => { await page.getByLabel('想从哪里开始？').fill(request); await page.getByRole('button', { name: /发送 · 新 Run/ }).click() }
+    const send = async (request: string) => { await page.getByLabel('想从哪里开始？').fill(request); await page.getByRole('button', { name: /发送消息/ }).click() }
     await send('create initial data')
     await expect(page.getByText('RESTORED_DATA_RUN_ENDED', { exact: true })).toHaveCount(1)
     await page.getByRole('tab', { name: /任务数据/ }).click()

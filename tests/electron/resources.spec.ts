@@ -40,7 +40,7 @@ test('immutable resources: HTTP Agent, desktop continuation/reference/approval, 
   const errors: string[] = []
   async function send(page: Page, request: string) {
     await page.getByLabel('想从哪里开始？').fill(request)
-    await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('button', { name: /发送消息/ }).click()
   }
   async function fullText(page: Page) {
     const region = page.getByRole('region', { name: '全部资源分页浏览' })

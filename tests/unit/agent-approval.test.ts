@@ -9,7 +9,6 @@ import type { Snapshot } from '../../src/shared/types'
 import { modelServer, synthetic, textStream, hostToolStream, frame, type Exchange } from '../helpers/model-server'
 import type { ServerResponse } from 'node:http'
 import { RunBudget } from '../../src/runtime/model/agent'
-import defaults from '../../src/shared/contracts/development-defaults.json'
 const cleanups: (() => Promise<void> | void)[] = []
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close() })
 const schema = { type: 'object', properties: { progress: { type: 'string' } }, required: ['progress'], additionalProperties: false }
@@ -218,7 +217,7 @@ describe('general Agent loop and persisted single-action approval', () => {
     const { store, task, path, models } = await setup(dataConversation)
     const { dataId, approval } = await beginReplacement(store, task)
     expect(store.snapshot(task.task.id).runs[0]).toMatchObject({ state: 'waiting', wait_reason: 'approval' })
-    expect(() => store.start(task.task.id, 'second', 'main', [])).toThrow('unfinished Run')
+    expect(() => store.start(task.task.id, 'second', 'main', [])).toThrow(expect.objectContaining({ code: 'RUN_BUSY' }))
     expect(() => models.remove('main')).toThrow('occupied')
     const second = store.create('other task'); expect(second.task.title).toBe('other task')
     const db = new Database(join(path, 'pliuna.sqlite')); expect(db.prepare('SELECT revision FROM task_data WHERE id=?').get(dataId)).toEqual({ revision: 1 }); db.close()
@@ -297,11 +296,11 @@ describe('general Agent loop and persisted single-action approval', () => {
     expect(store.snapshot(task.task.id).approvals[0]).toMatchObject({ id: approval.id, expires_at: approval.expires_at, decision: 'pending', evaluation: { error: 'MODEL_TIMEOUT' } })
     store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'deny' }); await ended(store, task)
   })
-  it('wall timeout fences a running request and completes cleanup without any write', async () => {
-    const { store, task } = await setup((_x, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders() }, { run_wall_ms: 100 })
+  it('request timeout fences a running request and completes cleanup without any write', async () => {
+    const { store, task } = await setup((_x, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders() }, { request_timeout_ms: 100 })
     store.start(task.task.id, 'timeout', 'main', [])
     const snapshot = await ended(store, task)
-    expect(snapshot.runs[0]).toMatchObject({ state: 'failed', primary_reason: 'RUN_WALL_LIMIT' })
+    expect(snapshot.runs[0]).toMatchObject({ state: 'failed', primary_reason: 'MODEL_TIMEOUT' })
     expect(snapshot.records.some(r => r.kind === 'task_data.changed')).toBe(false)
   })
   for (const decision of ['approve', 'deny', 'escalate', 'invalid']) it('assisted ' + decision + ' uses an independent no-tools context and correct fallback', async () => {
@@ -418,21 +417,6 @@ describe('general Agent loop and persisted single-action approval', () => {
     const budget = new RunBudget({ id: 'tiny', base_url: 'https://example.test', wire_model_id: 'id', context_tokens: 300, max_output_tokens: 100, compatibility_profile: 'chat-max-tokens' })
     expect(() => budget.reserve([{ role: 'user', content: 'very large input'.repeat(100) }], undefined)).toThrow('CONTEXT_BUDGET_EXCEEDED')
     expect(budget.state.model_requests).toBe(0)
-  })
-  it('enforces request, tool, token and wall budgets before further dispatch', () => {
-    const config = { id: 'budget', limits: { run_model_requests: 40, run_tool_requests: 200, run_tokens: 200000, run_wall_ms: 3600000 }, base_url: 'https://example.test', wire_model_id: 'id', context_tokens: 1000000, max_output_tokens: 100, compatibility_profile: 'chat-max-tokens' as const }
-    const requests = new RunBudget(config)
-    for (let i = 0; i < defaults.run.model_requests; i++) requests.reserve([], undefined)
-    expect(() => requests.reserve([], undefined)).toThrow('RUN_BUDGET_EXCEEDED')
-    const tools = new RunBudget(config)
-    for (let i = 0; i < defaults.run.tool_requests; i++) tools.tool()
-    expect(() => tools.tool()).toThrow('RUN_BUDGET_EXCEEDED')
-    const tokens = new RunBudget(config)
-    expect(() => tokens.reserve([{ role: 'user', content: 'x'.repeat(defaults.run.tokens) }], undefined)).toThrow('RUN_BUDGET_EXCEEDED')
-    expect(tokens.state.model_requests).toBe(0)
-    const usage = new RunBudget(config), reservation = usage.reserve([], undefined)
-    expect(() => usage.settle(reservation, { text: '', calls: [], finish: 'stop', usage: { prompt_tokens: defaults.run.tokens, completion_tokens: 1 } })).toThrow('RUN_BUDGET_EXCEEDED')
-    expect(() => new RunBudget(config, Date.now() - defaults.run.wall_ms).check()).toThrow('RUN_WALL_LIMIT')
   })
   it('labels mixed usage honestly and retains reservations for failed requests', () => {
     const budget = new RunBudget({ id: 'accounting', base_url: 'https://example.test', wire_model_id: 'id', context_tokens: 1000000, max_output_tokens: 100, compatibility_profile: 'chat-max-tokens' })

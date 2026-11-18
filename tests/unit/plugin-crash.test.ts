@@ -30,7 +30,10 @@ for (const boundary of ['sent', 'prepared', 'committed']) it('plugin SIGKILL at 
       expect(db.prepare('SELECT state,dispatch,execution,commit_valid FROM calls').all()).toEqual([{ state: 'ended', dispatch: 'sent', execution: boundary === 'committed' ? 'success' : 'unknown', commit_valid: 0 }])
       expect(db.prepare('SELECT id FROM resources').all()).toHaveLength(boundary === 'committed' ? 1 : 0)
       expect(db.prepare('SELECT id FROM runs').all()).toHaveLength(1)
-      if (boundary === 'prepared') { expect(db.prepare('SELECT state FROM staging').get()).toEqual({ state: 'invalid' }); expect(JSON.parse((db.prepare("SELECT detail_json FROM cleanup_jobs WHERE owner_kind='staging'").get() as any).detail_json).assessment).toBe('candidate') }
+      if (boundary === 'prepared') {
+        expect(db.prepare('SELECT state FROM staging').get()).toEqual({ state: 'prepared' })
+        expect(JSON.parse((db.prepare("SELECT detail_json FROM cleanup_jobs WHERE owner_kind='staging'").get() as any).detail_json)).toMatchObject({ assessment: 'review', reason: 'OWNER_UNCERTAIN' })
+      }
     } finally { db.close() }
     await new Promise(resolve => setTimeout(resolve, 50))
     expect((await store.handle({ type: 'plugin.list', task_id: task }) as any).items[0].instances).toEqual([])

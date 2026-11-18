@@ -1,6 +1,6 @@
 import { ContractError, assertContract } from '../../shared/validation'
 import { randomUUID } from 'node:crypto'
-import type { HostModelRequest, ModelConfiguration } from '../../shared/contracts.generated'
+import type { ExecutionScope, HostModelRequest, ModelConfiguration } from '../../shared/contracts.generated'
 import { modelTools } from './tools'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { ChatAdapter, ModelError, endpoint, type ChatMessage, type Completion, type ToolDefinition } from './adapter'
@@ -10,7 +10,7 @@ import { deadline } from './limits'
 import { requestAccounting, type RequestAccounting, type RequestPurpose } from './accounting'
 import type { ChannelEntry, SavedChannel } from './channels'
 import type { ModelPersistence, SavedConnection } from './persistence'
-import { requestEvidence, type RequestEvidence, type RequestLink } from './request-evidence'
+import { captureExecutionScope, requestEvidence, type RequestEvidence, type RequestLink } from './request-evidence'
 import { capacityPlan } from './capacity'
 
 interface Configuration { config: ModelConfiguration; key: string; channel: string; roles: Set<'main' | 'approval' | 'compaction'>; locks: number; revision: number; remembered?: boolean; credentialMissing?: boolean }
@@ -53,7 +53,18 @@ export class ModelScheduler {
     }
   }
 }
-export interface ModelLease { id: string; revision: number; config: ModelConfiguration; release: () => void; accounting?: (event: RequestAccounting) => void; evidence?: (event: RequestEvidence) => string }
+export interface ModelLease { id: string; revision: number; config: ModelConfiguration; release: () => void; accounting?: (event: RequestAccounting) => void; evidence?: (event: RequestEvidence) => string; owner?: ExecutionScope }
+function restoredConfiguration(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const configuration = value as Record<string, unknown>, limits = configuration.limits
+  if (!limits || typeof limits !== 'object' || Array.isArray(limits)) return value
+  // Drop retired cumulative ceilings only when loading an existing connection.
+  // Current per-request limits and unknown fields still pass strict validation.
+  const current: Record<string, unknown> = { ...limits }
+  for (const field of ['run_tokens', 'run_model_requests', 'run_tool_requests', 'run_wall_ms']) delete current[field]
+  return { ...configuration, limits: current }
+}
+
 export class ModelService {
   private configurations = new Map<string, Configuration>()
   private channelConfigurations = new Map<string, ChannelEntry>()
@@ -80,7 +91,7 @@ export class ModelService {
       for (const raw of loaded.records) {
         const saved = raw as SavedConnection
         if (!saved || !Number.isSafeInteger(saved.revision) || saved.revision < 1 || typeof saved.protocol !== 'string' || !Array.isArray(saved.roles) || saved.roles.some(role => role !== 'main' && role !== 'approval' && role !== 'compaction') || (saved.key !== null && typeof saved.key !== 'string')) throw new Error()
-        const entry = this.prepare({ type: 'model.configure', configuration: saved.configuration, api_key: saved.key ?? '', confirm_memory_only: true }, saved.key === null)
+        const entry = this.prepare({ type: 'model.configure', configuration: restoredConfiguration(saved.configuration), api_key: saved.key ?? '', confirm_memory_only: true }, saved.key === null)
         if (restored.has(entry.config.id)) throw new Error()
         entry.revision = saved.revision; entry.remembered = true; entry.credentialMissing = saved.key === null
         if (saved.protocol === this.protocol && !entry.credentialMissing) entry.roles = new Set(saved.roles)
@@ -322,6 +333,7 @@ export class ModelService {
     return this.acquire(target, 'compaction')
   }
   async request(lease: ModelLease, task: string, messages: ChatMessage[], tools: ToolDefinition[] | undefined, signal: AbortSignal, onText?: (text: string) => void, outputLimit?: number, onStart?: () => void, purpose: RequestPurpose = 'main', onRequest?: (link: RequestLink) => void): Promise<Completion> {
+    const owner = captureExecutionScope(lease.owner, task)
     const requestId = randomUUID()
     const entry = this.entry(lease.id)
     if (entry.revision !== lease.revision) throw new ContractError('CONFIGURATION_CHANGED', 'Configuration changed')
@@ -329,7 +341,7 @@ export class ModelService {
     record('reserved')
     let dispatched = false
     try {
-      const evidenceId = lease.evidence?.(requestEvidence(messages, requestId, purpose))
+      const evidenceId = lease.evidence?.(requestEvidence(messages, requestId, purpose, owner))
       if (evidenceId) onRequest?.({ request_id: requestId, evidence_event_id: evidenceId })
       const result = await this.send(entry, task, signal, inner => {
         onStart?.(); record('dispatched'); dispatched = true

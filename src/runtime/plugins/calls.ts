@@ -1,7 +1,10 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import defaults from '../../shared/contracts/development-defaults.json'
-import { ContractError } from '../../shared/validation'
+import { ContractError, validateModel } from '../../shared/validation'
+import type { ExecutionScope, ModelRequest } from '../../shared/contracts.generated'
+import { captureExecutionScope } from '../model/request-evidence'
+import type { ToolAccountingPhase } from '../runner/budget-accounting'
 import type { PluginControl } from './control'
 import type { PluginDirectory } from './directory'
 import { PluginProcesses } from './process'
@@ -9,7 +12,8 @@ import { RpcError } from './rpc'
 import type { PluginDerivations } from './derivations'
 
 type Row = Record<string, any>
-export type CallSource = { run_id: string | null; action_id?: string; parent_call_id?: string; instance_id?: string; chain: string[]; budget?: { calls: number }; signal: AbortSignal; valid(): void; approve(action: string, input: unknown, signal: AbortSignal): Promise<void>; checkApproval(action: string, input: unknown): void }
+export type CallSource = { run_id: string | null; action_id?: string; parent_call_id?: string; instance_id?: string; chain: string[]; signal: AbortSignal; owner?: ExecutionScope; valid(): void; authorize?(request: ModelRequest): void; accountTool?(operationId: string, phase: ToolAccountingPhase): void; approve(action: string, input: unknown, signal: AbortSignal): Promise<void>; checkApproval(action: string, input: unknown): void }
+export type PluginCallResourceScope = { call_id: string; task_id: string; run_id: string | null; parent_call_id: string | null; instance_key: string; instance_id: string | null; owner?: ExecutionScope }
 type Active = { task: string; digest: string; source: CallSource; controller: AbortController; settled: Promise<void>; instance?: string; ended_reason?: string }
 const now = () => new Date().toISOString()
 export class PluginCalls {
@@ -17,37 +21,47 @@ export class PluginCalls {
   private closed = false
   constructor(private db: Database.Database, private epoch: string, private control: PluginControl, private directory: PluginDirectory, private processes: PluginProcesses, private references: (task: string, refs: unknown[]) => void, private record: (task: string, kind: string, payload: Row) => void, private commitUploads: (call: string) => Row[] = () => [], private settleUploads: (call: string, success: boolean) => void = () => {}, private saveOutput?: (task: string, call: string, instance: string, digest: string, global: boolean, bytes: Buffer) => Promise<void>, private derivations?: PluginDerivations) {}
   async call(task: string, capabilityId: string, args: unknown, references: unknown[], source: CallSource, registered?: (id: string) => void): Promise<unknown> {
-    source.valid(); this.references(task, references)
-    const resolved = await this.directory.capability(task, capabilityId), copy = this.control.get(resolved.digest)
+    const owner = captureExecutionScope(source.owner, task)
+    if (owner && owner.run_id !== source.run_id) throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Plugin call belongs to another Run')
+    source = { ...source, ...(owner ? { owner } : {}) }
+    const request = source.authorize ? structuredClone(validateModel({ type: 'call', input: { capability: capabilityId, arguments: args, references } })) : undefined
+    if (request?.type === 'call') { args = request.input.arguments; references = request.input.references }
+    const checkSource = () => { source.valid(); if (request) source.authorize?.(request) }
+    checkSource(); this.references(task, references)
+    const resolved = await this.directory.capability(task, capabilityId)
+    checkSource()
+    const copy = this.control.get(resolved.digest)
     await this.directory.validateArguments(task,capabilityId,args)
-    source.valid()
+    checkSource()
     const instanceKey = resolved.digest + ':' + (copy.manifest.access_level === 'global' ? 'global' : task)
     if (source.chain.includes(instanceKey) || source.chain.length >= defaults.tool.nested_max_depth) throw new ContractError('PLUGIN_CALL_CYCLE', 'Nested calls cannot reenter an instance or exceed the source depth limit')
-    const budget = source.budget ?? { calls: 0 }
-    if (++budget.calls > defaults.run.tool_requests) throw new ContractError('PLUGIN_CALL_BUDGET', 'Nested call budget exhausted')
     const id = randomUUID(), controller = new AbortController(), abort = () => controller.abort()
-    source.signal.addEventListener('abort', abort, { once: true }); if (source.signal.aborted) abort()
     let settled!: () => void
-    const entry: Active = { task, digest: resolved.digest, source: { ...source, budget, chain: [...source.chain, instanceKey] }, controller, settled: new Promise(resolve => { settled = resolve }) }
+    const entry: Active = { task, digest: resolved.digest, source: { ...source, chain: [...source.chain, instanceKey] }, controller, settled: new Promise(resolve => { settled = resolve }) }
+    this.db.transaction(() => {
+      source.accountTool?.(id, 'reserved')
+      this.db.prepare("INSERT INTO calls (id,task_id,run_id,parent_call_id,instance_id,capability_id,state,dispatch,delivery,input_json,limits_json,commit_valid,created_at) VALUES (?,?,?,?,?,?,'registered','not_sent','pending',?,?,1,?)").run(id, task, source.run_id, source.parent_call_id ?? null, source.instance_id ?? null, capabilityId, JSON.stringify({ arguments: args, references }), JSON.stringify({ ...defaults, package_digest: resolved.digest, plugin_version: copy.manifest.version, runtime_epoch: this.epoch, chain: entry.source.chain, instance_key: instanceKey, ...(owner ? { owner } : {}) }), now())
+    })()
+    source.signal.addEventListener('abort', abort, { once: true }); if (source.signal.aborted) abort()
     this.active.set(id, entry)
-    this.db.prepare("INSERT INTO calls (id,task_id,run_id,parent_call_id,instance_id,capability_id,state,dispatch,delivery,input_json,limits_json,commit_valid,created_at) VALUES (?,?,?,?,?,?,'registered','not_sent','pending',?,?,1,?)").run(id, task, source.run_id, source.parent_call_id ?? null, source.instance_id ?? null, capabilityId, JSON.stringify({ arguments: args, references }), JSON.stringify({ ...defaults, package_digest: resolved.digest, plugin_version: copy.manifest.version, runtime_epoch: this.epoch, chain: entry.source.chain }), now())
-    registered?.(id)
     let action: string | null = source.action_id ?? null, committed = false, returned = false
     const input = { type: 'plugin.invoke', call_id: id, capability: capabilityId, arguments: args, references, effect: resolved.capability.effect, package_digest: resolved.digest }
     if (action) this.db.prepare("UPDATE actions SET call_id=?,kind='invocation',request_json=? WHERE id=? AND state='registered' AND commit_valid=1").run(id, JSON.stringify(input), action)
     const valid = () => {
       if (this.closed || controller.signal.aborted || !this.control.available(task, resolved.digest)) throw new ContractError('PLUGIN_SOURCE_INVALID', 'Plugin call no longer has commit eligibility')
-      source.valid()
+      checkSource()
       const row = this.db.prepare('SELECT state,commit_valid,dispatch FROM calls WHERE id=?').get(id) as Row | undefined
       if (!row?.commit_valid || row.state === 'ended') throw new ContractError('PLUGIN_SOURCE_INVALID', 'Original call has ended')
       if (action && resolved.capability.effect !== 'read' && row.dispatch === 'not_sent' && row.state === 'executing') source.checkApproval(action, input)
     }
-    const wall = setTimeout(() => { this.invalidate(id); controller.abort() }, defaults.run.wall_ms); wall.unref?.()
+    const wall = setTimeout(() => { this.invalidate(id); controller.abort() }, defaults.tool.operation_timeout_ms); wall.unref?.()
+    let settlement: Promise<unknown> | undefined
     try {
+      registered?.(id)
       if (resolved.capability.effect !== 'read') {
         if (!action) {
           action = randomUUID()
-          this.db.prepare("INSERT INTO actions (id,task_id,run_id,call_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,?,'invocation','registered',?,?,1,?)").run(action, task, source.run_id, id, JSON.stringify({ type: source.run_id ? 'run' : 'plugin', id: source.run_id ?? source.instance_id, epoch: this.epoch }), JSON.stringify(input), now())
+          this.db.prepare("INSERT INTO actions (id,task_id,run_id,call_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,?,'invocation','registered',?,?,1,?)").run(action, task, source.run_id, id, JSON.stringify({ type: source.run_id ? 'run' : 'plugin', id: source.run_id ?? source.instance_id, epoch: this.epoch, ...(owner ? { owner } : {}) }), JSON.stringify(input), now())
         }
         this.db.prepare("UPDATE calls SET state='waiting',wait_reason='approval' WHERE id=?").run(id)
         await source.approve(action, input, controller.signal); valid()
@@ -55,13 +69,14 @@ export class PluginCalls {
       }
       valid(); this.references(task, references)
       this.db.prepare("UPDATE calls SET state='executing',wait_reason=NULL WHERE id=?").run(id)
+      source.accountTool?.(id, 'dispatched')
       return await this.processes.execute(copy, task, { call_id: id, capability: resolved.capability.id, arguments: args, references, signal: controller.signal, nested: !!source.parent_call_id, valid, started: instance => { entry.instance = instance; this.db.prepare('UPDATE calls SET instance_id=? WHERE id=?').run(instance, id) }, ended: reason => { entry.ended_reason = reason; this.invalidate(id); controller.abort() }, dispatch: state => {
         if (this.closed) return
         this.db.transaction(() => {
           this.db.prepare("UPDATE calls SET dispatch=? WHERE id=? AND dispatch='not_sent'").run(state, id)
           if (action) this.db.prepare("UPDATE actions SET state='ended',result=?,commit_valid=0,authorization_json=?,result_json=?,ended_at=? WHERE id=? AND state!='ended'").run(state === 'sent' ? 'success' : 'unknown', JSON.stringify({ basis: resolved.capability.effect === 'read' ? 'default' : 'single_approval' }), JSON.stringify({ call_id: id, dispatched: state, tool_execution: 'not_proven' }), now(), action)
         })()
-      }, settle: async output => {
+      }, settle: output => settlement ??= (async () => {
       valid()
       const pending = this.db.prepare("SELECT id FROM actions WHERE call_id=? AND state!='ended' AND json_extract(request_json,'$.type')!='plugin.result.upload' UNION ALL SELECT id FROM calls WHERE parent_call_id=? AND state!='ended' LIMIT 1").get(id, id)
       if (pending) throw new ContractError('PLUGIN_DEPENDENT_WORK_PENDING', 'Tool returned before its related actions or child calls ended')
@@ -82,15 +97,16 @@ export class PluginCalls {
         this.derivations?.commit(id, resources, this.record, copy.manifest.version)
         if (resources.length) Object.assign(result, { resources })
         this.db.prepare("UPDATE calls SET state='ended',execution='success',delivery='delivered',result_json=?,commit_valid=0,ended_at=? WHERE id=?").run(JSON.stringify(result), now(), id)
-        this.record(task, 'plugin.call.ended', { call_id: id, package_digest: resolved.digest, execution: 'success' })
+        this.record(task, 'plugin.call.ended', { call_id: id, package_digest: resolved.digest, execution: 'success', ...(owner ? { owner: { ...owner } } : {}) })
       })()
       committed = true
       return result
-      } })
+      })() })
     } catch (error) {
       await this.cancelChildren(id)
       if (this.closed) throw error
-      const row = this.db.prepare('SELECT dispatch FROM calls WHERE id=?').get(id) as Row
+      const row = this.db.prepare('SELECT dispatch,state,result_json FROM calls WHERE id=?').get(id) as Row
+      if (row.state === 'ended' && row.result_json) return JSON.parse(row.result_json)
       const execution = row.dispatch === 'not_sent' ? 'not_executed' : returned ? 'success' : controller.signal.aborted && (!entry.ended_reason || ['PLUGIN_PROCESS_REVOKED', 'PLUGIN_TASK_STOPPED', 'PLUGIN_HOST_CLOSED'].includes(entry.ended_reason)) ? 'cancelled' : error instanceof RpcError ? 'failure' : 'unknown'
       const delivery = returned || (error instanceof ContractError && error.code === 'PLUGIN_OUTPUT_INVALID') ? 'failed' : 'delivered'
       const declaredCode = error instanceof RpcError && resolved.capability.errors.includes(error.message) ? error.message : null
@@ -98,7 +114,7 @@ export class PluginCalls {
       this.db.transaction(() => {
         this.db.prepare("UPDATE calls SET state='ended',execution=?,delivery=?,result_json=?,commit_valid=0,ended_at=? WHERE id=?").run(execution, delivery, JSON.stringify(result), now(), id)
         if (action) this.db.prepare("UPDATE actions SET state='ended',result=?,commit_valid=0,result_json=?,ended_at=? WHERE id=? AND state!='ended'").run(row.dispatch === 'not_sent' ? 'not_executed' : 'unknown', JSON.stringify(result), now(), action)
-        this.record(task, 'plugin.call.ended', { call_id: id, package_digest: resolved.digest, execution })
+        this.record(task, 'plugin.call.ended', { call_id: id, package_digest: resolved.digest, execution, ...(owner ? { owner: { ...owner } } : {}) })
       })()
       return result
     } finally {
@@ -106,7 +122,13 @@ export class PluginCalls {
       try {
         await this.cancelChildren(id)
         this.derivations?.settled(id)
-        if (!this.closed) this.settleUploads(id, committed)
+        if (!this.closed) {
+          this.settleUploads(id, committed)
+          if (source.accountTool) {
+            const row = this.db.prepare('SELECT execution FROM calls WHERE id=?').get(id) as Row
+            source.accountTool(id, row.execution === 'unknown' ? 'unknown' : row.execution === 'not_executed' ? 'failed' : 'completed')
+          }
+        }
       } finally { this.active.delete(id); settled() }
     }
   }
@@ -117,18 +139,36 @@ export class PluginCalls {
   }
   private invalidate(id: string): void { if (!this.closed) this.db.prepare('UPDATE calls SET commit_valid=0 WHERE id=?').run(id) }
   cancelRun(run: string): void { for (const [id, active] of this.active) if (active.source.run_id === run) { this.invalidate(id); active.controller.abort() } }
+  cancelAttempt(attempt: string): void { for (const [id, active] of this.active) if (active.source.owner?.attempt_id === attempt) { this.invalidate(id); active.controller.abort() } }
   cancelAll(): void { for (const [id, active] of this.active) { this.invalidate(id); active.controller.abort() } }
   cancelTask(task: string): void { for (const [id, active] of this.active) if (active.task === task) { this.invalidate(id); active.controller.abort() } }
   revoke(): void { for (const [id, active] of this.active) if (!this.control.available(active.task, active.digest)) { this.invalidate(id); active.controller.abort() } }
   source(id: string): Active | undefined { return this.active.get(id) }
+  resourceScope(id: string): PluginCallResourceScope {
+    const row = this.db.prepare('SELECT id,task_id,run_id,parent_call_id,instance_id,dispatch,limits_json FROM calls WHERE id=?').get(id) as Row | undefined
+    if (!row) throw new ContractError('PLUGIN_CALL_UNAVAILABLE', 'Original call does not exist')
+    const limits = JSON.parse(row.limits_json)
+    const instanceKey = limits.instance_key ?? (Array.isArray(limits.chain) ? limits.chain.at(-1) : undefined)
+    if (typeof instanceKey !== 'string' || !instanceKey) throw new ContractError('PLUGIN_CALL_SCOPE_UNAVAILABLE', 'Original plugin instance scope requires inspection')
+    const owner = captureExecutionScope(limits.owner, row.task_id)
+    if (owner && owner.run_id !== row.run_id) throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Plugin call belongs to another Run')
+    // Before dispatch a nested row can still contain its caller's instance.
+    const instance = this.active.get(id)?.instance ?? (row.dispatch !== 'not_sent' ? row.instance_id : null)
+    return { call_id: row.id, task_id: row.task_id, run_id: row.run_id, parent_call_id: row.parent_call_id, instance_key: instanceKey, instance_id: instance ?? null, ...(owner ? { owner } : {}) }
+  }
+  activeScopes(instanceKey?: string): PluginCallResourceScope[] {
+    const scopes = [...this.active.keys()].map(id => this.resourceScope(id))
+    return instanceKey === undefined ? scopes : scopes.filter(scope => scope.instance_key === instanceKey)
+  }
   busyRun(run: string): boolean { return [...this.active.values()].some(active => active.source.run_id === run) }
   async drain(): Promise<void> { while (this.active.size) await Promise.all([...this.active.values()].map(active => active.settled)) }
   busy(task: string): boolean { return [...this.active.values()].some(active => active.task === task) }
   cancel(id: string): void { const active = this.active.get(id); if (active) { this.invalidate(id); active.controller.abort() } }
   status(id: string): unknown {
-    const row = this.db.prepare('SELECT id,task_id,parent_call_id,state,dispatch,execution,delivery,result_json FROM calls WHERE id=?').get(id) as Row | undefined
+    const row = this.db.prepare('SELECT id,task_id,parent_call_id,state,dispatch,execution,delivery,result_json,limits_json FROM calls WHERE id=?').get(id) as Row | undefined
     if (!row) throw new ContractError('PLUGIN_CALL_UNAVAILABLE', 'Original call does not exist')
-    return { call_id: row.id, task_id: row.task_id, parent_call_id: row.parent_call_id, state: row.state, dispatch: row.dispatch, execution: row.execution, delivery: row.delivery, result: row.result_json ? JSON.parse(row.result_json) : null }
+    const owner = captureExecutionScope(JSON.parse(row.limits_json).owner, row.task_id)
+    return { call_id: row.id, task_id: row.task_id, parent_call_id: row.parent_call_id, state: row.state, dispatch: row.dispatch, execution: row.execution, delivery: row.delivery, result: row.result_json ? JSON.parse(row.result_json) : null, ...(owner ? { owner } : {}) }
   }
   close(): void { for (const [id, active] of this.active) { this.invalidate(id); active.controller.abort() }; this.closed = true }
 }

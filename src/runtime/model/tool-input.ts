@@ -57,9 +57,12 @@ export function modelToolRequest(name: string, raw: unknown): ModelRequest {
     options = { max_chars: value.max_chars ?? defaults.read.content_default_chars, selection: { ...selection, ...(view ? { view } : {}) }, explicit: { ...(value.max_chars !== undefined ? { max_chars: value.max_chars } : {}), ...(value.selection !== undefined ? { selection: value.selection } : {}) } }
     input = { target: { kind: value.kind, id: value.id, ...(selection.revision !== undefined ? { expected_revision: selection.revision } : {}) }, ...(value.cursor !== undefined ? { cursor: value.cursor } : {}) }
   } else if (name === 'write') {
-    const decoded = decodeModelInput(value.input_json)
-    if (!object(decoded)) return fail('write input_json must decode to an object')
-    if (Object.hasOwn(decoded, 'type')) fail('input_json.type cannot override operation')
+    const structured = Object.hasOwn(value, 'input'), encoded = Object.hasOwn(value, 'input_json')
+    if (structured === encoded) fail('write requires exactly one of input or input_json')
+    if (structured && value.operation !== 'resource.create') fail('Structured input is supported only for resource.create')
+    const decoded = structured ? value.input : decodeModelInput(value.input_json)
+    if (!object(decoded)) return fail('write input must be an object or input_json must decode to an object')
+    if (Object.hasOwn(decoded, 'type')) fail('write input type cannot override operation')
     input = { type: value.operation, ...decoded }
   } else if (name === 'call') input = { capability: value.capability, arguments: decodeModelInput(value.input_json), references: value.references ?? [] }
   let request: ModelRequest

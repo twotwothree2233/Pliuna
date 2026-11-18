@@ -7,12 +7,13 @@ import { digest, resourceBody } from './resources'
 import { generateExportBody, type ExportInput } from './export-generation'
 import type { ExportIssue } from './static-export'
 import { isBundleMediaType } from '../shared/branding'
+import type { exportCompositionSummary } from './export-composition'
 
 export interface CheckSnapshot {
   input: Omit<ExportInput, 'root'>
   bodies: { id: string; bytes?: Uint8Array; error?: string; observation?: string }[]
 }
-export interface CheckResult { complete: boolean; issues: ExportIssue[]; issue_codes: string[]; worker_metrics?: { elapsed_ms: number; rss_bytes: number; process_peak_rss_bytes: number; heap_used_bytes: number; external_bytes: number; array_buffer_bytes: number } }
+export interface CheckResult { complete: boolean; issues: ExportIssue[]; issue_codes: string[]; selection?: ReturnType<typeof exportCompositionSummary>; worker_metrics?: { elapsed_ms: number; rss_bytes: number; process_peak_rss_bytes: number; heap_used_bytes: number; external_bytes: number; array_buffer_bytes: number } }
 export interface CheckGeneration { result: Promise<CheckResult>; stop(): Promise<void> }
 export type CheckRunner = (snapshot: CheckSnapshot) => CheckGeneration
 export function captureCheck(input: ExportInput): { snapshot: CheckSnapshot; fingerprint: string; bytes: number; capture_ms: number; copy_ms: number } {
@@ -89,7 +90,7 @@ export class ExportChecks {
     }
     const result = check.result
     return { id: check.id, phase: check.phase, exited: !check.generation, ...(check.error ? { error: check.error } : {}), metrics: { ...check.metrics, ...result?.worker_metrics },
-      ...(result ? { complete: result.complete, selection_hash: check.fingerprint, issues: result.issues.slice(offset, offset + 50), issue_count: result.issues.length, offset, next_offset: offset + 50 < result.issues.length ? offset + 50 : null } : {}),
+      ...(result ? { complete: result.complete, selection_hash: check.fingerprint, issues: result.issues.slice(offset, offset + 50), issue_count: result.issues.length, offset, next_offset: offset + 50 < result.issues.length ? offset + 50 : null, ...(result.selection ? { selection: result.selection } : {}) } : {}),
       notice: 'Read-only in-memory check. No persistent job or pin. Actual export validates independently.' }
   }
   cancel(task: string, id: string): unknown {

@@ -13,6 +13,7 @@ import { homedir } from 'node:os'
 import { mkdirSync } from 'node:fs'
 import { saveExport, exportTargetIdentity, reconcileExport } from './export-save'
 import { applicationEnvironment, applicationName } from '../shared/branding'
+import { startLocalWebServer } from './web-server'
 
 app.setName(applicationName)
 if (process.platform === 'win32') app.setAppUserModelId('app.pliuna.desktop')
@@ -31,6 +32,9 @@ let closing = false
 let quitReady = false
 let shutdownRequest: string | undefined
 let restartTimes: number[] = []
+const webMode = applicationEnvironment(process.env, 'WEB') === '1'
+let webServer: Awaited<ReturnType<typeof startLocalWebServer>> | undefined
+let webStartupFailed = false
 const pending = new Map<string, { resolve: (value: HostResponse) => void; timer?: ReturnType<typeof setTimeout> }>()
 function runtimeRequest(request: unknown): Promise<any> {
   if (!runtime) return Promise.reject(Error('OFFLINE'))
@@ -72,14 +76,13 @@ app.whenReady().then(() => {
   ]))
   const window = new BrowserWindow({ title: 'Pliuna', width: 1320, height: 860, minWidth: 390, minHeight: 600, show: false,
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 16 } } : {}),
-    webPreferences: { preload: join(__dirname, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } })
+    webPreferences: { ...(!webMode ? { preload: join(__dirname, '../preload/index.cjs') } : {}), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())
   const materials = new MaterialSources(runtimeRequest, async () => { const selected=await dialog.showOpenDialog(window,{title:'添加任务材料',properties:['openFile','multiSelections']});return selected.canceled?[]:selected.filePaths })
   let exportSaving = false
-  ipcMain.handle('pliuna:request', (event, request: unknown): Promise<HostResponse> | HostResponse => {
+  const hostRequest = (request: unknown): Promise<HostResponse> | HostResponse => {
     if (closing) return { ok: false, error: { code: 'SHUTTING_DOWN', message: 'Host is shutting down' } }
-    if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) return { ok: false, error: { code: 'FORBIDDEN', message: 'Untrusted frame' } }
     if (Buffer.byteLength(JSON.stringify(request) ?? '') > defaults.transport.rpc_message_bytes) return { ok: false, error: { code: 'INPUT_TOO_LARGE', message: 'IPC message too large' } }
     if (typeof (request as any)?.type === 'string' && (request as any).type.startsWith('export.')) {
       const r = request as any
@@ -163,16 +166,29 @@ app.whenReady().then(() => {
       const timer = modelOperation ? undefined : setTimeout(() => { pending.delete(id); resolve({ ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Response timeout. Query current state before deciding whether to submit again.' } }) }, defaults.tool.execution_ms)
       pending.set(id, { resolve, timer }); runtime!.postMessage({ id, request })
     })
+  }
+  ipcMain.handle('pliuna:request', (event, request: unknown) => {
+    if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) return { ok: false, error: { code: 'FORBIDDEN', message: 'Untrusted frame' } }
+    return hostRequest(request)
   })
-  window.once('ready-to-show', () => window.show())
-  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) window.loadURL(process.env.ELECTRON_RENDERER_URL)
+  if (webMode) {
+    const port = Number(applicationEnvironment(process.env, 'WEB_PORT') ?? 4173)
+    void startLocalWebServer({ root: join(__dirname, '../renderer'), port, platform: process.platform, request: hostRequest }).then(server => {
+      webServer = server
+      console.info(`Pliuna Web: ${server.url}`)
+      return window.loadURL(server.url)
+    }).catch(() => { webStartupFailed = true; console.error('WEB_START_FAILED: Local Web service could not start'); app.quit() })
+  } else if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) window.loadURL(process.env.ELECTRON_RENDERER_URL)
   else window.loadFile(join(__dirname, '../renderer/index.html'))
+  if (!webMode) window.once('ready-to-show', () => window.show())
 })
+if (webMode) for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => app.quit())
 // A renderer may still veto quitting to retain unsaved input or an unknown result.
 app.on('will-quit', event => {
-  if (quitReady) { runtime?.kill(); return }
+  if (quitReady) { runtime?.kill(); if (webStartupFailed) app.exit(1); return }
   event.preventDefault()
   closing = true; inspections.close()
+  void webServer?.close().catch(() => {})
   if (!runtime) { quitReady = true; app.quit(); return }
   if (shutdownRequest) { const previous = pending.get(shutdownRequest); if (previous) clearTimeout(previous.timer); pending.delete(shutdownRequest) }
   const id = randomUUID()

@@ -14,11 +14,13 @@ import { validatePluginProtection,verifyPluginProtection } from './plugins/prote
 import { validateRetirement,type Retirement } from './replicas'
 import { validateResourceCleanup,type ResourceCleanup,type TaskDeletion } from './resource-cleanup'
 import { digest,resourceBody } from './resources'
+import { hasV2Writes,readBusinessSchema } from './schema-upgrade'
+import { validateRunnerResourceReferences } from './runner/resource-references'
 import { defaultDatabaseFile, initialDatabaseFile, initialDatabaseFiles, isInitialDatabaseFile, isManagedDatabaseFile, legacyDatabaseFile } from '../shared/branding'
 
 type Row = Record<string, any>
-export type RestoreImage = { file: string; tasks: string[]; resources: Row[]; plugins: PluginCopy[]; sha256?: string }
-type Operation = { id: string; token: string; point_id: string; phase: 'preparing' | 'switched' | 'completed' | 'rolled_back'; previous: string; target: RestoreImage; rollback: RestoreImage; created_at: string }
+export type RestoreImage = { file: string; tasks: string[]; resources: Row[]; plugins: PluginCopy[]; sha256?: string; schema_version?: 1 | 2 }
+type Operation = { id: string; token: string; point_id: string | null; kind?: 'schema_upgrade'; phase: 'preparing' | 'switched' | 'completed' | 'rolled_back'; previous: string; target: RestoreImage; rollback: RestoreImage; created_at: string }
 type Journal = { version: 5 | 6; export_control: IdentityEncoding; selected: string; deleted_tasks: string[]; operations: Operation[]; verified_head: string | null; retirements: Retirement[]; task_deletions: TaskDeletion[]; resource_cleanups: ResourceCleanup[] }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const managed = isManagedDatabaseFile
@@ -29,14 +31,16 @@ export function flushFile(root: string, file: string): void {
   flushDirectorySync(root)
 }
 export function describeDatabase(db: Database.Database, file: string): RestoreImage {
-  return { file, tasks: (db.prepare('SELECT id FROM tasks ORDER BY id').all() as Row[]).map(row => row.id), resources: db.prepare('SELECT * FROM resources ORDER BY id').all() as Row[], plugins: [] }
+  return { file, schema_version: readBusinessSchema(db), tasks: (db.prepare('SELECT id FROM tasks ORDER BY id').all() as Row[]).map(row => row.id), resources: db.prepare('SELECT * FROM resources ORDER BY id').all() as Row[], plugins: [] }
 }
 export function verifyDatabase(db: Database.Database, root: string, deleted: string[], image?: RestoreImage): void {
-  if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length || JSON.stringify(db.prepare('SELECT version FROM schema_version').all()) !== '[{"version":1}]') fail()
+  const version = readBusinessSchema(db)
+  if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length || (image?.schema_version !== undefined && image.schema_version !== version)) fail()
   const actual = describeDatabase(db, image?.file ?? defaultDatabaseFile)
   if (actual.tasks.some(task => deleted.includes(task))) fail()
   if (image && (JSON.stringify(actual.tasks) !== JSON.stringify(image.tasks) || JSON.stringify(actual.resources) !== JSON.stringify(image.resources))) fail()
   for (const resource of actual.resources) resourceBody(root, resource as Parameters<typeof resourceBody>[1])
+  validateRunnerResourceReferences(db)
   new PluginDerivations(db, root).validateStored()
 }
 
@@ -84,8 +88,8 @@ export class RestoreJournal {
       const pending = this.pending()
       if (pending?.phase === 'preparing') this.finish('rolled_back')
       else if (pending?.phase === 'switched') {
-        try { this.verifyEffectivePoint(pending.point_id); this.verifyImage(pending.target); this.finish('completed') }
-        catch { this.verifyImage(pending.rollback); this.save({ ...this.value, selected: pending.rollback.file, operations: this.value.operations.map(op => op.id === pending.id ? { ...op, phase: 'rolled_back' } : op) }) }
+        try { if (pending.kind !== 'schema_upgrade') this.verifyEffectivePoint(pending.point_id!); this.verifyImage(pending.target); this.finish('completed') }
+        catch { this.assertUpgradeRollback(pending); this.verifyImage(pending.rollback); this.save({ ...this.value, selected: pending.rollback.file, operations: this.value.operations.map(op => op.id === pending.id ? { ...op, phase: 'rolled_back' } : op) }) }
       }
       if ((present || !isInitialDatabaseFile(this.value.selected)) && (!existsSync(join(root, this.value.selected)) || !lstatSync(join(root, this.value.selected)).isFile())) fail()
     } catch { error = 'RESTORE_JOURNAL_INVALID' }
@@ -107,6 +111,8 @@ export class RestoreJournal {
     if ((v.verified_head !== null && typeof v.verified_head !== 'string') || !Array.isArray(v.retirements)) fail()
     for (const r of v.retirements) { validateRetirement(r); if (v.version === 5 && r.version !== 1) fail() }
     if (new Set(v.retirements.map(r => r.id)).size !== v.retirements.length || v.retirements.some(r => r.phase !== 'preview' && r.file === v.selected)) fail()
+    const authorizationIds = v.retirements.flatMap(r => (r.reauthorizations ?? []).map(a => a.id))
+    if (new Set(authorizationIds).size !== authorizationIds.length) fail()
     if (!Array.isArray(v.task_deletions) || !Array.isArray(v.resource_cleanups)) fail()
     const deleted = new Set(v.deleted_tasks)
     for (const d of v.task_deletions) if (!d || !uuid.test(d.task_id) || !deleted.has(d.task_id) || !Array.isArray(d.resources) || !Array.isArray(d.stages)) fail()
@@ -127,12 +133,13 @@ export class RestoreJournal {
     }
     let pending = 0
     for (const op of v.operations) {
-      if (!op || !uuid.test(op.id) || !uuid.test(op.token) || !uuid.test(op.point_id) || !managed(op.previous) || !['preparing', 'switched', 'completed', 'rolled_back'].includes(op.phase) || !Number.isFinite(Date.parse(op.created_at))) fail()
+      if (!op || !uuid.test(op.id) || !uuid.test(op.token) || (op.kind === 'schema_upgrade' ? op.point_id !== null : op.kind !== undefined || !uuid.test(op.point_id!)) || !managed(op.previous) || !['preparing', 'switched', 'completed', 'rolled_back'].includes(op.phase) || !Number.isFinite(Date.parse(op.created_at))) fail()
       for (const [image, suffix] of [[op.target, 'target'], [op.rollback, 'rollback']] as const) {
         validatePluginProtection(image?.plugins)
-        if (!image || (image.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(image.sha256)) || image.file !== `restore-${op.id}-${suffix}.sqlite` || !Array.isArray(image.tasks) || image.tasks.some(id => typeof id !== 'string' || !uuid.test(id)) || !Array.isArray(image.resources)) fail()
+        if (!image || (image.schema_version !== undefined && ![1,2].includes(image.schema_version)) || (image.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(image.sha256)) || image.file !== `restore-${op.id}-${suffix}.sqlite` || !Array.isArray(image.tasks) || image.tasks.some(id => typeof id !== 'string' || !uuid.test(id)) || !Array.isArray(image.resources)) fail()
         for (const r of image.resources) if (!r || !uuid.test(r.id) || typeof r.storage_key !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(r.storage_key) || !/^[a-f0-9]{64}$/.test(r.sha256) || !Number.isSafeInteger(r.byte_length) || r.byte_length < 0) fail()
       }
+      if (op.kind === 'schema_upgrade' && (op.target.schema_version !== 2 || op.rollback.schema_version !== 1)) fail()
       if (['switched', 'completed'].includes(op.phase) && (!op.target.sha256 || !op.rollback.sha256)) fail()
       if (['preparing', 'switched'].includes(op.phase)) { pending++; if (v.selected !== (op.phase === 'preparing' ? op.previous : op.target.file)) fail() }
     }
@@ -183,6 +190,15 @@ export class RestoreJournal {
     if ([...target.tasks, ...current.tasks].some(task => this.value.deleted_tasks.includes(task))) fail()
     this.save({ ...this.value, operations: [...this.value.operations, op] }); return op
   }
+  prepareUpgrade(db: Database.Database, plugins: PluginCopy[]): Operation {
+    if (this.error || this.pending() || readBusinessSchema(db) !== 1) fail()
+    this.assertRecoverySafe(db)
+    const id = randomUUID(), current = { ...describeDatabase(db, this.value.selected), plugins }
+    verifyPluginProtection(this.root, plugins)
+    const op: Operation = { id, token: randomUUID(), point_id: null, kind: 'schema_upgrade', phase: 'preparing', previous: this.value.selected, target: { ...current, schema_version: 2, file: `restore-${id}-target.sqlite` }, rollback: { ...current, schema_version: 1, file: `restore-${id}-rollback.sqlite` }, created_at: new Date().toISOString() }
+    this.save({ ...this.value, operations: [...this.value.operations, op] })
+    return op
+  }
   seal(): void {
     const op = this.pending(); if (!op || op.phase !== 'preparing') fail()
     this.verifyImage(op!.target); this.verifyImage(op!.rollback)
@@ -191,7 +207,8 @@ export class RestoreJournal {
   phase(): string | null { return this.pending()?.phase ?? null }
   switch(): void {
     const op = this.pending(); if (!op || op.phase !== 'preparing') fail()
-    this.verifyEffectivePoint(op!.point_id); this.verifyImage(op!.target); this.verifyImage(op!.rollback)
+    if (op!.kind !== 'schema_upgrade') this.verifyEffectivePoint(op!.point_id!)
+    this.verifyImage(op!.target); this.verifyImage(op!.rollback)
     this.save({ ...this.value, selected: op!.target.file, operations: this.value.operations.map(o => o.id === op!.id ? { ...o, phase: 'switched' } : o) })
   }
   finish(phase: 'completed' | 'rolled_back'): void {
@@ -200,9 +217,16 @@ export class RestoreJournal {
   }
   rollback(): string {
     const op = this.pending(); if (!op) fail()
+    this.assertUpgradeRollback(op!)
     this.verifyImage(op!.rollback)
     this.save({ ...this.value, selected: op!.rollback.file, operations: this.value.operations.map(o => o.id === op!.id ? { ...o, phase: 'rolled_back' } : o) })
     return this.value.selected
+  }
+  private assertUpgradeRollback(op: Operation): void {
+    if (op.kind !== 'schema_upgrade') return
+    const db = new Database(managedRegularFile(this.root, op.target.file), { readonly: true, fileMustExist: true })
+    try { if (hasV2Writes(db)) throw new ContractError('SCHEMA_DOWNGRADE_BLOCKED', 'New v2 business writes exist; automatic downgrade is closed') }
+    finally { db.close() }
   }
   beforeDelete(taskId: string, db?: Database.Database): void {
     if (this.error || this.pending()) fail()
@@ -253,8 +277,22 @@ export class RestoreJournal {
   retirementRecords(): Retirement[] { return structuredClone(this.value.retirements) }
   saveRetirement(record: Retirement): void {
     if (this.error) fail()
+    validateRetirement(record)
     const prior = this.value.retirements.find(r => r.id === record.id)
-    if (prior && (prior.version !== record.version || prior.file !== record.file || JSON.stringify(prior.protection) !== JSON.stringify(record.protection) || (prior.phase !== 'preview' && record.phase === 'preview'))) fail()
+    if (prior && (['version', 'token', 'file', 'selected', 'graph', 'created_at'].some(k => prior[k as keyof Retirement] !== record[k as keyof Retirement]) || JSON.stringify(prior.protection) !== JSON.stringify(record.protection) || record.attempt < prior.attempt || record.attempt > prior.attempt + 1 || JSON.stringify(prior.members.map(({ suffix, identity }) => ({ suffix, identity }))) !== JSON.stringify(record.members.map(({ suffix, identity }) => ({ suffix, identity }))) || prior.members.some((m, i) => ['deleted', 'absent'].includes(m.state) && record.members[i]!.state !== m.state))) fail()
+    const authorizations = record.reauthorizations ?? [], confirmations = record.reauthorization_confirmations ?? []
+    const previousAuthorizations = prior?.reauthorizations ?? [], previousConfirmations = prior?.reauthorization_confirmations ?? []
+    if (authorizations.length < previousAuthorizations.length || confirmations.length < previousConfirmations.length || JSON.stringify(authorizations.slice(0, previousAuthorizations.length)) !== JSON.stringify(previousAuthorizations) || JSON.stringify(confirmations.slice(0, previousConfirmations.length)) !== JSON.stringify(previousConfirmations)) fail()
+    const addedAuthorizations = authorizations.slice(previousAuthorizations.length), addedConfirmations = confirmations.slice(previousConfirmations.length)
+    if (addedAuthorizations.length > 1 || addedConfirmations.length > 1 || (addedAuthorizations.length && addedConfirmations.length)) fail()
+    if (addedAuthorizations.length) {
+      const a = addedAuthorizations[0]!
+      if (!prior || !['retired', 'group_deleted'].includes(prior.phase) || record.phase !== prior.phase || record.attempt !== prior.attempt || record.next_retry_at !== prior.next_retry_at || record.reason !== prior.reason || JSON.stringify(record.members) !== JSON.stringify(prior.members) || a.expected_attempt !== prior.attempt || a.expected_phase !== prior.phase || a.selected !== this.value.selected || JSON.stringify(a.members.map(({ observed_present: _present, ...m }) => m)) !== JSON.stringify(prior.members)) fail()
+    }
+    if (addedConfirmations.length) {
+      const c = addedConfirmations[0]!, a = previousAuthorizations.at(-1)
+      if (!prior || !a || a.id !== c.authorization_id || a.selected !== this.value.selected || a.expected_attempt !== prior.attempt || a.expected_phase !== prior.phase || (prior.next_retry_at && Date.parse(prior.next_retry_at) > Date.now()) || record.next_retry_at !== null || record.phase !== prior.phase || record.attempt !== prior.attempt + 1 || c.attempt !== record.attempt || JSON.stringify(record.members) !== JSON.stringify(prior.members) || JSON.stringify(a.members.map(({ observed_present: _present, ...m }) => m)) !== JSON.stringify(prior.members)) fail()
+    }
     if (record.phase !== 'preview' && this.value.retirements.some(r => r.id !== record.id && r.file === record.file && r.phase !== 'preview')) fail()
     if (prior && ['preview', 'retired', 'group_deleted', 'released'].indexOf(record.phase) < ['preview', 'retired', 'group_deleted', 'released'].indexOf(prior.phase)) fail()
     this.save({ ...this.value, retirements: [...this.value.retirements.filter(r => r.id !== record.id), structuredClone(record)] })
@@ -263,7 +301,8 @@ export class RestoreJournal {
   markStartupVerified(db: Database.Database): void {
     if (this.error || this.pending()) fail()
     if (this.value.operations.length) {
-      if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length || JSON.stringify(db.prepare('SELECT version FROM schema_version').all()) !== '[{"version":1}]') fail()
+      readBusinessSchema(db)
+      if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length) fail()
       const current = describeDatabase(db, this.value.selected)
       if (current.tasks.some(t => this.value.deleted_tasks.includes(t))) fail()
       for (const material of current.resources) if (!this.resourceRetired(material.id) && !this.resourceRetired(material.storage_key)) resourceBody(this.root, material as Parameters<typeof resourceBody>[1])

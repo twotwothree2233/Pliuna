@@ -64,6 +64,19 @@ it('rejects JSON encoding and invalid references without registering Call or Act
   expect((store as any).db.prepare('SELECT count(*) n FROM calls').get()).toEqual({ n: 0 })
 })
 
+it('stores structured JSON resource content exactly and keeps source ownership checks', async () => {
+  const value = { html: '<section id="lesson">\n<p data-note="\\quoted">中文😀</p></section>', css: 'p::after { content: "quote \\\" and \\\\"; }\n', nested: { literal: '{"do_not_decode":true}', enabled: false, count: 0 } }
+  const input = { display_name: 'Structured lecture.json', content: { type: 'json', value } }
+  const request = modelToolRequest('write', { operation: 'resource.create', input })
+  const result: any = await store.agentTool(task, run, request, new AbortController().signal)
+  expect(result).toMatchObject({ execution: 'success', delivery: 'delivered', data: { media_type: 'application/json' } })
+  const saved: any = store.handle({ type: 'task.query', task_id: task, query: { type: 'read', input: { target: { kind: 'resource', id: result.data.id } } } })
+  expect(saved.data.content).toEqual({ type: 'json', value })
+  const before = (store as any).db.prepare('SELECT count(*) n FROM resources').get()
+  await expect(store.agentTool(other, run, request, new AbortController().signal)).rejects.toThrow()
+  expect((store as any).db.prepare('SELECT count(*) n FROM resources').get()).toEqual(before)
+})
+
 it('keeps capability outputs and quotas discoverable and uses new call encoding in examples', () => {
   const guide: any = contractRepresentation(montyContract, { view: 'guide' })
   expect(JSON.parse(guide.example.input_json)).toEqual(montyContract.example)

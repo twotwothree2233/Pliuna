@@ -37,7 +37,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     for (let n = 0; n < 2; n++) {
       await chooseModel(page, 'fixture')
       await page.getByLabel('想从哪里开始？').fill('fixture form ' + n)
-      await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+      await page.getByRole('button', { name: /发送消息/ }).click()
       await expect(page.locator('.managed')).toHaveCount(n + 1)
       await expect(page.locator('.agent-status')).toContainText('已完成')
     }
@@ -59,7 +59,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     })
     await chooseModel(page, 'replace-main')
     await page.getByLabel('想从哪里开始？').fill('replace the first View only')
-    await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('button', { name: /发送消息/ }).click()
     await openPending(page)
     await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
     await openPending(page)

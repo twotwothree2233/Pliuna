@@ -31,7 +31,7 @@ it('pins before writing and atomically hands off to a formal immutable resource'
   })
   const result = create(); expect(result.execution).toBe('success')
   expect(db.prepare('SELECT state,resource_id,received_bytes FROM staging').get()).toEqual({ state: 'committed', resource_id: result.data.id, received_bytes: 8 })
-  expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 1 })
+  expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 2 })
 })
 it('rejects pin handoff outside the business transaction', () => { expect(() => life.commit('missing', 'missing')).toThrow('transaction') })
 it('rolls back the complete resource publication if pin handoff fails', () => {
