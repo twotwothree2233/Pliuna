@@ -78,7 +78,11 @@ else:
 con.execute("UPDATE runs SET state='completed',commit_valid=0 WHERE id='production_1'")
 con.execute("INSERT INTO runs (id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES ('continuation','task_1','request_1','running','epoch_1','{}','{}','now')")
 assert not con.execute('PRAGMA foreign_key_check').fetchall()
+con.executescript((BASE / '003-chapters.sql').read_text(encoding='utf-8'))
+assert not con.execute('SELECT * FROM runner_chapter_updates').fetchall()
+assert not con.execute('SELECT * FROM runner_chapter_assemblies').fetchall()
+assert not con.execute('PRAGMA foreign_key_check').fetchall()
 con.close()
 
-print(f'PASS: {len(fixtures)} schema fixtures; v1/v2 SQL, request/recovery uniqueness, independent submissions and rollback')
+print(f'PASS: {len(fixtures)} schema fixtures; v1/v2/chapter SQL, request/recovery uniqueness, independent submissions and rollback')
 print('Not tested: documentation, runtime behavior, DOM/CSS safety, model quality, native packaging or crash durability.')

@@ -1,5 +1,5 @@
 import type {
-  ArtifactCandidate, ArtifactIndex, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
+  ArtifactCandidate, ArtifactIndex, ChapterDependency, ChapterInheritance, ChapterIntent, ChapterManifest, ChapterOwnership, ChapterProposal, ChapterPublication, ChapterRegion, ChapterReplacement, ChapterUpdate, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
   ExecutionAttempt, ExecutionScope, GoalRevision, InputEvent, LogicalWork, Outline, OutlineSection, OutcomeRequirement,
   PresentationPlan, PublicationEntry, PublicationManifest, RunnerRun, WorkDependency, WorkOutputDeclaration
 } from './contracts.generated'
@@ -30,6 +30,16 @@ export interface RunnerContractTypes {
   runner_delivery_query: DeliveryQuery
   runner_publication_manifest: PublicationManifest
   runner_publication_entry: PublicationEntry
+  runner_chapter_dependency: ChapterDependency
+  runner_chapter_ownership: ChapterOwnership
+  runner_chapter_region: ChapterRegion
+  runner_chapter_manifest: ChapterManifest
+  runner_chapter_intent: ChapterIntent
+  runner_chapter_update: ChapterUpdate
+  runner_chapter_replacement: ChapterReplacement
+  runner_chapter_proposal: ChapterProposal
+  runner_chapter_inheritance: ChapterInheritance
+  runner_chapter_publication: ChapterPublication
 }
 
 function invalid(message: string): never { throw new ContractError('INVALID_RUNNER_CONTRACT', message) }
@@ -83,6 +93,7 @@ export function dependencyKey(input: WorkDependency): string {
     case 'work': return JSON.stringify([input.kind, input.task_id, input.work_id, input.result_revision])
     case 'artifact': return JSON.stringify([input.kind, input.task_id, input.artifact_id, input.artifact_revision])
     case 'resource': return JSON.stringify([input.kind, input.task_id, input.resource_id])
+    case 'chapter': return JSON.stringify([input.kind, input.task_id, input.view_id, input.region_id ?? null, input.revision])
   }
 }
 
@@ -133,7 +144,60 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
     unique(object.contributions.map((item: PublicationEntry) => item.artifact_id), 'published artifacts')
     if (object.state === 'complete' && object.unresolved.length) invalid('Complete manifest cannot contain unresolved requirements')
   }
+  if (definition === 'runner_chapter_ownership') chapterOwnership(record as ChapterOwnership)
+  if (definition === 'runner_chapter_region') chapterRegion(record as ChapterRegion)
+  if (definition === 'runner_chapter_manifest') chapterManifest(record as ChapterManifest)
+  if (definition === 'runner_chapter_update') chapterUpdate(record as ChapterUpdate)
+  if (definition === 'runner_chapter_replacement') chapterReplacement(record as ChapterReplacement)
+  if (definition === 'runner_chapter_proposal') chapterProposal(record as ChapterProposal)
+  if (definition === 'runner_chapter_inheritance') {
+    const keep = record as ChapterInheritance
+    if (keep.valid && keep.reason !== undefined) invalid('Valid inherited contributions cannot retain an invalidation reason')
+  }
+  if (definition === 'runner_chapter_publication') {
+    const publication = record as ChapterPublication
+    unique(publication.source_bundle_resource_ids, 'publication sources')
+    if (publication.previous_operation_id === publication.operation_id) invalid('Publication cannot succeed itself')
+    if (publication.request.type !== 'write' || publication.request.input.type !== 'surface.update') invalid('Chapter publication requires a controlled Surface request')
+  }
   return record
+}
+
+function chapterOwnership(ownership: ChapterOwnership): void {
+  for (const [field, values] of Object.entries(ownership)) unique(values, `chapter ${field}`)
+}
+function chapterRegion(region: ChapterRegion): void {
+  if (region.title_selector === region.body_selector) invalid('Chapter title and body require separate boundaries')
+  chapterOwnership(region.ownership)
+  unique(region.dependencies.map(dependencyKey), 'chapter dependencies')
+}
+function chapterManifest(manifest: ChapterManifest): void {
+  unique(manifest.chapters.map(chapter => chapter.region_id), 'chapter identities')
+  unique(manifest.chapters.flatMap(chapter => [chapter.title_selector, chapter.body_selector]), 'chapter boundaries')
+  for (const chapter of manifest.chapters) chapterRegion(chapter)
+  for (const field of ['form_ids', 'behavior_ids', 'reference_ids', 'export_ids', 'css_selectors'] as const) unique(manifest.chapters.flatMap(chapter => chapter.ownership[field]), `owned chapter ${field}`)
+}
+function chapterUpdate(update: ChapterUpdate): void {
+  chapterManifest(update.base_manifest)
+  sameGoal(update, update.base_manifest)
+  if (update.view_id !== update.base_manifest.view_id) ownership()
+  unique(update.region_ids, 'update chapters')
+  unique(update.region_intents.map(intent => intent.region_id), 'chapter intents')
+  unique(update.previous_update_ids, 'previous updates')
+  if (update.previous_update_ids.includes(update.update_id)) invalid('Chapter update cannot supersede itself')
+  if (update.region_ids.some(id => !update.base_manifest.chapters.some(chapter => chapter.region_id === id)) || update.region_intents.length !== update.region_ids.length || update.region_intents.some(intent => !update.region_ids.includes(intent.region_id))) invalid('Update scope and chapter intent bindings must match the exact baseline')
+  if (update.source && (update.source.purpose !== 'production' || update.source.update_id !== update.update_id || update.source.request_id !== update.request_id || update.source.intent_revision !== update.intent_revision)) ownership()
+}
+function chapterReplacement(replacement: ChapterReplacement): void {
+  unique(replacement.previous_region_ids, 'replaced chapters')
+  unique(replacement.chapters.map(chapter => chapter.region_id), 'replacement chapters')
+  for (const chapter of replacement.chapters) chapterRegion(chapter)
+}
+function chapterProposal(proposal: ChapterProposal): void {
+  unique(proposal.replacements.flatMap(replacement => replacement.previous_region_ids), 'proposal replaced chapters')
+  unique(proposal.replacements.flatMap(replacement => replacement.chapters.map(chapter => chapter.region_id)), 'proposal chapter identities')
+  for (const replacement of proposal.replacements) chapterReplacement(replacement)
+  if (proposal.source.purpose !== 'production' || proposal.source.update_id !== proposal.update_id || proposal.source.intent_revision !== proposal.intent_revision) ownership()
 }
 
 export interface ArtifactAcceptanceContext {

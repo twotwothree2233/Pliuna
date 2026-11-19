@@ -235,7 +235,17 @@ export class RunnerPublicationState {
     if (artifactRevision !== undefined) revision(artifactRevision)
     if (batchId !== undefined) assertRunnerId(batchId, 'batch_id')
     const row = this.db.prepare('SELECT payload_json FROM runner_view_mappings WHERE task_id=? AND artifact_id=? AND (? IS NULL OR artifact_revision=?) AND (? IS NULL OR batch_id=?) ORDER BY rowid DESC LIMIT 1').get(taskId, artifactId, artifactRevision ?? null, artifactRevision ?? null, batchId ?? null, batchId ?? null) as PayloadRow | undefined
-    return row ? validateRunnerContract('runner_publication_entry', JSON.parse(row.payload_json)) : null
+    const standard = row ? validateRunnerContract('runner_publication_entry', JSON.parse(row.payload_json)) : null
+    if (batchId !== undefined || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runner_chapter_assemblies'").get()) return standard
+    const chapter = this.db.prepare("SELECT json_extract(payload_json,'$.entry') payload_json FROM runner_chapter_assemblies WHERE task_id=? AND artifact_id=? AND (? IS NULL OR artifact_revision=?) ORDER BY artifact_revision DESC LIMIT 1").get(taskId, artifactId, artifactRevision ?? null, artifactRevision ?? null) as PayloadRow | undefined
+    const assembled = chapter ? validateRunnerContract('runner_publication_entry', JSON.parse(chapter.payload_json)) : null
+    return assembled && (!standard || assembled.artifact_revision > standard.artifact_revision) ? assembled : standard
+  }
+  mappings(taskId: string): PublicationEntry[] {
+    assertRunnerId(taskId, 'task_id')
+    const ids = new Set((this.db.prepare('SELECT DISTINCT artifact_id FROM runner_view_mappings WHERE task_id=?').all(taskId) as { artifact_id: string }[]).map(row => row.artifact_id))
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runner_chapter_assemblies'").get()) for (const row of this.db.prepare('SELECT DISTINCT artifact_id FROM runner_chapter_assemblies WHERE task_id=?').all(taskId) as { artifact_id: string }[]) ids.add(row.artifact_id)
+    return [...ids].map(artifact => this.mapping(taskId, artifact)!).sort((left, right) => left.artifact_id.localeCompare(right.artifact_id))
   }
   history(taskId: string, historyId: string): SurfaceLayoutHistory | null {
     assertRunnerId(taskId, 'task_id'); assertRunnerId(historyId, 'surface_history_id')

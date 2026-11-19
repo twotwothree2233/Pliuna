@@ -26,7 +26,7 @@ export interface InstalledSummary {
 export function recordedMessage(record: HistoryRecord): ChatMessage | undefined {
   const { payload, kind } = record
   const message: ChatMessage | undefined = kind === 'message.user' || kind === 'worker.input'
-    ? { role: 'user', content: JSON.stringify({ request: payload.text, ...(payload.materials ? { request_materials: payload.materials } : {}), ...(payload.conversation_history ? { conversation_history: payload.conversation_history } : {}) }) }
+    ? { role: 'user', content: JSON.stringify({ request: payload.text, ...(payload.materials ? { request_materials: payload.materials } : {}), ...(payload.bound === undefined ? {} : { bound: payload.bound }), ...(payload.conversation_history ? { conversation_history: payload.conversation_history } : {}) }) }
     : kind === 'model.response' || kind === 'model.tool_result' || kind === 'worker.conversation' ? payload.message
     : kind === 'message.assistant' && payload.model_config_id === 'fixture' ? { role: 'assistant', content: payload.text } : undefined
   if (!message) return

@@ -47,10 +47,16 @@ it('executes a correction once, isolates the other goal and rejects the late sup
   expect(s.state.run(beta).commit_valid).toBe(true)
   pending[0]!.resolve(answer('LATE OLD ALPHA'))
   await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(3))
-  const messages = JSON.stringify(s.complete.mock.calls[2]![2])
+  const modelMessages = s.complete.mock.calls[2]![2], messages = JSON.stringify(modelMessages)
   expect(messages).toContain('Alpha original')
   expect(messages).toContain('Use the revised alpha conclusion')
-  expect(messages).not.toContain('Beta independent')
+  expect(messages).toContain('Beta independent')
+  const system = modelMessages[0]!.content!
+  expect(JSON.parse(system.split('\nBound data: ')[1]!)).toMatchObject({
+    owner: { request_id: request, intent_revision: 2 },
+    goal: { request_id: request, intent_revision: 2 }
+  })
+  expect(system).not.toContain(betaRequest)
   const successor = s.state.taskWorks(task).find(work => work.purpose === 'production' && work.request_id === request && work.intent_revision === 2)!
   expect(s.state.run(successor.run_id).budget_id).toBe(budget)
   pending[2]!.resolve(answer('Current alpha answer')); pending[1]!.resolve(answer('Independent beta answer'))

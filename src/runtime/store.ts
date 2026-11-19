@@ -19,7 +19,7 @@ import { modelTools } from './model/tools'
 import { assertReadDispatch } from './model/read-policy'
 import { messageEvidence, type RequestEvidence } from './model/request-evidence'
 import type { RequestAccounting } from './model/accounting'
-import { RunBudget, runAgent } from './model/agent'
+import { RunBudget, runAgent, type WorkerExecution } from './model/agent'
 import { ContextRejectedError } from './model/capacity'
 import { modelReadOptions } from './model/tool-input'
 import { RepresentationPager } from './model/representation'
@@ -64,7 +64,7 @@ import { runActivity } from './run-activity'
 import { RunnerWorkState, type QualifiedAttempt } from './runner/work-state'
 import { WorkerContext } from './runner/worker-context'
 import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory } from './runner/conversation'
-import type { WorkerProfile } from './runner/worker-profile'
+import type { WorkerGrant, WorkerProfile } from './runner/worker-profile'
 import { captureExecutionScope } from './model/request-evidence'
 import type { ExecutionScope, ExecutionAttempt, InputEvent, GoalRevision } from '../shared/contracts.generated'
 import { aggregateRunOutcome, type WorkRunState } from './runner/run-outcome'
@@ -89,6 +89,12 @@ import type { PublicationOperation, PublicationResult } from './runner/publicati
 import { freezeExportComposition } from './runner/export-selection'
 import { exportCompositionIssue, exportCompositionSummary, type FrozenExportComposition } from './export-composition'
 import type { LogicalWork, PresentationPlan } from '../shared/contracts.generated'
+import type { ChapterManifest, ChapterProposal, ChapterPublication, ChapterUpdate } from '../shared/contracts.generated'
+import { ChapterHost } from './runner/chapter-host'
+import { chapterTerminal } from './runner/chapter-state'
+import { assembleChapterUpdate, chapterCandidateTemplate, chapterContext, chapterInput, validateChapterCandidate } from './runner/chapter-content'
+import { createChapterProfile } from './runner/chapter-profile'
+import { createChapterRouterProfile, validateChapterRoute } from './runner/chapter-router'
 
 const id = () => randomUUID()
 const now = () => new Date().toISOString()
@@ -97,7 +103,7 @@ function fail(code: string, message: string): never { throw new ContractError(co
 type Row = Record<string, any>
 type ExecutionActionContext = (PluginActionContext | { id: string; signal: AbortSignal; owner: ExecutionScope; authorize(request: unknown): void; valid(): void; identity?: never }) & { hostPublication?: boolean }
 type WorkerAgent = { owner: ExecutionScope; controller: AbortController; main: ModelLease; compact?: ModelLease; approval?: ModelLease; budget: RunBudget; mode: 'manual' | 'assisted'; context: WorkerContext; profile: WorkerProfile<unknown>; collator?: Collator; diagnostic?: RunnerDiagnostic; messages?: ChatMessage[]; state: 'running' | 'waiting'; reason?: string }
-type WorkerInput = { text: string; conversation?: ConversationHistory }
+type WorkerInput = { text: string; conversation?: ConversationHistory; bound?: unknown }
 type SurfaceWrite = Extract<ModelRequest, { type: 'write' }> & { input: Extract<Extract<ModelRequest, { type: 'write' }>['input'], { type: 'surface.update' }> }
 type SurfaceOperation = SurfaceWrite['input']['operations'][number]
 type PreparedView = { op: Extract<SurfaceOperation, { type: 'view.create' | 'view.replace' | 'view.remove' }>; viewId: string; resourceId: string; stageId: string; hash: string; body: Buffer; bundle: Bundle; draft: Record<string, unknown>; auto: boolean; answers: number; direct: import('./export-control').ExportResource[]; source?: BundleSource }
@@ -146,6 +152,8 @@ export class RuntimeStore {
   private runnerArtifactState?: RunnerArtifactState
   private runnerCompositionState?: RunnerCompositionState
   private compositionPublications = new Map<string, Promise<PublicationResult>>()
+  private chapterFlights = new Map<string, Promise<void>>()
+  private chapterRoutes = new Map<string, AbortController>()
   private runnerAdmission = new RunnerAdmission()
   private pendingWorkers = new Map<string, { task: string; work: RunnerAdmissionWork; start(): void; reject(error: unknown): void }>()
   private pumpingWorkers = new Set<string>()
@@ -259,6 +267,10 @@ export class RuntimeStore {
       const work = new RunnerWorkState(this.db, this.epoch), attempt = work.attempt(context.owner.attempt_id)
       work.updateAttempt({ ...attempt, state })
       this.db.prepare('UPDATE runs SET state=?,wait_reason=? WHERE id=? AND commit_valid=1').run(state, reason ?? null, runId)
+      if (context.owner.purpose === 'production' && context.owner.update_id) {
+        this.chapters().state.stage(context.owner.task_id, context.owner.update_id, state === 'waiting' ? reason === 'approval' ? 'waiting_approval' : 'waiting_input' : 'publishing')
+        this.record(context.owner.task_id, 'chapter.update.stage', { update_id: context.owner.update_id, state, reason })
+      }
     } else if (context?.owner) {
       const worker = this.workers.get(context.owner.attempt_id)
       if (!worker) fail('RUNNER_OWNERSHIP_INVALID', 'Action attempt is unavailable')
@@ -493,7 +505,7 @@ export class RuntimeStore {
     this.requests.invalidateConfiguration(); return { updated: true }
   }
   private initializeRequests(): void {
-    this.requests = new RequestQueue(this.db, this.epoch, config => this.requestSelection(config), (task, resource) => this.requestMaterial(task, resource), (task, text, config, attachments, request) => this.start(task, text, config, attachments, request), () => !this.closing && !this.closed && (this.recovery.status() as Row).phase === 'idle', async (task, resources) => {
+    this.requests = new RequestQueue(this.db, this.epoch, config => this.requestSelection(config), (task, resource) => this.requestMaterial(task, resource), (task, text, config, attachments, request) => this.startQueuedRequest(task, text, config, attachments, request), () => !this.closing && !this.closed && (this.recovery.status() as Row).phase === 'idle', async (task, resources) => {
       for (const resource of resources) {
         this.acceptWork()
         const row = this.one('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', task, resource.id)
@@ -509,6 +521,67 @@ export class RuntimeStore {
       return { conversation, user_record_id: record }
     } : undefined)
     if (this.closing) this.requests.close()
+  }
+  private publishedChapterManifests(task: string): ChapterManifest[] {
+    return (this.db.prepare('SELECT v.id,v.revision,v.bundle_resource_id FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? ORDER BY v.rowid').all(task) as Row[]).flatMap(view => {
+      const manifest = this.chapters().state.manifest(task, view.id)
+      if (!manifest || manifest.view_revision !== view.revision || manifest.bundle_resource_id !== view.bundle_resource_id) return []
+      const goal = new RunnerWorkState(this.db, this.epoch).goal(manifest.request_id)
+      return goal.state === 'active' && goal.intent_revision === manifest.intent_revision ? [manifest] : []
+    })
+  }
+  private startQueuedRequest(task: string, text: string, config: string, attachments: Row[], requestId: string): string | Promise<string> {
+    if (!this.features.runner || config === 'fixture') return this.start(task, text, config, attachments, requestId)
+    const views = this.db.prepare('SELECT v.id AS viewId FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=?').all(task) as { viewId: string }[]
+    if (!views.length) return this.start(task, text, config, attachments, requestId)
+    this.registerPublishedChapters(task, views)
+    const manifests = this.publishedChapterManifests(task)
+    return this.routeChapterRequest(task, text, config, attachments, requestId, manifests)
+  }
+  private async routeChapterRequest(task: string, text: string, config: string, attachments: Row[], requestId: string, manifests: ChapterManifest[]): Promise<string> {
+    const row = this.one("SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=? AND state='queued'", task, requestId)
+    const input = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json), profile = createChapterRouterProfile(manifests)
+    const lease = this.models.acquire(config, 'main'), controller = new AbortController(), operation = id()
+    this.chapterRoutes.set(requestId, controller)
+    const valid = () => {
+      this.acceptWork(); this.recovery.assertWrite()
+      if (controller.signal.aborted || this.task(task).state !== 'active') fail('SOURCE_INVALID', 'Chapter routing was cancelled')
+      const current = this.one('SELECT state,input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, requestId)
+      if (current.state !== 'queued' || current.input_json !== row.input_json || current.config_selection_json !== row.config_selection_json || lease.revision !== selection.revision) fail('REQUEST_SOURCE_INVALID', 'Chapter routing no longer matches its accepted input')
+    }
+    lease.evidence = event => { valid(); return this.record(task, 'model.request.evidence', { ...event, routing_operation_id: operation, input_request_id: requestId }) }
+    lease.accounting = event => { if (['reserved', 'dispatched'].includes(event.phase)) valid(); this.record(task, 'model.request.accounting', { ...event, routing_operation_id: operation }) }
+    try {
+      valid()
+      const history = loadConversation(this.db, task, input.conversation)
+      const budget = new RunBudget(lease.config)
+      const fitted = fitConversation(history, candidate => !budget.plan([{ role: 'system', content: profile.system }, ...candidate.messages.map(item => item.message), { role: 'user', content: text }], []).needsCompaction)
+      const messages: ChatMessage[] = [{ role: 'system', content: profile.system }, ...fitted.messages.map(item => item.message), { role: 'user', content: text }]
+      const reservation = budget.reserve(messages, [], lease.config, 'main-input')
+      this.record(task, 'chapter.route.started', { request_id: requestId, operation_id: operation })
+      const response = await this.models.request(lease, task, messages, [], controller.signal, undefined, lease.config.max_output_tokens)
+      budget.settle(reservation, response); valid()
+      const route = validateChapterRoute(profile.parseResult(response), this.publishedChapterManifests(task))
+      this.record(task, 'chapter.route.resolved', { request_id: requestId, operation_id: operation, route })
+      if (route.kind === 'update') {
+        const current = this.chapters().state.manifest(task, route.view_id)!
+        const view = this.one('SELECT revision,state_revision FROM views WHERE id=?', route.view_id)
+        const update = this.startChapterUpdate({ type: 'chapter.update', task_id: task, input_event_id: `chapter-input:${requestId}`, update_id: `chapter-update:${requestId}`, view_id: route.view_id, view_revision: view.revision, state_revision: view.state_revision, region_ids: route.region_ids, text, model_config_id: config }, { record_id: input.user_record_id, conversation: input.conversation, material_resource_ids: attachments.map(item => item.id) })
+        if (current.request_id !== update.request_id) fail('CHAPTER_CONFLICT', 'Chapter goal changed while routing')
+        this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, chapter_route: route, chapter_update_id: update.update_id, chapter_run_id: update.source?.run_id, code: null }), task, requestId)
+        return update.source!.run_id
+      }
+      if (route.kind === 'ambiguous') {
+        this.db.prepare("UPDATE requests SET state='confirmation_required',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: 'CHAPTER_SCOPE_REQUIRED', chapter_route: route }), task, requestId)
+        this.record(task, 'chapter.route.clarification', { request_id: requestId, text: '请明确要修改的章节，或在正文中选择范围。' })
+        return ''
+      }
+      const chapterQuery = (route.kind === 'query' || route.kind === 'explanation') && route.view_id && route.region_ids
+        ? { manifest: this.chapters().state.manifest(task, route.view_id)!, region_ids: route.region_ids }
+        : undefined
+      this.db.prepare('UPDATE requests SET input_json=? WHERE task_id=? AND id=?').run(json({ ...input, chapter_route: route, ...(chapterQuery ? { chapter_query: chapterQuery } : {}) }), task, requestId)
+      return this.start(task, text, config, attachments, requestId)
+    } finally { this.chapterRoutes.delete(requestId); lease.release() }
   }
   private requestSelection(config: string): Row {
     const list = this.models.list() as Row[]
@@ -596,6 +669,7 @@ export class RuntimeStore {
   }
   async shutdown(): Promise<void> {
     this.closing = true
+    for (const controller of this.chapterRoutes.values()) controller.abort()
     if (this.shutdownFlight) { this.pluginProcesses.retryCleanup(); return this.shutdownFlight }
     this.shutdownFlight = this.shutdownOnce()
     try { await this.shutdownFlight } catch (error) { this.shutdownFlight = undefined; throw error }
@@ -618,6 +692,8 @@ export class RuntimeStore {
   }
   close(): void {
     if (this.closed) return
+    for (const controller of this.chapterRoutes.values()) controller.abort()
+    this.chapterRoutes.clear()
     for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
     this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
     for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Runtime closed before worker dispatch'))
@@ -837,6 +913,7 @@ export class RuntimeStore {
   }
   snapshot(taskId: string): Snapshot {
     this.settlePluginCleanup()
+    this.chapters().reconcile(taskId)
     const row = this.task(taskId)
     const task: Task = { id: row.id, title: row.title, state: row.state, revision: row.revision }
     const surface = this.one('SELECT * FROM surfaces WHERE task_id=?', taskId)
@@ -861,7 +938,9 @@ export class RuntimeStore {
       }
       renderedBytes += Buffer.byteLength(checked.html) + Buffer.byteLength(checked.css) + Buffer.byteLength(v.draft_json) + Buffer.byteLength(json(checked.bundle))
       if (renderedBytes > 16 * 1024 * 1024) fail('SURFACE_PAGE_SIZE_LIMIT', 'Enabled View page exceeds 16 MiB; use fewer or smaller resources')
-      return { id: v.id, revision: v.revision, state_revision: v.state_revision, draft: JSON.parse(v.draft_json), bundle: checked.bundle, presentation: { html: checked.html, css: checked.css, ...(error ? { error } : {}) } }
+      const chapters = this.chapters().state
+      const manifest = chapters.manifest(taskId, v.id)
+      return { id: v.id, revision: v.revision, state_revision: v.state_revision, draft: JSON.parse(v.draft_json), bundle: checked.bundle, presentation: { html: checked.html, css: checked.css, ...(error ? { error } : {}) }, ...(manifest && manifest.view_revision === v.revision ? { chapter_manifest: manifest, chapter_updates: chapters.updates(taskId, v.id) } : {}) }
     })
     return {
       runtime_epoch: this.epoch, task, surface: { id: surface.id, revision: surface.revision, layout }, view_page: { offset, limit: 10, total },
@@ -887,6 +966,7 @@ export class RuntimeStore {
       this.db.prepare('SELECT state,wait_reason,primary_reason,budget_json FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 50').all(task),
       this.approvals(task),
       [...this.surfaceWaiters].filter(([, value]) => value.taskId === task).map(([key]) => key)
+      ,this.db.prepare('SELECT update_id,state FROM runner_chapter_updates WHERE task_id=? ORDER BY rowid').all(task)
     ])
     let cached = this.syncFacts.get(task)
     if (!cached || cached.key !== facts) { cached = { key: facts, snapshot: this.snapshot(task) }; this.syncFacts.set(task, cached) }
@@ -962,13 +1042,20 @@ export class RuntimeStore {
   }
   private installRunnerProduction(taskId: string, requestId: string, runId: string, main: ModelLease, materials: Row[]): void {
     const state = new RunnerWorkState(this.db, this.epoch), goal = state.goal(requestId)
+    const query = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', taskId, requestId).input_json).chapter_query as { manifest: ChapterManifest; region_ids: string[] } | undefined
+    const chapterDependencies = query ? [...new Map([
+      { kind: 'chapter' as const, task_id: taskId, view_id: query.manifest.view_id, revision: query.manifest.shared_revision },
+      ...query.manifest.chapters.filter(chapter => query.region_ids.includes(chapter.region_id)).flatMap(chapter => [
+        { kind: 'chapter' as const, task_id: taskId, view_id: query.manifest.view_id, region_id: chapter.region_id, revision: chapter.revision }, ...chapter.dependencies
+      ])
+    ].map(dependency => [json(dependency), dependency])).values()] : []
     const ledger = new RunnerBudgetLedger(this.db)
     const previous = this.db.prepare("SELECT budget_id FROM runner_budgets WHERE task_id=? AND request_id=? AND purpose='production' ORDER BY rowid LIMIT 1").get(taskId, requestId) as Row | undefined
     const budgetId = previous?.budget_id ?? id()
     if (!previous) ledger.create({ budget_id: budgetId, task_id: taskId, purpose: 'production', request_id: requestId })
     state.registerRun({ run_id: runId, task_id: taskId, runtime_epoch: this.epoch, state: 'running', commit_valid: true, budget_id: budgetId, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision })
     const workId = id(), attemptId = id()
-    const work: LogicalWork = { work_id: workId, task_id: taskId, run_id: runId, plan_revision: 1, role: 'producer', required: true, requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), dependencies: [{ kind: 'goal', task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision }, ...materials.map(resource => ({ kind: 'resource' as const, task_id: taskId, resource_id: resource.id }))], state: 'planned', max_attempts: 2, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision }
+    const work: LogicalWork = { work_id: workId, task_id: taskId, run_id: runId, plan_revision: 1, role: 'producer', required: true, requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), dependencies: [{ kind: 'goal', task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision }, ...materials.map(resource => ({ kind: 'resource' as const, task_id: taskId, resource_id: resource.id })), ...chapterDependencies], state: 'planned', max_attempts: 2, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision }
     state.installPlan([work])
     state.createAttempt({ attempt_id: attemptId, task_id: taskId, run_id: runId, work_id: workId, runtime_epoch: this.epoch, attempt_number: 1, profile_id: 'producer-output-v1', model_config_id: main.id, model_config_revision: main.revision, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision })
     this.runnerComposition().designateSource({ task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision, work_id: workId, plan_revision: work.plan_revision })
@@ -1157,26 +1244,34 @@ export class RuntimeStore {
       for (const attempt of attempts) void this.executeRunnerProduction(attempt.attempt_id).catch(() => {})
     } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
   }
+  private contentToolGrants(task: string, conversation: ConversationHistory): WorkerGrant[] {
+    // Queries enforce Task ownership; request materials describe inputs, not the tool access boundary.
+    const capabilities = this.pluginDirectory.discovery(task).map(capability => capability.id as string)
+    return [
+      { type: 'list', kind: 'resource' }, { type: 'read', kind: 'resource' },
+      { type: 'read', kind: 'event', ids: [...new Set([...conversation.refs.map(ref => ref.id), ...conversation.messages.map(item => item.source.id)])] },
+      { type: 'list', kind: 'task_data' }, { type: 'read', kind: 'task_data' },
+      { type: 'list', kind: 'plugin' }, { type: 'read', kind: 'plugin' },
+      { type: 'list', kind: 'capability' }, { type: 'read', kind: 'capability', ids: capabilities },
+      ...capabilities.map(capability => ({ type: 'call' as const, capability }))
+    ]
+  }
   async executeRunnerProduction(attemptId: string): Promise<ProducerResult> {
     const state = new RunnerWorkState(this.db, this.epoch), qualified = state.qualify(attemptId, 'dispatch'), { work, goal } = qualified
     if (!goal || work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role)) fail('RUNNER_OWNERSHIP_INVALID', 'Content execution requires current production work')
     const owner = this.workerOwner(qualified), sections = this.runnerArtifacts().outline(work.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
     const integration = work.role === 'integrator' ? this.runnerComposition().integrationInputs(attemptId) : undefined
     const resources = integration?.resources ?? work.dependencies.flatMap(dependency => dependency.kind === 'resource' ? [dependency.resource_id] : dependency.kind === 'artifact' ? [this.runnerArtifacts().artifact(work.task_id, dependency.artifact_id, dependency.artifact_revision)?.bundle_resource_id].filter((value): value is string => !!value) : [])
-    const capabilities = this.pluginDirectory.discovery(work.task_id).map(capability => capability.id as string)
     const conversation = this.runnerConversation(work.task_id, work.request_id, work.intent_revision)
     const conversationResources = conversation.resource_ids.filter(resource => this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(work.task_id, resource))
-    const profile = createProducerProfile({ owner, work, goal, sections, grants: [
-      { type: 'read', kind: 'resource', ids: [...new Set([...resources, ...conversationResources])] },
-      { type: 'read', kind: 'event', ids: [...new Set([...conversation.refs.map(ref => ref.id), ...conversation.messages.map(item => item.source.id)])] },
-      { type: 'read', kind: 'task_data' }, { type: 'list', kind: 'task_data' },
-      { type: 'list', kind: 'capability' }, { type: 'read', kind: 'capability', ids: capabilities },
-      ...capabilities.map(capability => ({ type: 'call' as const, capability }))
-    ] })
+    const materialIds = [...new Set([...resources, ...conversationResources])]
+    const materials = materialIds.map(resource => ({ ...this.one('SELECT r.id,r.display_name,r.byte_length,r.media_type FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', work.task_id, resource), provenance_ref: { task_id: work.task_id, kind: 'resource' as const, id: resource } }))
+    const profile = createProducerProfile({ owner, work, goal, sections, grants: this.contentToolGrants(work.task_id, conversation) })
     const host = new RunnerHostProduction(this.db, this.epoch)
     let result: ProducerResult
     const text = this.runnerGoalText(work.task_id, work.request_id, work.intent_revision)
-    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation }
+    const chapterQuery = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', work.task_id, work.request_id).input_json).chapter_query as { manifest: ChapterManifest; region_ids: string[] } | undefined
+    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation, bound: { materials, ...(chapterQuery ? { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) } }
     try { result = await this.executeWorker(attemptId, profile, input, (result, source) => {
       const accepted = host.accept(result, source, resourceId => {
         const loaded = loadBundleSource(this.db, this.root, work.task_id, { type: 'resource', resource: { kind: 'resource', id: resourceId } }, row => this.journal.assertResource(row))
@@ -1185,7 +1280,7 @@ export class RuntimeStore {
       if (result.answer !== null) this.record(work.task_id, 'runner.answer', { owner: source, purpose: 'final_answer', text: result.answer, request_id: work.request_id, input_event_id: goal.input_event_id, run_id: work.run_id, intent_revision: work.intent_revision, result_ref: accepted.output.result_ref })
       this.record(work.task_id, 'runner.output.accepted', { owner: source, run_id: work.run_id, plan_revision: work.plan_revision, result_revision: accepted.output.result_revision, requirement_ids: accepted.output.requirement_ids, artifacts: accepted.output.artifacts, inventory_revision: accepted.inventory?.inventory_revision ?? null })
       this.refreshRunnerScope(work.task_id)
-    }) } catch (error) {
+    }, undefined, undefined, value => host.preflight(value, owner, materials.map(material => material.provenance_ref))) } catch (error) {
       if (!this.closed && this.db.open) host.retainFailure(error)
       throw error
     }
@@ -1280,18 +1375,18 @@ export class RuntimeStore {
   private workerOwner(value: QualifiedAttempt): ExecutionScope {
     const common = { task_id: value.task_id, run_id: value.run.run_id, work_id: value.work.work_id, attempt_id: value.attempt.attempt_id, role: value.work.role }
     return value.run.purpose === 'production'
-      ? { ...common, purpose: 'production', request_id: value.run.request_id, intent_revision: value.run.intent_revision }
+      ? { ...common, purpose: 'production', request_id: value.run.request_id, intent_revision: value.run.intent_revision, ...(value.run.update_id ? { update_id: value.run.update_id } : {}) }
       : { ...common, purpose: 'composition', batch_id: value.run.batch_id, composition_version: value.run.composition_version, trigger_request_id: value.run.trigger_request_id }
   }
   // The Run owns configuration leases and the cumulative budget. Each attempt
   // gets its own messages, cancellation source, read cursors and evidence owner.
-  async executeWorker<Result>(attemptId: string, profile: WorkerProfile<Result>, input?: WorkerInput, installResult?: (result: Result, owner: ExecutionScope) => void, collator?: Collator, diagnostic?: RunnerDiagnostic): Promise<Result> {
+  async executeWorker<Result>(attemptId: string, profile: WorkerProfile<Result>, input?: WorkerInput, installResult?: (result: Result, owner: ExecutionScope) => void, collator?: Collator, diagnostic?: RunnerDiagnostic, validateResult?: WorkerExecution<Result>['validateResult']): Promise<Result> {
     const state = new RunnerWorkState(this.db, this.epoch), attempt = state.attempt(attemptId), work = state.work(attempt.work_id)
     if (this.pendingWorkers.has(attemptId) || this.workers.has(attemptId) || profile.id !== attempt.profile_id || profile.role !== work.role || !['registered', 'queued'].includes(attempt.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Worker attempt cannot enter the dispatch queue')
     state.updateAttempt({ ...attempt, state: 'queued' })
     return new Promise<Result>((resolve, reject) => {
       this.pendingWorkers.set(attemptId, { task: work.task_id, work: admissionWork(work), reject, start: () => {
-        void this.executeAdmittedWorker(attemptId, profile, input, installResult, collator, diagnostic).then(resolve, reject).finally(() => this.pumpRunnerWorkers(work.task_id))
+        void this.executeAdmittedWorker(attemptId, profile, input, installResult, collator, diagnostic, validateResult).then(resolve, reject).finally(() => this.pumpRunnerWorkers(work.task_id))
       } })
       this.pumpRunnerWorkers(work.task_id)
     })
@@ -1342,7 +1437,7 @@ export class RuntimeStore {
       }
     }
   }
-  private async executeAdmittedWorker<Result>(attemptId: string, profile: WorkerProfile<Result>, input?: WorkerInput, installResult?: (result: Result, owner: ExecutionScope) => void, collator?: Collator, diagnostic?: RunnerDiagnostic): Promise<Result> {
+  private async executeAdmittedWorker<Result>(attemptId: string, profile: WorkerProfile<Result>, input?: WorkerInput, installResult?: (result: Result, owner: ExecutionScope) => void, collator?: Collator, diagnostic?: RunnerDiagnostic, validateResult?: WorkerExecution<Result>['validateResult']): Promise<Result> {
     const state = new RunnerWorkState(this.db, this.epoch), qualified = state.qualify(attemptId, 'dispatch')
     const { attempt, work, run } = qualified, taskId = qualified.task_id, runId = run.run_id
     this.qualify(taskId, runId)
@@ -1380,12 +1475,14 @@ export class RuntimeStore {
         const text = input?.text ?? (run.purpose === 'production' ? this.runnerGoalText(taskId, run.request_id, run.intent_revision) : JSON.parse(this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.trigger_request_id, taskId).input_json).text)
         if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > defaults.data.object_bytes) fail('INVALID_INPUT', 'Worker input must be nonempty and bounded')
         const materials = worker.context.navigation(attempt.input_versions)
+        const bound = input?.bound === undefined ? {} : { bound: input.bound }
+        if (Buffer.byteLength(json(bound)) > defaults.transport.rpc_message_bytes) fail('INPUT_TOO_LARGE', 'Bound worker input exceeds transport capacity')
         const navigation = (history?: ConversationHistory) => history ? { conversation_history: { refs: history.refs, truncated: history.truncated, notice: 'Earlier messages belong to this Task conversation. Use the read event tool with these exact IDs for complete originals when needed.' } } : {}
         if (conversation) conversation = fitConversation(conversation, history => !worker.budget.plan([
           { role: 'system', content: profile.system }, ...history.messages.map(item => item.message),
-          { role: 'user', content: JSON.stringify({ request: text, request_materials: materials, ...navigation(history) }) }
+          { role: 'user', content: JSON.stringify({ request: text, request_materials: materials, ...bound, ...navigation(history) }) }
         ], profile.tools).needsCompaction)
-        return { text, materials, ...navigation(conversation) }
+        return { text, materials, ...bound, ...navigation(conversation) }
       })()
       this.db.transaction(() => {
         state.qualify(attemptId, 'dispatch')
@@ -1413,6 +1510,7 @@ export class RuntimeStore {
         tool: (request, signal) => this.workerTool(attemptId, request, signal)
       }, controller.signal, worker.budget, {
         profile,
+        ...(validateResult ? { validateResult } : {}),
         onResult: value => {
           this.db.transaction(() => {
             this.qualifyWorker(attemptId)
@@ -1507,8 +1605,9 @@ export class RuntimeStore {
     const workId = id(), attemptId = id(), dependency = { kind: 'goal' as const, task_id: source.task_id, request_id: source.request_id, intent_revision: source.intent_revision }
     const binding = { request_id: source.request_id, intent_revision: source.intent_revision, work_id: source.work_id, plan_revision: source.plan_revision, through_sequence: source.through_sequence }
     this.db.transaction(() => {
-      state.installPlan([{ work_id: workId, task_id: source.task_id, run_id: run.run_id, plan_revision: 1, role: 'diagnostic', required: false, requirement_ids: [], dependencies: [dependency], state: 'planned', max_attempts: 1, purpose: 'production', request_id: source.request_id, intent_revision: source.intent_revision }])
-      state.createAttempt({ attempt_id: attemptId, work_id: workId, task_id: source.task_id, run_id: run.run_id, runtime_epoch: this.epoch, attempt_number: 1, profile_id: diagnostic.profile.id, model_config_id: original.model_config_id, model_config_revision: original.model_config_revision, input_versions: [dependency], state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: source.request_id, intent_revision: source.intent_revision })
+      const scope = { purpose: 'production' as const, request_id: source.request_id, intent_revision: source.intent_revision, ...(subject.update_id ? { update_id: subject.update_id } : {}) }
+      state.installPlan([{ work_id: workId, task_id: source.task_id, run_id: run.run_id, plan_revision: 1, role: 'diagnostic', required: false, requirement_ids: [], dependencies: [dependency], state: 'planned', max_attempts: 1, ...scope }])
+      state.createAttempt({ attempt_id: attemptId, work_id: workId, task_id: source.task_id, run_id: run.run_id, runtime_epoch: this.epoch, attempt_number: 1, profile_id: diagnostic.profile.id, model_config_id: original.model_config_id, model_config_revision: original.model_config_revision, input_versions: [dependency], state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], ...scope })
       this.record(source.task_id, 'runner.progress.diagnostic.queued', { subject: binding, run_id: run.run_id, work_id: workId, attempt_id: attemptId, automatic_replay: false, execution_permission: false, recovery_permission: false })
     })()
     void this.executeWorker(attemptId, diagnostic.profile, undefined, (result, owner) => {
@@ -1584,6 +1683,209 @@ export class RuntimeStore {
       ) LIMIT 1`).get({ run: runId })
   }
   private runnerArtifacts(): RunnerArtifactState { return this.runnerArtifactState ??= new RunnerArtifactState(this.db, new RunnerWorkState(this.db, this.epoch)) }
+  private chapters(): ChapterHost { return new ChapterHost(this.db, this.epoch, resource => this.bundle(resource), (task, kind, payload) => this.record(task, kind, payload)) }
+  startChapterUpdate(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[] }): ChapterUpdate {
+    this.acceptWork(); this.recovery.assertWrite(); this.task(input.task_id)
+    let clarified: { request_id: string; input: Row; row: Row } | undefined
+    if (input.source_request_id) {
+      const row = this.one('SELECT * FROM requests WHERE task_id=? AND id=?', input.task_id, input.source_request_id), original = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json)
+      if (original.binding_version !== 1 || !(row.state === 'confirmation_required' && original.code === 'CHAPTER_SCOPE_REQUIRED' || row.state === 'started' && original.chapter_update_id === input.update_id)) fail('REQUEST_NOT_CONFIRMABLE', 'Select chapters for the original request awaiting scope clarification')
+      const materialIds = (this.requests.handle({ type: 'request.status', task_id: input.task_id, request_id: input.source_request_id }).materials as Row[]).map(material => {
+        if (material.state !== 'success') fail('REQUEST_MATERIALS_INCOMPLETE', 'Original materials must remain available')
+        return this.requestMaterial(input.task_id, material.id).id as string
+      })
+      input = { ...input, text: original.text, model_config_id: selection.id }
+      received = { record_id: original.user_record_id, conversation: original.conversation, material_resource_ids: materialIds }
+      clarified = { request_id: input.source_request_id!, input: original, row }
+      if (json(this.requestSelection(selection.id)) !== json(selection)) fail('REQUEST_CONFIGURATION_CHANGED', 'Confirm the changed model selection before selecting chapters')
+    }
+    const host = this.chapters(), saved = host.state.update(input.task_id, input.update_id)
+    if (saved) return host.start(input)
+    const main = this.models.acquire(input.model_config_id, 'main')
+    let compact: ModelLease | undefined, approval: ModelLease | undefined, update!: ChapterUpdate, producer!: ExecutionAttempt
+    try {
+      compact = this.models.acquireCompaction(main)
+      if (this.approvalMode === 'assisted') approval = this.models.acquire(this.approvalModel, 'approval')
+      this.db.transaction(() => {
+        if (this.task(input.task_id).state !== 'active') fail('TASK_STOPPED', 'Explicitly resume the task first')
+        update = host.start(input, received)
+        const state = new RunnerWorkState(this.db, this.epoch), runId = id()
+        const common = { task_id: update.task_id, run_id: runId, purpose: 'production' as const, request_id: update.request_id, intent_revision: update.intent_revision, update_id: update.update_id }
+        const ledger = new RunnerBudgetLedger(this.db)
+        const existing = this.db.prepare("SELECT budget_id FROM runner_budgets WHERE task_id=? AND request_id=? AND purpose='production' ORDER BY rowid LIMIT 1").get(update.task_id, update.request_id) as Row | undefined
+        const budgetId = existing?.budget_id ?? id()
+        if (!existing) ledger.create({ budget_id: budgetId, task_id: update.task_id, purpose: 'production', request_id: update.request_id })
+        this.db.prepare("INSERT INTO runs(id,task_id,request_id,chapter_update_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,?,'running',?,?,?,?)").run(runId, update.task_id, update.request_id, update.update_id, this.epoch, json({ ...defaults, run: main.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now())
+        state.registerRun({ ...common, runtime_epoch: this.epoch, state: 'running', commit_valid: true, budget_id: budgetId })
+        const originalArtifact = update.base_manifest.artifact_id ? this.runnerArtifacts().artifact(update.task_id, update.base_manifest.artifact_id, update.base_manifest.artifact_revision) ?? fail('RUNNER_OWNERSHIP_INVALID', 'Chapter baseline artifact is unavailable') : null
+        const inheritedMaterials = originalArtifact ? this.runnerArtifacts().chapterMaterialDependencies(originalArtifact).map(dependency => dependency.resource_id) : []
+        const materialIds = [...new Set([...(received?.material_resource_ids ?? []), ...inheritedMaterials])]
+        host.state.protect(update.task_id, 'input_materials', update.update_id, materialIds)
+        const dependencies = [{ kind: 'goal' as const, task_id: update.task_id, request_id: update.request_id, intent_revision: update.intent_revision }, ...update.dependencies, ...materialIds.map(resource_id => ({ kind: 'resource' as const, task_id: update.task_id, resource_id }))]
+        const works: LogicalWork[] = ['producer', 'lightweight'].map(role => ({ ...common, work_id: id(), plan_revision: 1, role: role as 'producer' | 'lightweight', required: true, requirement_ids: [], dependencies, state: 'planned', max_attempts: 1 }))
+        state.installPlan(works)
+        for (const work of works) {
+          const attempt: ExecutionAttempt = { ...common, work_id: work.work_id, attempt_id: id(), runtime_epoch: this.epoch, attempt_number: 1, profile_id: work.role === 'producer' ? 'chapter-producer-v1' : 'chapter-host-publisher-v1', model_config_id: main.id, model_config_revision: main.revision, input_versions: dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }
+          state.createAttempt(attempt)
+          if (work.role === 'producer') producer = attempt
+        }
+        update = host.state.stage(update.task_id, update.update_id, 'queued', { source: this.workerOwner(state.qualify(producer.attempt_id, 'dispatch')) })
+        if (clarified) {
+          const current = this.one('SELECT state,input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', input.task_id, clarified.request_id)
+          if (current.state !== 'confirmation_required' || current.input_json !== clarified.row.input_json || current.config_selection_json !== clarified.row.config_selection_json) fail('REQUEST_SOURCE_INVALID', 'Original scope clarification changed before installation')
+          this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=?").run(json({ ...clarified.input, chapter_update_id: update.update_id, chapter_run_id: producer.run_id, chapter_route: { kind: 'update', view_id: input.view_id, region_ids: input.region_ids }, code: null }), input.task_id, clarified.request_id)
+        }
+      })()
+      this.agents.set(producer.run_id, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: this.approvalMode, managed: true })
+      for (const old of update.previous_update_ids) this.cancelChapterExecution(update.task_id, old)
+      const flight = this.executeChapterUpdate(update.task_id, update.update_id, producer.attempt_id)
+      this.chapterFlights.set(update.update_id, flight)
+      void flight.finally(() => this.chapterFlights.delete(update.update_id)).catch(() => {})
+      return host.state.update(update.task_id, update.update_id)!
+    } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
+  }
+  private cancelChapterExecution(task: string, updateId: string): void {
+    const state = new RunnerWorkState(this.db, this.epoch)
+    const runs = this.db.prepare('SELECT run_id FROM runner_runs WHERE task_id=? AND json_extract(payload_json,\'$.update_id\')=?').all(task, updateId) as Row[]
+    for (const run of runs) {
+      this.record(task, 'runner.cancelled', { run_id: run.run_id, scope: 'run', reason: 'chapter_update_cancelled' })
+      state.revokeRun(run.run_id)
+      this.agents.get(run.run_id)?.controller.abort()
+      this.revokeRunActions(run.run_id)
+      this.aggregateWorkerRun(task, run.run_id)
+    }
+  }
+  private async executeChapterUpdate(task: string, updateId: string, producerId: string): Promise<void> {
+    const host = this.chapters(), state = new RunnerWorkState(this.db, this.epoch)
+    const initial = host.state.assertCurrent(task, updateId), runId = state.attempt(producerId).run_id
+    try {
+      const owner = this.workerOwner(state.qualify(producerId, 'dispatch'))
+      const context = chapterInput(this.bundle(initial.base_manifest.bundle_resource_id), initial.base_manifest, initial.region_ids, initial.dependencies)
+      const template = chapterCandidateTemplate(this.bundle(initial.base_manifest.bundle_resource_id), initial.base_manifest, initial.region_ids, initial.dependencies)
+      const checkCandidate = (proposal: ChapterProposal, source: ExecutionScope): void => {
+        state.qualify(producerId)
+        const resource = this.db.prepare("SELECT a.source_json FROM actions a WHERE a.task_id=? AND a.result='success' AND json_extract(a.result_json,'$.data.id')=?").get(task, proposal.bundle_resource_id) as Row | undefined
+        if (!resource || json(captureExecutionScope(JSON.parse(resource.source_json).owner)) !== json(source)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter proposal requires a resource created by its exact producer')
+        const bundle = loadBundleSource(this.db, this.root, task, { type: 'resource', resource: { kind: 'resource', id: proposal.bundle_resource_id } }, row => this.journal.assertResource(row)).bundle
+        validateProducerBundle(bundle); this.checkedBundle(task, bundle, source.attempt_id)
+        validateChapterCandidate(bundle, proposal.replacements.flatMap(group => group.chapters))
+        const latest = host.state.manifest(task, initial.view_id)!
+        assembleChapterUpdate({ latest: { bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, baseline: initial.base_manifest, candidate: bundle, replacements: proposal.replacements, dependencies: proposal.dependencies })
+      }
+      const accepted = this.one('SELECT payload_json FROM records WHERE task_id=? AND id=?', task, initial.record_id)
+      const conversation = loadConversation(this.db, task, JSON.parse(accepted.payload_json).conversation)
+      const profile = createChapterProfile(initial, owner, this.contentToolGrants(task, conversation), proposal => checkCandidate(proposal, owner), template.chapters)
+      host.state.stage(task, updateId, 'generating'); this.record(task, 'chapter.update.stage', { update_id: updateId, state: 'generating' })
+      await this.executeWorker(producerId, profile, { text: initial.text, bound: { chapter_context: context.bundle, chapter_fragments: context.chapters, chapter_template: template.bundle }, conversation }, (proposal, source) => {
+        checkCandidate(proposal, source)
+        host.state.recordProposal(proposal)
+        this.record(task, 'chapter.proposal.accepted', { update_id: updateId, proposal_id: proposal.proposal_id, owner: source })
+      })
+      const publisher = state.taskWorks(task).find(work => work.run_id === runId && work.role === 'lightweight')!
+      await new Promise<void>((resolve, reject) => {
+        const attemptId = publisher.current_attempt_id!
+        state.updateAttempt({ ...state.attempt(attemptId), state: 'queued' })
+        this.pendingWorkers.set(attemptId, { task, work: admissionWork(publisher), reject, start: () => { void this.publishChapterUpdate(task, updateId, attemptId).then(resolve, reject).finally(() => this.pumpRunnerWorkers(task)) } })
+        this.pumpRunnerWorkers(task)
+      })
+    } catch (error) {
+      if (!this.closed && this.db.open) {
+        const current = host.state.update(task, updateId)!
+        if (!chapterTerminal.has(current.state) && current.state !== 'unknown') host.state.stage(task, updateId, this.agents.get(runId)?.controller.signal.aborted ? 'cancelled' : 'failed', { reason: error instanceof ContractError || error instanceof ModelError ? error.code : 'CHAPTER_EXECUTION_FAILED' })
+        const publisher = state.taskWorks(task).find(work => work.run_id === runId && work.role === 'lightweight')
+        if (publisher && !['succeeded', 'failed', 'cancelled', 'invalidated'].includes(publisher.state)) state.revokeWork(publisher.work_id, { kind: 'failure', work_id: publisher.work_id })
+        this.record(task, 'chapter.update.ended', { update_id: updateId, state: host.state.update(task, updateId)!.state, reason: host.state.update(task, updateId)!.reason })
+      }
+    } finally { if (!this.closed) this.aggregateWorkerRun(task, runId) }
+  }
+  private async publishChapterUpdate(task: string, updateId: string, attemptId: string): Promise<void> {
+    const host = this.chapters(), chapters = host.state, state = new RunnerWorkState(this.db, this.epoch)
+    const qualified = state.qualify(attemptId, 'dispatch'), owner = this.workerOwner(qualified), runId = owner.run_id
+    const agent = this.agents.get(runId) ?? fail('RUNNER_OWNERSHIP_INVALID', 'Chapter publication lease is unavailable')
+    const signal = agent.controller.signal
+    const valid = () => {
+      if (signal.aborted) fail('SOURCE_INVALID', 'Chapter update was cancelled')
+      chapters.assertCurrent(task, updateId); state.qualify(attemptId); this.qualify(task, runId)
+    }
+    state.updateAttempt({ ...qualified.attempt, state: 'dispatched', dispatch_state: 'dispatched', operation_id: id() })
+    state.updateAttempt({ ...state.attempt(attemptId), state: 'running' })
+    let previousOperation: string | undefined
+    try {
+      for (;;) {
+        valid()
+        const update = chapters.assertCurrent(task, updateId), proposal = chapters.proposal(task, update.proposal_id!)!
+        const latest = chapters.manifest(task, update.view_id)!
+        const view = this.one('SELECT v.* FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? AND v.id=?', task, update.view_id)
+        if (view.revision !== latest.view_revision || view.bundle_resource_id !== latest.bundle_resource_id) fail('CHAPTER_BASELINE_CONFLICT', 'Published content changed outside the current chapter mapping')
+        const candidate = loadBundleSource(this.db, this.root, task, { type: 'resource', resource: { kind: 'resource', id: proposal.bundle_resource_id } }, row => this.journal.assertResource(row)).bundle
+        const dependencyManifests = proposal.dependencies.flatMap(dependency => { const manifest = chapters.manifest(task, dependency.view_id); return manifest ? [manifest] : [] })
+        const assembled = assembleChapterUpdate({ latest: { bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, baseline: update.base_manifest, candidate, replacements: proposal.replacements, dependencies: proposal.dependencies, dependency_manifests: dependencyManifests })
+        if (assembled.invalid_kept_region_ids.length) fail('CHAPTER_DEPENDENCY_CONFLICT', 'Dependent chapters require an explicit wider update scope')
+        validateProducerBundle(assembled.bundle); this.checkedBundle(task, assembled.bundle, attemptId)
+        const resourceAction = id(), resourceInput = { type: 'resource.create' as const, display_name: 'Chapter assembly', content: { type: 'json' as const, value: JSON.parse(json(assembled.bundle)) } }
+        this.db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(resourceAction, task, runId, json({ type: 'host_chapter', owner }), json(resourceInput), now())
+        const resourceContext: ExecutionActionContext = { id: resourceAction, owner, signal, valid, authorize: request => { if (json(request) !== json({ type: 'write', input: resourceInput })) fail('WORKER_CAPABILITY_DENIED', 'Only the exact assembled resource is authorized') } }
+        const created = this.resourceCreate(task, runId, resourceInput, resourceContext) as { data: { id: string } }
+        const surface = this.one('SELECT * FROM surfaces WHERE task_id=?', task), operationId = id(), actionId = id()
+        const request: SurfaceWrite = { type: 'write', input: { type: 'surface.update', surface_id: surface.id, expected_revision: surface.revision, operations: [{ type: 'view.replace', view_id: view.id, expected_view_revision: view.revision, bundle: { type: 'resource', resource: { kind: 'resource', id: created.data.id } }, state_transition: { type: 'preserve', expected_state_revision: view.state_revision, compatibility_version: assembled.bundle.state.compatibility_version } }] } }
+        const operation: ChapterPublication = { task_id: task, operation_id: operationId, update_id: updateId, proposal_id: proposal.proposal_id, base_manifest_revision: latest.manifest_revision, assembled_bundle_resource_id: created.data.id, view_id: view.id, expected_view_revision: view.revision, expected_state_revision: view.state_revision, request, source_bundle_resource_ids: [latest.bundle_resource_id, proposal.bundle_resource_id], ...(previousOperation ? { previous_operation_id: previousOperation } : {}), action_id: actionId, state: 'registered' }
+        this.db.transaction(() => {
+          valid(); chapters.registerPublication(operation)
+          this.db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, task, runId, json({ type: 'host_chapter', owner, update_id: updateId, operation_id: operationId }), json(request.input), now())
+          chapters.publicationStage(task, operationId, 'prepared')
+          chapters.stage(task, updateId, 'publishing', { action_id: actionId })
+          this.record(task, 'chapter.publication.prepared', { update_id: updateId, operation_id: operationId, action_id: actionId, previous_operation_id: previousOperation })
+        })()
+        const context: ExecutionActionContext = { id: actionId, owner, signal, valid, hostPublication: true, authorize: raw => { if (json(raw) !== json(request)) fail('WORKER_CAPABILITY_DENIED', 'Chapter publisher can execute only its exact compiled action') } }
+        let installedResource: string | undefined
+        const hooks: CompositionPublicationHooks = {
+          check: () => { valid(); if (chapters.manifest(task, view.id)?.manifest_revision !== latest.manifest_revision) fail('VERSION_CONFLICT', 'Chapter publication requires reassembly on the latest content') },
+          prepared: prepared => { installedResource = prepared.find(item => item.viewId === view.id)?.resourceId },
+          committed: (recordId, surfaceRevision) => {
+            if (!installedResource) fail('CHAPTER_CONFLICT', 'Chapter publication has no installed resource')
+            const artifact = latest.artifact_id ? this.db.prepare('SELECT candidate_id FROM runner_artifacts WHERE task_id=? AND artifact_id=? AND artifact_revision=?').get(task, latest.artifact_id, latest.artifact_revision) as Row | undefined : undefined
+            const requirements = latest.artifact_id ? (artifact && this.runnerArtifacts().candidate(task, artifact.candidate_id)?.candidate.requirement_ids) ?? fail('RUNNER_OWNERSHIP_INVALID', 'Chapter inheritance requires its original accepted coverage') : state.goal(update.request_id).requirements.map(requirement => requirement.requirement_id)
+            state.updateAttempt({ ...state.attempt(attemptId), state: 'succeeded', result_ref: { task_id: task, kind: 'record', id: recordId } })
+            const manifest: ChapterManifest = { ...latest, chapters: assembled.chapters, view_revision: view.revision + 1, state_revision: view.state_revision + 1, bundle_resource_id: installedResource!, manifest_revision: latest.manifest_revision + 1, ...(latest.artifact_revision ? { artifact_revision: latest.artifact_revision + 1 } : {}) }
+            chapters.installManifest(manifest, latest.manifest_revision)
+            for (const keep of assembled.kept) chapters.keep({ task_id: task, update_id: updateId, view_id: view.id, region_id: keep.region_id, region_revision: keep.revision, source_bundle_resource_id: latest.bundle_resource_id, source_manifest_revision: latest.manifest_revision, request_id: latest.request_id, intent_revision: latest.intent_revision, ...(latest.artifact_id ? { artifact_id: latest.artifact_id, artifact_revision: latest.artifact_revision } : {}), requirement_ids: requirements, dependencies: keep.dependencies, valid: true })
+            const result = { operation_id: operationId, action_id: actionId, state: 'published', view_id: view.id, view_revision: manifest.view_revision, state_revision: manifest.state_revision, manifest_revision: manifest.manifest_revision, surface_record_id: recordId, surface_revision: surfaceRevision }
+            chapters.publicationStage(task, operationId, 'published', result)
+            const succeeded = chapters.stage(task, updateId, 'succeeded')
+            if (latest.artifact_id) this.runnerArtifacts().installChapterAssembly({ update: succeeded, latestManifest: latest, proposal, publisherOwner: owner, published: { operation_id: operationId, action_id: actionId, bundle_resource_id: installedResource!, view_id: view.id, view_revision: manifest.view_revision, state_revision: manifest.state_revision, surface_record_id: recordId, surface_revision: surfaceRevision }, requirement_ids: requirements })
+            this.record(task, 'runner.answer', { owner, purpose: 'final_answer', text: '更新已完成。', request_id: update.request_id, input_event_id: update.input_event_id, run_id: runId, intent_revision: update.intent_revision, update_id: updateId, operation_id: operationId })
+            this.record(task, 'chapter.update.ended', { update_id: updateId, state: 'succeeded', operation_id: operationId })
+            return result
+          }
+        }
+        try {
+          chapters.publicationStage(task, operationId, 'dispatched')
+          await this.replaceSurface(task, runId, request, signal, context, hooks)
+          if (chapters.publication(task, operationId)?.operation.state !== 'published') fail('CHAPTER_CONFLICT', 'Query the original chapter publication result')
+          this.refreshRunnerScope(task)
+          return
+        } catch (error) {
+          if (chapters.publication(task, operationId)?.operation.state === 'published') return
+          const code = error instanceof ContractError ? error.code : 'CHAPTER_PUBLICATION_FAILED'
+          const action = this.db.prepare('SELECT state,result FROM actions WHERE id=? AND task_id=?').get(actionId, task) as Row | undefined
+          const denied = !!this.db.prepare("SELECT 1 FROM approvals WHERE action_id=? AND decision='deny'").get(actionId)
+          const unknown = !action || action.state !== 'ended' || !['failure', 'not_executed'].includes(action.result)
+          chapters.publicationStage(task, operationId, unknown ? 'unknown' : signal.aborted ? 'failure' : 'failure', { code, ...(denied ? { denied: true } : {}) })
+          if (unknown) { chapters.stage(task, updateId, 'unknown', { reason: code }); state.updateAttempt({ ...state.attempt(attemptId), state: 'unknown', dispatch_state: 'unknown' }); return }
+          if (!denied && code === 'VERSION_CONFLICT' && !signal.aborted) {
+            chapters.assertCurrent(task, updateId)
+            previousOperation = operationId
+            continue
+          }
+          throw error
+        }
+      }
+    } catch (error) {
+      const attempt = state.attempt(attemptId)
+      if (!['succeeded', 'failed', 'cancelled', 'revoked', 'unknown'].includes(attempt.state)) state.updateAttempt({ ...attempt, state: signal.aborted ? 'cancelled' : 'failed' })
+      throw error
+    }
+  }
   private runnerComposition(): RunnerCompositionState { return this.runnerCompositionState ??= new RunnerCompositionState(this.db, new RunnerWorkState(this.db, this.epoch), this.runnerArtifacts()) }
   private runnerHostComposition(): RunnerHostComposition { return new RunnerHostComposition(this.db, new RunnerWorkState(this.db, this.epoch), this.runnerArtifacts(), this.runnerComposition()) }
   prepareRunnerComposition(taskId: string, triggerRequestId: string, options: PrepareRunnerCompositionOptions = {}): PreparedRunnerComposition {
@@ -1722,7 +2024,7 @@ export class RuntimeStore {
     const agent = this.agents.get(runId), owner = context.owner!
     if (!agent?.approval) return
     const run = new RunnerWorkState(this.db, this.epoch).run(runId)
-    if (run.purpose !== 'composition') fail('RUNNER_OWNERSHIP_INVALID', 'Host publication requires a Composition Run')
+    if (run.purpose !== 'composition' && !run.update_id) fail('RUNNER_OWNERSHIP_INVALID', 'Host publication requires its exact publisher Run')
     const accounting = new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: taskId, budget_id: run.budget_id, attempt_id: owner.attempt_id })
     const lease: ModelLease = { ...agent.approval, owner, release() {} }
     lease.evidence = event => { context.valid(); return this.record(taskId, 'model.request.evidence', { ...event, run_id: runId }) }
@@ -1733,8 +2035,9 @@ export class RuntimeStore {
     }
     try {
       context.valid()
-      const request = this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.trigger_request_id, taskId)
-      const messages: ChatMessage[] = [{ role: 'system', content: approvalTemplate }, { role: 'user', content: json({ source: owner, action: input, permission: 'Only this exact compiled Surface action. Input discard requires separate explicit human confirmation.', user_request: request.input_json }) }]
+      const request = this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.purpose === 'composition' ? run.trigger_request_id : run.request_id, taskId)
+      const chapter = run.purpose === 'production' && run.update_id ? this.chapters().state.update(taskId, run.update_id) : null
+      const messages: ChatMessage[] = [{ role: 'system', content: approvalTemplate }, { role: 'user', content: json({ source: owner, action: input, permission: 'Only this exact compiled Surface action. Input discard requires separate explicit human confirmation.', user_request: chapter?.text ?? request.input_json }) }]
       const reservation = agent.budget.reserve(messages, undefined, lease.config, 'approval-input')
       const response = await this.models.request(lease, taskId, messages, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'approval')
       context.valid(); agent.budget.settle(reservation, response)
@@ -1929,7 +2232,16 @@ export class RuntimeStore {
       const value = await this.dispatchWorkerTool(attemptId, raw, signal)
       const result = value as Row | null
       accounting.tool(operation, result?.execution === 'unknown' ? 'unknown' : 'completed')
-      this.record(task, 'worker.tool.ended', { operation_id: operation, ...(typeof result?.operation_id === 'string' ? { source_operation_id: result.operation_id } : {}), owner: worker.owner, run_id: run.run_id, state: result?.execution === 'unknown' ? 'unknown' : 'completed' })
+      const recordId = this.record(task, 'worker.tool.ended', { operation_id: operation, ...(typeof result?.operation_id === 'string' ? { source_operation_id: result.operation_id } : {}), owner: worker.owner, run_id: run.run_id, state: result?.execution === 'unknown' ? 'unknown' : 'completed' })
+      if (result?.execution === 'success' && result.delivery === 'delivered' && !worker.collator && !worker.diagnostic) {
+        let provenance_ref: { task_id: string; kind: 'record' | 'resource' | 'action'; id: string } = { task_id: task, kind: 'record', id: recordId }
+        if (request.type === 'read' && ['event', 'resource', 'action'].includes(request.input.target.kind)) {
+          const target = request.input.target
+          provenance_ref = { task_id: task, kind: target.kind === 'event' ? 'record' : target.kind as 'resource' | 'action', id: target.id }
+        } else if (request.type === 'write' && request.input.type === 'resource.create') provenance_ref = { task_id: task, kind: 'resource', id: result.data.id }
+        this.runnerArtifacts().checkProvenance(task, provenance_ref)
+        return { ...result, provenance_ref }
+      }
       return value
     } catch (error) {
       if (!this.closed && this.db.open) {
@@ -2542,14 +2854,15 @@ export class RuntimeStore {
     return { slots: [{ id: 'main', groups: resolved }] }
   }
   private async replaceSurface(taskId: string, runId: string | null, request: SurfaceWrite, signal: AbortSignal, context?: ExecutionActionContext, publication?: CompositionPublicationHooks): Promise<unknown> {
-    if (!this.features.viewReplacement) fail('CAPABILITY_DISABLED', 'View replacement is not yet verified and remains disabled')
-    const input = request.input, prepared = this.inspectReplacement(taskId, runId, input, context)
-    const resolved = prepared.some(p => p.source) ? { version: 1, effective_request: { ...input, operations: input.operations.map(op => { const p = prepared.find(p => p.op === op); return p?.source && op.type !== 'view.remove' && op.type !== 'layout.set' ? { ...op, bundle: { type: 'inline', bundle: p.bundle } } : op }) }, sources: prepared.filter(p => p.source).map(p => p.source!) } : undefined
-    const evidence = captureEvidence(this.db, this.root, taskId, input.snapshot_sources)
-    const check = (verifyFiles = true) => { this.checkSurfaceVersions(taskId, runId, input, prepared, context); checkEvidence(this.db, this.root, taskId, evidence, verifyFiles); publication?.check() }
-    const actionId = context?.id ?? id(), needsApproval = prepared.some(p => !p.auto) || input.operations.some(op => op.type === 'layout.set')
-    if (!context) this.db.prepare("INSERT INTO actions (id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, taskId, runId, json({ type: 'run', id: runId, level: 'task' }), json(input), now())
+    const input = request.input, actionId = context?.id ?? id()
     try {
+      if (!this.features.viewReplacement) fail('CAPABILITY_DISABLED', 'View replacement is not yet verified and remains disabled')
+      const prepared = this.inspectReplacement(taskId, runId, input, context)
+      const resolved = prepared.some(p => p.source) ? { version: 1, effective_request: { ...input, operations: input.operations.map(op => { const p = prepared.find(p => p.op === op); return p?.source && op.type !== 'view.remove' && op.type !== 'layout.set' ? { ...op, bundle: { type: 'inline', bundle: p.bundle } } : op }) }, sources: prepared.filter(p => p.source).map(p => p.source!) } : undefined
+      const evidence = captureEvidence(this.db, this.root, taskId, input.snapshot_sources)
+      const check = (verifyFiles = true) => { this.checkSurfaceVersions(taskId, runId, input, prepared, context); checkEvidence(this.db, this.root, taskId, evidence, verifyFiles); publication?.check() }
+      const needsApproval = prepared.some(p => !p.auto) || input.operations.some(op => op.type === 'layout.set')
+      if (!context) this.db.prepare("INSERT INTO actions (id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, taskId, runId, json({ type: 'run', id: runId, level: 'task' }), json(input), now())
       if (needsApproval) await this.awaitApproval(taskId, runId, actionId, input, signal, 'surface-replace-v1', context, resolved)
       check()
       // All reset operations require explicit host confirmation, even with an empty draft.
@@ -2593,6 +2906,7 @@ export class RuntimeStore {
         const recordId = this.record(taskId, 'surface.published', result)
         this.db.prepare("UPDATE actions SET state='ended',wait_reason=NULL,result='success',commit_valid=0,authorization_json=?,result_json=?,ended_at=? WHERE id=?").run(json({ basis: needsApproval ? 'single_approval' : 'default', host_checked: true, reset_confirmed: prepared.some(p => p.op.type === 'view.replace' && p.op.state_transition.type === 'reset'), confirmed_by: 'human', ...confirmation }), json(result), now(), actionId)
         publication?.committed(recordId, result.revision)
+        this.registerPublishedChapters(taskId, prepared)
         return result
       })()
     } catch (error) {
@@ -2606,6 +2920,18 @@ export class RuntimeStore {
       if (!this.closed) {
         this.db.prepare("UPDATE approvals SET validity='revoked' WHERE action_id=? AND validity='valid'").run(actionId)
         this.restoreActionState(runId, context)
+      }
+    }
+  }
+  private registerPublishedChapters(task: string, prepared: { viewId: string }[]): void {
+    if (!this.features.runner) return
+    for (const item of prepared) {
+      const view = this.db.prepare('SELECT revision FROM views WHERE id=?').get(item.viewId) as { revision: number } | undefined
+      if (!view) continue
+      try { this.chapters().map(task, item.viewId, view.revision) }
+      catch (error) {
+        if (!(error instanceof ContractError) || !['CHAPTER_MAPPING_REQUIRED', 'CHAPTER_MAPPING_INVALID', 'CHAPTER_OWNERSHIP_INVALID', 'CHAPTER_STYLE_INVALID'].includes(error.code)) throw error
+        this.record(task, 'chapter.mapping.required', { view_id: item.viewId, view_revision: view.revision, reason: error.code })
       }
     }
   }
@@ -2721,6 +3047,7 @@ export class RuntimeStore {
         const data = { action_id: actionId, revision: surface.revision + 1, views: prepared.map(p => ({ client_ref: p.op.client_ref, view_id: p.viewId })) }
         this.record(taskId, 'surface.published', data)
         this.db.prepare("UPDATE actions SET state='ended',result='success',commit_valid=0,result_json=?,ended_at=? WHERE id=?").run(json(data), now(), actionId)
+        this.registerPublishedChapters(taskId, prepared)
         return data
       })()
       return result
@@ -2736,6 +3063,13 @@ export class RuntimeStore {
     return attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
   }
   private finish(taskId: string, runId: string, state: string, reason: string, runnerFinal = false): void {
+    if (!runnerFinal && state === 'cancelled') {
+      const row = this.db.prepare('SELECT chapter_update_id FROM runs WHERE id=? AND task_id=?').get(runId, taskId) as Row | undefined
+      if (row?.chapter_update_id) {
+        const chapters = this.chapters().state, update = chapters.update(taskId, row.chapter_update_id)
+        if (update && !chapterTerminal.has(update.state) && update.state !== 'unknown') chapters.stage(taskId, update.update_id, 'cancelled', { reason })
+      }
+    }
     if (!runnerFinal && this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(runId)) {
       const core = this.one('SELECT state FROM runs WHERE id=? AND task_id=?', runId, taskId)
       if (!['running', 'waiting'].includes(core.state)) return
@@ -2848,11 +3182,31 @@ export class RuntimeStore {
     if (raw && typeof raw === 'object' && typeof (raw as Row).type === 'string' && ((raw as Row).type.startsWith('model.') || (raw as Row).type === 'approval.configure')) { assertContract<import('../shared/contracts.generated').HostModelRequest>('host_model_request', raw); if ((raw as Row).type !== 'model.list') { this.recovery.assertWrite(); if (!['model.discover', 'model.probe', 'model.cancel', 'model.remember'].includes((raw as Row).type)) this.requests.invalidateConfiguration() }; return this.modelConfiguration(raw) }
     if (raw && typeof raw === 'object' && typeof (raw as Row).type === 'string' && (raw as Row).type.startsWith('plugin.')) return this.pluginConfiguration(raw)
     const r = validateIpc(raw)
-    const reads = ['storage.status', 'task.query', 'host.tasks.page', 'task.snapshot', 'task.data.read', 'operation.list', 'material.list', 'material.status', 'material.read', 'request.list', 'request.status']
+    const reads = ['storage.status', 'task.query', 'host.tasks.page', 'task.snapshot', 'task.data.read', 'operation.list', 'material.list', 'material.status', 'material.read', 'request.list', 'request.status', 'chapter.status']
     if (!reads.includes(r.type) && !r.type.startsWith('maintenance.')) this.recovery.assertWrite(r.type === 'draft.save' ? r.maintenance_token : undefined)
-    if (r.type.startsWith('request.')) { this.task((r as Row).task_id); return this.requests.handle(r) }
+    if (r.type.startsWith('request.')) {
+      this.task((r as Row).task_id)
+      if (r.type === 'request.cancel') this.chapterRoutes.get(r.request_id)?.abort()
+      return this.requests.handle(r)
+    }
     if (r.type.startsWith('material.')) { this.task((r as Row).task_id); return this.materials.handle(r) }
     switch (r.type) {
+      case 'chapters.map': this.task(r.task_id); return this.chapters().map(r.task_id, r.view_id, r.expected_view_revision)
+      case 'chapter.update': return this.startChapterUpdate(r)
+      case 'chapter.status': {
+        this.task(r.task_id); this.chapters().reconcile(r.task_id)
+        return this.chapters().state.update(r.task_id, r.update_id) ?? fail('NOT_FOUND', 'Chapter update is unavailable')
+      }
+      case 'chapter.cancel': {
+        this.task(r.task_id)
+        const chapters = this.chapters().state, update = chapters.update(r.task_id, r.update_id) ?? fail('NOT_FOUND', 'Chapter update is unavailable')
+        if (!chapterTerminal.has(update.state) && update.state !== 'unknown') {
+          chapters.stage(r.task_id, r.update_id, 'cancelled', { reason: 'user_cancelled' })
+          this.cancelChapterExecution(r.task_id, r.update_id)
+          this.record(r.task_id, 'chapter.update.ended', { update_id: r.update_id, state: 'cancelled' })
+        }
+        return chapters.update(r.task_id, r.update_id)
+      }
       case 'maintenance.status': return { ...(this.recovery.status() as Row), gc: this.gc.status(), gc_enabled: (this.gc.status() as Row).enabled && (this.recovery.status() as Row).phase !== 'blocked', gc_scope: 'registered_staging_verified_replicas_and_deleted_task_resources' }
       case 'maintenance.begin': return this.recovery.begin(r.inputs)
       case 'maintenance.cancel': return this.recovery.cancel(r.token)
@@ -2895,6 +3249,7 @@ export class RuntimeStore {
       case 'answer.submit': return this.submitAnswer(r)
       case 'run.cancel': return this.db.transaction(() => { this.task(r.task_id); this.one('SELECT id FROM runs WHERE id=? AND task_id=?', r.run_id, r.task_id); this.finish(r.task_id, r.run_id, 'cancelled', 'user_cancelled'); return this.snapshot(r.task_id) })()
       case 'task.stop': {
+        for (const [request, controller] of this.chapterRoutes) if (this.db.prepare('SELECT 1 FROM requests WHERE id=? AND task_id=?').get(request, r.task_id)) controller.abort()
         this.db.transaction(() => {
           this.task(r.task_id)
           this.db.prepare("UPDATE tasks SET state='stopping' WHERE id=?").run(r.task_id)

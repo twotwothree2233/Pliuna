@@ -39,13 +39,14 @@ function summary(fixture: ReturnType<typeof setup>, latest_user_id: string | nul
 function grants(fixture: ReturnType<typeof setup>, dependencies: WorkDependency[]): void {
   const { db, selected } = fixture
   if (selected.purpose !== 'production') throw Error('Production fixture required')
+  const update = selected.update_id ? { update_id: selected.update_id } : {}
   db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,?,'started','{}','{}','time')").run(selected.request_id, selected.task_id)
   db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running','epoch','{}','{}','time')").run(selected.run_id, selected.task_id, selected.request_id)
   db.prepare("INSERT INTO runner_budgets(budget_id,task_id,purpose,request_id,limits_json,created_at) VALUES ('budget',?,'production',?,'{}','time')").run(selected.task_id, selected.request_id)
-  const run = { task_id: selected.task_id, run_id: selected.run_id, purpose: 'production', request_id: selected.request_id, intent_revision: selected.intent_revision, runtime_epoch: 'epoch', state: 'running', commit_valid: true, budget_id: 'budget' }
+  const run = { task_id: selected.task_id, run_id: selected.run_id, purpose: 'production', request_id: selected.request_id, intent_revision: selected.intent_revision, ...update, runtime_epoch: 'epoch', state: 'running', commit_valid: true, budget_id: 'budget' }
   db.prepare("INSERT INTO runner_runs(run_id,task_id,purpose,request_id,intent_revision,budget_id,payload_json) VALUES (?,?,'production',?,?,'budget',?)").run(selected.run_id, selected.task_id, selected.request_id, selected.intent_revision, JSON.stringify(run))
-  const work: LogicalWork = { task_id: selected.task_id, run_id: selected.run_id, work_id: selected.work_id, role: selected.role, purpose: 'production', request_id: selected.request_id, intent_revision: selected.intent_revision, plan_revision: 1, required: true, requirement_ids: ['answer'], dependencies, state: 'queued', max_attempts: 2, current_attempt_id: selected.attempt_id }
-  const attempt: ExecutionAttempt = { task_id: selected.task_id, run_id: selected.run_id, work_id: selected.work_id, attempt_id: selected.attempt_id, purpose: 'production', request_id: selected.request_id, intent_revision: selected.intent_revision, runtime_epoch: 'epoch', attempt_number: 1, profile_id: 'profile', model_config_id: 'model', model_config_revision: 1, input_versions: dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }
+  const work: LogicalWork = { task_id: selected.task_id, run_id: selected.run_id, work_id: selected.work_id, role: selected.role, purpose: 'production', request_id: selected.request_id, intent_revision: selected.intent_revision, ...update, plan_revision: 1, required: true, requirement_ids: ['answer'], dependencies, state: 'queued', max_attempts: 2, current_attempt_id: selected.attempt_id }
+  const attempt: ExecutionAttempt = { task_id: selected.task_id, run_id: selected.run_id, work_id: selected.work_id, attempt_id: selected.attempt_id, purpose: 'production', request_id: selected.request_id, intent_revision: selected.intent_revision, ...update, runtime_epoch: 'epoch', attempt_number: 1, profile_id: 'profile', model_config_id: 'model', model_config_revision: 1, input_versions: dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }
   db.prepare('INSERT INTO runner_work(work_id,task_id,run_id,plan_revision,state,payload_json) VALUES (?,?,?,1,?,?)').run(work.work_id, work.task_id, work.run_id, work.state, JSON.stringify(work))
   db.prepare('INSERT INTO runner_attempts(attempt_id,task_id,work_id,run_id,attempt_number,state,payload_json) VALUES (?,?,?,?,1,?,?)').run(attempt.attempt_id, attempt.task_id, attempt.work_id, attempt.run_id, attempt.state, JSON.stringify(attempt))
 }
@@ -70,7 +71,7 @@ it('filters interleaved work before restoring complete batches with the same cal
 
 const otherScopes: [string, ExecutionScope][] = [
   ['Task', { ...owner, task_id: 'other-task' }], ['Run', { ...owner, run_id: 'other-run' }], ['work', { ...owner, work_id: 'other-work' }],
-  ['attempt', { ...owner, attempt_id: 'other-attempt' }], ['goal', { ...owner, request_id: 'other-goal' }], ['revision', { ...owner, intent_revision: 2 }], ['role', { ...owner, role: 'router' }], ['purpose', composition]
+  ['attempt', { ...owner, attempt_id: 'other-attempt' }], ['goal', { ...owner, request_id: 'other-goal' }], ['revision', { ...owner, intent_revision: 2 }], ['update', { ...owner, update_id: 'other-update' }], ['role', { ...owner, role: 'router' }], ['purpose', composition]
 ]
 it.each(otherScopes)('excludes records from another %s even when other identity fields match', (_field, other) => {
   const fixture = setup()
@@ -318,8 +319,22 @@ it('enforces the original-record count without silently shortening history', () 
 
 const dependencies: WorkDependency[] = [
   { kind: 'goal', task_id: 'task', request_id: 'upstream-goal', intent_revision: 3 }, { kind: 'work', task_id: 'task', work_id: 'upstream-work', result_revision: 5 },
-  { kind: 'artifact', task_id: 'task', artifact_id: 'artifact', artifact_revision: 7 }, { kind: 'resource', task_id: 'task', resource_id: 'immutable-resource' }
+  { kind: 'artifact', task_id: 'task', artifact_id: 'artifact', artifact_revision: 7 }, { kind: 'resource', task_id: 'task', resource_id: 'immutable-resource' },
+  { kind: 'chapter', task_id: 'task', view_id: 'view', region_id: 'chapter', revision: 2 }
 ]
+it('restores only the selected update history and exact chapter navigation grants', () => {
+  const selected: ExecutionScope = { ...owner, update_id: 'update' }, fixture = setup(selected)
+  fixture.record('worker.input', { text: 'This chapter update' })
+  fixture.record('model.response', response('Other update'), { ...selected, update_id: 'other-update' })
+  fixture.record('model.response', response('Ordinary goal response'), owner)
+  const messages = fixture.context.load(system)
+  expect(messages.map(message => message.content)).toEqual(['Worker rules', JSON.stringify({ request: 'This chapter update' })])
+  expect(messageEvidence(messages[1]!)?.owner).toEqual(selected)
+  grants(fixture, dependencies)
+  expect(fixture.context.navigation(dependencies)).toEqual(dependencies)
+  fixture.db.prepare("UPDATE runner_attempts SET payload_json=json_remove(payload_json,'$.update_id') WHERE attempt_id='attempt'").run()
+  expect(() => fixture.context.navigation(dependencies)).toThrow(/outside the granted input set/)
+})
 it('returns copied exact granted references without loading dependency bodies or sibling history', () => {
   const fixture = setup(); grants(fixture, dependencies)
   fixture.record('model.response', response('PRIVATE DEPENDENCY HISTORY'), { ...owner, work_id: 'upstream-work', attempt_id: 'upstream-attempt' })

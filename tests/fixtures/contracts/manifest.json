@@ -123,5 +123,45 @@
     "file": "invalid-10.json",
     "definition": "ipc_request",
     "valid": false
+  },
+  {
+    "file": "16-chapter-manifest.json",
+    "definition": "runner_chapter_manifest",
+    "valid": true
+  },
+  {
+    "file": "17-chapter-update.json",
+    "definition": "runner_chapter_update",
+    "valid": true
+  },
+  {
+    "file": "18-chapter-proposal.json",
+    "definition": "runner_chapter_proposal",
+    "valid": true
+  },
+  {
+    "file": "19-chapter-inheritance.json",
+    "definition": "runner_chapter_inheritance",
+    "valid": true
+  },
+  {
+    "file": "20-chapter-ipc.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "invalid-11.json",
+    "definition": "runner_chapter_update",
+    "valid": false
+  },
+  {
+    "file": "invalid-12.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "invalid-13.json",
+    "definition": "ipc_request",
+    "valid": false
   }
 ]

@@ -11,6 +11,7 @@ import { RestoreJournal } from '../../src/runtime/restore-journal'
 import { hasV2Writes, openBusinessDatabase, prepareBusinessDatabase, purgeRunnerTask, readBusinessSchema, upgradeCandidate } from '../../src/runtime/schema-upgrade'
 import { RuntimeStore } from '../../src/runtime/store'
 import { validateRunnerContract } from '../../src/shared/runner-validation'
+import { chapterManifest, chapterUpdate as makeChapterUpdate } from '../helpers/chapters'
 
 const roots: string[] = [], connections: Database.Database[] = [], journals: RestoreJournal[] = [], managers: RecoveryManager[] = []
 const runtimes: RuntimeStore[] = []
@@ -63,6 +64,7 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
   const budget = randomUUID(), reservation = randomUUID(), work = randomUUID(), attempt = randomUUID()
   const artifact = randomUUID(), candidate = randomUUID(), resource = randomUUID(), read = randomUUID()
   const batch = randomUUID(), operation = randomUUID(), action = randomUUID(), now = new Date().toISOString()
+  const chapterUpdate = randomUUID(), chapterProposal = randomUUID(), chapterOperation = randomUUID(), view = randomUUID()
   const insert = (sql: string, ...values: (string | number | null)[]) => db.prepare(sql).run(...values)
   const goal = validateRunnerContract('runner_goal_revision', { task_id: task, request_id: request, intent_revision: 1, input_event_id: input, state: 'active', requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: false }] })
   const runner = validateRunnerContract('runner_run', { task_id: task, request_id: request, intent_revision: 1, run_id: run, runtime_epoch: 'fixture', state: 'completed', commit_valid: false, budget_id: budget, purpose: 'production' })
@@ -101,8 +103,21 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
     insert("INSERT INTO runner_publications VALUES (?,?,?,NULL,'registered','{}',NULL)", operation, task, batch)
     insert("INSERT INTO runner_surface_history VALUES (?,?,?,1,?,'{}')", randomUUID(), task, randomUUID(), action)
     insert("INSERT INTO runner_manifests VALUES (?,?,1,?,'{}')", randomUUID(), task, operation)
-    insert("INSERT INTO runner_view_mappings VALUES (?,?,1,?,?,1,?,?,'{}')", task, artifact, batch, randomUUID(), resource, resource)
+    const entry = { task_id: task, request_id: request, intent_revision: 1, artifact_id: artifact, artifact_revision: 1, section_id: 'section', source_bundle_resource_id: resource, published_bundle_resource_id: resource, view_id: view, view_revision: 1, state_revision: 1, surface_history_id: 'history' }
+    insert('INSERT INTO runner_view_mappings VALUES (?,?,1,?,?,1,?,?,?)', task, artifact, batch, view, resource, resource, JSON.stringify({ ...entry, batch_id: batch }))
     insert("INSERT INTO runner_deliveries VALUES (?,?,?,'final_answer',?,'{}')", randomUUID(), task, request, record)
+    const manifest = { ...chapterManifest(), task_id: task, request_id: request, view_id: view, bundle_resource_id: resource }
+    const update = { ...makeChapterUpdate(chapterUpdate, ['a'], manifest), task_id: task, input_event_id: randomUUID(), record_id: record, request_id: request, view_id: view, dependencies: [], state: 'succeeded' as const }
+    insert("INSERT INTO runner_chapter_manifests VALUES (?,?,1,1,?,?,?)", task, view, resource, JSON.stringify(manifest), now)
+    insert('INSERT INTO runner_chapter_heads VALUES (?,?,1)', task, view)
+    insert("INSERT INTO runner_chapter_updates VALUES (?,?,?,?,1,?,'succeeded',?,?,?)", task, chapterUpdate, update.input_event_id, request, view, JSON.stringify(update), JSON.stringify(update), now)
+    insert("INSERT INTO runner_chapter_intents VALUES (?,?,'chapter',1,?)", task, view, chapterUpdate)
+    insert("INSERT INTO runner_chapter_proposals VALUES (?,?,?,?,'{}')", task, chapterProposal, chapterUpdate, resource)
+    insert("INSERT INTO runner_chapter_inheritance VALUES (?,?,'chapter','{}')", task, chapterUpdate)
+    insert("INSERT INTO runner_chapter_publications VALUES (?,?,?,NULL,'published','{}','{}')", task, chapterOperation, chapterUpdate)
+    insert("INSERT INTO runner_chapter_resources VALUES (?,'manifest',?,?)", task, view, resource)
+    insert("INSERT INTO runner_chapter_publication_evidence VALUES (?,?,1,'published','{}',?)", task, chapterOperation, now)
+    insert('INSERT INTO runner_chapter_assemblies VALUES (?,?,1,?,?,?)', task, artifact, chapterUpdate, chapterOperation, JSON.stringify({ entry: { ...entry, chapter_update_id: chapterUpdate, chapter_operation_id: chapterOperation } }))
   })()
   return { read }
 }
@@ -113,11 +128,38 @@ it('creates complete v2 databases atomically and reopens without changing identi
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name='one_unfinished_run'").get()).toBeUndefined()
   expect(db.prepare('SELECT * FROM runner_goal_heads').all()).toEqual([])
   expect(db.prepare('SELECT * FROM runner_artifacts').all()).toEqual([])
+  expect(db.prepare('SELECT * FROM runner_chapter_assemblies').all()).toEqual([])
   expect(hasV2Writes(db)).toBe(false)
   const file = journal.selected(); db.close()
   const reopened = prepareBusinessDatabase(root, journal); connections.push(reopened)
   expect(readBusinessSchema(reopened)).toBe(2); expect(journal.selected()).toBe(file)
   expect(control(root).operations).toEqual([])
+})
+it.each(['prepare', 'open', 'candidate'] as const)('installs chapter metadata on an existing v2 database through %s without attributing old runs', path => {
+  const { root, journal } = profile(), prior = legacy(root, journal.selected())
+  prior.db.exec(runnerSql)
+  prior.db.exec('UPDATE schema_version SET version=2; CREATE TABLE business_upgrade_state(id INTEGER PRIMARY KEY,previous_schema INTEGER,v2_writes INTEGER); INSERT INTO business_upgrade_state VALUES (1,1,0)')
+  const history = prior.db.prepare('SELECT * FROM records').all(), selected = journal.selected()
+  let db = prior.db
+  if (path === 'candidate') upgradeCandidate(db)
+  else {
+    db.close()
+    db = path === 'open' ? openBusinessDatabase(root, selected) : prepareBusinessDatabase(root, journal)
+    connections.push(db)
+  }
+  expect(journal.selected()).toBe(selected)
+  expect(hasV2Writes(db)).toBe(false)
+  expect(db.prepare('SELECT id,chapter_update_id FROM runs').all()).toEqual([{ id: prior.run, chapter_update_id: null }])
+  expect(db.prepare('SELECT * FROM records').all()).toEqual(history)
+  expect(db.prepare('SELECT * FROM runner_chapter_updates').all()).toEqual([])
+  expect(db.prepare('SELECT * FROM runner_chapter_publication_evidence').all()).toEqual([])
+  expect(db.prepare('SELECT * FROM runner_chapter_assemblies').all()).toEqual([])
+  expect((db.prepare("SELECT sql FROM sqlite_master WHERE name='one_active_request_run'").get() as { sql: string }).sql).toContain('chapter_update_id')
+  upgradeCandidate(db)
+  expect(hasV2Writes(db)).toBe(false)
+  db.prepare("INSERT INTO runner_chapter_updates VALUES (?,?,?,?,1,'view','queued','{}','{}','time')").run(prior.task, randomUUID(), randomUUID(), prior.request)
+  expect(hasV2Writes(db)).toBe(true)
+  expect(db.pragma('foreign_key_check')).toEqual([])
 })
 it('upgrades only registered copies and preserves original legacy rows and file bytes', () => {
   const { root, journal } = profile(), prior = legacy(root, journal.selected()); prior.db.close()
@@ -263,7 +305,7 @@ it('migrates v1 history through RuntimeStore once without inventing runner attri
   const root = runtimeRoot(), prior = legacy(root, 'pliuna.sqlite')
   const original = {
     requests: prior.db.prepare('SELECT * FROM requests').all(),
-    runs: prior.db.prepare('SELECT * FROM runs').all(),
+    runs: prior.db.prepare('SELECT *,NULL AS chapter_update_id FROM runs').all(),
     records: prior.db.prepare('SELECT * FROM records').all()
   }
   prior.db.close()

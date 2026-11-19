@@ -1,0 +1,13 @@
+{
+  "type": "chapter.update",
+  "task_id": "task",
+  "input_event_id": "input",
+  "update_id": "update",
+  "source_request_id": 1,
+  "view_id": "view",
+  "view_revision": 1,
+  "state_revision": 1,
+  "region_ids": ["a"],
+  "text": "Revise",
+  "model_config_id": "model"
+}

@@ -19,7 +19,7 @@ export function Materials({taskId,active,onDirty}:{taskId:string;active:boolean;
   finally{setBusy(false)}
  }
  async function read(id:string,offset=0){setBusy(true);setError('');try{setDetail(await hostRequest({type:'material.read',task_id:taskId,resource_id:id,offset}))}catch(e){setError(String(e));setDetail(null)}finally{setBusy(false)}}
- return <section className="inspector task-reading materials-page" aria-label="材料导入"><header className="task-page-heading"><h2>任务资源</h2><p>原始材料、派生结果与导入状态</p></header><p className="muted">导入只保存材料。发送请求后，Agent 才按需读取。</p>
+ return <section className="inspector task-reading materials-page" aria-label="材料导入"><header className="task-page-heading"><h2>任务资源</h2><p>原始材料、派生结果与导入状态</p></header><p className="muted">发送请求默认使用本任务已导入及正在导入的材料。可在输入框旁选择本次材料。</p>
   <details className="record-help"><summary>导入范围与预览说明</summary><p>导入只保存，不启动 Agent、不解析、不执行文件、不自动外发。已导入不等于已解析或已发送。每批最多 50 项，文件上限 256 MiB，粘贴文本上限 256 KiB（UTF-8 字节）；不扫描文件夹、不解压。其他格式可保存，未支持预览时只显示元信息。</p></details>
   <div className="inline-actions material-add-actions"><button className="primary" disabled={busy||textPending||unknown||!active} onClick={()=>void start('material.pick')}>选择文件导入{retry?'（仅重试此项）':''}</button><button aria-expanded={addingText} onClick={()=>setAddingText(v=>!v)}>粘贴文本</button></div>
   <div className="material-text-entry" hidden={!addingText}><label>材料名称<input aria-label="材料名称" disabled={busy||textPending} value={name} maxLength={200} onChange={e=>setName(e.target.value)}/></label>

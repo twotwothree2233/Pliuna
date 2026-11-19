@@ -20,10 +20,10 @@ function stable(value: unknown, fallback: string): string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$/.test(value) && Buffer.byteLength(value) <= RUNNER_LIMITS.index.id_bytes ? value : fallback
 }
 function sameOwner(left: ExecutionScope, right: ExecutionScope): boolean {
-  return left.purpose === 'production' && right.purpose === 'production' && left.task_id === right.task_id && left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.run_id === right.run_id && left.work_id === right.work_id && left.attempt_id === right.attempt_id && left.role === right.role
+  return left.purpose === 'production' && right.purpose === 'production' && left.task_id === right.task_id && left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.update_id === right.update_id && left.run_id === right.run_id && left.work_id === right.work_id && left.attempt_id === right.attempt_id && left.role === right.role
 }
 function owner(work: ProductionWork, attempt: ExecutionAttempt): ExecutionScope {
-  return { purpose: 'production', task_id: work.task_id, request_id: work.request_id, intent_revision: work.intent_revision, run_id: work.run_id, work_id: work.work_id, attempt_id: attempt.attempt_id, role: work.role }
+  return { purpose: 'production', task_id: work.task_id, request_id: work.request_id, intent_revision: work.intent_revision, ...(work.update_id ? { update_id: work.update_id } : {}), run_id: work.run_id, work_id: work.work_id, attempt_id: attempt.attempt_id, role: work.role }
 }
 function outcome(execution: string | null, delivery: string | null): ProgressCallFact['outcome'] | null {
   if (execution === 'success') return delivery === 'failed' ? 'failure' : 'success'
@@ -66,7 +66,7 @@ export class RunnerHostProgress {
           if (!stored) return null
           attempt = validateRunnerContract('runner_execution_attempt', JSON.parse(stored.payload_json)); attempts.set(source.attempt_id, attempt)
         }
-        if (attempt.runtime_epoch !== this.epoch || attempt.task_id !== work.task_id || attempt.run_id !== work.run_id || attempt.work_id !== work.work_id || attempt.purpose !== 'production' || attempt.request_id !== work.request_id || attempt.intent_revision !== work.intent_revision || !sameOwner(source, owner(work, attempt)) || !sameDependencies(attempt.input_versions, work.dependencies)) return null
+        if (attempt.runtime_epoch !== this.epoch || attempt.task_id !== work.task_id || attempt.run_id !== work.run_id || attempt.work_id !== work.work_id || attempt.purpose !== 'production' || attempt.request_id !== work.request_id || attempt.intent_revision !== work.intent_revision || attempt.update_id !== work.update_id || !sameOwner(source, owner(work, attempt)) || !sameDependencies(attempt.input_versions, work.dependencies)) return null
         let plan = row.plan_revision
         if (plan === null) {
           if (!bindings.has(attempt.attempt_id)) {

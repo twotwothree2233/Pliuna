@@ -15,6 +15,7 @@ import { RunnerGoals } from './RunnerGoals'
 import { RunnerWorkingCopy } from './RunnerWorkingCopy'
 import { TaskReply } from './TaskReply'
 import { runnerSummary } from './runner-projection'
+import type { ChapterSourceRequest } from './ChapterEditor'
 
 type Tool = 'details' | 'context' | 'pending' | 'stop' | null
 export function runStatus(run?: Run) {
@@ -25,11 +26,12 @@ export function runStatus(run?: Run) {
 }
 const approvalTitle = (approval: Snapshot['approvals'][number]) => ({ 'task_data.replace': '更新任务数据', 'task_data.remove': '移除任务数据', 'surface.update': '更新任务内容', 'plugin.invoke': '调用插件' } as Record<string, string>)[(approval.request as { type?: string }).type ?? ''] ?? '确认本次修改'
 
-export function AgentPanel({ snapshot, run, modelId, models, busy, text, setText, composer, onDirty, onQueueChange, refresh, act, settings, onRecords, surfaceChecks }: {
+export function AgentPanel({ snapshot, run, modelId, models, busy, text, setText, composer, onDirty, onQueueChange, refresh, act, settings, onRecords, onChapterScope, surfaceChecks }: {
   snapshot: Snapshot | null; run?: Run; modelId: string; models: ModelState; busy: boolean
   text: string; setText(value: string): void; composer: RefObject<HTMLTextAreaElement | null>
   onDirty(id: string, dirty: boolean): void; onQueueChange(state: RequestQueueState): void; refresh(): Promise<void>; act(request: HostRequest): Promise<void>; settings(): void; onRecords(): void
   surfaceChecks: { id: string; content: ReactNode }[]
+  onChapterScope(request: ChapterSourceRequest): boolean
 }) {
   const [tool, setTool] = useState<Tool>(null), [menu, setMenu] = useState(false), [detailTab, setDetailTab] = useState<'process' | 'usage' | 'raw'>('process')
   const [queueOpen, setQueueOpen] = useState(false), [queue, setQueue] = useState<RequestQueueState>({ taskId: snapshot?.task.id ?? '', loaded: false, pending: 0, confirmation: 0, unknown: false }), [selected, setSelected] = useState('')
@@ -43,7 +45,7 @@ export function AgentPanel({ snapshot, run, modelId, models, busy, text, setText
   const pending = snapshot?.approvals.filter(p => p.decision === 'pending' && p.validity === 'valid') ?? []
   const items = [...pending.map(p => ({ id: p.id, title: approvalTitle(p), content: <ApprovalCard key={`${p.id}:${p.handling}`} taskId={snapshot!.task.id} approval={p} busy={busy} decide={decision => { setTool(null); void act({ type: 'approval.decide', task_id: snapshot!.task.id, approval_id: p.id, decision }) }} /> })), ...surfaceChecks.map(check => ({ ...check, title: '确认替换任务内容' }))]
   const active = items.find(item => item.id === selected) ?? items[0]
-  const status = !snapshot ? '未选择任务' : queue.unknown ? '发送结果待核对' : queue.confirmation ? '材料需要确认' : managed ? runnerSummary(snapshot.runner!) : pending.length ? '等待你批准' : surfaceChecks.length ? '等待确认替换' : !run && queue.pending ? '等待材料与排队' : runStatus(current)
+  const status = !snapshot ? '未选择任务' : queue.unknown ? '发送结果待核对' : queue.confirmation ? '需要你确认' : managed ? runnerSummary(snapshot.runner!) : pending.length ? '等待你批准' : surfaceChecks.length ? '等待确认替换' : !run && queue.pending ? '等待材料与排队' : runStatus(current)
   const phase = queue.unknown || queue.confirmation || items.length || current?.state === 'failed' || current?.state === 'interrupted' ? 'attention' : run ? 'running' : current?.state === 'completed' ? 'done' : 'idle'
   useEffect(() => { if (tool === 'pending' && !active) setTool(null) }, [tool, active?.id])
   useEffect(() => {
@@ -70,14 +72,14 @@ export function AgentPanel({ snapshot, run, modelId, models, busy, text, setText
       {snapshot ? <>
         {managed ? <RunnerGoals snapshot={snapshot} busy={busy} refresh={refresh} onDirty={onDirty} onApproval={id => { setSelected(id); open('pending') }} /> : current ? <AgentActivity snapshot={snapshot} run={current} /> : <section className="agent-ready"><h2>准备就绪</h2><p>在下方输入指令，结果保存在任务区。</p></section>}
         {active && <section className="agent-pending-summary" aria-label="当前待处理"><header><span>需要你处理</span><small>{items.length} 项</small></header><b>{active.title}</b><button disabled={busy} onClick={() => { setSelected(active.id); open('pending') }}>查看并处理 →</button></section>}
-        {(queue.pending > 0 || queue.unknown) && <button className="agent-queue-row" aria-label="请求队列" onClick={() => setQueueOpen(true)}><span>{queue.unknown ? '核对原请求' : queue.confirmation ? '材料需要确认' : '待执行请求'}</span><span>{queue.unknown ? '发送已暂停' : `${queue.pending} 项`} ›</span></button>}
+        {(queue.pending > 0 || queue.unknown) && <button className="agent-queue-row" aria-label="请求队列" onClick={() => setQueueOpen(true)}><span>{queue.unknown ? '核对原请求' : queue.confirmation ? '请求需要确认' : '待执行请求'}</span><span>{queue.unknown ? '发送已暂停' : `${queue.pending} 项`} ›</span></button>}
         <RunnerWorkingCopy runner={snapshot.runner} />
         <TaskReply key={`${snapshot.task.id}:${snapshot.runtime_epoch}`} snapshot={snapshot} onRecords={onRecords} />
         <dl className="agent-state-facts"><div><dt>内容单元</dt><dd>{snapshot.view_page?.total ?? snapshot.views.length}</dd></div><div><dt>任务数据</dt><dd>{snapshot.task_data.total} 项</dd></div></dl>
         {modelId === 'fixture' && <p className="agent-note">开发夹具 · 本机固定示例，不联网。</p>}{!modelId && <p className="agent-note">选择主模型后即可发送。<button onClick={settings}>配置主模型 →</button></p>}
       </> : <section className="agent-ready"><h2>先选择任务</h2><p>选择或新建任务后查看执行状态。</p></section>}
     </div>
-    {snapshot && <><footer className="agent-state-footer"><button className="agent-text-link" onClick={onRecords}>查看执行记录 →</button></footer><RequestComposer taskId={snapshot.task.id} active={snapshot.task.state === 'active'} text={text} setText={setText} modelId={modelId} models={models} busy={busy} run={Boolean(run)} composer={composer} onDirty={onDirty} refresh={refresh} queueOpen={queueOpen} setQueueOpen={setQueueOpen} onQueueChange={updateQueue} stop={run && !managed ? () => open('stop') : undefined} /></>}
+    {snapshot && <><footer className="agent-state-footer"><button className="agent-text-link" onClick={onRecords}>查看执行记录 →</button></footer><RequestComposer taskId={snapshot.task.id} active={snapshot.task.state === 'active'} text={text} setText={setText} modelId={modelId} models={models} busy={busy} run={Boolean(run)} composer={composer} onDirty={onDirty} refresh={refresh} queueOpen={queueOpen} setQueueOpen={setQueueOpen} onQueueChange={updateQueue} onChapterScope={onChapterScope} stop={run && !managed ? () => open('stop') : undefined} /></>}
     {tool && snapshot && <AgentDialog key={tool} title={titles[tool]} close={() => setTool(null)}>
       {tool === 'pending' && active && <>{items.length > 1 && <nav className="agent-pending-tabs" aria-label="选择待处理事项">{items.map((item, index) => <button key={item.id} aria-pressed={item.id === active.id} onClick={() => setSelected(item.id)}>{index + 1} · {item.title}</button>)}</nav>}<div key={active.id}>{active.content}</div></>}
       {tool === 'context' && <ContextPanel taskId={snapshot.task.id} modelId={modelId} latest={snapshot.records.at(-1)?.id} refresh={refresh} />}

@@ -9,7 +9,11 @@ Object.assign(names, {
   ArtifactIndex: 'runner_artifact_index', ArtifactCandidate: 'runner_artifact_candidate', PresentationPlan: 'runner_presentation_plan',
   CompositionScope: 'runner_composition_scope', CompositionBatch: 'runner_composition_batch', DeliveryRecord: 'runner_delivery_record',
   DeliveryQuery: 'runner_delivery_query', PublicationManifest: 'runner_publication_manifest', PublicationEntry: 'runner_publication_entry',
-  WorkOutputDeclaration: 'runner_work_output_declaration', ContributionInventory: 'runner_contribution_inventory', ContributionInventoryRef: 'runner_contribution_inventory_ref'
+  WorkOutputDeclaration: 'runner_work_output_declaration', ContributionInventory: 'runner_contribution_inventory', ContributionInventoryRef: 'runner_contribution_inventory_ref',
+  ChapterDependency: 'runner_chapter_dependency', ChapterOwnership: 'runner_chapter_ownership', ChapterRegion: 'runner_chapter_region',
+  ChapterManifest: 'runner_chapter_manifest', ChapterIntent: 'runner_chapter_intent', ChapterUpdate: 'runner_chapter_update',
+  ChapterReplacement: 'runner_chapter_replacement', ChapterProposal: 'runner_chapter_proposal', ChapterInheritance: 'runner_chapter_inheritance',
+  ChapterPublication: 'runner_chapter_publication'
 })
 let output = '/* Generated from src/shared/contracts/core.schema.json. Do not edit. */\n'
 for (const [name, definition] of Object.entries(names)) {

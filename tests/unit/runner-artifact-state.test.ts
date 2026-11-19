@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import type { ArtifactCandidate, ExecutionAttempt, GoalRevision, LogicalWork, Outline, WorkDependency } from '../../src/shared/contracts.generated'
 import { RunnerArtifactState, type ArtifactAssignment } from '../../src/runtime/runner/artifact-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
@@ -339,10 +339,34 @@ it.each(['record', 'action', 'resource'] as const)('requires existing same-Task 
   db.prepare("INSERT INTO actions(id,task_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES ('foreign-action','other','invocation','ended','{}','{}',0,'time'),('local-action','task','invocation','ended','{}','{}',0,'time')").run()
   resource(db, 'foreign-resource', 'other'); resource(db, 'local-resource')
   for (const id of ['missing', `foreign-${kind}`]) {
+    expect(() => state.checkProvenance('task', { task_id: 'task', kind, id })).toThrowError(expect.objectContaining({ code: 'RUNNER_PROVENANCE_INVALID' }))
     expect(state.decide({ ...candidate, candidate_id: `candidate-${id}`, provenance_ref: { task_id: 'task', kind, id } }, { state: 'accepted' })).toEqual({ state: 'rejected', code: 'RUNNER_PROVENANCE_INVALID' })
   }
   const id = kind === 'record' ? 'record' : `local-${kind}`
+  expect(() => state.checkProvenance('task', { task_id: 'task', kind, id })).not.toThrow()
+  expect(state.candidate('task', 'valid-provenance')).toBeNull()
+  expect(state.owner('task', 'artifact')?.current_revision).toBe(0)
   expect(state.decide({ ...candidate, candidate_id: 'valid-provenance', provenance_ref: { task_id: 'task', kind, id } }, { state: 'accepted' }).state).toBe('accepted')
+})
+
+it.each(['record', 'action', 'resource'] as const)('rejects a mismatched %s provenance Task before querying objects', kind => {
+  const { db, state } = setup()
+  const prepare = vi.spyOn(db, 'prepare')
+  expect(() => state.checkProvenance('task', { task_id: 'other', kind, id: 'record' })).toThrowError(expect.objectContaining({ code: 'RUNNER_PROVENANCE_INVALID' }))
+  expect(prepare).not.toHaveBeenCalled()
+  prepare.mockRestore()
+})
+
+it('rejects a request ID used as record provenance without replacing its source', () => {
+  const { state, candidate } = setup()
+  const invalid = { ...candidate, provenance_ref: { task_id: 'task', kind: 'record' as const, id: candidate.request_id } }
+  expect(() => state.checkProvenance('task', invalid.provenance_ref)).toThrowError(expect.objectContaining({ code: 'RUNNER_PROVENANCE_INVALID' }))
+  expect(state.decide(invalid, { state: 'accepted' })).toEqual({ state: 'rejected', code: 'RUNNER_PROVENANCE_INVALID' })
+  expect(state.candidate('task', candidate.candidate_id)?.candidate.provenance_ref).toEqual(invalid.provenance_ref)
+  expect(state.artifact('task', 'artifact')).toBeNull()
+  expect(state.owner('task', 'artifact')?.current_revision).toBe(0)
+  expect(state.decide({ ...candidate, candidate_id: 'corrected' }, { state: 'accepted' }).state).toBe('accepted')
+  expect(state.candidate('task', candidate.candidate_id)?.result).toEqual({ state: 'rejected', code: 'RUNNER_PROVENANCE_INVALID' })
 })
 
 it('rolls back candidate, artifact and pointer together when final installation fails', () => {

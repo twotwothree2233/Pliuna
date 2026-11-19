@@ -57,10 +57,10 @@ function setup(options: {
 it('lets a ready request pass an importing request without changing its original bindings', () => {
   const s = setup(), operation = s.materialImport(), a = s.submit({ text: 'wait for my material', import_ids: [operation] })
   const original = s.db.prepare('SELECT input_json,config_selection_json FROM requests WHERE id=?').get(a.request_id)
-  const b = s.submit({ text: 'independent ready goal' })
+  const ready = s.resource('ready', 3), b = s.submit({ text: 'independent ready goal', resource_ids: [ready] })
   expect(a.state).toBe('queued'); expect(b.state).toBe('started')
   expect(s.db.prepare('SELECT input_json,config_selection_json FROM requests WHERE id=?').get(a.request_id)).toEqual(original)
-  expect(s.start).toHaveBeenCalledWith('task', 'independent ready goal', 'model', [], b.request_id)
+  expect(s.start).toHaveBeenCalledWith('task', 'independent ready goal', 'model', [{ kind: 'resource', id: ready }], b.request_id)
 })
 
 it('holds large-material verification per request and rechecks single-Run admission after it resolves', async () => {

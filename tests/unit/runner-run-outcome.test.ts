@@ -169,12 +169,20 @@ it('rejects inconsistent ownership, duplicate facts and a current attempt from a
   const invalid = [
     facts([work('worker', 'running', { task_id: 'other-task' })]),
     facts([work('worker', 'running', { request_id: 'other-goal' })]),
+    facts([work('worker', 'running', { update_id: 'other-update' })]),
+    facts([work('worker', 'running')], { attempts: [attempt('worker', 'running', { update_id: 'other-update' })] }),
     facts([work('worker', 'running')], { attempts: [attempt('worker', 'running', { runtime_epoch: 'old-epoch' })] }),
     facts([work('worker'), work('worker')]),
     facts([work('worker')], { attempts: [attempt('worker'), attempt('worker')] }),
     facts([work('worker')], { attempts: [attempt('other', 'running', { attempt_id: 'attempt-worker' })] })
   ]
   for (const input of invalid) expect(() => aggregateRunOutcome(input)).toThrow('inconsistent ownership')
+})
+
+it('keeps chapter update identity consistent across run, work and attempt outcomes', () => {
+  const input = facts([work('worker', 'succeeded', { update_id: 'update' })], { run: run({ update_id: 'update' }), attempts: [attempt('worker', 'succeeded', { update_id: 'update' })] })
+  expect(aggregateRunOutcome(input)).toMatchObject({ phase: 'closing', outcome: 'completed' })
+  expect(() => aggregateRunOutcome({ ...input, attempts: [attempt('worker')] })).toThrow('inconsistent ownership')
 })
 
 it('is deterministic across fact order and does not mutate frozen owner input', () => {

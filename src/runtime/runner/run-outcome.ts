@@ -59,7 +59,7 @@ const fail = (): never => { throw new ContractError('RUNNER_OUTCOME_FACTS_INVALI
 const sorted = (ids: string[]): string[] => ids.sort()
 function sameSource(run: RunnerRun, source: LogicalWork | ExecutionAttempt): boolean {
   return source.task_id === run.task_id && source.purpose === run.purpose &&
-    (run.purpose === 'production' ? source.purpose === 'production' && source.request_id === run.request_id && source.intent_revision === run.intent_revision : source.purpose === 'composition' && source.batch_id === run.batch_id && source.composition_version === run.composition_version && source.trigger_request_id === run.trigger_request_id)
+    (run.purpose === 'production' ? source.purpose === 'production' && source.request_id === run.request_id && source.intent_revision === run.intent_revision && source.update_id === run.update_id : source.purpose === 'composition' && source.batch_id === run.batch_id && source.composition_version === run.composition_version && source.trigger_request_id === run.trigger_request_id)
 }
 function waitKey(wait: RunWaitReason): string { return JSON.stringify([wait.work_id, wait.attempt_id ?? null, wait.operation_id ?? null, wait.reason]) }
 

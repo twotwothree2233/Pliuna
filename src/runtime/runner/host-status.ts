@@ -213,12 +213,14 @@ export class RunnerHostStatus {
   }
 
   private published(task: string, request?: string): PublicationEntry[] {
-    const rows = this.db.prepare("SELECT m.payload_json FROM runner_view_mappings m JOIN views v ON v.id=m.view_id AND v.revision=m.view_revision AND v.bundle_resource_id=m.published_bundle_resource_id JOIN surfaces s ON s.id=v.surface_id AND s.task_id=m.task_id WHERE m.task_id=? AND (? IS NULL OR json_extract(m.payload_json,'$.request_id')=?) AND m.rowid=(SELECT MAX(n.rowid) FROM runner_view_mappings n WHERE n.task_id=m.task_id AND n.artifact_id=m.artifact_id) AND EXISTS(SELECT 1 FROM json_each(s.layout_json,'$.slots') sl,json_each(sl.value,'$.groups') g,json_each(g.value,'$.views') item WHERE item.value=m.view_id) ORDER BY m.rowid").all(task, request ?? null, request ?? null) as Payload[]
-    return rows.map(row => validateRunnerContract('runner_publication_entry', JSON.parse(row.payload_json)))
+    return this.host.publications.mappings(task).filter(entry => (!request || entry.request_id === request) && !!this.db.prepare("SELECT 1 FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? AND v.id=? AND v.revision=? AND v.bundle_resource_id=? AND EXISTS(SELECT 1 FROM json_each(s.layout_json,'$.slots') sl,json_each(sl.value,'$.groups') g,json_each(g.value,'$.views') item WHERE item.value=v.id)").get(task, entry.view_id, entry.view_revision, entry.published_bundle_resource_id))
   }
   private accepted(goal: GoalRevision): ArtifactIndex[] {
-    const rows = this.db.prepare("SELECT a.payload_json FROM runner_artifacts a JOIN runner_artifact_owners o ON o.task_id=a.task_id AND o.artifact_id=a.artifact_id AND o.current_revision=a.artifact_revision JOIN runner_work w ON w.work_id=o.work_id AND w.plan_revision=o.plan_revision AND w.task_id=o.task_id WHERE a.task_id=? AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=? AND json_extract(a.payload_json,'$.work_id')=w.work_id AND json_extract(a.payload_json,'$.run_id')=w.run_id AND json_extract(a.payload_json,'$.attempt_id')=json_extract(w.payload_json,'$.current_attempt_id') AND w.state IN ('running','waiting','succeeded')").all(goal.task_id, goal.request_id, goal.intent_revision) as Payload[]
-    return rows.map(row => validateRunnerContract('runner_artifact_index', JSON.parse(row.payload_json)))
+    const rows = this.db.prepare("SELECT a.payload_json FROM runner_artifacts a JOIN runner_artifact_owners o ON o.task_id=a.task_id AND o.artifact_id=a.artifact_id AND o.current_revision=a.artifact_revision WHERE a.task_id=? AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=?").all(goal.task_id, goal.request_id, goal.intent_revision) as Payload[]
+    return rows.map(row => validateRunnerContract('runner_artifact_index', JSON.parse(row.payload_json))).filter(index => {
+      try { this.composition.checkArtifact(goal.task_id, index.artifact_id, index.artifact_revision); return true }
+      catch (error) { if (!(error instanceof ContractError)) throw error; return false }
+    })
   }
 
   private goal(goal: GoalRevision): RunnerGoalProjection {
@@ -228,7 +230,7 @@ export class RunnerHostStatus {
     const covered = new Set(inventory?.requirement_ids ?? []), unresolved = new Set(inventory?.unresolved.map(item => item.requirement_id) ?? [])
     const missingAnswer = !reply && goal.requirements.some(requirement => requirement.required && requirement.kind === 'answer')
     for (const requirement of goal.requirements) if (requirement.required && (!covered.has(requirement.requirement_id) || requirement.kind === 'answer' && !reply)) unresolved.add(requirement.requirement_id)
-    const fragments = inventory?.required_works.flatMap(output => output.artifacts) ?? []
+    const fragments = inventory ? this.composition.currentArtifacts(inventory) : []
     const delivered = !!inventory && !unresolved.size && fragments.every(fragment => published.some(entry => sameGoal(goal, entry) && entry.artifact_id === fragment.artifact_id && entry.artifact_revision === fragment.artifact_revision)) && (!goal.requirements.some(requirement => requirement.required && requirement.kind === 'answer') || !!reply)
     const stale = published.some(entry => !sameGoal(goal, entry) || !accepted.some(index => index.artifact_id === entry.artifact_id && index.artifact_revision === entry.artifact_revision))
     const delivery = delivered ? 'published' : missingAnswer && inventory ? 'incomplete' : stale ? 'pending_update' : accepted.length ? 'accepted' : reply ? 'incomplete' : run && (failedRuns.has(run.state) || run.state === 'completed') || goal.state === 'withdrawn' ? 'incomplete' : 'pending'
@@ -252,13 +254,16 @@ export class RunnerHostStatus {
         if (answers.length && !this.answer(goal)) for (const requirement of answers) unresolved.add(requirementKey(goal.request_id, goal.intent_revision, requirement.requirement_id))
       } catch (error) { if (!(error instanceof ContractError)) throw error }
     }
+    const pendingChapters = new Set(scope.targets.flatMap(target => this.composition.pendingChapterUpdates(task, target.request_id, target.intent_revision)))
     const pending = published.filter(entry => {
       const target = scope.targets.find(target => target.request_id === entry.request_id)
       if (!target) return false
-      const goal = this.work.goal(entry.request_id), owner = this.artifacts.owner(task, entry.artifact_id), work = owner ? this.work.work(owner.work_id) : null
-      return !sameGoal(goal, entry) || owner?.current_revision !== entry.artifact_revision || !work || !['running', 'waiting', 'succeeded'].includes(work.state)
+      const goal = this.work.goal(entry.request_id)
+      if (!sameGoal(goal, entry)) return true
+      try { this.composition.checkArtifact(task, entry.artifact_id, entry.artifact_revision); return false }
+      catch (error) { if (!(error instanceof ContractError)) throw error; return true }
     }).length
     const running = !!this.db.prepare("SELECT 1 FROM runner_runs r JOIN runs c ON c.id=r.run_id WHERE r.task_id=? AND c.state IN ('running','waiting') LIMIT 1").get(task)
-    return { composition_version: scope.composition_version, state: complete.state === 'complete' && !unresolved.size ? 'complete' : published.length || !running ? 'partial' : 'working', required_goal_count: scope.targets.filter(target => target.required).length, unresolved_count: unresolved.size, pending_update_count: pending, published_count: published.length }
+    return { composition_version: scope.composition_version, state: complete.state === 'complete' && !unresolved.size ? 'complete' : published.length || !running ? 'partial' : 'working', required_goal_count: scope.targets.filter(target => target.required).length, unresolved_count: unresolved.size, pending_update_count: pending + pendingChapters.size, published_count: published.length }
   }
 }

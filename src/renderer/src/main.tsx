@@ -20,11 +20,13 @@ import { ApplicationSettings, type SettingsPage } from './ApplicationSettings'
 import { readTextSize, applyTextSize, managedTextStyles, scaleManagedInlineText } from './text-size'
 import { managedThemeStyles, themeManagedInlineStyles } from './managed-theme'
 import { desktopPlatform, shortcutLabel } from './desktop-platform'
+import { ChapterEditor, type ChapterSourceRequest } from './ChapterEditor'
+import { ChapterPresentation, captureChapterPosition, restoreChapterPosition, type ChapterPosition } from './chapter-presentation'
 import './style.css'
 
 const request = hostRequest
 interface ViewEditor { taskId: string; hold(): () => void; save(token?: string): Promise<void> }
-function ManagedView({ view, taskId, refresh, onDirty, onSubmission, register }: { view: View; taskId: string; refresh: () => Promise<void>; onDirty: (id: string, dirty: boolean) => void; onSubmission: (id: string, pending: boolean) => void; register: (id: string, editor: ViewEditor | null) => void }) {
+function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmission, register, onChapterResolve, sourceRequest, onSourceResolved }: { view: View; taskId: string; modelId: string; enabled: boolean; refresh: () => Promise<void>; onDirty: (id: string, dirty: boolean) => void; onSubmission: (id: string, pending: boolean) => void; register: (id: string, editor: ViewEditor | null) => void; onChapterResolve: () => void; sourceRequest?: ChapterSourceRequest; onSourceResolved(): void }) {
   const root = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement | null>(null)
   const pending = useRef(new Map<string, unknown>())
@@ -41,6 +43,8 @@ function ManagedView({ view, taskId, refresh, onDirty, onSubmission, register }:
   const conflict = useRef(false)
   const held = useRef(false)
   const bindings = useRef<ReturnType<typeof bindManagedBehaviors> | null>(null)
+  const chapters = useRef<ChapterPresentation | null>(null)
+  const position = useRef<ChapterPosition | null>(null)
   const checked = view.presentation
   async function save(token?: string): Promise<void> {
     clearTimeout(timer.current)
@@ -105,6 +109,7 @@ function ManagedView({ view, taskId, refresh, onDirty, onSubmission, register }:
       const el = host.querySelector<HTMLElement>('#v-' + view.id + '-' + b.element_id)!
       if (b.type === 'submit') el.onclick = async () => {
         if (submitting.current || held.current || answerUnknown.current) return
+        if (chapters.current?.blocksForm(b.form_id)) { setStatus('此表单包含正在更新的章节，请等待更新完成'); return }
         submitting.current = true; onSubmission(view.id, true)
         host.querySelectorAll('button').forEach(button => { button.disabled = true })
         try {
@@ -112,16 +117,38 @@ function ManagedView({ view, taskId, refresh, onDirty, onSubmission, register }:
           await request({ type: 'answer.submit', task_id: taskId, view_id: view.id, view_revision: view.revision, expected_state_revision: revision.current, form_id: b.form_id })
           setStatus('提交成功 · 已保存不可变答案'); await refresh()
         } catch (e) { if (/UNKNOWN_RESULT|CONNECTION_LOST|OFFLINE/.test(String(e))) answerUnknown.current = true; setStatus(String(e)) }
-        finally { submitting.current = false; if (!answerUnknown.current) onSubmission(view.id, false); host.querySelectorAll('button').forEach(button => { button.disabled = answerUnknown.current }) }
+        finally { submitting.current = false; if (!answerUnknown.current) onSubmission(view.id, false); host.querySelectorAll('button').forEach(button => { button.disabled = answerUnknown.current }); chapters.current?.applySubmissionGuards() }
       }
     }
+    chapters.current = new ChapterPresentation({
+      host, bundle: view.bundle, save, canPrepare: () => !submitting.current && !held.current && !answerUnknown.current,
+      cancel: async update => { await request({ type: 'chapter.cancel', task_id: taskId, update_id: update.update_id }); await refresh() },
+      query: async update => { await request({ type: 'chapter.status', task_id: taskId, update_id: update.update_id }); await refresh() },
+      resolve: onChapterResolve
+    })
+    let heldFocus: ChapterPosition['focus']
+    const trackFocus = (event: FocusEvent) => {
+      if (held.current && !event.composedPath().includes(host) && event.target !== document.body) heldFocus = undefined
+    }
+    document.addEventListener('focusin', trackFocus, true)
+    if (position.current) { restoreChapterPosition(position.current, host, view.chapter_manifest); position.current = null }
+    chapters.current.sync(view.chapter_manifest, view.chapter_updates)
     register(view.id, { taskId, save, hold: () => {
       if (submitting.current || held.current || answerUnknown.current) throw new Error('答案提交或替换未确认，请先核对原结果；不会创建恢复点')
       clearTimeout(timer.current)
+      heldFocus = captureChapterPosition(host, view.chapter_manifest).focus
       held.current = true; host.inert = true
-      return () => { held.current = false; host.inert = false }
+      return () => {
+        held.current = false; host.inert = false
+        if (host.isConnected && heldFocus) restoreChapterPosition({ focus: heldFocus }, host, view.chapter_manifest)
+        heldFocus = undefined
+      }
     } })
     return () => {
+      position.current = captureChapterPosition(host, view.chapter_manifest)
+      if (!position.current.focus && heldFocus) position.current.focus = heldFocus
+      document.removeEventListener('focusin', trackFocus, true)
+      chapters.current?.dispose(); chapters.current = null
       clearTimeout(timer.current); register(view.id, null)
       bindings.current?.dispose(); bindings.current = null
       host.removeEventListener('submit', preventSubmit)
@@ -131,6 +158,7 @@ function ManagedView({ view, taskId, refresh, onDirty, onSubmission, register }:
       host.querySelectorAll<HTMLButtonElement>('button').forEach(el => { el.onclick = null })
     }
   }, [view.id, view.revision, checked.error?.code, resetCounter])
+  useLayoutEffect(() => { chapters.current?.sync(view.chapter_manifest, view.chapter_updates) }, [view.chapter_manifest, view.chapter_updates])
   useEffect(() => {
     if (view.state_revision < revision.current) return
     if (view.state_revision !== revision.current && !saving.current) {
@@ -148,7 +176,7 @@ function ManagedView({ view, taskId, refresh, onDirty, onSubmission, register }:
     if (!remote || remote.revision !== view.revision) { setStatus('内容版本变化，请关闭此任务后重新打开'); return }
     pending.current.clear(); conflict.current = false; revision.current = remote.state_revision
     resetDraft.current = remote; onDirty(view.id, false); setResetCounter(n => n + 1); setStatus('已载入远端保存版本')
-  }}>放弃本地输入并重新加载</button><p>本地未保存值：{JSON.stringify([...pending.current])}</p></div>}<div className="view-boundary"><div ref={root} /></div></article>
+  }}>放弃本地输入并重新加载</button><p>本地未保存值：{JSON.stringify([...pending.current])}</p></div>}<div className="view-boundary"><div ref={root} /></div>{!checked.error && <ChapterEditor taskId={taskId} view={view} modelId={modelId} enabled={enabled} save={save} stateRevision={() => revision.current} refresh={refresh} onDirty={onDirty} sourceRequest={sourceRequest} onSourceResolved={onSourceResolved} />}</article>
 }
 function App() {
   const [tasks, setTasks] = useState<Task[]>([])
@@ -157,6 +185,7 @@ function App() {
   const taskPageLimit = useRef(50)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [taskQueue, setTaskQueue] = useState<RequestQueueState | null>(null)
+  const [chapterScope, setChapterScope] = useState<{ task_id: string; view_id?: string; request: ChapterSourceRequest } | null>(null)
   const [error, setError] = useState('')
   const [text, setText] = useState('')
   const [title, setTitle] = useState('')
@@ -513,6 +542,12 @@ function App() {
   const readyModels = models.models.filter(m => m.roles.includes('main'))
   const taskState = (task: Task) => taskStatus(snapshot?.task.id === task.id ? snapshot.task : task, snapshot, taskQueue)
   const filteredTasks = tasks.filter(t => t.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
+  const currentScope = chapterScope?.task_id === snapshot?.task.id ? chapterScope : null
+  function openChapterScope(source: ChapterSourceRequest): boolean {
+    if (!snapshot || busy || !canLeave()) return false
+    setChapterScope({ task_id: snapshot.task.id, ...(snapshot.views.length === 1 ? { view_id: snapshot.views[0]!.id } : {}), request: source })
+    setTab('surface'); workspace.current?.dismissDrawer(); return true
+  }
   return <WorkspaceLayout ref={workspace} nativeMac={desktopPlatform() === 'darwin' && Boolean(window.pliuna) && window.pliuna.transport !== 'web'}
     header={<><PaneToggle side="left" /><div className="window-title"><b>Pliuna</b><span>{snapshot?.task.title ?? '工作空间'}</span></div><div className="window-tools"><button disabled={!snapshot || busy || exportOpen} onClick={() => setExportOpen(true)}>导出</button></div></>}
     sidebar={<><div className="sidebar-heading"><span>任务</span><div className="sidebar-actions"><button onClick={newTask} disabled={busy} title={`新建任务（${shortcutLabel('N')}）`}>＋ 新建</button><PaneClose side="left" /></div></div><input type="search" aria-label="筛选任务" placeholder="筛选任务" value={filter} onChange={e => setFilter(e.target.value)} /><div className="task-list">{filteredTasks.map((t, i) => <button className={'task-row ' + (t.id === snapshot?.task.id ? 'selected' : '')} key={t.id} aria-current={t.id === snapshot?.task.id ? 'page' : undefined} title={`${t.title} · ${taskState(t)}`} onClick={() => void select(t.id)}><span className="task-number">{String(i + 1).padStart(2, '0')}</span><span className="task-name">{t.title}</span><span className={'task-dot ' + t.state} aria-label={taskState(t)} /></button>)}{taskCursor && <button onClick={() => { taskPageLimit.current += 50; void refresh().catch(e => setError(String(e))) }}>加载更多任务</button>}{!filteredTasks.length && <p className="sidebar-empty">{tasks.length ? '没有匹配的任务' : '尚无任务'}</p>}</div><div className="sidebar-footer"><button onClick={settings}>设置 <span>{shortcutLabel(',')}</span></button><small>本地保存 · 切换任务不取消执行</small></div></>}
@@ -522,13 +557,14 @@ function App() {
     {surfaceUnknown && <div className="error" role="alert">替换结果尚未确认，目标输入保持暂停。只查询原动作，不重发。<button disabled={busy} onClick={() => void querySurfaceOutcome()}>查询原替换结果并同步</button></div>}
     {error && <div className="error" role="alert">{error}<button onClick={() => void Promise.all([refresh(), reloadModels()]).catch(e => setError(String(e)))}>重新查询状态</button></div>}
     {snapshot ? <><div className="workspace-tabs" role="tablist" aria-label="任务工作区">{([['surface', '内容', snapshot.view_page?.total ?? snapshot.views.length], ['data', '任务数据', snapshot.task_data.total], ['resources', '资源', null], ['answers', '作答记录', snapshot.answer_total], ['execution', '执行记录', snapshot.runs.length]] as const).map(([id, label, count]) => <button key={id} role="tab" id={`tab-${id}`} aria-selected={tab === id} aria-controls="workspace-panel" onClick={() => { if (canLeave()) { setError(''); setTab(id) } }}>{label}{count !== null && <span>{count}</span>}</button>)}</div><div className="workspace-scroll" role="tabpanel" id="workspace-panel" aria-labelledby={`tab-${tab}`}>
-      {tab === 'surface' && <div className="document">{snapshot.views.length > 1 && <nav className="content-directory" aria-label="内容目录"><label htmlFor="content-location">本页内容</label><select id="content-location" value="" onChange={event => { const target = document.getElementById(`content-${event.target.value}`); target?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><option value="" disabled>定位到内容…</option>{snapshot.views.map((view, index) => <option key={view.id} value={view.id}>{viewTitle(view, index)}</option>)}</select></nav>}{snapshot.view_page && snapshot.view_page.total > 10 && <div className="inline-actions"><button disabled={busy || snapshot.view_page.offset === 0} onClick={() => void changeViewPage(snapshot.view_page!.offset - 10)}>上一页内容</button><span>第 {snapshot.view_page.offset + 1}–{Math.min(snapshot.view_page.offset + 10, snapshot.view_page.total)} 项 / 共 {snapshot.view_page.total} 项</span><button disabled={busy || snapshot.view_page.offset + 10 >= snapshot.view_page.total} onClick={() => void changeViewPage(snapshot.view_page!.offset + 10)}>下一页内容</button></div>}{(snapshot.surface.layout?.slots.flatMap(slot => slot.groups) ?? [{ id: 'default', type: 'column', views: snapshot.views.map(v => v.id) }]).map(group => <div key={group.id} className={'surface-group ' + (group.type === 'responsive_columns' ? 'surface-columns' : '')} style={{ ...(group.type === 'responsive_columns' && 'column_weights' in group && group.column_weights ? { '--surface-columns': group.column_weights.map(weight => `minmax(0,${weight}fr)`).join(' ') } : {}), gap: ({ none: 0, small: 8, medium: 16, large: 24 } as Record<string, number>)[group.gap ?? 'medium'], alignItems: group.align === 'start' ? 'start' : group.align === 'center' ? 'center' : 'stretch' }}>{group.views.map(viewId => { const v = snapshot.views.find(item => item.id === viewId); return v ? <ManagedView key={v.id} view={v} taskId={snapshot.task.id} refresh={refresh} onDirty={onDirty} onSubmission={onSubmission} register={registerEditor} /> : null })}</div>)}{!snapshot.views.length && <section className="empty-state"><h2>尚无已发布内容</h2><p>{run ? 'Agent 正在处理。排版后的内容发布后会显示在这里。' : '排版后的内容发布后会显示在这里。指令、回复和进度请在右侧 Agent 面板查看。'}</p><div className="inline-actions">{snapshot.task_data.total > 0 && <button onClick={() => setTab('data')}>查看任务数据</button>}<button onClick={() => { workspace.current?.showAgent() }}>打开 Agent 输入</button>{!modelId && <button className="primary" onClick={settings}>配置主模型</button>}</div></section>}</div>}
+      {tab === 'surface' && currentScope && <section className="chapter-scope" aria-label="确认修改范围"><div><b>确认修改范围</b><p>{currentScope.view_id ? '在正文下选择要修改的章节，再继续原请求。' : '先选择原请求对应的内容。'}</p></div><div className="inline-actions"><label htmlFor="chapter-scope-view">内容<select id="chapter-scope-view" value={snapshot.views.some(view => view.id === currentScope.view_id) ? currentScope.view_id : ''} disabled={busy} onChange={event => { if (canLeave()) setChapterScope({ ...currentScope, view_id: event.target.value }) }}><option value="" disabled>选择本页内容…</option>{snapshot.views.map((view, index) => <option key={view.id} value={view.id}>{viewTitle(view, index)}</option>)}</select></label><button disabled={busy} onClick={() => { if (canLeave()) setChapterScope(null) }}>稍后处理</button></div></section>}
+      {tab === 'surface' && <div className="document">{snapshot.views.length > 1 && <nav className="content-directory" aria-label="内容目录"><label htmlFor="content-location">本页内容</label><select id="content-location" value="" onChange={event => { const target = document.getElementById(`content-${event.target.value}`); target?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><option value="" disabled>定位到内容…</option>{snapshot.views.map((view, index) => <option key={view.id} value={view.id}>{viewTitle(view, index)}</option>)}</select></nav>}{snapshot.view_page && snapshot.view_page.total > 10 && <div className="inline-actions"><button disabled={busy || snapshot.view_page.offset === 0} onClick={() => void changeViewPage(snapshot.view_page!.offset - 10)}>上一页内容</button><span>第 {snapshot.view_page.offset + 1}–{Math.min(snapshot.view_page.offset + 10, snapshot.view_page.total)} 项 / 共 {snapshot.view_page.total} 项</span><button disabled={busy || snapshot.view_page.offset + 10 >= snapshot.view_page.total} onClick={() => void changeViewPage(snapshot.view_page!.offset + 10)}>下一页内容</button></div>}{(snapshot.surface.layout?.slots.flatMap(slot => slot.groups) ?? [{ id: 'default', type: 'column', views: snapshot.views.map(v => v.id) }]).map(group => <div key={group.id} className={'surface-group ' + (group.type === 'responsive_columns' ? 'surface-columns' : '')} style={{ ...(group.type === 'responsive_columns' && 'column_weights' in group && group.column_weights ? { '--surface-columns': group.column_weights.map(weight => `minmax(0,${weight}fr)`).join(' ') } : {}), gap: ({ none: 0, small: 8, medium: 16, large: 24 } as Record<string, number>)[group.gap ?? 'medium'], alignItems: group.align === 'start' ? 'start' : group.align === 'center' ? 'center' : 'stretch' }}>{group.views.map(viewId => { const v = snapshot.views.find(item => item.id === viewId); return v ? <ManagedView key={v.id} view={v} taskId={snapshot.task.id} modelId={modelId} enabled={!busy && snapshot.task.state === 'active'} refresh={refresh} onDirty={onDirty} onSubmission={onSubmission} register={registerEditor} onChapterResolve={() => workspace.current?.showAgent()} sourceRequest={currentScope?.view_id === v.id ? currentScope.request : undefined} onSourceResolved={() => setChapterScope(null)} /> : null })}</div>)}{!snapshot.views.length && <section className="empty-state"><h2>尚无已发布内容</h2><p>{run ? 'Agent 正在处理。排版后的内容发布后会显示在这里。' : '排版后的内容发布后会显示在这里。指令、回复和进度请在右侧 Agent 面板查看。'}</p><div className="inline-actions">{snapshot.task_data.total > 0 && <button onClick={() => setTab('data')}>查看任务数据</button>}<button onClick={() => { workspace.current?.showAgent() }}>打开 Agent 输入</button>{!modelId && <button className="primary" onClick={settings}>配置主模型</button>}</div></section>}</div>}
       {tab === 'resources' && <Materials key={snapshot.task.id} taskId={snapshot.task.id} active={snapshot.task.state==='active'} onDirty={onDirty} />}
       {tab === 'data' && <TaskData key={snapshot.task.id} snapshot={snapshot} />}
       {tab === 'answers' && <AnswerHistory key={snapshot.task.id} snapshot={snapshot} continueDisabled={busy || Boolean(run) || !modelId || snapshot.task.state !== 'active'} onReturnToContent={() => { if (canLeave()) setTab('surface') }} onContinue={answerId => { if (!confirm(`基于当前选中的正式作答发送新请求？这会调用当前主模型，并产生一次新的运行。\n作答 ID：${answerId}`)) return; void act({ type: 'task.submit', task_id: snapshot.task.id, text: `请阅读已保存的正式作答（ID：${answerId}），继续本任务。`, model_config_id: modelId, attachments: [] }) }} />}
       {tab === 'execution' && <ExecutionHistory key={snapshot.task.id} snapshot={snapshot} />}
     </div></> : <div className="workspace-scroll"><section className="workspace-start"><header><span className="eyebrow">本地工作空间</span><h1>{tasks.length ? '选择任务' : '尚无任务'}</h1><p>{tasks.length ? '从左侧选择已有任务，或新建任务。打开任务不会自动运行 Agent。' : '先配置主模型，再创建任务并输入目标。内容、任务数据、作答和执行记录分别保存。'}</p></header><div className="start-actions"><button className="primary" onClick={newTask}>{tasks.length ? '新建任务' : '创建第一个任务'}</button><button onClick={settings}>配置模型与审批</button></div><dl className="workspace-readiness"><div><dt>主模型</dt><dd>{readyModels.length ? `${readyModels.length} 个已通过角色测试` : '未配置 · 不自动联网'}</dd></div><div><dt>审批</dt><dd>{models.approval.mode === 'manual' ? '手动批准具体动作' : '独立辅助审批'}</dd></div><div><dt>可用入口</dt><dd>任务内容 / 数据 / 材料 / 作答 / 请求与执行记录</dd></div><div><dt>计算能力</dt><dd>Monty · 通过工具发现可用性</dd></div></dl></section></div>}</>}
-    agent={<AgentPanel key={snapshot?.task.id ?? 'no-task'} snapshot={snapshot} run={run} modelId={modelId} models={models} busy={busy} text={text} setText={setText} composer={composer} onDirty={onDirty} onQueueChange={onQueueChange} refresh={async()=>{await refresh();await reloadModels()}} act={act} settings={()=>void settings()} onRecords={() => { if (canLeave()) { setTab('execution'); workspace.current?.dismissDrawer() } }} surfaceChecks={snapshot?.surface_updates.map(update => ({ id: update.action_id, content: <section className="approval-card pending" key={update.action_id}><b>替换提交检查 · 本人操作</b><p>{update.reset_requires_confirmation ? '包含 reset：继续后将另行确认丢弃草稿。权限审批不能代替此确认。' : '保留兼容的已保存草稿；先保存待写输入，版本变化则本动作冲突。'}</p><details><summary>目标、内容及版本</summary><pre>{JSON.stringify(update.request, null, 2)}</pre>{update.request_truncated && <RecordBrowser taskId={snapshot.task.id} kind="action" label="本次替换原动作" initialId={update.action_id} />}</details><small>期限：{new Date(update.expires_at).toLocaleString()}</small><div><button disabled={busy} onClick={() => void act({ type: 'surface.respond', task_id: snapshot.task.id, action_id: update.action_id, proceed: false, confirm_discard: false })}>取消本次替换</button><button disabled={busy} onClick={() => void completeSurface(update)}>保存输入并检查替换</button></div></section> })) ?? []} />}
+    agent={<AgentPanel key={snapshot?.task.id ?? 'no-task'} snapshot={snapshot} run={run} modelId={modelId} models={models} busy={busy} text={text} setText={setText} composer={composer} onDirty={onDirty} onQueueChange={onQueueChange} onChapterScope={openChapterScope} refresh={async()=>{await refresh();await reloadModels()}} act={act} settings={()=>void settings()} onRecords={() => { if (canLeave()) { setTab('execution'); workspace.current?.dismissDrawer() } }} surfaceChecks={snapshot?.surface_updates.map(update => ({ id: update.action_id, content: <section className="approval-card pending" key={update.action_id}><b>替换提交检查 · 本人操作</b><p>{update.reset_requires_confirmation ? '包含 reset：继续后将另行确认丢弃草稿。权限审批不能代替此确认。' : '保留兼容的已保存草稿；先保存待写输入，版本变化则本动作冲突。'}</p><details><summary>目标、内容及版本</summary><pre>{JSON.stringify(update.request, null, 2)}</pre>{update.request_truncated && <RecordBrowser taskId={snapshot.task.id} kind="action" label="本次替换原动作" initialId={update.action_id} />}</details><small>期限：{new Date(update.expires_at).toLocaleString()}</small><div><button disabled={busy} onClick={() => void act({ type: 'surface.respond', task_id: snapshot.task.id, action_id: update.action_id, proceed: false, confirm_discard: false })}>取消本次替换</button><button disabled={busy} onClick={() => void completeSurface(update)}>保存输入并检查替换</button></div></section> })) ?? []} />}
     footer={<><span className={connected ? 'online' : ''}>{connected ? '● 运行时已连接' : '○ 未连接运行时'}</span><span>本地运行 <SettingsShortcut open={() => void settings()} /></span><span>{snapshot ? `${snapshot.views.length} 个内容单元 · ${snapshot.task_data.total} 个数据对象 · ${snapshot.answer_total} 份作答` : `${tasks.length} 个本地任务`}</span></>}
   >
     {exportOpen && snapshot && <DialogFocus><ExportPanel snapshot={snapshot} close={() => setExportOpen(false)} /></DialogFocus>}

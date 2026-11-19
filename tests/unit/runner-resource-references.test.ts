@@ -1,8 +1,10 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import coreSql from '../../src/shared/contracts/001-core.sql?raw'
+import runnerSql from '../../src/shared/contracts/002-runner.sql?raw'
 import { upgradeCandidate } from '../../src/runtime/schema-upgrade'
 import { registerRunnerResources, runnerResourceReferences, validateRunnerResourceReferences } from '../../src/runtime/runner/resource-references'
+import { ChapterState } from '../../src/runtime/runner/chapter-state'
 
 let db: Database.Database
 const task = 'task', other = 'other-task'
@@ -70,6 +72,35 @@ it('includes prepared publication resources before a Surface is installed', () =
   expect(new Set(runnerResourceReferences(db).map(reference => reference.resource_id))).toEqual(new Set(['source', 'published']))
 })
 
+it('installs chapter protection in the common reference graph atomically', () => {
+  resource('chapter'); resource('foreign', other)
+  const chapters = new ChapterState(db)
+  expect(() => chapters.protect(task, 'publication', 'operation', ['chapter', 'foreign'])).toThrow(/dependencies require inspection/)
+  expect(db.prepare('SELECT * FROM runner_chapter_resources').all()).toEqual([])
+  expect(db.prepare('SELECT * FROM object_references').all()).toEqual([])
+  chapters.protect(task, 'publication', 'operation', ['chapter', 'chapter'])
+  chapters.protect(task, 'publication', 'operation', ['chapter'])
+  expect(db.prepare('SELECT task_id,target_id,protects_resource FROM object_references').all()).toEqual([{ task_id: task, target_id: 'chapter', protects_resource: 1 }])
+  expect(db.prepare('SELECT resource_id FROM runner_chapter_resources').all()).toEqual([{ resource_id: 'chapter' }])
+})
+
+it('retains chapter baselines, proposals, assembly inputs and detached evidence without their projections', () => {
+  for (const id of ['baseline', 'candidate', 'kept', 'assembled', 'source', 'evidence']) resource(id)
+  db.prepare("INSERT INTO requests VALUES ('goal',?,'started','{}','{}','time')").run(task)
+  db.prepare("INSERT INTO runner_chapter_updates VALUES (?,'update','input','goal',1,'view','unknown','{}','{}','time')").run(task)
+  db.prepare("INSERT INTO runner_chapter_manifests VALUES (?,'view',1,1,'baseline','{}','time')").run(task)
+  db.prepare("INSERT INTO runner_chapter_proposals VALUES (?,'proposal','update','candidate','{}')").run(task)
+  db.prepare("INSERT INTO runner_chapter_inheritance VALUES (?,'update','region',?)").run(task, JSON.stringify({ source_bundle_resource_id: 'kept' }))
+  db.prepare("INSERT INTO runner_chapter_publications VALUES (?,'operation','update',NULL,'unknown',?,NULL)").run(task, JSON.stringify({ assembled_bundle_resource_id: 'assembled', source_bundle_resource_ids: ['source'] }))
+  new ChapterState(db).protect(task, 'publication', 'operation', ['evidence'])
+  db.prepare('DELETE FROM object_references').run()
+  expect(db.prepare('SELECT * FROM views').all()).toEqual([])
+  expect(new Set(runnerResourceReferences(db).map(reference => reference.resource_id))).toEqual(new Set(['baseline', 'candidate', 'kept', 'assembled', 'source', 'evidence']))
+  expect(() => validateRunnerResourceReferences(db)).not.toThrow()
+  db.prepare("DELETE FROM task_resources WHERE resource_id='source'").run()
+  expect(() => validateRunnerResourceReferences(db)).toThrow(/dependencies require inspection/)
+})
+
 it('protects resource dependencies that use resource_id and provenance that uses id', () => {
   resource('dependency'); resource('provenance')
   history('history', 1, { dependencies: [{ kind: 'resource', task_id: task, resource_id: 'dependency' }], provenance_ref: { kind: 'resource', task_id: task, id: 'provenance' } })
@@ -95,4 +126,13 @@ it('reads v1 replicas using their own format and requires no runner tables', () 
     expect(runnerResourceReferences(legacy)).toEqual([])
     expect(() => validateRunnerResourceReferences(legacy)).not.toThrow()
   } finally { legacy.close() }
+})
+
+it('reads older v2 replicas before chapter tables have been installed', () => {
+  const older = new Database(':memory:')
+  try {
+    older.exec(coreSql); older.exec(runnerSql); older.exec('UPDATE schema_version SET version=2')
+    expect(runnerResourceReferences(older)).toEqual([])
+    expect(() => validateRunnerResourceReferences(older)).not.toThrow()
+  } finally { older.close() }
 })

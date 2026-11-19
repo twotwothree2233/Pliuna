@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type Database from 'better-sqlite3'
@@ -13,6 +13,7 @@ import type { ProducerResult } from '../../src/runtime/runner/production-profile
 import { RuntimeStore } from '../../src/runtime/store'
 import type { ArtifactCandidate, Bundle, LogicalWork, ModelConfiguration, WorkDependency } from '../../src/shared/contracts.generated'
 import { modelToolRequest } from '../../src/runtime/model/tool-input'
+import type { PluginControl } from '../../src/runtime/plugins/control'
 
 const stores: RuntimeStore[] = []
 afterEach(() => { for (const store of stores.splice(0)) store.close(); vi.restoreAllMocks() })
@@ -37,6 +38,19 @@ function setup(runner: { productionRuns: 1 | 2; collator?: 'rule' | 'model' } | 
 function content(text: string): Bundle {
   return { profile: 'managed-v1', html: `<section><p>${text}</p></section>`, css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'v1' }, forms: [], behaviors: [], references: [], export: [] }
 }
+function provenanceResult(s: ReturnType<typeof setup>, bundle_resource_id: string, provenance_ref: ArtifactCandidate['provenance_ref'], candidate_id: string): ProducerResult {
+  const work = s.state.taskWorks(s.task).find(item => item.role === 'producer')
+  if (!work || work.purpose !== 'production') throw Error('Expected producer')
+  const section = new RunnerArtifactState(s.db, s.state).outline(s.task)!.sections.find(item => item.request_id === work.request_id)!
+  const candidate: ArtifactCandidate = {
+    task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, run_id: work.run_id, work_id: work.work_id,
+    attempt_id: work.current_attempt_id!, plan_revision: work.plan_revision, dependencies: work.dependencies,
+    artifact_id: 'provenance-artifact', candidate_id, base_artifact_revision: 0, bundle_resource_id,
+    section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key,
+    presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref, requirement_ids: ['answer'], unresolved: []
+  }
+  return { version: 1, complete: true, answer: 'Artifact is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] }
+}
 function integration(s: ReturnType<typeof setup>, producer: LogicalWork, dependencies: WorkDependency[]) {
   if (producer.purpose !== 'production') throw Error('Expected production source')
   const work: LogicalWork = { task_id: s.task, run_id: producer.run_id, work_id: 'integrator', plan_revision: 1, role: 'integrator', required: true, requirement_ids: ['answer'], dependencies, state: 'planned', max_attempts: 1, purpose: 'production', request_id: producer.request_id, intent_revision: producer.intent_revision }
@@ -46,6 +60,161 @@ function integration(s: ReturnType<typeof setup>, producer: LogicalWork, depende
     return s.store.executeRunnerProduction('integrator-attempt')
   }
 }
+function resourceCompletion(callId: string, value: unknown): Completion {
+  return { text: '', calls: [{ id: callId, type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: callId, content: value } }) } }], finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 } }
+}
+function answerOnly(text: string): ProducerResult {
+  return { version: 1, complete: true, answer: text, artifacts: [], requirement_ids: ['answer'], unresolved: [] }
+}
+
+it('corrects a missing artifact in the same host conversation and reuses the successful bundle', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' })
+  let resourceId = '', proposed: ProducerResult | undefined
+  s.complete.mockResolvedValueOnce(resourceCompletion('delivery-bundle', { type: 'json', value: content('Content to deliver') }))
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const created = JSON.parse(messages.find(message => message.tool_call_id === 'delivery-bundle')!.content!)
+    expect(created).toMatchObject({ execution: 'success', delivery: 'delivered' })
+    resourceId = created.data.id
+    proposed = provenanceResult(s, resourceId, created.provenance_ref, 'delivery-corrected-candidate')
+    return answer(JSON.stringify(answerOnly('Content is ready.')))
+  })
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    expect(messages[0]!.content).toContain('RUNNER_DELIVERY_MISSING')
+    expect(messages.some(message => message.role === 'assistant' && message.content?.includes('Content is ready.'))).toBe(true)
+    expect(JSON.parse(messages.find(message => message.tool_call_id === 'delivery-bundle')!.content!).data.id).toBe(resourceId)
+    expect(s.records('worker.result')).toEqual([])
+    expect(s.records('runner.answer')).toEqual([])
+    expect(s.db.prepare('SELECT count(*) n FROM runner_work_outputs').get()).toEqual({ n: 0 })
+    expect(s.db.prepare('SELECT count(*) n FROM runner_contribution_inventories').get()).toEqual({ n: 0 })
+    return answer(JSON.stringify(proposed))
+  })
+  const run = s.store.start(s.task, 'Create and deliver one artifact', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+  expect(s.complete).toHaveBeenCalledTimes(3)
+  expect(s.records('resource.created')).toHaveLength(1)
+  expect(s.records('worker.result.rejected')).toMatchObject([{ code: 'RUNNER_DELIVERY_MISSING', path: 'artifacts', value: [] }])
+  expect(s.records('worker.result')).toMatchObject([{ value: proposed }])
+  expect(s.records('runner.answer')).toMatchObject([{ text: proposed!.answer }])
+  expect(s.records('runner.output.accepted')[0]!.artifacts).toEqual([{ task_id: s.task, artifact_id: 'provenance-artifact', artifact_revision: 1 }])
+})
+
+it('rejects direct acceptance of an empty delivery after a successful exact-owner bundle action', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' }), pending = deferred<Completion>()
+  s.complete.mockImplementationOnce(() => pending.promise)
+  const run = s.store.start(s.task, 'Verify final delivery at acceptance', 'production', [])
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(1))
+  try {
+    const owner = s.records('worker.input')[0]!.owner
+    const created = await s.store.workerTool(owner.attempt_id, modelToolRequest('write', { operation: 'resource.create', input: { display_name: 'Direct delivery', content: { type: 'json', value: content('Undeclared delivery') } } }), new AbortController().signal)
+    expect(created).toMatchObject({ execution: 'success', delivery: 'delivered' })
+    const value = answerOnly('Content is ready.')
+    const internal = s.store as unknown as { record(taskId: string, kind: string, payload: unknown): string }
+    const resultRecordId = internal.record(s.task, 'worker.result', { value, run_id: run, owner })
+    s.state.updateAttempt({ ...s.state.attempt(owner.attempt_id), state: 'succeeded', result_ref: { task_id: s.task, kind: 'record', id: resultRecordId } })
+    const host = new RunnerHostProduction(s.db, s.state.epoch), validate = vi.fn()
+    expect(() => host.accept(value, owner, validate)).toThrow(expect.objectContaining({ code: 'RUNNER_DELIVERY_MISSING' }))
+    expect(validate).not.toHaveBeenCalled()
+    expect(s.db.prepare('SELECT count(*) n FROM runner_work_outputs').get()).toEqual({ n: 0 })
+    expect(s.db.prepare('SELECT count(*) n FROM runner_contribution_inventories').get()).toEqual({ n: 0 })
+    expect(s.records('runner.answer')).toEqual([])
+    expect(s.records('runner.output.accepted')).toEqual([])
+  } finally {
+    s.store.close()
+    pending.resolve(answer('Discarded paused response'))
+  }
+})
+
+it.each(['ordinary answer', 'text resource', 'ordinary JSON resource', 'failed managed bundle'] as const)('accepts an answer after %s without creating an artifact obligation', async mode => {
+  const s = setup({ productionRuns: 1, collator: 'rule' })
+  s.complete.mockRejectedValue(new Error('Unexpected model request after the final response'))
+  if (mode === 'ordinary answer') s.complete.mockResolvedValueOnce(answer('A direct answer.'))
+  else {
+    const missingImage = content('No valid image')
+    missingImage.html = '<section><img src="pliuna-resource:missing" alt="Missing image"></section>'
+    missingImage.references = [{ name: 'missing', target: { kind: 'resource', id: 'missing-image-resource' } }]
+    const resourceContent = mode === 'text resource' ? { type: 'text', text: 'Working notes' } : { type: 'json', value: mode === 'failed managed bundle' ? missingImage : { note: 'Working notes' } }
+    s.complete.mockResolvedValueOnce(resourceCompletion('answer-resource', resourceContent))
+    s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+      const result = JSON.parse(messages.find(message => message.tool_call_id === 'answer-resource')!.content!)
+      expect(result).toMatchObject(mode === 'failed managed bundle' ? { execution: 'not_executed', error: { code: 'RESOURCE_MISSING' } } : { execution: 'success', delivery: 'delivered' })
+      return answer(JSON.stringify(answerOnly('A direct answer.')))
+    })
+  }
+  const run = s.store.start(s.task, 'Answer the current question', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+  expect(s.complete).toHaveBeenCalledTimes(mode === 'ordinary answer' ? 1 : 2)
+  expect(s.records('worker.result.rejected')).toEqual([])
+  expect(s.records('runner.output.accepted')).toMatchObject([{ artifacts: [], requirement_ids: ['answer'] }])
+  expect(s.records('runner.answer')).toHaveLength(1)
+  if (mode === 'failed managed bundle') {
+    expect(s.records('resource.created')).toEqual([])
+    expect(s.db.prepare("SELECT state,result FROM actions WHERE json_extract(request_json,'$.display_name')='answer-resource'").get()).toEqual({ state: 'ended', result: 'not_executed' })
+  }
+})
+
+it('keeps an explicit unresolved delivery partial after a successful bundle action', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' })
+  s.complete.mockResolvedValueOnce(resourceCompletion('unresolved-bundle', { type: 'json', value: content('Unfinished delivery') }))
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    expect(JSON.parse(messages.find(message => message.tool_call_id === 'unresolved-bundle')!.content!)).toMatchObject({ execution: 'success' })
+    const work = s.state.taskWorks(s.task)[0]!
+    if (work.purpose !== 'production') throw Error('Expected producer')
+    return answer(JSON.stringify({ ...answerOnly('The delivery remains unfinished.'), requirement_ids: [], unresolved: [{ task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, requirement_id: 'answer' }] }))
+  })
+  const run = s.store.start(s.task, 'Keep an incomplete delivery explicit', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+  expect(s.complete).toHaveBeenCalledTimes(2)
+  expect(s.records('worker.result.rejected')).toEqual([])
+  expect(s.records('runner.output.accepted')).toMatchObject([{ artifacts: [], requirement_ids: [] }])
+  const work = s.state.taskWorks(s.task)[0]!
+  if (work.purpose !== 'production') throw Error('Expected producer')
+  const composition = new RunnerCompositionState(s.db, s.state, new RunnerArtifactState(s.db, s.state))
+  expect(composition.inventory(s.task, work.request_id, work.intent_revision)).toMatchObject({ requirement_ids: [], unresolved: [{ requirement_id: 'answer' }] })
+  expect(s.store.runnerGoals({ task_id: s.task })).toMatchObject({ goals: [{ delivery: 'incomplete', unresolved_count: 1 }], scope: { state: 'partial' } })
+})
+
+it('does not impose one active producer bundle on a sibling goal', async () => {
+  const s = setup({ productionRuns: 2, collator: 'rule' }), pending = deferred<Completion>(), ready = deferred<void>()
+  let resourceId = '', source: ArtifactCandidate['provenance_ref'] | undefined
+  s.complete.mockResolvedValueOnce(resourceCompletion('sibling-bundle', { type: 'json', value: content('Sibling output') }))
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const result = JSON.parse(messages.find(message => message.tool_call_id === 'sibling-bundle')!.content!)
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered' })
+    resourceId = result.data.id; source = result.provenance_ref; ready.resolve()
+    return pending.promise
+  })
+  const first = s.store.start(s.task, 'Create an artifact for the first goal', 'production', [])
+  await ready.promise
+  s.complete.mockResolvedValueOnce(answer(JSON.stringify(answerOnly('Independent sibling answer.'))))
+  const second = s.store.start(s.task, 'Answer the second goal', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(second).state).toBe('completed'))
+  expect(s.records('runner.answer')).toMatchObject([{ text: 'Independent sibling answer.', owner: { run_id: second } }])
+  expect(s.records('worker.result.rejected')).toEqual([])
+  pending.resolve(answer(JSON.stringify(provenanceResult(s, resourceId, source!, 'sibling-source-candidate'))))
+  await vi.waitFor(() => expect(s.state.run(first).state).toBe('completed'))
+  expect(s.complete).toHaveBeenCalledTimes(3)
+  expect(s.records('runner.output.accepted')).toHaveLength(2)
+  expect(s.records('resource.created')).toHaveLength(1)
+})
+
+it.each(['attempt_id', 'work_id', 'request_id'] as const)('ignores a successful bundle action bound to another %s', async field => {
+  const s = setup({ productionRuns: 1, collator: 'rule' })
+  s.complete.mockResolvedValueOnce(resourceCompletion('historical-bundle', { type: 'json', value: content('Historical output') }))
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const result = JSON.parse(messages.find(message => message.tool_call_id === 'historical-bundle')!.content!)
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered' })
+    const row = s.db.prepare('SELECT source_json FROM actions WHERE id=?').get(result.operation_id) as { source_json: string }
+    const source = JSON.parse(row.source_json)
+    source.owner[field] = `previous-${field}`
+    s.db.prepare('UPDATE actions SET source_json=? WHERE id=?').run(JSON.stringify(source), result.operation_id)
+    return answer(JSON.stringify(answerOnly('Only the current work is complete.')))
+  })
+  const run = s.store.start(s.task, 'Answer from the current attempt', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+  expect(s.complete).toHaveBeenCalledTimes(2)
+  expect(s.records('worker.result.rejected')).toEqual([])
+  expect(s.records('runner.output.accepted')).toMatchObject([{ artifacts: [], requirement_ids: ['answer'] }])
+})
 
 it('persists independent final answers, exact complete outputs and seals before production closes', async () => {
   const s = setup(), pending = [deferred<Completion>(), deferred<Completion>()]
@@ -66,6 +235,120 @@ it('persists independent final answers, exact complete outputs and seals before 
   expect(s.records('runner.answer').map(record => record.text)).toEqual(['Alpha final answer', 'Beta final answer'])
   expect(s.records('runner.output.accepted')).toHaveLength(2)
   expect(s.db.prepare('SELECT COUNT(DISTINCT budget_id) n FROM runner_runs').get()).toEqual({ n: 2 })
+})
+
+it('lets a Producer discover and read an enabled plugin workflow through its actual tools', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' }), source = mkdtempSync(join(tmpdir(), 'pliuna-worker-plugin-'))
+  const text = 'Use the selected workflow to organize the response.'
+  try {
+    writeFileSync(join(source, 'workflow.md'), text)
+    writeFileSync(join(source, 'manifest.json'), JSON.stringify({ manifest_version: '0.1', protocol_version: '0.1', id: 'fixture.worker-content', version: '1.0.0', access_level: 'task', contributes: [{ id: 'workflow', kind: 'workflow', entry: 'workflow.md', description: 'Worker workflow' }] }))
+    const plugins = (s.store as unknown as { plugins: PluginControl }).plugins, copy = await plugins.install(source)
+    const plan = plugins.plan(s.task, copy.digest)
+    await plugins.enable(s.task, copy.digest, [], plan.fingerprint, false, () => {})
+    plugins.selectWorkflow(s.task, { digest: copy.digest, contribution_id: 'workflow' }, () => {})
+    let discovered = ''
+    s.complete.mockResolvedValueOnce({ text: '', finish: 'tool_calls', calls: [{ id: 'list-plugins', type: 'function', function: { name: 'list', arguments: JSON.stringify({ kind: 'plugin' }) } }] })
+    s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+      const result = JSON.parse(messages.at(-1)!.content!)
+      expect(result).toMatchObject({ execution: 'success', data: { items: [{ enabled: true }] } })
+      const selected = result.data.items[0].workflow
+      expect(selected).toMatchObject({ kind: 'plugin' })
+      discovered = selected.id
+      return { text: '', finish: 'tool_calls', calls: [{ id: 'read-workflow', type: 'function', function: { name: 'read', arguments: JSON.stringify(selected) } }] }
+    })
+    s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+      expect(JSON.parse(messages.at(-1)!.content!)).toMatchObject({ execution: 'success', data: { data: { text } } })
+      return answer('The enabled workflow was read.')
+    })
+    const run = s.store.start(s.task, 'Follow the enabled workflow.', 'production', [])
+    await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+    expect(discovered).toContain('plugin-content:' + copy.digest + ':')
+    expect(s.complete).toHaveBeenCalledTimes(3)
+  } finally { rmSync(source, { recursive: true, force: true }) }
+})
+
+it('corrects a request id used as provenance without recreating or prematurely accepting the bundle', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' })
+  let bundleResource = '', rejected: ProducerResult | undefined, corrected: ProducerResult | undefined
+  s.complete.mockResolvedValueOnce({ text: '', finish: 'tool_calls', calls: [{ id: 'create-provenance-bundle', type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: 'Artifact.json', content: { type: 'json', value: content('Reuse this bundle') } } }) } }] })
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const result = JSON.parse(messages.at(-1)!.content!)
+    expect(result).toMatchObject({ execution: 'success', data: { media_type: 'application/json' } })
+    bundleResource = result.data.id
+    const work = s.state.taskWorks(s.task)[0]!
+    if (work.purpose !== 'production') throw Error('Expected producer')
+    rejected = provenanceResult(s, bundleResource, { task_id: s.task, kind: 'record', id: work.request_id }, 'wrong-provenance')
+    return answer(JSON.stringify(rejected))
+  })
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    expect(s.records('worker.result')).toEqual([])
+    expect(new RunnerArtifactState(s.db, s.state).candidate(s.task, 'wrong-provenance')).toBeNull()
+    expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, 'provenance-artifact')).toBeNull()
+    const feedback = messages.filter(message => message.role !== 'assistant' && message.role !== 'tool').map(message => message.content ?? '').join('\n')
+    expect(feedback).toContain('RUNNER_PROVENANCE_INVALID')
+    expect(feedback).toContain('artifacts[0].provenance_ref')
+    expect(feedback).toContain(rejected!.artifacts[0]!.provenance_ref.id)
+    const retained = messages.find(message => message.role === 'tool' && message.tool_call_id === 'create-provenance-bundle')
+    expect(JSON.parse(retained?.content ?? '{}')).toMatchObject({ execution: 'success', data: { id: bundleResource } })
+    corrected = provenanceResult(s, bundleResource, { task_id: s.task, kind: 'resource', id: bundleResource }, 'corrected-provenance')
+    return answer(JSON.stringify(corrected))
+  })
+
+  const run = s.store.start(s.task, 'Create one complete artifact', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+
+  expect(s.complete).toHaveBeenCalledTimes(3)
+  expect(s.records('resource.created')).toHaveLength(1)
+  expect(s.records('worker.tool.ended')).toMatchObject([{ state: 'completed' }])
+  expect(s.records('worker.result.rejected')).toMatchObject([{ code: 'RUNNER_PROVENANCE_INVALID', path: 'artifacts[0].provenance_ref', value: rejected!.artifacts[0]!.provenance_ref }])
+  expect(s.records('worker.result')).toMatchObject([{ value: corrected }])
+  expect(s.records('worker.ended')).toMatchObject([{ state: 'succeeded' }])
+  expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, 'provenance-artifact')).toMatchObject({ artifact_revision: 1, bundle_resource_id: bundleResource, provenance_ref: { task_id: s.task, kind: 'resource', id: bundleResource } })
+})
+
+it('rechecks provenance at acceptance and retains its rejection after the source becomes available again', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' }), otherTask = s.store.create('Other provenance task').task.id
+  let sourceResource = '', proposed: ProducerResult | undefined, owner: Parameters<RunnerHostProduction['preflight']>[1] | undefined
+  const originalPreflight = RunnerHostProduction.prototype.preflight
+  const preflight = vi.spyOn(RunnerHostProduction.prototype, 'preflight').mockImplementation(function (this: RunnerHostProduction, raw, rawOwner, sources) {
+    const issue = originalPreflight.call(this, raw, rawOwner, sources)
+    expect(issue).toBeNull()
+    owner = rawOwner
+    expect(s.db.prepare('UPDATE task_resources SET task_id=? WHERE task_id=? AND resource_id=?').run(otherTask, s.task, sourceResource).changes).toBe(1)
+    return issue
+  })
+  const write = (id: string, display_name: string, content: unknown): Completion['calls'][number] => ({ id, type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name, content } }) } })
+  s.complete.mockResolvedValueOnce({ text: '', finish: 'tool_calls', calls: [write('create-race-bundle', 'Artifact.json', { type: 'json', value: content('Source may disappear') }), write('create-race-source', 'Source.txt', { type: 'text', text: 'Original source' })] })
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const bundleResult = JSON.parse(messages.find(message => message.tool_call_id === 'create-race-bundle')!.content!)
+    const sourceResult = JSON.parse(messages.find(message => message.tool_call_id === 'create-race-source')!.content!)
+    expect(bundleResult.execution).toBe('success')
+    expect(sourceResult.execution).toBe('success')
+    sourceResource = sourceResult.data.id
+    proposed = provenanceResult(s, bundleResult.data.id, { task_id: s.task, kind: 'resource', id: sourceResource }, 'raced-provenance')
+    return answer(JSON.stringify(proposed))
+  })
+
+  const run = s.store.start(s.task, 'Create one complete artifact', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('failed'))
+
+  expect(preflight).toHaveBeenCalledOnce()
+  expect(s.complete).toHaveBeenCalledTimes(2)
+  expect(s.records('worker.result.rejected')).toEqual([])
+  expect(s.records('worker.result')).toMatchObject([{ value: proposed }])
+  expect(s.records('worker.ended')).toMatchObject([{ state: 'failed', code: 'RUNNER_PROVENANCE_INVALID' }])
+  const artifacts = new RunnerArtifactState(s.db, s.state), retained = artifacts.candidate(s.task, 'raced-provenance')
+  expect(retained).toEqual({ candidate: proposed!.artifacts[0], result: { state: 'rejected', code: 'RUNNER_PROVENANCE_INVALID' } })
+  expect(artifacts.owner(s.task, 'provenance-artifact')).toBeNull()
+  expect(artifacts.artifact(s.task, 'provenance-artifact')).toBeNull()
+  expect(s.db.prepare('UPDATE task_resources SET task_id=? WHERE task_id=? AND resource_id=?').run(s.task, otherTask, sourceResource).changes).toBe(1)
+  expect(() => artifacts.checkProvenance(s.task, proposed!.artifacts[0]!.provenance_ref)).not.toThrow()
+  if (!proposed || !owner) throw Error('Expected the original final result and owner')
+  const host = new RunnerHostProduction(s.db, s.state.epoch), finalResult = proposed, finalOwner = owner
+  expect(() => host.accept(finalResult, finalOwner, () => {})).toThrow(expect.objectContaining({ code: 'RUNNER_PROVENANCE_INVALID' }))
+  expect(artifacts.candidate(s.task, 'raced-provenance')).toEqual(retained)
+  expect(s.records('worker.result')).toMatchObject([{ value: proposed }])
 })
 
 it('lets a Producer discover contracts and create an accepted JSON bundle through its actual tools', async () => {
@@ -338,7 +621,7 @@ it('integrates an exact complete work output and seals with the original designa
   })
   s.complete.mockImplementationOnce(async (_config, _key, messages) => {
     expect(JSON.stringify(messages)).toContain('DECLARED_SOURCE_BODY')
-    await expect(s.store.workerTool('integrator-attempt', modelToolRequest('read', { kind: 'resource', id: unrelated }), new AbortController().signal)).rejects.toMatchObject({ code: 'WORKER_CAPABILITY_DENIED' })
+    await expect(s.store.workerTool('integrator-attempt', modelToolRequest('read', { kind: 'resource', id: unrelated }), new AbortController().signal)).resolves.toMatchObject({ execution: 'success', data: { data: { text: 'UNRELATED_PRIVATE_BODY' } } })
     return answer('Integrated final answer')
   })
   expect((await execute()).answer).toBe('Integrated final answer')

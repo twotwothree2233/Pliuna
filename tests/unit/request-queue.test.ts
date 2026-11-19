@@ -62,3 +62,79 @@ it('keeps current queue counts independent of the history page',()=>{
  const current=call('request.list'),older=call('request.list',{before:current.next_before})
  expect(current.summary).toEqual({pending:20,confirmation:0});expect(older.items).toHaveLength(1);expect(older.items[0].state).toBe('cancelled');expect(older.summary).toEqual(current.summary)
 })
+
+it('binds already imported Task materials when the request has no explicit selection',()=>{
+ const resources=[save(),save()],request=submit()
+ expect(request.state).toBe('started')
+ expect(new Set(request.materials.map((material:any)=>material.id))).toEqual(new Set(resources))
+ const database=db()
+ try{
+  const input=JSON.parse((database.prepare('SELECT input_json FROM requests WHERE id=?').get(request.request_id) as any).input_json)
+  expect(new Set(input.bound_materials.map((material:any)=>material.id))).toEqual(new Set(resources))
+  expect(input.bound_materials).toEqual(expect.arrayContaining(resources.map(id=>expect.objectContaining({id,display_name:'test.txt',byte_length:3}))))
+ }finally{database.close()}
+})
+
+it('waits for imports captured at acceptance and ignores materials added later',async()=>{
+ const ready=save(),waiting=reg(),receiving=reg()
+ call('material.internal.begin',{operation_id:receiving,byte_length:3,media_type:'text/plain; charset=utf-8'})
+ const request=submit()
+ expect(request.state).toBe('queued')
+ expect(request.materials).toHaveLength(3)
+ expect(new Set(request.materials.filter((material:any)=>material.operation_id).map((material:any)=>material.operation_id))).toEqual(new Set([waiting,receiving]))
+ expect(store.snapshot(task).runs).toHaveLength(0)
+ const late=save(),finished=save(waiting)
+ await vi.advanceTimersByTimeAsync(251)
+ expect(call('request.status',{request_id:request.request_id}).state).toBe('queued')
+ expect(store.snapshot(task).runs).toHaveLength(0)
+ call('material.internal.chunk',{operation_id:receiving,offset:0,data:Buffer.from('abc').toString('base64')})
+ const received=call('material.internal.finish',{operation_id:receiving}).resource.id
+ await vi.advanceTimersByTimeAsync(251)
+ const completed=call('request.status',{request_id:request.request_id})
+ expect(completed.state).toBe('started')
+ expect(new Set(completed.materials.map((material:any)=>material.id))).toEqual(new Set([ready,finished,received]))
+ expect(completed.materials.some((material:any)=>material.id===late)).toBe(false)
+})
+
+it('excludes failed, cancelled, removed, generated and foreign materials from the default selection',()=>{
+ const available=save(),removed=save(),failed=reg(),cancelled=reg()
+ call('material.internal.fail',{operation_id:failed,code:'IMPORT_SOURCE_UNAVAILABLE'})
+ call('material.cancel',{operation_id:cancelled})
+ const run=store.start(task,'Generate a separate result','fixture',[])
+ const generated=(store.modelTool(task,run,{type:'write',input:{type:'resource.create',display_name:'result.txt',content:{type:'text',text:'generated result'}}}) as any).data.id
+ const other=store.create('other Task').task.id
+ const foreignCall=(type:string,extra:Record<string,unknown>={})=>store.handle({type,task_id:other,...extra}) as any
+ const foreignImport=foreignCall('material.internal.register',{items:[{display_name:'foreign.txt',source:'text'}]}).items[0].operation_id
+ foreignCall('material.internal.begin',{operation_id:foreignImport,byte_length:3,media_type:'text/plain; charset=utf-8'})
+ foreignCall('material.internal.chunk',{operation_id:foreignImport,offset:0,data:Buffer.from('abc').toString('base64')})
+ const foreign=foreignCall('material.internal.finish',{operation_id:foreignImport}).resource.id
+ const database=db()
+ try{database.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(task,removed)}finally{database.close()}
+ const request=submit()
+ expect(request.materials).toHaveLength(1)
+ expect(request.materials[0]).toMatchObject({id:available,state:'success'})
+ expect(request.materials.some((material:any)=>[removed,generated,foreign].includes(material.id)||[failed,cancelled].includes(material.operation_id))).toBe(false)
+})
+
+it.each(['resource','import'] as const)('retains an explicit %s selection without adding default materials',kind=>{
+ const selected=save(),unselected=save(),pending=reg()
+ const request=submit(kind==='resource'?{resource_ids:[selected]}:{import_ids:[pending]})
+ expect(request.materials).toHaveLength(1)
+ expect(request.materials[0]).toMatchObject(kind==='resource'?{id:selected,state:'success'}:{operation_id:pending})
+ expect(request.materials.some((material:any)=>material.id===unselected)).toBe(false)
+ expect(request.state).toBe(kind==='resource'?'started':'queued')
+})
+
+it.each(['completed','mixed'] as const)('keeps all 50 default %s materials and rejects overflow without truncation',kind=>{
+ const resources=Array.from({length:kind==='completed'?50:25},()=>save())
+ const imports=kind==='mixed'?Array.from({length:25},()=>reg()):[]
+ const request=submit()
+ expect(request.materials).toHaveLength(50)
+ expect(new Set(request.materials.filter((material:any)=>material.id).map((material:any)=>material.id))).toEqual(new Set(resources))
+ expect(new Set(request.materials.filter((material:any)=>material.operation_id).map((material:any)=>material.operation_id))).toEqual(new Set(imports))
+ expect(request.state).toBe(kind==='completed'?'started':'queued')
+ reg()
+ expect(()=>submit()).toThrowError()
+ expect(call('request.list').items).toHaveLength(1)
+ expect(call('request.status',{request_id:request.request_id}).materials).toHaveLength(50)
+})

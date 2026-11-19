@@ -28,13 +28,15 @@ export function compositionCompleteness(db: Database.Database, work: RunnerWorkS
       const goal = work.goal(target.request_id)
       if (goal.task_id !== taskId || goal.intent_revision !== target.intent_revision || goal.state !== 'active' || !target.contribution_inventory) { missing(target); continue }
       const inventory = composition.checkInventory(taskId, target.request_id, target.intent_revision, target.contribution_inventory.inventory_revision)
+      const currentArtifacts = composition.currentArtifacts(inventory)
       if (inventory.unresolved.length) { missing(target, inventory.unresolved.map(item => item.requirement_id)); continue }
       for (const requirement of goal.requirements.filter(item => item.required)) {
         if (!target.requirement_ids.includes(requirement.requirement_id) || !inventory.requirement_ids.includes(requirement.requirement_id) || !inventory.required_works.some(output => output.requirement_ids.includes(requirement.requirement_id) && (requirement.kind !== 'artifact' || output.artifacts.length > 0))) missing(target, [requirement.requirement_id])
       }
       for (const output of inventory.required_works) {
         if (output.unresolved.length) missing(target, output.unresolved.map(item => item.requirement_id))
-        for (const artifact of output.artifacts) {
+        for (const original of output.artifacts) {
+          const artifact = currentArtifacts.find(index => index.artifact_id === original.artifact_id)!
           const entry = pending.find(item => item.artifact_id === artifact.artifact_id && item.artifact_revision === artifact.artifact_revision)
             ?? publications.mapping(taskId, artifact.artifact_id, artifact.artifact_revision)
           const view = entry ? db.prepare('SELECT revision,bundle_resource_id FROM views WHERE id=? AND surface_id=?').get(entry.view_id, surfaceId) as { revision: number; bundle_resource_id: string } | undefined : undefined

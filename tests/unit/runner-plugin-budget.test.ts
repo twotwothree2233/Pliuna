@@ -37,7 +37,7 @@ function setup(limit: number, options: { children?: number; denied?: boolean; un
     db, epoch: 'epoch', closed: false,
     workers: new Map([['attempt', { owner, profile, state: 'running', controller: new AbortController() }]]),
     qualifyWorker: () => ({ task_id: 'task', run }), qualify: () => {}, qualifyPlugin: () => {},
-    record: () => 'record', pluginChildOwners: new Map(), pluginInvocationSources: new Map(),
+    pluginChildOwners: new Map(), pluginInvocationSources: new Map(),
     pluginProcesses: { changed() {}, live: () => true },
     awaitApproval: async () => { throw new ContractError('ACTION_REJECTED', 'Declined') },
     checkApproval: () => {}

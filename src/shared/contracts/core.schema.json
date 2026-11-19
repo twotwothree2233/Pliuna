@@ -3801,6 +3801,135 @@
             "confirm_cost"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapters.map"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "view_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "expected_view_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "view_id",
+            "expected_view_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapter.update"
+            },
+            "source_request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "input_event_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "view_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "view_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "state_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "region_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "tsType": "string[]"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "model_config_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "input_event_id",
+            "update_id",
+            "view_id",
+            "view_revision",
+            "state_revision",
+            "region_ids",
+            "text",
+            "model_config_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapter.cancel"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "update_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapter.status"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "update_id"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -6503,6 +6632,9 @@
             "resource_id"
           ],
           "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/runner_chapter_dependency"
         }
       ]
     },
@@ -6566,6 +6698,9 @@
         },
         "result_ref": {
           "$ref": "#/$defs/runner_provenance_ref"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
         }
       },
       "required": [
@@ -6622,6 +6757,9 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
             }
           },
           "required": [
@@ -6811,6 +6949,9 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
             }
           },
           "required": [
@@ -6974,6 +7115,9 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
             }
           },
           "required": [
@@ -7131,6 +7275,9 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
             }
           },
           "required": [
@@ -8233,6 +8380,12 @@
         "batch_id": {
           "$ref": "#/$defs/runner_id"
         },
+        "chapter_update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "chapter_operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
         "request_id": {
           "$ref": "#/$defs/runner_id"
         },
@@ -8277,7 +8430,6 @@
       },
       "required": [
         "task_id",
-        "batch_id",
         "request_id",
         "intent_revision",
         "artifact_id",
@@ -8289,6 +8441,18 @@
         "view_revision",
         "state_revision",
         "surface_history_id"
+      ],
+      "oneOf": [
+        {
+          "tsType": "{ batch_id: string; chapter_update_id?: never; chapter_operation_id?: never }",
+          "required": ["batch_id"],
+          "not": { "anyOf": [{ "required": ["chapter_update_id"] }, { "required": ["chapter_operation_id"] }] }
+        },
+        {
+          "tsType": "{ batch_id?: never; chapter_update_id: string; chapter_operation_id: string }",
+          "required": ["chapter_update_id", "chapter_operation_id"],
+          "not": { "required": ["batch_id"] }
+        }
       ],
       "additionalProperties": false
     },
@@ -8508,6 +8672,589 @@
           }
         }
       ]
+    },
+    "runner_chapter_dependency": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "chapter"
+        },
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "kind",
+        "task_id",
+        "view_id",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_ownership": {
+      "type": "object",
+      "properties": {
+        "form_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "behavior_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "reference_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "export_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "css_selectors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "form_ids",
+        "behavior_ids",
+        "reference_ids",
+        "export_ids",
+        "css_selectors"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_region": {
+      "type": "object",
+      "properties": {
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "title_selector": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 512
+        },
+        "body_selector": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 512
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "ownership": {
+          "$ref": "#/$defs/runner_chapter_ownership"
+        }
+      },
+      "required": [
+        "region_id",
+        "revision",
+        "title",
+        "title_selector",
+        "body_selector",
+        "dependencies",
+        "ownership"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_manifest": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "manifest_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "shared_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_region"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "ChapterRegion[]"
+        }
+      },
+      "required": [
+        "task_id",
+        "view_id",
+        "view_revision",
+        "state_revision",
+        "bundle_resource_id",
+        "manifest_revision",
+        "shared_revision",
+        "request_id",
+        "intent_revision",
+        "chapters"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_intent": {
+      "type": "object",
+      "properties": {
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "region_id",
+        "intent_revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_update": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "record_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "base_manifest": {
+          "$ref": "#/$defs/runner_chapter_manifest"
+        },
+        "region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "string[]"
+        },
+        "region_intents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_intent"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "ChapterIntent[]"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "generating",
+            "waiting_input",
+            "waiting_approval",
+            "assembling",
+            "publishing",
+            "unknown",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "superseded"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "model_config_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "source": {
+          "$ref": "#/$defs/runner_execution_scope"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "publication_operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "action_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "previous_update_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "input_event_id",
+        "record_id",
+        "request_id",
+        "intent_revision",
+        "view_id",
+        "base_manifest",
+        "region_ids",
+        "region_intents",
+        "dependencies",
+        "state",
+        "text",
+        "previous_update_ids"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_replacement": {
+      "type": "object",
+      "properties": {
+        "previous_region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "string[]"
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_region"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "ChapterRegion[]"
+        }
+      },
+      "required": [
+        "previous_region_ids",
+        "chapters"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_proposal": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "replacements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_replacement"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "ChapterReplacement[]"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "source": {
+          "$ref": "#/$defs/runner_execution_scope"
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "proposal_id",
+        "intent_revision",
+        "bundle_resource_id",
+        "replacements",
+        "dependencies",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_inheritance": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "region_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source_bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "source_manifest_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "view_id",
+        "region_id",
+        "region_revision",
+        "source_bundle_resource_id",
+        "source_manifest_revision",
+        "request_id",
+        "intent_revision",
+        "requirement_ids",
+        "dependencies",
+        "valid"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_publication": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "base_manifest_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "assembled_bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "expected_view_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_state_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request": {
+          "$ref": "#/$defs/model_request"
+        },
+        "source_bundle_resource_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "string[]"
+        },
+        "previous_operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "action_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "state": {
+          "enum": [
+            "registered",
+            "prepared",
+            "dispatched",
+            "published",
+            "failure",
+            "cancelled",
+            "unknown",
+            "superseded"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "operation_id",
+        "update_id",
+        "proposal_id",
+        "base_manifest_revision",
+        "assembled_bundle_resource_id",
+        "view_id",
+        "expected_view_revision",
+        "expected_state_revision",
+        "request",
+        "source_bundle_resource_ids",
+        "state"
+      ],
+      "additionalProperties": false
     }
   },
   "$ref": "#/$defs/model_request"

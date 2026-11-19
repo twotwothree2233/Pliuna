@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import type { ArtifactCandidate, ArtifactIndex, Outline, OutlineSection } from '../../shared/contracts.generated'
+import type { ArtifactCandidate, ArtifactIndex, Outline, OutlineSection, WorkDependency } from '../../shared/contracts.generated'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { isBundleMediaType } from '../../shared/branding'
 import { validateArtifactCandidate, validateRunnerContract } from '../../shared/runner-validation'
@@ -7,6 +7,8 @@ import { ContractError } from '../../shared/validation'
 import { assertRunnerId } from './limits'
 import { registerRunnerResources } from './resource-references'
 import type { RunnerWorkState } from './work-state'
+import { ChapterArtifactState, type ChapterAssemblyInstall } from './chapter-artifact'
+export type { ChapterArtifactAssembly, ChapterAssemblyInstall } from './chapter-artifact'
 
 export interface ArtifactOwnerRef { work_id: string; plan_revision: number }
 export interface ArtifactAssignment extends ArtifactOwnerRef {
@@ -140,6 +142,7 @@ export class RunnerArtifactState {
       const previous = assignment.previous_owner
       if (assignment.base_artifact_revision !== (current?.current_revision ?? 0) || (current ? !previous || previous.work_id !== current.work_id || previous.plan_revision !== current.plan_revision : previous != null)) fail('RUNNER_ARTIFACT_CONFLICT', 'Artifact assignment must compare its current owner and accepted baseline')
       const work = this.work.work(assignment.work_id), run = this.work.run(work.run_id)
+      if (work.purpose === 'production' && work.update_id) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter producers submit scoped proposals and cannot acquire a whole artifact')
       const section = this.outline(assignment.task_id)?.sections.find(item => item.section_id === assignment.section_id)
       if (work.purpose !== 'production' || run.purpose !== 'production' || work.task_id !== assignment.task_id || run.task_id !== assignment.task_id || work.plan_revision !== assignment.plan_revision || !section || section.request_id !== work.request_id || section.intent_revision !== work.intent_revision || run.request_id !== work.request_id || run.intent_revision !== work.intent_revision || run.runtime_epoch !== this.work.epoch || !run.commit_valid || !['queued', 'running', 'waiting'].includes(run.state) || !['planned', 'queued', 'running', 'waiting', 'succeeded'].includes(work.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Artifact assignment does not match a current production plan and section')
       const goal = this.work.goal(work.request_id)
@@ -169,6 +172,31 @@ export class RunnerArtifactState {
     return row ? validateRunnerContract('runner_artifact_index', JSON.parse(row.payload_json)) : null
   }
 
+  installChapterAssembly(input: ChapterAssemblyInstall): ArtifactIndex {
+    return new ChapterArtifactState(this.db, this.work, this).install(input)
+  }
+  checkChapterAssembly(index: ArtifactIndex): ArtifactCandidate | null {
+    return new ChapterArtifactState(this.db, this.work, this).check(index)
+  }
+  resolveChapterReference(index: ArtifactIndex): ArtifactIndex | null {
+    return new ChapterArtifactState(this.db, this.work, this).resolve(index)
+  }
+  chapterMaterialDependencies(index: ArtifactIndex): Extract<WorkDependency, { kind: 'resource' }>[] {
+    return new ChapterArtifactState(this.db, this.work, this).materialDependencies(index)
+  }
+
+  checkProvenance(taskId: string, provenance: ArtifactCandidate['provenance_ref']): void {
+    if (provenance.task_id !== taskId) fail('RUNNER_PROVENANCE_INVALID', 'Candidate provenance must reference an existing source in this Task')
+    const exists = provenance.kind === 'record'
+      ? this.db.prepare('SELECT id FROM records WHERE task_id=? AND id=?').get(taskId, provenance.id)
+      : provenance.kind === 'action'
+        ? this.db.prepare('SELECT id FROM actions WHERE task_id=? AND id=?').get(taskId, provenance.id)
+        : provenance.kind === 'resource'
+          ? this.db.prepare('SELECT r.id FROM task_resources t JOIN resources r ON r.id=t.resource_id WHERE t.task_id=? AND r.id=?').get(taskId, provenance.id)
+          : undefined
+    if (!exists) fail('RUNNER_PROVENANCE_INVALID', 'Candidate provenance must reference an existing source in this Task')
+  }
+
   private checkCandidate(candidate: ArtifactCandidate): void {
     if (this.db.prepare('SELECT work_id FROM runner_work_outputs WHERE work_id=? AND plan_revision=? LIMIT 1').get(candidate.work_id, candidate.plan_revision)) fail('RUNNER_OUTPUT_CLOSED', 'A complete work output cannot accept another candidate')
     const owner = this.owner(candidate.task_id, candidate.artifact_id)
@@ -181,13 +209,7 @@ export class RunnerArtifactState {
     const resource = this.db.prepare('SELECT r.id,r.byte_length,r.media_type FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?').get(candidate.task_id, candidate.bundle_resource_id) as { id: string; byte_length: number; media_type: string } | undefined
     if (!resource) fail('RUNNER_RESOURCE_INVALID', 'Candidate resource must be immutable and associated with this Task')
     if (!Number.isSafeInteger(resource.byte_length) || resource.byte_length < 0 || resource.byte_length > defaults.surface.inline_bundle_bytes || resource.media_type !== 'application/json' && !isBundleMediaType(resource.media_type)) fail('INVALID_BUNDLE_SOURCE', 'Candidate bundle must be bounded JSON; resource references do not increase bundle capacity')
-    const provenance = candidate.provenance_ref
-    const exists = provenance.kind === 'record'
-      ? this.db.prepare('SELECT id FROM records WHERE task_id=? AND id=?').get(candidate.task_id, provenance.id)
-      : provenance.kind === 'action'
-        ? this.db.prepare('SELECT id FROM actions WHERE task_id=? AND id=?').get(candidate.task_id, provenance.id)
-        : this.db.prepare('SELECT r.id FROM task_resources t JOIN resources r ON r.id=t.resource_id WHERE t.task_id=? AND r.id=?').get(candidate.task_id, provenance.id)
-    if (!exists) fail('RUNNER_PROVENANCE_INVALID', 'Candidate provenance must reference an existing source in this Task')
+    this.checkProvenance(candidate.task_id, candidate.provenance_ref)
     validateArtifactCandidate(candidate, { ...qualified, goal: qualified.goal, section, current_artifact_revision: owner.current_revision, resource_task_id: candidate.task_id })
   }
 

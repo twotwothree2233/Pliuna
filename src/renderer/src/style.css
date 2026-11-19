@@ -481,6 +481,16 @@ summary { cursor:pointer; line-height:1.8 }
 @media(max-width:520px){.record-detail{padding-left:10px}.record-row-meta{max-width:35%}.record-detail-tabs{gap:14px}.record-tools{flex-wrap:wrap}.record-tools select{max-width:100%}.record-row-main small{font-size:calc(8px * var(--text-scale))}}
 .run-facts{display:flex;gap:24px;flex-wrap:wrap;margin:18px 0 24px;font-size:calc(10px * var(--text-scale))}.run-facts>div{min-width:55px}.run-facts dt{font-weight:400;color:var(--quiet);margin-bottom:7px}.run-facts dd{margin:0}.run-reading-outcome{margin:20px 0 26px;padding-left:18px;border-left:2px solid var(--accent)}.run-reading-outcome h4{font-size:calc(12px * var(--text-scale));font-weight:500;margin:0 0 10px}.run-reading-outcome p{font-size:calc(12px * var(--text-scale));line-height:1.9}.run-reading-outcome small{color:var(--quiet);font-size:calc(9px * var(--text-scale))}
 
+/* Editing intent belongs beside its published content, outside the Bundle. */
+.chapter-editor{margin:20px 0 8px;border-top:1px solid var(--line);padding-top:12px;font-size:calc(11px * var(--text-scale));line-height:1.8;color:var(--muted)}
+.chapter-editor>summary{width:fit-content;color:var(--accent);cursor:pointer;padding:4px 0}.chapter-editor>summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.chapter-editor form{display:grid;gap:10px;margin-top:16px;color:var(--fg)}.chapter-editor fieldset{margin:0;padding:0;border:0;min-width:0}.chapter-editor legend{margin-bottom:8px;color:var(--muted)}
+.chapter-options{display:grid;gap:7px;max-height:180px;overflow:auto;padding:2px}.chapter-options label{display:flex;align-items:baseline;gap:9px;min-width:0;cursor:pointer}.chapter-options input{margin:0;flex:none;width:auto;accent-color:var(--accent)}.chapter-options span{overflow-wrap:anywhere}
+.chapter-editor textarea{display:block;resize:vertical;min-height:86px;max-height:240px;width:100%;font:inherit;line-height:1.8}.chapter-editor textarea::placeholder{color:var(--muted)}.chapter-editor p{margin:10px 0;line-height:1.8}.chapter-editor .inline-actions{margin:3px 0 0}.chapter-editor .error{overflow-wrap:anywhere}
+.chapter-source{margin-top:12px}.chapter-source blockquote{margin:8px 0;padding:6px 12px;border-left:2px solid var(--line-strong);color:var(--fg);max-height:160px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.chapter-source small{color:var(--muted)}
+.chapter-scope{margin:20px auto 0;padding:16px 0;border-bottom:1px solid var(--line);max-width:920px;font-size:calc(11px * var(--text-scale));line-height:1.8}.chapter-scope p{margin:4px 0 12px;color:var(--muted)}.chapter-scope label{display:flex;align-items:center;gap:8px}.chapter-scope select{max-width:min(360px,60vw)}
+.agent-scope-notice{padding:10px 16px 12px;border-top:1px solid var(--line);font-size:calc(11px * var(--text-scale));line-height:1.8}.agent-scope-notice p{margin:0 0 6px;color:var(--muted)}.agent-scope-notice>div+div{margin-top:10px}.agent-scope-notice small{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:4px;overflow-wrap:anywhere}.agent-scope-notice button{color:var(--accent)}
+
 /* Agent owns requests, saved replies and progress beside the published content. */
 .agent-heading{gap:8px;padding-inline:13px;min-width:0}
 .agent-heading>b{flex:none;font-size:calc(12px * var(--text-scale))}

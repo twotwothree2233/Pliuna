@@ -484,6 +484,35 @@ type: "context.compact"
 task_id: string
 model_config_id: string
 confirm_cost: true
+} | {
+type: "chapters.map"
+task_id: IpcRequestRunnerId
+view_id: IpcRequestRunnerId
+expected_view_revision: number
+} | {
+type: "chapter.update"
+source_request_id?: IpcRequestRunnerId
+task_id: IpcRequestRunnerId
+input_event_id: IpcRequestRunnerId
+update_id: IpcRequestRunnerId
+view_id: IpcRequestRunnerId
+view_revision: number
+state_revision: number
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+region_ids: string[]
+text: string
+model_config_id: IpcRequestRunnerId
+} | {
+type: "chapter.cancel"
+task_id: IpcRequestRunnerId
+update_id: IpcRequestRunnerId
+} | {
+type: "chapter.status"
+task_id: IpcRequestRunnerId
+update_id: IpcRequestRunnerId
 })
 export type IpcRequestJsonPointer = string
 export type IpcRequestRead = ({
@@ -505,6 +534,7 @@ end: number
 max_chars?: number
 }
 })
+export type IpcRequestRunnerId = string
 
 export interface IpcRequestTarget {
 kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
@@ -1062,6 +1092,7 @@ operation_id?: InputEventRunnerId
 stage: InputEventRunnerConsumptionStage
 route?: ("direct" | "clarification" | "semantic")
 result_ref?: InputEventRunnerProvenanceRef
+update_id?: InputEventRunnerId
 }
 export interface InputEventRunnerProvenanceRef {
 task_id: InputEventRunnerId
@@ -1113,8 +1144,16 @@ artifact_revision: number
 kind: "resource"
 task_id: WorkDependencyRunnerId
 resource_id: WorkDependencyRunnerId
-})
+} | WorkDependencyRunnerChapterDependency)
 export type WorkDependencyRunnerId = string
+
+export interface WorkDependencyRunnerChapterDependency {
+kind: "chapter"
+task_id: WorkDependencyRunnerId
+view_id: WorkDependencyRunnerId
+revision: number
+region_id?: WorkDependencyRunnerId
+}
 export type RunnerRun = ({
 run_id: RunnerRunRunnerId
 task_id: RunnerRunRunnerId
@@ -1126,6 +1165,7 @@ previous_run_id?: RunnerRunRunnerId
 purpose: "production"
 request_id: RunnerRunRunnerId
 intent_revision: number
+update_id?: RunnerRunRunnerId
 } | {
 run_id: RunnerRunRunnerId
 task_id: RunnerRunRunnerId
@@ -1157,6 +1197,7 @@ max_attempts: number
 purpose: "production"
 request_id: LogicalWorkRunnerId
 intent_revision: number
+update_id?: LogicalWorkRunnerId
 } | {
 work_id: LogicalWorkRunnerId
 task_id: LogicalWorkRunnerId
@@ -1196,8 +1237,15 @@ artifact_revision: number
 kind: "resource"
 task_id: LogicalWorkRunnerId
 resource_id: LogicalWorkRunnerId
-})
+} | LogicalWorkRunnerChapterDependency)
 
+export interface LogicalWorkRunnerChapterDependency {
+kind: "chapter"
+task_id: LogicalWorkRunnerId
+view_id: LogicalWorkRunnerId
+revision: number
+region_id?: LogicalWorkRunnerId
+}
 export interface LogicalWorkRunnerWorkCause {
 kind: ("failure" | "cancellation" | "invalidation")
 work_id: LogicalWorkRunnerId
@@ -1224,6 +1272,7 @@ usage_refs: ExecutionAttemptRunnerId[]
 purpose: "production"
 request_id: ExecutionAttemptRunnerId
 intent_revision: number
+update_id?: ExecutionAttemptRunnerId
 } | {
 attempt_id: ExecutionAttemptRunnerId
 task_id: ExecutionAttemptRunnerId
@@ -1266,8 +1315,15 @@ artifact_revision: number
 kind: "resource"
 task_id: ExecutionAttemptRunnerId
 resource_id: ExecutionAttemptRunnerId
-})
+} | ExecutionAttemptRunnerChapterDependency)
 
+export interface ExecutionAttemptRunnerChapterDependency {
+kind: "chapter"
+task_id: ExecutionAttemptRunnerId
+view_id: ExecutionAttemptRunnerId
+revision: number
+region_id?: ExecutionAttemptRunnerId
+}
 export interface ExecutionAttemptRunnerProvenanceRef {
 task_id: ExecutionAttemptRunnerId
 kind: ("record" | "resource" | "action")
@@ -1282,6 +1338,7 @@ role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diag
 purpose: "production"
 request_id: ExecutionScopeRunnerId
 intent_revision: number
+update_id?: ExecutionScopeRunnerId
 } | {
 task_id: ExecutionScopeRunnerId
 run_id: ExecutionScopeRunnerId
@@ -1372,7 +1429,7 @@ artifact_revision: number
 kind: "resource"
 task_id: ArtifactCandidateRunnerId
 resource_id: ArtifactCandidateRunnerId
-})
+} | ArtifactCandidateRunnerChapterDependency)
 
 export interface ArtifactCandidate {
 task_id: ArtifactCandidateRunnerId
@@ -1402,6 +1459,13 @@ export interface ArtifactCandidateRunnerProvenanceRef {
 task_id: ArtifactCandidateRunnerId
 kind: ("record" | "resource" | "action")
 id: ArtifactCandidateRunnerId
+}
+export interface ArtifactCandidateRunnerChapterDependency {
+kind: "chapter"
+task_id: ArtifactCandidateRunnerId
+view_id: ArtifactCandidateRunnerId
+revision: number
+region_id?: ArtifactCandidateRunnerId
 }
 export interface ArtifactCandidateRunnerRequirementRef {
 task_id: ArtifactCandidateRunnerId
@@ -1555,6 +1619,24 @@ limit: number
 after_delivery_id?: DeliveryQueryRunnerId
 }
 export type PublicationManifestRunnerId = string
+export type PublicationManifestRunnerPublicationEntry = ({
+task_id: PublicationManifestRunnerId
+batch_id?: PublicationManifestRunnerId
+chapter_update_id?: PublicationManifestRunnerId
+chapter_operation_id?: PublicationManifestRunnerId
+request_id: PublicationManifestRunnerId
+intent_revision: number
+artifact_id: PublicationManifestRunnerId
+artifact_revision: number
+section_id: PublicationManifestRunnerId
+source_bundle_resource_id: PublicationManifestRunnerId
+published_bundle_resource_id: PublicationManifestRunnerId
+view_id: PublicationManifestRunnerId
+view_revision: number
+state_revision: number
+surface_history_id: PublicationManifestRunnerId
+} & PublicationManifestRunnerPublicationEntry1)
+export type PublicationManifestRunnerPublicationEntry1 = ({ batch_id: string; chapter_update_id?: never; chapter_operation_id?: never } | { batch_id?: never; chapter_update_id: string; chapter_operation_id: string })
 
 export interface PublicationManifest {
 manifest_id: PublicationManifestRunnerId
@@ -1574,32 +1656,17 @@ task_id: PublicationManifestRunnerId
 request_id: PublicationManifestRunnerId
 intent_revision: number
 }
-export interface PublicationManifestRunnerPublicationEntry {
-task_id: PublicationManifestRunnerId
-batch_id: PublicationManifestRunnerId
-request_id: PublicationManifestRunnerId
-intent_revision: number
-artifact_id: PublicationManifestRunnerId
-artifact_revision: number
-section_id: PublicationManifestRunnerId
-source_bundle_resource_id: PublicationManifestRunnerId
-published_bundle_resource_id: PublicationManifestRunnerId
-view_id: PublicationManifestRunnerId
-view_revision: number
-state_revision: number
-surface_history_id: PublicationManifestRunnerId
-}
 export interface PublicationManifestRunnerRequirementRef {
 task_id: PublicationManifestRunnerId
 request_id: PublicationManifestRunnerId
 intent_revision: number
 requirement_id: PublicationManifestRunnerId
 }
-export type PublicationEntryRunnerId = string
-
-export interface PublicationEntry {
+export type PublicationEntry = ({
 task_id: PublicationEntryRunnerId
-batch_id: PublicationEntryRunnerId
+batch_id?: PublicationEntryRunnerId
+chapter_update_id?: PublicationEntryRunnerId
+chapter_operation_id?: PublicationEntryRunnerId
 request_id: PublicationEntryRunnerId
 intent_revision: number
 artifact_id: PublicationEntryRunnerId
@@ -1611,7 +1678,8 @@ view_id: PublicationEntryRunnerId
 view_revision: number
 state_revision: number
 surface_history_id: PublicationEntryRunnerId
-}
+} & ({ batch_id: string; chapter_update_id?: never; chapter_operation_id?: never } | { batch_id?: never; chapter_update_id: string; chapter_operation_id: string }))
+export type PublicationEntryRunnerId = string
 export type WorkOutputDeclarationRunnerId = string
 
 export interface WorkOutputDeclaration {
@@ -1703,4 +1771,582 @@ task_id: ContributionInventoryRefRunnerId
 request_id: ContributionInventoryRefRunnerId
 intent_revision: number
 inventory_revision: number
+}
+export type ChapterDependencyRunnerId = string
+
+export interface ChapterDependency {
+kind: "chapter"
+task_id: ChapterDependencyRunnerId
+view_id: ChapterDependencyRunnerId
+revision: number
+region_id?: ChapterDependencyRunnerId
+}
+export type ChapterOwnershipRunnerId = string
+
+export interface ChapterOwnership {
+/**
+ * @maxItems 256
+ */
+form_ids: ChapterOwnershipRunnerId[]
+/**
+ * @maxItems 256
+ */
+behavior_ids: ChapterOwnershipRunnerId[]
+/**
+ * @maxItems 256
+ */
+reference_ids: ChapterOwnershipRunnerId[]
+/**
+ * @maxItems 256
+ */
+export_ids: ChapterOwnershipRunnerId[]
+/**
+ * @maxItems 256
+ */
+css_selectors: string[]
+}
+export type ChapterRegionRunnerId = string
+
+export interface ChapterRegion {
+region_id: ChapterRegionRunnerId
+revision: number
+title: string
+title_selector: string
+body_selector: string
+/**
+ * @maxItems 256
+ */
+dependencies: ChapterRegionRunnerChapterDependency[]
+ownership: ChapterRegionRunnerChapterOwnership
+}
+export interface ChapterRegionRunnerChapterDependency {
+kind: "chapter"
+task_id: ChapterRegionRunnerId
+view_id: ChapterRegionRunnerId
+revision: number
+region_id?: ChapterRegionRunnerId
+}
+export interface ChapterRegionRunnerChapterOwnership {
+/**
+ * @maxItems 256
+ */
+form_ids: ChapterRegionRunnerId[]
+/**
+ * @maxItems 256
+ */
+behavior_ids: ChapterRegionRunnerId[]
+/**
+ * @maxItems 256
+ */
+reference_ids: ChapterRegionRunnerId[]
+/**
+ * @maxItems 256
+ */
+export_ids: ChapterRegionRunnerId[]
+/**
+ * @maxItems 256
+ */
+css_selectors: string[]
+}
+export type ChapterManifestRunnerId = string
+
+export interface ChapterManifest {
+task_id: ChapterManifestRunnerId
+view_id: ChapterManifestRunnerId
+view_revision: number
+state_revision: number
+bundle_resource_id: ChapterManifestRunnerId
+manifest_revision: number
+shared_revision: number
+request_id: ChapterManifestRunnerId
+intent_revision: number
+artifact_id?: ChapterManifestRunnerId
+artifact_revision?: number
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+chapters: ChapterRegion[]
+}
+export type ChapterIntentRunnerId = string
+
+export interface ChapterIntent {
+region_id: ChapterIntentRunnerId
+intent_revision: number
+}
+export type ChapterUpdateRunnerId = string
+export type ChapterUpdateRunnerExecutionScope = ({
+task_id: ChapterUpdateRunnerId
+run_id: ChapterUpdateRunnerId
+work_id: ChapterUpdateRunnerId
+attempt_id: ChapterUpdateRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "production"
+request_id: ChapterUpdateRunnerId
+intent_revision: number
+update_id?: ChapterUpdateRunnerId
+} | {
+task_id: ChapterUpdateRunnerId
+run_id: ChapterUpdateRunnerId
+work_id: ChapterUpdateRunnerId
+attempt_id: ChapterUpdateRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "composition"
+batch_id: ChapterUpdateRunnerId
+composition_version: number
+trigger_request_id: ChapterUpdateRunnerId
+})
+
+export interface ChapterUpdate {
+task_id: ChapterUpdateRunnerId
+update_id: ChapterUpdateRunnerId
+input_event_id: ChapterUpdateRunnerId
+record_id: ChapterUpdateRunnerId
+request_id: ChapterUpdateRunnerId
+intent_revision: number
+view_id: ChapterUpdateRunnerId
+base_manifest: ChapterUpdateRunnerChapterManifest
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+region_ids: string[]
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+region_intents: ChapterIntent[]
+/**
+ * @maxItems 256
+ */
+dependencies: ChapterUpdateRunnerChapterDependency[]
+state: ("queued" | "generating" | "waiting_input" | "waiting_approval" | "assembling" | "publishing" | "unknown" | "succeeded" | "failed" | "cancelled" | "interrupted" | "superseded")
+text: string
+model_config_id?: ChapterUpdateRunnerId
+source?: ChapterUpdateRunnerExecutionScope
+proposal_id?: ChapterUpdateRunnerId
+publication_operation_id?: ChapterUpdateRunnerId
+action_id?: ChapterUpdateRunnerId
+/**
+ * @maxItems 256
+ */
+previous_update_ids: ChapterUpdateRunnerId[]
+reason?: string
+}
+export interface ChapterUpdateRunnerChapterManifest {
+task_id: ChapterUpdateRunnerId
+view_id: ChapterUpdateRunnerId
+view_revision: number
+state_revision: number
+bundle_resource_id: ChapterUpdateRunnerId
+manifest_revision: number
+shared_revision: number
+request_id: ChapterUpdateRunnerId
+intent_revision: number
+artifact_id?: ChapterUpdateRunnerId
+artifact_revision?: number
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+chapters: ChapterRegion[]
+}
+export interface ChapterUpdateRunnerChapterDependency {
+kind: "chapter"
+task_id: ChapterUpdateRunnerId
+view_id: ChapterUpdateRunnerId
+revision: number
+region_id?: ChapterUpdateRunnerId
+}
+export interface ChapterReplacement {
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+previous_region_ids: string[]
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+chapters: ChapterRegion[]
+}
+export type ChapterProposalRunnerId = string
+export type ChapterProposalRunnerExecutionScope = ({
+task_id: ChapterProposalRunnerId
+run_id: ChapterProposalRunnerId
+work_id: ChapterProposalRunnerId
+attempt_id: ChapterProposalRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "production"
+request_id: ChapterProposalRunnerId
+intent_revision: number
+update_id?: ChapterProposalRunnerId
+} | {
+task_id: ChapterProposalRunnerId
+run_id: ChapterProposalRunnerId
+work_id: ChapterProposalRunnerId
+attempt_id: ChapterProposalRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "composition"
+batch_id: ChapterProposalRunnerId
+composition_version: number
+trigger_request_id: ChapterProposalRunnerId
+})
+
+export interface ChapterProposal {
+task_id: ChapterProposalRunnerId
+update_id: ChapterProposalRunnerId
+proposal_id: ChapterProposalRunnerId
+intent_revision: number
+bundle_resource_id: ChapterProposalRunnerId
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+replacements: ChapterReplacement[]
+/**
+ * @maxItems 256
+ */
+dependencies: ChapterProposalRunnerChapterDependency[]
+source: ChapterProposalRunnerExecutionScope
+}
+export interface ChapterProposalRunnerChapterDependency {
+kind: "chapter"
+task_id: ChapterProposalRunnerId
+view_id: ChapterProposalRunnerId
+revision: number
+region_id?: ChapterProposalRunnerId
+}
+export type ChapterInheritanceRunnerId = string
+
+export interface ChapterInheritance {
+task_id: ChapterInheritanceRunnerId
+update_id: ChapterInheritanceRunnerId
+view_id: ChapterInheritanceRunnerId
+region_id: ChapterInheritanceRunnerId
+region_revision: number
+source_bundle_resource_id: ChapterInheritanceRunnerId
+source_manifest_revision: number
+request_id: ChapterInheritanceRunnerId
+intent_revision: number
+artifact_id?: ChapterInheritanceRunnerId
+artifact_revision?: number
+/**
+ * @maxItems 256
+ */
+requirement_ids: ChapterInheritanceRunnerId[]
+/**
+ * @maxItems 256
+ */
+dependencies: ChapterInheritanceRunnerChapterDependency[]
+valid: boolean
+reason?: string
+}
+export interface ChapterInheritanceRunnerChapterDependency {
+kind: "chapter"
+task_id: ChapterInheritanceRunnerId
+view_id: ChapterInheritanceRunnerId
+revision: number
+region_id?: ChapterInheritanceRunnerId
+}
+export type ChapterPublicationRunnerId = string
+export type ChapterPublicationModelRequest = ({
+type: "list"
+input: ChapterPublicationList
+} | {
+type: "read"
+input: ChapterPublicationModelRead
+} | {
+type: "write"
+input: ChapterPublicationWrite
+} | {
+type: "call"
+input: ChapterPublicationCall
+})
+export type ChapterPublicationModelRead = ({
+[k: string]: unknown
+} & {
+target: ChapterPublicationModelTarget
+range?: {
+start_line: number
+end_line: number
+}
+cursor?: string
+content?: {
+offset_bytes?: number
+end_bytes?: number
+pages?: {
+start: number
+end: number
+}
+max_chars?: number
+}
+})
+export type ChapterPublicationWrite = ({
+type: "surface.update"
+surface_id: string
+expected_revision: number
+/**
+ * @minItems 1
+ * @maxItems 100
+ */
+operations: [ChapterPublicationViewOp, ...(ChapterPublicationViewOp)[]]
+/**
+ * @maxItems 32
+ */
+snapshot_sources?: ChapterPublicationTarget[]
+} | {
+type: "task_data.create"
+data: ChapterPublicationDataValue
+} | {
+type: "task_data.replace"
+id: string
+expected_revision: number
+/**
+ * Actual JSON value, preserving its type. Objects and arrays must not be encoded as strings. The task object's fixed local schema further constrains the value.
+ */
+value: ({
+[k: string]: ChapterPublicationJsonValue
+} | ChapterPublicationJsonValue[] | string | number | boolean | null)
+references: ChapterPublicationReferences
+} | {
+type: "task_data.remove"
+id: string
+expected_revision: number
+} | {
+type: "resource.create"
+display_name: string
+content: ({
+type: "text"
+text: string
+} | {
+type: "json"
+/**
+ * Actual JSON value, preserving its type. Objects and arrays must not be encoded as strings. The task object's fixed local schema further constrains the value.
+ */
+value: ({
+[k: string]: ChapterPublicationJsonValue
+} | ChapterPublicationJsonValue[] | string | number | boolean | null)
+})
+})
+export type ChapterPublicationViewOp = ({
+type: "view.create"
+client_ref: string
+slot_id: string
+bundle: ChapterPublicationBundleInput
+} | {
+type: "view.replace"
+view_id: string
+expected_view_revision: number
+bundle: ChapterPublicationBundleInput
+state_transition: ChapterPublicationStateTransition
+} | {
+type: "view.remove"
+view_id: string
+expected_view_revision: number
+expected_state_revision: number
+} | {
+type: "layout.set"
+layout: ChapterPublicationLayout
+})
+export type ChapterPublicationBundleInput = ({
+type: "inline"
+bundle: ChapterPublicationBundle
+} | {
+type: "resource"
+resource: ChapterPublicationTarget
+})
+export type ChapterPublicationJsonPointer = string
+export type ChapterPublicationBehavior = ({
+type: "input"
+element_id: string
+field: ChapterPublicationJsonPointer
+control: ("text" | "textarea" | "number" | "checkbox" | "radio" | "select" | "multiselect" | "range")
+option_value?: unknown
+} | {
+type: "text"
+element_id: string
+field: ChapterPublicationJsonPointer
+} | {
+type: "visible"
+element_id: string
+field: ChapterPublicationJsonPointer
+} | {
+type: "toggle"
+element_id: string
+field: ChapterPublicationJsonPointer
+} | {
+type: "class_toggle"
+element_id: string
+field: ChapterPublicationJsonPointer
+class_name: string
+} | {
+type: "submit"
+element_id: string
+form_id: string
+})
+/**
+ * @maxItems 256
+ */
+export type ChapterPublicationReferences = ChapterPublicationReference[]
+export type ChapterPublicationStateTransition = ({
+type: "preserve"
+expected_state_revision: number
+compatibility_version: string
+} | {
+type: "reset"
+expected_state_revision: number
+initial: unknown
+})
+export type ChapterPublicationViewLocator = ({
+type: "existing"
+view_id: string
+} | {
+type: "created"
+client_ref: string
+})
+/**
+ * Actual JSON value, preserving its type. Objects and arrays must not be encoded as strings. The task object's fixed local schema further constrains the value.
+ */
+export type ChapterPublicationJsonValue = ({
+[k: string]: ChapterPublicationJsonValue
+} | ChapterPublicationJsonValue[] | string | number | boolean | null)
+
+export interface ChapterPublication {
+task_id: ChapterPublicationRunnerId
+operation_id: ChapterPublicationRunnerId
+update_id: ChapterPublicationRunnerId
+proposal_id: ChapterPublicationRunnerId
+base_manifest_revision: number
+assembled_bundle_resource_id: ChapterPublicationRunnerId
+view_id: ChapterPublicationRunnerId
+expected_view_revision: number
+expected_state_revision: number
+request: ChapterPublicationModelRequest
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+source_bundle_resource_ids: string[]
+previous_operation_id?: ChapterPublicationRunnerId
+action_id?: ChapterPublicationRunnerId
+state: ("registered" | "prepared" | "dispatched" | "published" | "failure" | "cancelled" | "unknown" | "superseded")
+}
+export interface ChapterPublicationList {
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+filters?: {
+name_query?: string
+status?: string
+since?: string
+until?: string
+}
+limit?: number
+cursor?: string
+}
+export interface ChapterPublicationModelTarget {
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "runner_outline" | "runner_batch" | "runner_artifact_index" | "runner_layout")
+id: string
+expected_revision?: number
+}
+export interface ChapterPublicationBundle {
+profile: "managed-v1"
+html: string
+css: string
+state: ChapterPublicationState
+forms: ChapterPublicationForm[]
+behaviors: ChapterPublicationBehavior[]
+references: ChapterPublicationReferences
+export: ChapterPublicationExportFragment[]
+}
+export interface ChapterPublicationState {
+schema: ChapterPublicationLocalSchema
+initial: unknown
+compatibility_version: string
+}
+export interface ChapterPublicationLocalSchema {
+type: ("object" | "array" | "string" | "number" | "integer" | "boolean" | "null")
+description?: string
+properties?: {
+[k: string]: ChapterPublicationLocalSchema
+}
+required?: string[]
+additionalProperties?: false
+items?: ChapterPublicationLocalSchema
+/**
+ * @minItems 1
+ */
+enum?: [unknown, ...(unknown)[]]
+minLength?: number
+maxLength?: number
+minItems?: number
+maxItems?: number
+minimum?: number
+maximum?: number
+}
+export interface ChapterPublicationForm {
+id: string
+/**
+ * @minItems 1
+ */
+fields: [ChapterPublicationJsonPointer, ...(ChapterPublicationJsonPointer)[]]
+}
+export interface ChapterPublicationReference {
+name: string
+target: ChapterPublicationTarget
+}
+export interface ChapterPublicationTarget {
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+id: string
+expected_revision?: number
+}
+export interface ChapterPublicationExportFragment {
+id: string
+category: ("learning" | "answer" | "feedback" | "mixed_personal" | "unclassified")
+source: ({
+type: "element"
+element_id: string
+} | {
+type: "static"
+html: string
+css: string
+})
+evidence?: ChapterPublicationTarget[]
+personal_binding?: {
+version: 1
+answer_id: string
+view_history_id: string
+}
+}
+export interface ChapterPublicationLayout {
+slots: {
+slot_id: string
+groups: ChapterPublicationLayoutGroup[]
+}[]
+}
+export interface ChapterPublicationLayoutGroup {
+id: string
+mode: ("column" | "responsive_columns")
+views: ChapterPublicationViewLocator[]
+/**
+ * @minItems 1
+ * @maxItems 6
+ */
+column_weights?: [number]|[number, number]|[number, number, number]|[number, number, number, number]|[number, number, number, number, number]|[number, number, number, number, number, number]
+gap: ("none" | "small" | "medium" | "large")
+align: ("start" | "center" | "stretch")
+}
+export interface ChapterPublicationDataValue {
+schema: ChapterPublicationLocalSchema
+/**
+ * Actual JSON value matching schema. For an object schema pass an object such as {"stage":"initial"}, NOT a JSON-encoded string. Do not JSON.stringify this field. String values are valid only when the schema allows strings.
+ */
+value: ({
+[k: string]: ChapterPublicationJsonValue
+} | ChapterPublicationJsonValue[] | string | number | boolean | null)
+references: ChapterPublicationReferences
+}
+export interface ChapterPublicationCall {
+capability: string
+arguments: ChapterPublicationJsonValue
+references: ChapterPublicationReferences
 }

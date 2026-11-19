@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import type { ArtifactCandidate, ArtifactIndex, ContributionInventory, ExecutionAttempt, ExecutionScope, GoalRevision, LogicalWork, WorkOutputDeclaration } from '../../shared/contracts.generated'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
+import type { WorkerResultIssue } from '../model/agent'
 import { canonical } from '../surface-transition'
 import { RunnerArtifactState } from './artifact-state'
 import { RunnerCompositionState } from './composition-state'
@@ -43,6 +44,46 @@ export class RunnerHostProduction {
     return { output, indexes, inventory: inventory ? validateRunnerContract('runner_contribution_inventory', JSON.parse(inventory.payload_json)) : null }
   }
 
+  private deliveryIssue(result: ProducerResult, owner: ExecutionScope): WorkerResultIssue | null {
+    if (result.artifacts.length || result.unresolved.length) return null
+    const rows = this.db.prepare(`SELECT a.source_json,json_extract(a.result_json,'$.data.id') AS resource_id
+      FROM actions a JOIN task_resources r ON r.task_id=a.task_id AND r.resource_id=json_extract(a.result_json,'$.data.id')
+      WHERE a.task_id=? AND a.run_id=? AND a.state='ended' AND a.result='success'
+        AND json_extract(a.source_json,'$.type')='worker' AND json_extract(a.source_json,'$.owner.attempt_id')=?
+        AND json_extract(a.request_json,'$.type')='resource.create' AND json_extract(a.request_json,'$.content.type')='json'
+        AND json_extract(a.request_json,'$.content.value.profile')='managed-v1'
+        AND json_extract(a.result_json,'$.operation_id')=a.id AND json_extract(a.result_json,'$.execution')='success'
+        AND json_extract(a.result_json,'$.delivery')='delivered' ORDER BY a.rowid`).all(owner.task_id, owner.run_id, owner.attempt_id) as { source_json: string; resource_id: string }[]
+    const resources = rows.filter(row => canonical(JSON.parse(row.source_json).owner) === canonical(owner)).map(row => row.resource_id)
+    if (!resources.length) return null
+    return {
+      code: 'RUNNER_DELIVERY_MISSING', path: 'artifacts', value: [], bundle_resource_ids: resources,
+      message: 'Created managed-v1 content has not been delivered. Include its ArtifactCandidate entries in artifacts, or mark the unfinished requirements unresolved.'
+    }
+  }
+
+  preflight(raw: ProducerResult, rawOwner: ExecutionScope, sources: readonly ArtifactCandidate['provenance_ref'][] = []): WorkerResultIssue | null {
+    const owner = validateRunnerContract('runner_execution_scope', rawOwner)
+    const qualified = this.work.qualify(owner.attempt_id), { work, goal } = qualified
+    if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.task_id !== owner.task_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'Production preflight requires its current exact work owner')
+    const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
+    const result = validateProducerResult(raw, { owner, work, goal, sections })
+    const delivery = this.deliveryIssue(result, owner)
+    if (delivery) return delivery
+    for (const [index, candidate] of result.artifacts.entries()) {
+      try { this.artifacts.checkProvenance(owner.task_id, candidate.provenance_ref) }
+      catch (error) {
+        if (!(error instanceof ContractError) || error.code !== 'RUNNER_PROVENANCE_INVALID') throw error
+        const available = sources.filter(source => {
+          try { this.artifacts.checkProvenance(owner.task_id, source); return true }
+          catch (error) { if (error instanceof ContractError && error.code === 'RUNNER_PROVENANCE_INVALID') return false; throw error }
+        })
+        return { code: error.code, path: `artifacts[${index}].provenance_ref`, value: candidate.provenance_ref, message: error.message, sources: available }
+      }
+    }
+    return null
+  }
+
   // Call again after an enclosing installation transaction has rolled back.
   // Only this adapter's checked failure and its original result record qualify.
   retainFailure(error: unknown): void {
@@ -77,6 +118,8 @@ export class RunnerHostProduction {
       if (work.purpose !== 'production' || !qualified.goal || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.task_id !== owner.task_id || work.role !== owner.role) fail('RUNNER_OWNERSHIP_INVALID', 'Production result requires its current exact work owner')
       const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
       const result = validateProducerResult(raw, { owner, work, goal: qualified.goal, sections })
+      const delivery = this.deliveryIssue(result, owner)
+      if (delivery) fail(delivery.code, delivery.message)
       const indexes = result.artifacts.map(candidate => {
         try {
         validateResource(candidate.bundle_resource_id)

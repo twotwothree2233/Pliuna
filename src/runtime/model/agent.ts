@@ -19,8 +19,17 @@ export interface AgentHost {
   tool(request: unknown, signal: AbortSignal): Promise<unknown>
 }
 export interface ContextRecovery { overflow: true; partial?: string }
+export interface WorkerResultIssue {
+  code: string
+  path: string
+  value: unknown
+  message: string
+  sources?: readonly { task_id: string; kind: 'record' | 'resource' | 'action'; id: string }[]
+  bundle_resource_ids?: readonly string[]
+}
 export interface WorkerExecution<Result> {
   profile: WorkerProfile<Result>
+  validateResult?(result: Result): WorkerResultIssue | null
   onResult(result: Result): void | Promise<void>
 }
 type LegacyBudgetLimits = NonNullable<ModelLease['config']['limits']> & { run_model_requests?: number; run_tool_requests?: number; run_tokens?: number; run_wall_ms?: number }
@@ -88,6 +97,8 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
   let messages: ChatMessage[] = [{ role: 'system', content: profile?.system ?? agentTemplate }, ...initial]
   let rejectedInput: string | undefined
   const rejectedResults = new Set<string>()
+  const rejectedIssues = new Set<string>()
+  let resultCorrection = '', preflightCorrection = ''
   while (true) {
     host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
     if (host.context) messages = await host.context(messages)
@@ -143,7 +154,21 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
         if (rejectedResults.has(signature)) throw error
         rejectedResults.add(signature)
         host.record('worker.result.rejected', { code: error.code, ...association })
-        messages[0] = { role: 'system', content: `${execution.profile.system}\n\n${correction}` }
+        resultCorrection = correction
+        messages[0] = { role: 'system', content: [execution.profile.system, resultCorrection, preflightCorrection].filter(Boolean).join('\n\n') }
+        continue
+      }
+      host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      const issue = execution.validateResult?.(result)
+      host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      if (issue) {
+        const signature = resultSignature(JSON.stringify({ code: issue.code, path: issue.path, value: issue.value }))
+        const repeated = rejectedIssues.has(signature)
+        host.record('worker.result.rejected', { ...issue, ...(repeated ? { no_progress: true } : {}), ...association })
+        if (repeated) throw new ContractError(issue.code, issue.message)
+        rejectedIssues.add(signature)
+        preflightCorrection = `The host rejected this result before acceptance. Correct the reported field and return the complete result. Reuse successful resources and tool results; do not repeat successful operations. Available sources identify existing evidence; choose the relevant source yourself. Host preflight data: ${JSON.stringify(issue)}`
+        messages[0] = { role: 'system', content: [execution.profile.system, resultCorrection, preflightCorrection].filter(Boolean).join('\n\n') }
         continue
       }
       if (host.context) await host.context(messages)

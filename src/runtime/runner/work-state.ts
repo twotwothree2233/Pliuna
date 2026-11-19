@@ -5,6 +5,8 @@ import { sameDependencies, validateRunnerContract } from '../../shared/runner-va
 import { ContractError } from '../../shared/validation'
 import { RunnerBudgetLedger } from './budget'
 import { assertRunnerId } from './limits'
+import { ChapterState } from './chapter-state'
+import { RunnerArtifactState } from './artifact-state'
 
 type PayloadRow = { payload_json: string }
 type CoreRun = { id: string; task_id: string; request_id: string | null; state: string; commit_valid: number; runtime_epoch: string }
@@ -49,7 +51,7 @@ function equivalent(left: unknown, right: unknown): boolean {
 }
 function sameSource(left: RunnerRun | LogicalWork | ExecutionAttempt, right: RunnerRun | LogicalWork | ExecutionAttempt): boolean {
   return left.task_id === right.task_id && left.purpose === right.purpose && (left.purpose === 'production' && right.purpose === 'production'
-    ? left.request_id === right.request_id && left.intent_revision === right.intent_revision
+    ? left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.update_id === right.update_id
     : left.purpose === 'composition' && right.purpose === 'composition' && left.batch_id === right.batch_id && left.composition_version === right.composition_version && left.trigger_request_id === right.trigger_request_id)
 }
 function attemptBinding(value: ExecutionAttempt): unknown {
@@ -189,7 +191,8 @@ export class RunnerWorkState {
       if (run.purpose === 'production') {
         const goal = this.goal(run.request_id)
         if (core.request_id !== run.request_id || goal.task_id !== run.task_id || goal.intent_revision !== run.intent_revision || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production Run does not match the current goal')
-        const active = this.db.prepare("SELECT id FROM runs WHERE request_id=? AND id<>? AND state IN ('running','waiting')").get(run.request_id, run.run_id)
+        if (run.update_id) new ChapterState(this.db).assertCurrent(run.task_id, run.update_id)
+        const active = this.db.prepare("SELECT c.id FROM runs c LEFT JOIN runner_runs r ON r.run_id=c.id WHERE c.request_id=? AND c.id<>? AND c.state IN ('running','waiting') AND COALESCE(json_extract(r.payload_json,'$.update_id'),'')=?").get(run.request_id, run.run_id, run.update_id ?? '')
         if (active) fail('RUNNER_RUN_CONFLICT', 'A request already owns an active production Run')
       } else {
         this.requestOwner(run.task_id, run.trigger_request_id)
@@ -226,6 +229,7 @@ export class RunnerWorkState {
     if (run.purpose === 'production') {
       const goal = this.goal(run.request_id)
       if (goal.task_id !== run.task_id || goal.intent_revision !== run.intent_revision || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production goal revision is no longer current')
+      if (run.update_id) new ChapterState(this.db).assertCurrent(run.task_id, run.update_id)
       return goal
     }
     const batch = this.db.prepare('SELECT payload_json FROM runner_batches WHERE batch_id=?').get(run.batch_id) as PayloadRow | undefined
@@ -235,11 +239,19 @@ export class RunnerWorkState {
     return undefined
   }
 
-  private artifactSource(dependency: Extract<WorkDependency, { kind: 'artifact' }>, proposed = new Map<string, LogicalWork>()): { work: LogicalWork; current: boolean } | null {
+  private artifactSource(dependency: Extract<WorkDependency, { kind: 'artifact' }>, proposed = new Map<string, LogicalWork>()): { work: LogicalWork; current: boolean; settled?: true } | null {
     const row = this.db.prepare('SELECT o.task_id,o.work_id,o.plan_revision,o.section_id,o.current_revision,a.payload_json,c.payload_json candidate_json,c.result_json FROM runner_artifact_owners o LEFT JOIN runner_artifacts a ON a.task_id=o.task_id AND a.artifact_id=o.artifact_id AND a.artifact_revision=o.current_revision LEFT JOIN runner_candidates c ON c.task_id=a.task_id AND c.candidate_id=a.candidate_id WHERE o.artifact_id=?').get(dependency.artifact_id) as { task_id: string; work_id: string; plan_revision: number; section_id: string; current_revision: number; payload_json: string | null; candidate_json: string | null; result_json: string | null } | undefined
     if (!row || row.task_id !== dependency.task_id || row.current_revision !== dependency.artifact_revision || !row.payload_json || !row.candidate_json || !row.result_json) return null
     const index = validateRunnerContract('runner_artifact_index', JSON.parse(row.payload_json)), candidate = validateRunnerContract('runner_artifact_candidate', JSON.parse(row.candidate_json)), decision = JSON.parse(row.result_json) as { state: string; index?: unknown }
     const source = proposed.get(index.work_id) ?? this.work(index.work_id), attempt = this.attempt(index.attempt_id)
+    // Published chapter content has settled host provenance. Consuming it does
+    // not require the publisher to regain authority over its old chapter input.
+    try {
+      if (new RunnerArtifactState(this.db, this).checkChapterAssembly(index)) return { work: source, current: true, settled: true }
+    } catch (error) {
+      if (error instanceof ContractError) return null
+      throw error
+    }
     if (decision.state !== 'accepted' || !equivalent(decision.index, index) || source.purpose !== 'production' || source.task_id !== dependency.task_id || source.request_id !== index.request_id || source.intent_revision !== index.intent_revision || source.run_id !== index.run_id || source.current_attempt_id !== index.attempt_id || row.work_id !== source.work_id || row.plan_revision !== source.plan_revision || row.section_id !== index.section_id || candidate.plan_revision !== source.plan_revision || !sameDependencies(candidate.dependencies, source.dependencies) || !sameDependencies(candidate.dependencies, attempt.input_versions)) return null
     if (!this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(dependency.task_id, index.bundle_resource_id)) return null
     return { work: source, current: ['running', 'waiting', 'succeeded'].includes(source.state) && ['running', 'waiting', 'succeeded'].includes(attempt.state) }
@@ -249,6 +261,7 @@ export class RunnerWorkState {
     if (work.purpose === 'production') {
       const goal = this.goal(work.request_id)
       if (goal.intent_revision !== work.intent_revision || goal.state !== 'active') fail('RUNNER_DEPENDENCY_INVALID', 'Work dependency belongs to an obsolete goal revision')
+      if (work.update_id) new ChapterState(this.db).assertCurrent(work.task_id, work.update_id)
     }
     if (checking.has(work.work_id)) fail('RUNNER_DEPENDENCY_CYCLE', 'Logical work dependencies must form a DAG')
     checking.add(work.work_id)
@@ -268,7 +281,9 @@ export class RunnerWorkState {
       } else if (dependency.kind === 'artifact') {
         const source = this.artifactSource(dependency, proposed)
         if (!source?.current) fail('RUNNER_DEPENDENCY_INVALID', 'Artifact dependency is not the current accepted version')
-        this.sourceDependenciesCurrent(source.work, requireSuccess, proposed, checking)
+        if (!source.settled) this.sourceDependenciesCurrent(source.work, requireSuccess, proposed, checking)
+      } else if (dependency.kind === 'chapter') {
+        if (!new ChapterState(this.db).dependencyCurrent(dependency)) fail('RUNNER_DEPENDENCY_INVALID', 'The exact chapter or shared dependency changed')
       } else if (!this.db.prepare('SELECT resource_id FROM task_resources WHERE task_id=? AND resource_id=?').get(dependency.task_id, dependency.resource_id)) fail('RUNNER_DEPENDENCY_INVALID', 'Resource dependency does not belong to this Task')
     }
   }
@@ -441,6 +456,19 @@ export class RunnerWorkState {
         if (work.purpose === 'production') {
           const goal = this.goal(work.request_id)
           if (goal.task_id !== taskId || goal.intent_revision !== work.intent_revision || goal.state !== 'active') causes.push(this.cause(work, 'invalidation'))
+          if (work.update_id) {
+            const chapters = new ChapterState(this.db), update = chapters.update(taskId, work.update_id)
+            const published = update?.state === 'succeeded' && update.publication_operation_id && chapters.publication(taskId, update.publication_operation_id)?.operation.state === 'published'
+            // An installed chapter result is historical evidence. Its own
+            // replacement advances the old input versions without reviving it.
+            if (work.state === 'succeeded' && published) {
+              checking.delete(work.work_id)
+              const cause = choose(causes); memo.set(work.work_id, cause)
+              return cause
+            }
+            try { chapters.assertCurrent(taskId, work.update_id) }
+            catch { causes.push(this.cause(work, 'invalidation')) }
+          }
         }
         for (const dependency of work.dependencies) {
           if (dependency.kind === 'work') {
@@ -453,7 +481,9 @@ export class RunnerWorkState {
           } else if (dependency.kind === 'artifact') {
             const source = this.artifactSource(dependency, all)
             if (!source) causes.push(this.cause(work, 'invalidation'))
-            else { const cause = inspect(source.work); if (cause) causes.push(cause); else if (!source.current) causes.push(this.cause(work, 'invalidation')) }
+            else if (!source.settled) { const cause = inspect(source.work); if (cause) causes.push(cause); else if (!source.current) causes.push(this.cause(work, 'invalidation')) }
+          } else if (dependency.kind === 'chapter') {
+            if (!new ChapterState(this.db).dependencyCurrent(dependency)) causes.push(this.cause(work, 'invalidation'))
           } else if (!this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(dependency.task_id, dependency.resource_id)) causes.push(this.cause(work, 'invalidation'))
         }
         checking.delete(work.work_id)

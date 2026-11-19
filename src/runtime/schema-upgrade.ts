@@ -7,6 +7,7 @@ import coreSql from '../shared/contracts/001-core.sql?raw'
 import runnerSql from '../shared/contracts/002-runner.sql?raw'
 import type { PluginCopy } from './plugins/package'
 import type { RestoreJournal } from './restore-journal'
+import { installChapterSchema } from './runner/chapter-state'
 
 export type BusinessSchema = 1 | 2
 const fail = (code: string, message: string): never => { throw new ContractError(code, message) }
@@ -28,7 +29,7 @@ export function hasV2Writes(db: Database.Database): boolean {
 export function purgeRunnerTask(db: Database.Database, task: string): void {
   if (!db.inTransaction) fail('TASK_DELETE_TRANSACTION', 'Runner history must be removed in the controlled Task deletion transaction')
   if (readBusinessSchema(db) === 1) return
-  for (const table of ['runner_deliveries', 'runner_view_mappings', 'runner_manifests', 'runner_surface_history', 'runner_publications', 'runner_batches', 'runner_scopes', 'runner_index_cursors', 'runner_index_reads', 'runner_contribution_inventories', 'runner_work_outputs', 'runner_inventory_sources', 'runner_artifacts', 'runner_candidates', 'runner_artifact_owners', 'runner_outlines', 'runner_attempts', 'runner_work', 'runner_runs', 'runner_budget_reservations', 'runner_budgets', 'runner_goal_heads', 'runner_goal_revisions', 'runner_consumptions', 'runner_inputs']) db.prepare(`DELETE FROM ${table} WHERE task_id=?`).run(task)
+  for (const table of ['runner_chapter_assemblies', 'runner_chapter_publication_evidence', 'runner_chapter_publications', 'runner_chapter_inheritance', 'runner_chapter_proposals', 'runner_chapter_intents', 'runner_chapter_updates', 'runner_chapter_heads', 'runner_chapter_manifests', 'runner_chapter_resources', 'runner_deliveries', 'runner_view_mappings', 'runner_manifests', 'runner_surface_history', 'runner_publications', 'runner_batches', 'runner_scopes', 'runner_index_cursors', 'runner_index_reads', 'runner_contribution_inventories', 'runner_work_outputs', 'runner_inventory_sources', 'runner_artifacts', 'runner_candidates', 'runner_artifact_owners', 'runner_outlines', 'runner_attempts', 'runner_work', 'runner_runs', 'runner_budget_reservations', 'runner_budgets', 'runner_goal_heads', 'runner_goal_revisions', 'runner_consumptions', 'runner_inputs']) db.prepare(`DELETE FROM ${table} WHERE task_id=?`).run(task)
 }
 
 function installWriteEvidence(db: Database.Database, previous: BusinessSchema | null): void {
@@ -44,10 +45,11 @@ function installWriteEvidence(db: Database.Database, previous: BusinessSchema | 
 // Only a private candidate or a brand-new database may be passed here.
 export function upgradeCandidate(db: Database.Database, previous: BusinessSchema | null = 1): void {
   const version = readBusinessSchema(db)
-  if (version === 2) { hasV2Writes(db); return }
+  if (version === 2) { hasV2Writes(db); installChapterSchema(db); return }
   if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length) fail('SCHEMA_UPGRADE_INVALID', 'Legacy business database requires inspection before upgrade')
   db.transaction(() => {
     db.exec(runnerSql)
+    installChapterSchema(db)
     db.prepare('UPDATE schema_version SET version=2,applied_at=? WHERE version=1').run(new Date().toISOString())
     installWriteEvidence(db, previous)
   })()
@@ -65,6 +67,7 @@ export function openBusinessDatabase(root: string, file: string): Database.Datab
     if (readBusinessSchema(db) !== 2) fail('SCHEMA_VERSION', 'Current runtime requires business schema v2')
     hasV2Writes(db)
     configure(db)
+    installChapterSchema(db)
     return db
   } catch (error) { db.close(); throw error }
 }
@@ -83,7 +86,7 @@ export function prepareBusinessDatabase(root: string, journal: RestoreJournal, p
       db.transaction(() => { db.exec(coreSql); upgradeCandidate(db, null) })()
       return db
     }
-    if (readBusinessSchema(db) === 2) { hasV2Writes(db); configure(db); return db }
+    if (readBusinessSchema(db) === 2) { hasV2Writes(db); configure(db); installChapterSchema(db); return db }
 
     db.exec('BEGIN EXCLUSIVE')
     const operation = journal.prepareUpgrade(db, plugins()); prepared = true

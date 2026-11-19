@@ -5,6 +5,7 @@ import { ContractError } from '../../shared/validation'
 import { RunnerArtifactState, type ArtifactOwner } from './artifact-state'
 import { assertRunnerId, RUNNER_LIMITS } from './limits'
 import { RunnerIndexPages, type ArtifactIndexPage } from './index-pages'
+import { ChapterState } from './chapter-state'
 import { registerRunnerResources } from './resource-references'
 import { RunnerWorkState } from './work-state'
 
@@ -129,13 +130,17 @@ export class RunnerCompositionState {
 
   private outputArtifacts(output: WorkOutputDeclaration): void {
     const owners = this.db.prepare('SELECT * FROM runner_artifact_owners WHERE task_id=? AND work_id=? AND plan_revision=? ORDER BY artifact_id').all(output.task_id, output.work_id, output.plan_revision) as ArtifactOwner[]
-    if (owners.length !== output.artifacts.length || owners.some(owner => !output.artifacts.some(reference => reference.artifact_id === owner.artifact_id && reference.artifact_revision === owner.current_revision && owner.current_revision > 0))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Output declaration must enumerate every assigned final fragment')
+    const inherited = new Set(output.artifacts.filter(reference => {
+      const original = this.artifacts.artifact(output.task_id, reference.artifact_id, reference.artifact_revision)
+      return original && this.artifacts.resolveChapterReference(original)
+    }).map(reference => reference.artifact_id))
+    if (owners.length + inherited.size !== output.artifacts.length || owners.some(owner => !output.artifacts.some(reference => reference.artifact_id === owner.artifact_id && reference.artifact_revision === owner.current_revision && owner.current_revision > 0))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Output declaration must enumerate every assigned final fragment or explicit chapter descendant')
     const previousArtifacts = this.db.prepare("SELECT a.artifact_id FROM runner_artifacts a JOIN runner_candidates c ON c.candidate_id=a.candidate_id WHERE a.task_id=? AND json_extract(c.payload_json,'$.work_id')=? AND json_extract(c.payload_json,'$.plan_revision')=?").all(output.task_id, output.work_id, output.plan_revision) as { artifact_id: string }[]
-    if (previousArtifacts.some(item => !owners.some(owner => owner.artifact_id === item.artifact_id))) fail('RUNNER_OWNERSHIP_INVALID', 'Final output no longer owns a previously produced fragment')
+    if (previousArtifacts.some(item => !owners.some(owner => owner.artifact_id === item.artifact_id) && !inherited.has(item.artifact_id))) fail('RUNNER_OWNERSHIP_INVALID', 'Final output no longer owns a previously produced fragment')
     for (const reference of output.artifacts) {
       const index = this.artifacts.artifact(output.task_id, reference.artifact_id, reference.artifact_revision)
       if (!index || !sameGoal(output, index) || index.work_id !== output.work_id || index.attempt_id !== output.attempt_id || index.run_id !== output.run_id) fail('RUNNER_OWNERSHIP_INVALID', 'Final fragment does not belong to the exact declared result')
-      const candidate = this.currentIndex(index)
+      const candidate = this.currentIndex(this.artifacts.resolveChapterReference(index) ?? index)
       if (candidate.unresolved.some(item => !output.unresolved.some(unresolved => unresolved.requirement_id === item.requirement_id))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Output cannot omit unresolved fragment requirements')
     }
   }
@@ -171,12 +176,28 @@ export class RunnerCompositionState {
     const inventory = this.inventory(taskId, requestId, intentRevision)
     if (!inventory || inventory.inventory_revision !== inventoryRevision) fail('RUNNER_OUTPUT_INCOMPLETE', 'Composition requires the exact current sealed contribution inventory')
     this.inventoryOutputs(inventory)
+    if (this.pendingChapterUpdates(taskId, requestId, intentRevision).length) fail('RUNNER_OUTPUT_INCOMPLETE', 'Required chapter updates have not been successfully published')
     return inventory
+  }
+
+  pendingChapterUpdates(taskId: string, requestId: string, intentRevision: number): string[] {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runner_chapter_assemblies'").get()) return []
+    const rows = this.db.prepare("SELECT u.update_id,u.state,a.operation_id FROM runner_chapter_updates u LEFT JOIN runner_chapter_assemblies a ON a.task_id=u.task_id AND a.update_id=u.update_id WHERE u.task_id=? AND u.request_id=? AND u.intent_revision=? AND EXISTS(SELECT 1 FROM runner_chapter_intents i WHERE i.task_id=u.task_id AND i.update_id=u.update_id) ORDER BY u.rowid").all(taskId, requestId, intentRevision) as { update_id: string; state: string; operation_id: string | null }[]
+    return rows.filter(row => row.state !== 'succeeded' || row.operation_id === null).map(row => row.update_id)
+  }
+
+  currentArtifacts(inventory: ContributionInventory): ArtifactIndex[] {
+    this.inventoryOutputs(inventory)
+    const indexes = inventory.required_works.flatMap(output => output.artifacts.map(reference => {
+      const original = this.artifacts.artifact(inventory.task_id, reference.artifact_id, reference.artifact_revision) ?? fail('RUNNER_DEPENDENCY_INVALID', 'The sealed contribution is unavailable')
+      return this.artifacts.resolveChapterReference(original) ?? original
+    }))
+    return [...new Map(indexes.map(index => [index.artifact_id, index])).values()]
   }
 
   private inventoryOutputs(inventory: ContributionInventory): void {
     const goal = this.currentGoal(inventory)
-    const required = this.work.taskWorks(inventory.task_id).filter(work => work.purpose === 'production' && sameGoal(inventory, work) && work.required)
+    const required = this.work.taskWorks(inventory.task_id).filter(work => work.purpose === 'production' && !work.update_id && sameGoal(inventory, work) && work.required)
     if (required.length !== inventory.required_works.length || required.some(work => !inventory.required_works.some(output => output.work_id === work.work_id && output.plan_revision === work.plan_revision && output.result_revision === work.result_revision))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Inventory must enumerate every current required work and its exact final result')
     for (const output of inventory.required_works) {
       const declared = this.output(output.task_id, output.work_id, output.plan_revision, output.result_revision)
@@ -297,6 +318,9 @@ export class RunnerCompositionState {
   private dependenciesCurrent(dependencies: WorkDependency[], visiting = new Set<string>()): void {
     for (const dependency of dependencies) {
       if (dependency.kind === 'goal') this.currentGoal(dependency)
+      else if (dependency.kind === 'chapter') {
+        if (!new ChapterState(this.db).dependencyCurrent(dependency)) fail('RUNNER_DEPENDENCY_INVALID', 'An actual chapter contribution dependency has changed')
+      }
       else if (dependency.kind === 'resource') {
         if (!this.db.prepare('SELECT resource_id FROM task_resources WHERE task_id=? AND resource_id=?').get(dependency.task_id, dependency.resource_id)) fail('RUNNER_DEPENDENCY_INVALID', 'Resource dependency no longer belongs to this Task')
       } else {
@@ -320,6 +344,8 @@ export class RunnerCompositionState {
 
   private currentIndex(index: ArtifactIndex, visiting = new Set<string>()): ArtifactCandidate {
     this.currentGoal(index)
+    const assembly = this.artifacts.checkChapterAssembly(index)
+    if (assembly) return assembly
     const owner = this.artifacts.owner(index.task_id, index.artifact_id), work = this.work.work(index.work_id), attempt = this.work.attempt(index.attempt_id), run = this.work.run(index.run_id)
     const row = this.db.prepare('SELECT candidate_id FROM runner_artifacts WHERE task_id=? AND artifact_id=? AND artifact_revision=?').get(index.task_id, index.artifact_id, index.artifact_revision) as { candidate_id: string } | undefined
     const record = row ? this.artifacts.candidate(index.task_id, row.candidate_id) : null

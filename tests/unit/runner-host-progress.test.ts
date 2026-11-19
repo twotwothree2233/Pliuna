@@ -103,6 +103,13 @@ it('records successful activity without goal progress as bounded metadata diagno
   expect((s.db.prepare('SELECT COUNT(*) n FROM runner_attempts').get() as { n: number }).n).toBe(1)
 })
 
+it('does not attribute another chapter update to matching run and attempt fields', () => {
+  const s = setup()
+  if (s.owner.purpose !== 'production') throw Error('Production fixture required')
+  s.successes({ ...s.owner, update_id: 'another-update' })
+  expect(s.observe().diagnoses).toEqual([])
+})
+
 it('counts distinct metadata-only read results even when model call IDs repeat', () => {
   const s = setup(), events = Array.from({ length: 3 }, () => s.model())
   const result = s.observe()

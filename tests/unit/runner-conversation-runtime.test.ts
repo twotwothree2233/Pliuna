@@ -46,6 +46,14 @@ function setup(options: { directory?: string; task?: string; productionRuns?: 1 
   return { store, internal, db, task, config, directory, complete, sent, submit, requestInput, record, records, waitRun, close }
 }
 const body = (messages: readonly ChatMessage[]) => messages.map(message => message.content ?? '').join('\n')
+function importText(store: RuntimeStore, task: string, name: string, text: string): Row {
+  const call = (type: string, extra: Row = {}) => store.handle({ type, task_id: task, ...extra }) as Row
+  const operation = call('material.internal.register', { items: [{ display_name: name, source: 'text' }] }).items[0].operation_id
+  const bytes = Buffer.from(text)
+  call('material.internal.begin', { operation_id: operation, byte_length: bytes.length, media_type: 'text/plain; charset=utf-8' })
+  call('material.internal.chunk', { operation_id: operation, offset: 0, data: bytes.toString('base64') })
+  return call('material.internal.finish', { operation_id: operation }).resource
+}
 
 it('continues ordinary sends with the real preceding user and accepted assistant messages', async () => {
   const s = setup()
@@ -214,4 +222,169 @@ it('carries the prior accepted answer into a corrected goal without changing an 
   const goals = s.store.runnerGoals({ task_id: s.task }).goals
   expect(goals.find(goal => goal.request_id === first.request_id)?.intent_revision).toBe(2)
   expect(goals.find(goal => goal.request_id === unrelated.request_id)?.intent_revision).toBe(1)
+})
+
+it('discovers imported material by name and reads its original through an ordinary send', async () => {
+  const s = setup(), name = 'schedule-notes.txt', original = 'SYNTHETIC MATERIAL: Δ token 73.'
+  const imported = importText(s.store, s.task, name, original)
+  let discovered = ''
+  s.complete.mockImplementationOnce(async () => {
+    const messages = s.sent.at(-1)!, input = JSON.parse(messages.filter(message => message.role === 'user').at(-1)!.content!) as Row
+    expect(input.bound.materials).toEqual([{ id: imported.id, display_name: name, byte_length: Buffer.byteLength(original), media_type: 'text/plain; charset=utf-8', provenance_ref: { task_id: s.task, kind: 'resource', id: imported.id } }])
+    expect(body(messages)).not.toContain(original)
+    discovered = input.bound.materials.find((material: Row) => material.display_name === name).id
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: [{ id: 'read-imported', type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'resource', id: discovered, selection: { view: 'text' } }) } }]
+    }
+  }).mockImplementationOnce(async () => {
+    const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === 'read-imported')!
+    const result = JSON.parse(tool.content!) as Row
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered', provenance_ref: { task_id: s.task, kind: 'resource', id: imported.id }, data: { metadata: { id: discovered }, data: { text: original } } })
+    return answer('The imported source was read.')
+  })
+
+  const request = s.submit('Read the imported material.')
+  await s.waitRun(request.run_id)
+  expect(discovered).toBe(imported.id)
+  expect(s.complete).toHaveBeenCalledTimes(2)
+})
+
+it('keeps prior material discoverable and readable when the next send explicitly selects only a new resource', async () => {
+  const s = setup(), priorText = 'Prior source: Cedar.', nextText = 'Current source: Birch.'
+  const prior = importText(s.store, s.task, 'prior.txt', priorText)
+  const first = s.submit('Remember this source for our conversation.')
+  await s.waitRun(first.run_id)
+  const current = importText(s.store, s.task, 'current.txt', nextText)
+  s.complete.mockImplementationOnce(async () => {
+    const input = JSON.parse(s.sent.at(-1)!.filter(message => message.role === 'user').at(-1)!.content!) as Row
+    const materials = input.bound.materials as Row[]
+    expect(new Set(materials.map(material => material.id))).toEqual(new Set([prior.id, current.id]))
+    const sources = ['prior.txt', 'current.txt'].map(name => materials.find(material => material.display_name === name)!)
+    expect(sources.every(Boolean)).toBe(true)
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: sources.map((source, index) => ({ id: `read-source-${index}`, type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'resource', id: source.id, selection: { view: 'text' } }) } }))
+    }
+  }).mockImplementationOnce(async () => {
+    for (const [index, source] of [prior, current].entries()) {
+      const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === `read-source-${index}`)!
+      expect(JSON.parse(tool.content!)).toMatchObject({ execution: 'success', delivery: 'delivered', data: { metadata: { id: source.id }, data: { text: [priorText, nextText][index] } } })
+    }
+    return answer('Both the prior and current sources were read.')
+  })
+
+  const next = s.store.handle({ type: 'request.submit', task_id: s.task, text: 'Compare the previous source with this one.', model_config_id: s.config.id, resource_ids: [current.id], import_ids: [] }) as Row
+  await s.waitRun(next.run_id)
+  expect(s.requestInput(next.request_id).resource_ids).toEqual([current.id])
+  expect(s.requestInput(next.request_id).bound_materials.map((material: Row) => material.id)).toEqual([current.id])
+  expect(s.complete).toHaveBeenCalledTimes(3)
+})
+
+it('discovers and reads all current-Task resources through paged model tools while isolating other Tasks', async () => {
+  const s = setup(), imported = importText(s.store, s.task, 'available-source.txt', 'Visible imported source.')
+  const other = s.store.create('Other material task').task.id
+  const foreign = importText(s.store, other, 'available-foreign.txt', 'PRIVATE FOREIGN SOURCE')
+  let generated = ''
+  s.complete.mockResolvedValueOnce({
+    text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+    calls: [{ id: 'create-working-source', type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: 'available-generated.txt', content: { type: 'text', text: 'Visible generated source.' } } }) } }]
+  }).mockImplementationOnce(async () => {
+    const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === 'create-working-source')!
+    const result = JSON.parse(tool.content!) as Row
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered' })
+    generated = result.data.id
+    return answer('The initial request completed.')
+  })
+  const first = s.submit('Prepare a separate working result.')
+  await s.waitRun(first.run_id)
+  expect(s.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(s.task, generated)).toBeTruthy()
+  const listed: Row[] = []
+  s.complete.mockImplementationOnce(async () => {
+    const messages = s.sent.at(-1)!, input = JSON.parse(messages.filter(message => message.role === 'user').at(-1)!.content!) as Row
+    expect(input.bound.materials.map((material: Row) => material.id)).toEqual([imported.id])
+    for (const hidden of [generated, foreign.id, 'available-generated.txt', 'available-foreign.txt', 'PRIVATE FOREIGN SOURCE']) expect(body(messages)).not.toContain(hidden)
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: [{ id: 'list-first-page', type: 'function', function: { name: 'list', arguments: JSON.stringify({ kind: 'resource', filters: { name_query: 'AVAILABLE-' }, limit: 1 }) } }]
+    }
+  }).mockImplementationOnce(async () => {
+    const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === 'list-first-page')!
+    const result = JSON.parse(tool.content!) as Row
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered', data: { items: [expect.objectContaining({ id: expect.any(String), media_type: 'text/plain; charset=utf-8' })], next_cursor: expect.any(String) } })
+    listed.push(...result.data.items)
+    expect(result.data.next_call).toMatchObject({ name: 'list', arguments: { kind: 'resource', filters: { name_query: 'AVAILABLE-' }, limit: 1, cursor: result.data.next_cursor } })
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: [{ id: 'list-next-page', type: 'function', function: { name: result.data.next_call.name, arguments: JSON.stringify(result.data.next_call.arguments) } }]
+    }
+  }).mockImplementationOnce(async () => {
+    const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === 'list-next-page')!
+    const result = JSON.parse(tool.content!) as Row
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered', data: { items: [expect.objectContaining({ id: expect.any(String), media_type: 'text/plain; charset=utf-8' })], next_cursor: null } })
+    listed.push(...result.data.items)
+    expect(new Set(listed.map(resource => resource.id))).toEqual(new Set([imported.id, generated]))
+    expect(listed.map(resource => resource.display_name).sort()).toEqual(['available-generated.txt', 'available-source.txt'])
+    expect(body(s.sent.at(-1)!)).not.toContain('PRIVATE FOREIGN SOURCE')
+    expect(body(s.sent.at(-1)!)).not.toContain(foreign.id)
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: [
+        { id: 'list-generated-name', type: 'function', function: { name: 'list', arguments: JSON.stringify({ kind: 'resource', filters: { name_query: 'GENERATED' } }) } },
+        ...[...listed.map(resource => resource.id), foreign.id].map((id, index) => ({ id: `read-resource-${index}`, type: 'function' as const, function: { name: 'read', arguments: JSON.stringify({ kind: 'resource', id, selection: { view: 'text' } }) } }))
+      ]
+    }
+  }).mockImplementationOnce(async () => {
+    const messages = s.sent.at(-1)!, result = (id: string) => JSON.parse(messages.find(message => message.role === 'tool' && message.tool_call_id === id)!.content!) as Row
+    expect(result('list-generated-name')).toMatchObject({ execution: 'success', data: { items: [{ id: generated }], next_cursor: null } })
+    for (const [index, resource] of listed.entries()) {
+      expect(result(`read-resource-${index}`)).toMatchObject({ execution: 'success', delivery: 'delivered', data: { metadata: { id: resource.id }, data: { text: resource.id === imported.id ? 'Visible imported source.' : 'Visible generated source.' } } })
+    }
+    expect(result(`read-resource-${listed.length}`)).toMatchObject({ execution: 'not_executed', delivery: 'delivered', error: { code: 'NOT_FOUND' } })
+    expect(body(messages)).not.toContain('PRIVATE FOREIGN SOURCE')
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: [{ id: 'read-missing-resource', type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'resource', id: 'absent-resource', selection: { view: 'text' } }) } }]
+    }
+  }).mockImplementationOnce(async () => {
+    const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === 'read-missing-resource')!
+    expect(JSON.parse(tool.content!)).toMatchObject({ execution: 'not_executed', delivery: 'delivered', error: { code: 'NOT_FOUND' } })
+    return answer('The available Task resources were read.')
+  })
+
+  const next = s.submit('Continue using the available material.')
+  await s.waitRun(next.run_id)
+  expect(s.requestInput(next.request_id).bound_materials.map((material: Row) => material.id)).toEqual([imported.id])
+  expect(s.complete).toHaveBeenCalledTimes(7)
+})
+
+it('discovers and reads a resource created during the current model execution', async () => {
+  const s = setup(), text = 'A source created after the Worker input snapshot.'
+  let created = ''
+  s.complete.mockResolvedValueOnce({
+    text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+    calls: [{ id: 'create-live-source', type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: 'live-source.txt', content: { type: 'text', text } } }) } }]
+  }).mockImplementationOnce(async () => {
+    const tool = s.sent.at(-1)!.find(message => message.role === 'tool' && message.tool_call_id === 'create-live-source')!
+    const result = JSON.parse(tool.content!) as Row
+    expect(result).toMatchObject({ execution: 'success', delivery: 'delivered' })
+    created = result.data.id
+    return {
+      text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 },
+      calls: [
+        { id: 'list-live-source', type: 'function', function: { name: 'list', arguments: JSON.stringify({ kind: 'resource' }) } },
+        { id: 'read-live-source', type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'resource', id: created, selection: { view: 'text' } }) } }
+      ]
+    }
+  }).mockImplementationOnce(async () => {
+    const messages = s.sent.at(-1)!, result = (id: string) => JSON.parse(messages.find(message => message.role === 'tool' && message.tool_call_id === id)!.content!) as Row
+    expect(result('list-live-source')).toMatchObject({ execution: 'success', delivery: 'delivered', data: { items: [{ id: created, display_name: 'live-source.txt' }], next_cursor: null } })
+    expect(result('read-live-source')).toMatchObject({ execution: 'success', delivery: 'delivered', data: { metadata: { id: created }, data: { text } } })
+    return answer('The newly created Task source was read.')
+  })
+
+  const request = s.submit('Create and inspect a working source.')
+  await s.waitRun(request.run_id)
+  expect(s.requestInput(request.request_id).bound_materials).toEqual([])
+  expect(s.complete).toHaveBeenCalledTimes(3)
 })

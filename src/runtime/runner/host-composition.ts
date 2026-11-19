@@ -27,7 +27,7 @@ export interface CompositionSurfacePrepared { op: PresentationSurfaceWrite['inpu
 export interface CompositionPublicationHooks {
   check(): void
   prepared(prepared: CompositionSurfacePrepared[]): void
-  committed(recordId: string, revision: number): PublicationResult
+  committed(recordId: string, revision: number): unknown
 }
 export interface CompositionPublication { request: PresentationSurfaceWrite; owner: ExecutionScope; hooks: CompositionPublicationHooks; operation_id: string; action_id: string }
 
@@ -53,7 +53,7 @@ export class RunnerHostComposition {
     }
   }
   private mappings(task: string): PublicationEntry[] {
-    return (this.db.prepare('SELECT m.payload_json FROM runner_view_mappings m WHERE m.task_id=? AND m.rowid=(SELECT MAX(n.rowid) FROM runner_view_mappings n WHERE n.task_id=m.task_id AND n.artifact_id=m.artifact_id) ORDER BY m.rowid').all(task) as Row[]).map(row => validateRunnerContract('runner_publication_entry', JSON.parse(row.payload_json)))
+    return this.publications.mappings(task)
   }
   private outline(task: string) { return this.artifacts.outline(task) ?? fail('RUNNER_NOT_FOUND', 'Composition requires a shared outline') }
   private surface(task: string): Row { return this.db.prepare('SELECT * FROM surfaces WHERE task_id=? ORDER BY rowid LIMIT 1').get(task) as Row ?? fail('RUNNER_NOT_FOUND', 'Task Surface is unavailable') }
