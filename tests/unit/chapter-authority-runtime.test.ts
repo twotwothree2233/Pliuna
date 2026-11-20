@@ -8,6 +8,7 @@ import { ChatAdapter, type Completion } from '../../src/runtime/model/adapter'
 import { ModelService, type ModelLease } from '../../src/runtime/model/service'
 import { pluginCapabilityId, pluginContentId } from '../../src/runtime/plugins/directory'
 import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
+import { ChapterHost } from '../../src/runtime/runner/chapter-host'
 import { ChapterState } from '../../src/runtime/runner/chapter-state'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { loadConversation } from '../../src/runtime/runner/conversation'
@@ -81,8 +82,28 @@ async function original(s: Fixture, content: Bundle = bundle()): Promise<Chapter
 }
 function chapterModel(s: Fixture, source: () => Bundle = bundle) {
   const pending = new Map<string, ReturnType<typeof deferred<Completion>>>()
+  const edits = new Map<string, [string, string][]>()
   s.complete.mockImplementation(async (_config, _key, messages) => {
     const system = messages.find(message => message.role === 'system')!.content!
+    if (system.includes('Bound scope: ')) {
+      const binding = JSON.parse(system.slice(system.lastIndexOf('Bound scope: ') + 'Bound scope: '.length)) as { node_ids: string[] }
+      const request = JSON.parse([...messages].reverse().find(message => message.role === 'user')!.content!).request
+      const input = s.records('worker.input').reverse().find(record => record.owner.update_id && record.text === request)!
+      const update = s.status(input.owner.update_id)
+      if (messages.at(-1)!.role !== 'tool') {
+        const gate = deferred<Completion>(); pending.set(update.update_id, gate); return gate.promise
+      }
+      const result = JSON.parse(messages.at(-1)!.content!)
+      expect(result).toMatchObject({ execution: 'success' })
+      if (result.data.state === 'staged') return answer('更新已完成。')
+      const nodes = messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content!)).map(value => value.data?.data ?? value.data).filter(value => binding.node_ids.includes(value?.node_id))
+      const operations = nodes.map(data => {
+        let html = data.html as string
+        for (const [from, to] of edits.get(update.update_id)!) html = html.replace(from, to)
+        return { type: 'replace', node_ids: [data.node_id], html }
+      })
+      return { text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 30 }, calls: [{ id: 'submit-content', type: 'function', function: { name: 'call', arguments: JSON.stringify({ capability: 'builtin:content-operations:v1', input_json: JSON.stringify({ operations }) }) } }] }
+    }
     const binding = JSON.parse(system.slice(system.lastIndexOf('Bound data: ') + 'Bound data: '.length)) as { update_id: string }
     const update = s.status(binding.update_id)
     if (messages.at(-1)!.role !== 'tool') {
@@ -96,11 +117,29 @@ function chapterModel(s: Fixture, source: () => Bundle = bundle) {
     pending,
     async release(updateId: string, replacements: [string, string][]) {
       await vi.waitFor(() => expect(pending.has(updateId)).toBe(true))
+      const update = s.status(updateId)
+      if (update.base_manifest.content_tree) {
+        edits.set(updateId, replacements)
+        pending.get(updateId)!.resolve({ text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 10 }, calls: update.region_ids.map((id, index) => ({ id: 'read-content-' + index, type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'content_node', id }) } })) })
+        return
+      }
       const candidate = source()
       for (const [from, to] of replacements) candidate.html = candidate.html.replace(from, to)
       pending.get(updateId)!.resolve(create(candidate))
     }
   }
+}
+
+// Retain coverage for work admitted by the application before tree metadata existed.
+function useLegacyMapping(s: Fixture): void {
+  const map = ChapterHost.prototype.map
+  vi.spyOn(ChapterHost.prototype, 'map').mockImplementation(function(this: ChapterHost, task, view, expected) {
+    const current = new ChapterState(s.internal().db).manifest(task, view)
+    if (current?.view_revision === expected && !current.content_tree) return current
+    const { content_tree: _tree, ...manifest } = map.call(this, task, view, expected)
+    s.internal().db.prepare('UPDATE runner_chapter_manifests SET payload_json=? WHERE task_id=? AND view_id=? AND manifest_revision=?').run(JSON.stringify(manifest), task, view, manifest.manifest_revision)
+    return manifest
+  })
 }
 function start(s: Fixture, manifest: ChapterManifest, name: 'Alpha' | 'Beta', updateId: string): ChapterUpdate {
   const view = s.snapshot().views[0]!
@@ -185,8 +224,43 @@ function material(s: Fixture, text: string, task = s.task, name = 'source.txt'):
 const queryTool = (name: 'list' | 'read', input: unknown, callId: string): Completion => ({ text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 10 }, calls: [{ id: callId, type: 'function', function: { name, arguments: JSON.stringify(input) } }] })
 const readResource = (id: string, callId: string): Completion => queryTool('read', { kind: 'resource', id }, callId)
 
-test('actual chapter tools discover same-Task resources and retain declared chapter dependencies after publication', async () => {
-  const s = setup(), originalManifest = await original(s), chapters = new ChapterState(s.internal().db)
+test('content tools discover material and exact node baselines while host submission owns candidate creation', async () => {
+  const s = setup(), mapped = await original(s), observed = new Map<string, unknown>()
+  const available = material(s, 'Available material for the selected content.'), other = s.store.create('Other Task').task.id
+  const foreign = material(s, 'Private foreign material.', other), nodeId = mapped.chapters.find(chapter => chapter.title === 'Alpha')!.region_id
+  let html = ''
+  s.complete.mockImplementation(async (_config, _key, messages) => {
+    const last = messages.at(-1)!
+    if (last.role !== 'tool') return queryTool('list', { kind: 'content_tree' }, 'discover-tree')
+    const result = JSON.parse(last.content!); observed.set(last.tool_call_id!, result)
+    if (last.tool_call_id === 'discover-tree') return queryTool('read', { kind: 'content_tree', id: mapped.view_id }, 'read-tree')
+    if (last.tool_call_id === 'read-tree') return queryTool('read', { kind: 'content_node', id: nodeId }, 'read-node')
+    if (last.tool_call_id === 'read-node') { html = result.data.data.html.replace('Alpha original', 'Alpha revised through content tools'); return queryTool('list', { kind: 'resource' }, 'discover-resources') }
+    if (last.tool_call_id === 'discover-resources') return readResource(available, 'read-material')
+    if (last.tool_call_id === 'read-material') return readResource(foreign, 'read-foreign')
+    if (last.tool_call_id === 'read-foreign') return create(bundle())
+    if (last.tool_call_id === 'create-bundle') return { text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 20 }, calls: [{ id: 'submit-content', type: 'function', function: { name: 'call', arguments: JSON.stringify({ capability: 'builtin:content-operations:v1', input_json: JSON.stringify({ operations: [{ type: 'replace', node_ids: [nodeId], html }] }) }) } }] }
+    expect(result).toMatchObject({ execution: 'success', data: { state: 'staged' } })
+    return answer('更新已完成。')
+  })
+  const update = start(s, mapped, 'Alpha', 'content-tool-authority')
+  await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
+  for (const call of ['discover-tree', 'read-tree', 'read-node', 'discover-resources', 'read-material']) expect(observed.get(call)).toMatchObject({ execution: 'success' })
+  expect(JSON.stringify(observed.get('read-tree'))).not.toContain('Alpha original')
+  expect(observed.get('read-node')).toMatchObject({ data: { data: { node_id: nodeId, revision: 1, position_revision: 1 } } })
+  expect(observed.get('read-foreign')).toMatchObject({ execution: 'not_executed', error: { code: 'NOT_FOUND' } })
+  expect(observed.get('create-bundle')).toMatchObject({ execution: 'not_executed', error: { code: 'WORKER_CAPABILITY_DENIED' } })
+  expect(s.records('content.operations.submitted')).toHaveLength(1)
+  expect(s.records('worker.input').find(record => record.owner.update_id === update.update_id)!.bound?.chapter_template).toBeUndefined()
+  await publish(s, s.status(update.update_id).action_id)
+  await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha revised through content tools')
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
+})
+
+test('legacy chapter tools discover same-Task resources and retain declared chapter dependencies after publication', async () => {
+  const s = setup(); useLegacyMapping(s)
+  const originalManifest = await original(s), chapters = new ChapterState(s.internal().db)
   const beta = originalManifest.chapters.find(chapter => chapter.title === 'Beta')!
   const dependency = { kind: 'chapter' as const, task_id: s.task, view_id: originalManifest.view_id, region_id: beta.region_id, revision: beta.revision }
   const mapped = chapters.installManifest({ ...originalManifest, manifest_revision: originalManifest.manifest_revision + 1, chapters: originalManifest.chapters.map(chapter => chapter.title === 'Alpha' ? { ...chapter, dependencies: [dependency] } : chapter) }, originalManifest.manifest_revision)
@@ -245,8 +319,9 @@ test('actual chapter tools discover same-Task resources and retain declared chap
   expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
 })
 
-test('actual chapter tools read captured conversation events while denying unrelated Task events', async () => {
-  const s = setup(), mapped = await original(s), observed = new Map<string, unknown>()
+test('legacy chapter tools read captured conversation events while denying unrelated Task events', async () => {
+  const s = setup(); useLegacyMapping(s)
+  const mapped = await original(s), observed = new Map<string, unknown>()
   const history = s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='runner.answer' ORDER BY sequence DESC LIMIT 1").get(s.task) as { id: string }
   const secret = 'UNRELATED TASK EVENT MUST STAY PRIVATE', unrelated = s.internal().record(s.task, 'test.private', { text: secret })
   s.complete.mockImplementation(async (_config, _key, messages) => {
@@ -271,8 +346,9 @@ test('actual chapter tools read captured conversation events while denying unrel
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
 })
 
-test('actual chapter tools discover and read Task data, enabled plugin content and capability contracts', async () => {
-  const s = setup(), mapped = await original(s), taskData = 'chapter-reference-data', observed = new Map<string, unknown>()
+test('legacy chapter tools discover and read Task data, enabled plugin content and capability contracts', async () => {
+  const s = setup(); useLegacyMapping(s)
+  const mapped = await original(s), taskData = 'chapter-reference-data', observed = new Map<string, unknown>()
   s.internal().db.prepare('INSERT INTO task_data(id,task_id,revision,schema_json,value_json,references_json,creator_run_id,auto_edit_valid) VALUES (?,?,1,?,?,?,NULL,0)').run(taskData, s.task, JSON.stringify({ type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false }), JSON.stringify({ label: 'Available chapter reference data' }), '[]')
   const source = join(s.directory, 'discovery-plugin')
   mkdirSync(source)

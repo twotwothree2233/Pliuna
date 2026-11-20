@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import type { Bundle, ChapterProposal, ChapterUpdate, ExecutionScope } from '../../src/shared/contracts.generated'
+import type { Bundle, ChapterProposal, ChapterUpdate, ContentOperation, ExecutionScope } from '../../src/shared/contracts.generated'
 import type { Completion } from '../../src/runtime/model/adapter'
-import { createChapterProfile } from '../../src/runtime/runner/chapter-profile'
+import { createChapterProfile, createContentProfile } from '../../src/runtime/runner/chapter-profile'
 import { assembleChapterUpdate, validateChapterMapping } from '../../src/runtime/runner/chapter-content'
+import { createChapterRouterProfile } from '../../src/runtime/runner/chapter-router'
+import { buildContentTree } from '../../src/runtime/runner/content-tree'
+import { assembleContentUpdate, assertContentAuthority, CONTENT_OPERATIONS, treeChapters } from '../../src/runtime/runner/content-tree-host'
 import { ContractError } from '../../src/shared/validation'
 import type { WorkerGrant } from '../../src/runtime/runner/worker-profile'
-import { chapterBundle, chapterProposal, chapterPublication, chapterRegion, chapterSource, chapterUpdate } from '../helpers/chapters'
+import { chapterBundle, chapterManifest, chapterProposal, chapterPublication, chapterRegion, chapterSource, chapterUpdate } from '../helpers/chapters'
 
 const final = (value: unknown): Completion => ({ text: JSON.stringify(value), finish: 'stop', calls: [] })
 const readResource = (id: string) => ({ type: 'read', input: { target: { kind: 'resource', id } } })
@@ -22,6 +25,52 @@ function owner(update = chapterUpdate()): Extract<ExecutionScope, { purpose: 'pr
 function mappingChecker(loadCandidate: (resourceId: string) => Bundle): (proposal: ChapterProposal) => void {
   return proposal => validateChapterMapping(loadCandidate(proposal.bundle_resource_id), proposal.replacements.flatMap(group => group.chapters))
 }
+
+function contentFixture() {
+  const bundle = { ...chapterBundle(), html: '<p>First</p><p>Second</p><p>Unchanged</p>' }, tree = buildContentTree(bundle.html)
+  const manifest = { ...chapterManifest(), content_tree: tree, chapters: treeChapters(tree) }
+  const ids = tree.nodes.filter(node => node.kind === 'paragraph').map(node => node.node_id)
+  const update = chapterUpdate('content-merge', ids.slice(0, 2), manifest)
+  update.tree_operations = [{ type: 'replace', node_ids: update.region_ids }]
+  update.source = owner(update)
+  return { bundle, tree, manifest, update, ids }
+}
+
+describe('content operation producer', () => {
+  it('keeps a router-bound merge intact while the worker supplies only its HTML fragment', () => {
+    const s = contentFixture(), route = createChapterRouterProfile([s.manifest]).parseResult(final({ kind: 'update', view_id: s.manifest.view_id, region_ids: s.update.region_ids, tree_operations: s.update.tree_operations }))
+    if (route.kind !== 'update') throw Error('Expected an update route')
+    s.update.tree_operations = route.tree_operations
+    let proposal: ChapterProposal | null = null
+    const profile = createContentProfile(s.update, owner(s.update), [], () => proposal)
+    const binding = JSON.parse(profile.system.split('Bound scope: ')[1]!)
+    expect(binding.operations).toEqual([{ type: 'replace', node_ids: s.update.region_ids }])
+    expect(profile.system).not.toContain(s.bundle.html)
+    expect(() => profile.parseResult(final('Done'))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
+    const operation: ContentOperation = { type: 'replace', node_ids: s.update.region_ids, html: '<p>Combined</p>' }
+    expect(() => profile.authorize({ type: 'call', input: { capability: CONTENT_OPERATIONS, arguments: { operations: [operation] }, references: [] } })).not.toThrow()
+    const assembled = assembleContentUpdate({ bundle: s.bundle, manifest: s.manifest }, s.update, [operation])
+    expect(assembled.bundle.html).toBe('<p>Combined</p><p>Unchanged</p>')
+    const combined = assembled.tree.nodes.find(node => node.kind === 'paragraph')!
+    for (const id of s.update.region_ids) expect(assembled.tree.lineage).toContainEqual({ previous_node_id: id, successor_node_ids: [combined.node_id], revision: assembled.tree.revision, reason: 'merge' })
+    expect(assembled.tree.nodes.find(node => node.node_id === s.ids[2])).toMatchObject({ revision: 1, position_revision: 1 })
+    proposal = { ...chapterProposal(s.update), replacements: [], tree_operations: [operation] }
+    expect(profile.parseResult(final('Done'))).toBe(proposal)
+    expect(() => profile.authorize(createResource(s.bundle))).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+  })
+
+  it('rejects changes to the bound replacement group even when all nodes were granted', () => {
+    const s = contentFixture(), [first, second] = s.update.region_ids
+    const changed: ContentOperation[][] = [
+      [{ type: 'replace', node_ids: [first!], html: '<p>Combined</p>' }, { type: 'delete', node_ids: [second!] }],
+      [{ type: 'replace', node_ids: [second!, first!], html: '<p>Combined</p>' }],
+      [{ type: 'replace', node_ids: [first!], html: '<p>Partial</p>' }],
+      [{ type: 'delete', node_ids: s.update.region_ids }]
+    ]
+    for (const operations of changed) expect(() => assertContentAuthority(s.update, operations)).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+    expect(() => assertContentAuthority(s.update, [{ type: 'replace', node_ids: s.update.region_ids, html: '<p>Corrected complete fragment</p>' }])).not.toThrow()
+  })
+})
 
 describe('chapter producer templates', () => {
   it('binds an immutable one-to-one replacement without model-supplied boundary metadata', () => {

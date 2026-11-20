@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { transformWithEsbuild } from 'vite'
-import type { Bundle, ChapterManifest, ChapterUpdate } from '../../src/shared/contracts.generated'
+import { createServer, transformWithEsbuild } from 'vite'
+import type { Bundle, ChapterManifest, ChapterUpdate, ContentTree } from '../../src/shared/contracts.generated'
 import type { ChapterPresentation } from '../../src/renderer/src/chapter-presentation'
 
 const electronPath: string = createRequire(import.meta.url)('electron')
@@ -18,7 +18,8 @@ interface BrowserFixture {
   calls: string[]
   mode: 'immediate' | 'pending' | 'reject'
   release?: () => void
-  rebuild(replacements: [string, string][], updates: ChapterUpdate[]): void
+  pendingSaves: (() => void)[]
+  rebuild(replacements: [string, string][], updates: ChapterUpdate[], tree?: ContentTree): void
 }
 declare global {
   interface Window {
@@ -44,7 +45,11 @@ let app: ElectronApplication
 let page: Page
 let directory: string
 let source: string
+let buildContentTree: typeof import('../../src/runtime/runner/content-tree').buildContentTree
+let applyContentOperations: typeof import('../../src/runtime/runner/content-tree').applyContentOperations
 test.beforeAll(async () => {
+  const compiler = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true } })
+  try { ({ buildContentTree, applyContentOperations } = await compiler.ssrLoadModule('/src/runtime/runner/content-tree.ts')) } finally { await compiler.close() }
   directory = await mkdtemp(join(tmpdir(), 'pliuna-chapter-ui-'))
   const entry = join(directory, 'chapter-browser.cjs')
   await writeFile(entry, "const {app,BrowserWindow}=require('electron');app.whenReady().then(()=>{const window=new BrowserWindow({width:1000,height:760,webPreferences:{contextIsolation:true,nodeIntegration:false}});window.loadURL('about:blank')})")
@@ -57,22 +62,24 @@ test.afterAll(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 
-async function fixture(options: { structural?: boolean; long?: boolean } = {}) {
+async function fixture(options: { structural?: boolean; long?: boolean; html?: string; tree?: ContentTree } = {}) {
   await page.evaluate(() => window.chapterFixture?.controller.dispose())
   await page.setContent('<style>:root{--fg:#171a20;--bg:#fff;--block:#f3f4f6;--line:#d7dbe1;--line-strong:#b1b8c1;--muted:#626b78;--accent:#375dd4;--hover:#e9edf4;--font-ui:system-ui;--warn:#a43b20}body{margin:0;padding:24px}.workspace-scroll{height:580px;overflow:auto;overflow-anchor:none;border:1px solid #ddd}</style><div class="workspace-scroll"><div id="view"></div></div><button id="outside">Agent</button>')
   await page.addScriptTag({ content: source })
-  await page.evaluate(({ manifest, long }) => {
+  await page.evaluate(({ manifest, long, html }) => {
     const shadow = document.querySelector('#view')!.attachShadow({ mode: 'open' })
-    const style = document.createElement('style'); style.textContent = 'h2{margin:24px 0 12px}section{padding:0 24px}p{line-height:1.8;margin:14px 0}input{display:block;margin:12px 0}button{margin:8px 0}#tail{height:700px}'
+    const style = document.createElement('style'); style.textContent = 'h2{margin:24px 0 12px}section{padding:0 24px}p{line-height:1.8;margin:14px 0}input{display:block;margin:12px 0}button{margin:8px 0}#tail,.tail{height:700px}td{min-width:150px;padding:12px}'
     const host = document.createElement('div'); host.dataset.view = 'v-view'
     const paragraphs = (name: string) => Array.from({ length: long ? 50 : 3 }, (_, index) => `<p id="v-view-${name}-p-${index}">${name} paragraph ${index} continues the original chapter.</p>`).join('')
     host.innerHTML = `<section><h2 id="v-view-a-title">Alpha</h2><div id="v-view-a-body">${paragraphs('a')}<input id="v-view-a-input" aria-label="Alpha input" value="alpha draft"></div></section><section><h2 id="v-view-b-title">Beta</h2><div id="v-view-b-body">${paragraphs('b')}<input id="v-view-b-input" aria-label="Beta input" value="beta draft"><button id="v-view-independent">Submit Beta</button><button id="v-view-shared">Submit both</button></div></section><div id="tail"></div>`
+    const rendered = (value: string) => html === undefined ? value : value.replace(/\bid="/g, 'id="v-view-')
+    if (html !== undefined) host.innerHTML = rendered(html)
     shadow.append(style, host)
-    const bundle: Bundle = { profile: 'managed-v1', html: host.innerHTML, css: style.textContent!, state: { schema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, additionalProperties: false }, initial: { a: 'alpha draft', b: 'beta draft' }, compatibility_version: 'v1' }, forms: [{ id: 'shared', fields: ['/a', '/b'] }, { id: 'independent', fields: ['/b'] }], behaviors: [{ type: 'input', element_id: 'a-input', field: '/a', control: 'text' }, { type: 'input', element_id: 'b-input', field: '/b', control: 'text' }, { type: 'submit', element_id: 'independent', form_id: 'independent' }, { type: 'submit', element_id: 'shared', form_id: 'shared' }], references: [], export: [] }
-    const state: BrowserFixture = { host, manifest, bundle, bodies: [...host.querySelectorAll<HTMLElement>('[id$="-body"]')], saved: [], calls: [], mode: 'immediate', controller: null!, rebuild: () => {} }
+    const bundle: Bundle = { profile: 'managed-v1', html: html ?? host.innerHTML, css: style.textContent!, state: { schema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, additionalProperties: false }, initial: { a: 'alpha draft', b: 'beta draft' }, compatibility_version: 'v1' }, forms: [{ id: 'shared', fields: ['/a', '/b'] }, { id: 'independent', fields: ['/b'] }], behaviors: [{ type: 'input', element_id: 'a-input', field: '/a', control: 'text' }, { type: 'input', element_id: 'b-input', field: '/b', control: 'text' }, { type: 'submit', element_id: 'independent', form_id: 'independent' }, { type: 'submit', element_id: 'shared', form_id: 'shared' }], references: [], export: [] }
+    const state: BrowserFixture = { host, manifest, bundle, bodies: [...host.querySelectorAll<HTMLElement>('[id$="-body"]')], saved: [], calls: [], pendingSaves: [], mode: 'immediate', controller: null!, rebuild: () => {} }
     const controller = () => new window.ChapterUI.ChapterPresentation({ host, bundle: state.bundle,
       save: async () => {
-        if (state.mode === 'pending') await new Promise<void>(resolve => { state.release = resolve })
+        if (state.mode === 'pending') await new Promise<void>(resolve => { state.release = resolve; state.pendingSaves.push(resolve) })
         if (state.mode === 'reject') throw Error('VERSION_CONFLICT')
         state.saved.push([...host.querySelectorAll<HTMLInputElement>('input')].map(input => input.value))
       }, canPrepare: () => true,
@@ -81,21 +88,21 @@ async function fixture(options: { structural?: boolean; long?: boolean } = {}) {
       resolve: value => { state.calls.push('resolve:' + value.update_id) }
     })
     state.controller = controller()
-    state.rebuild = (replacements, updates) => {
+    state.rebuild = (replacements, updates, tree) => {
       const position = window.ChapterUI.captureChapterPosition(host, state.manifest)
       const fields = [...host.querySelectorAll<HTMLInputElement>('input')].map(element => ({ id: element.id, value: element.value }))
       state.controller.dispose()
       for (const [from, to] of replacements) state.bundle.html = state.bundle.html.replace(from, to)
-      host.innerHTML = state.bundle.html
+      host.innerHTML = rendered(state.bundle.html)
       for (const field of fields) host.querySelector<HTMLInputElement>('#' + CSS.escape(field.id))!.value = field.value
-      state.manifest = { ...state.manifest, manifest_revision: state.manifest.manifest_revision + 1, view_revision: state.manifest.view_revision + 1 }
+      state.manifest = { ...state.manifest, manifest_revision: state.manifest.manifest_revision + 1, view_revision: state.manifest.view_revision + 1, ...(tree ? { content_tree: tree } : {}) }
       state.bodies = [...host.querySelectorAll<HTMLElement>('[id$="-body"]')]
       state.controller = controller()
       window.ChapterUI.restoreChapterPosition(position, host, state.manifest)
       state.controller.sync(state.manifest, updates)
     }
     window.chapterFixture = state
-  }, { manifest: manifest(options.structural), long: Boolean(options.long) })
+  }, { manifest: { ...manifest(options.structural), ...(options.tree ? { content_tree: options.tree } : {}) }, long: Boolean(options.long), html: options.html })
 }
 async function sync(...updates: ChapterUpdate[]) {
   await page.evaluate(updates => { const state = window.chapterFixture; state.controller.sync(state.manifest, updates) }, updates)
@@ -149,6 +156,22 @@ test('save conflict keeps the original chapter visible and gives a recovery acti
   await card('a').getByRole('button', { name: '保存输入并继续', exact: true }).click()
   await expect(body('a')).toBeHidden()
   expect(await page.evaluate(() => window.chapterFixture.saved[0]![0])).toBe('retry keeps this')
+})
+
+test('cancelling during a draft save restores input and ignores the late callback', async () => {
+  await fixture()
+  await page.getByLabel('Alpha input').fill('cancel preserves this draft')
+  await page.getByLabel('Alpha input').evaluate((element: HTMLInputElement) => element.setSelectionRange(7, 16, 'backward'))
+  await page.evaluate(() => { window.chapterFixture.mode = 'pending' })
+  await sync(update('a'))
+  await sync(update('a', 'cancelled'))
+  await expect(page.getByLabel('Alpha input')).toBeEditable()
+  await expect(page.getByLabel('Alpha input')).toBeFocused()
+  expect(await page.getByLabel('Alpha input').evaluate((element: HTMLInputElement) => [element.selectionStart, element.selectionEnd, element.selectionDirection])).toEqual([7, 16, 'backward'])
+  await page.evaluate(() => { window.chapterFixture.mode = 'immediate'; window.chapterFixture.release!() })
+  await expect(body('a')).toBeVisible()
+  await expect(page.getByLabel('Alpha input')).toHaveValue('cancel preserves this draft')
+  await expect(card('a').getByText('更新已取消', { exact: true })).toBeVisible()
 })
 
 test('new intent controls the card while waiting and unknown states stay static', async () => {
@@ -272,4 +295,144 @@ test('publication rebuild restores latest non-target control and respects motion
     }, colors)
     expect(actual.slice(0, 2)).toEqual(actual.slice(2))
   }
+})
+
+const treeInputs = '<input id="b-input" aria-label="Beta input" value="beta draft"><button id="independent">Submit Beta</button><button id="shared">Submit both</button><div class="tail"></div>'
+function treeUpdate(tree: ContentTree, node: string, state: ChapterUpdate['state'] = 'generating', intent = 1): ChapterUpdate {
+  const value = update(node, state, intent)
+  return { ...value, intent_revision: intent, base_manifest: { ...value.base_manifest, content_tree: tree }, text: 'Revise this content' }
+}
+
+test('heading-free paragraphs, list items and cells retain legal containers and read-only previews', async () => {
+  const html = '<p>Opening paragraph without a heading.</p><p>Untouched paragraph.</p><ul><li>Target item.<input id="a-input" aria-label="Alpha input" value="alpha draft"></li><li>Untouched item.</li></ul><table><tbody><tr><td>Target cell.</td><td>Untouched cell.</td></tr></tbody></table>' + treeInputs
+  const tree = buildContentTree(html)
+  const paragraph = tree.nodes.find(node => node.kind === 'paragraph')!
+  const item = tree.nodes.find(node => node.kind === 'list_item')!
+  const cell = tree.nodes.find(node => node.kind === 'cell')!
+  await fixture({ html, tree })
+  await page.getByLabel('Alpha input').fill('latest list draft')
+  const original = await page.getByLabel('Alpha input').elementHandle()
+  await sync(treeUpdate(tree, paragraph.node_id), treeUpdate(tree, item.node_id), treeUpdate(tree, cell.node_id))
+  await expect(page.getByText('Opening paragraph without a heading.', { exact: true })).toBeHidden()
+  await expect(page.getByText('Untouched paragraph.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Untouched item.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Untouched cell.', { exact: true })).toBeVisible()
+  expect(await card(item.node_id).evaluate(element => element.parentElement!.localName)).toBe('li')
+  expect(await card(cell.node_id).evaluate(element => element.parentElement!.localName)).toBe('td')
+  expect(await page.evaluate(() => window.chapterFixture.host.querySelectorAll('ul > :not(li),tr > :not(td):not(th)').length)).toBe(0)
+  await expect(page.locator('#v-view-shared')).toBeDisabled()
+  await expect(page.locator('#v-view-independent')).toBeEnabled()
+  await card(item.node_id).getByRole('button', { name: '查看上一版', exact: true }).click()
+  await expect(card(item.node_id).getByLabel('Alpha input')).toHaveValue('latest list draft')
+  await expect(card(item.node_id).getByLabel('Alpha input')).toBeDisabled()
+  await card(cell.node_id).getByRole('button', { name: '查看上一版', exact: true }).click()
+  await expect(card(cell.node_id).getByText('Target cell.', { exact: true })).toBeVisible()
+  expect(await card(cell.node_id).locator('.preview').evaluate(element => element.shadowRoot!.querySelector('td')?.parentElement?.localName)).toBe('tr')
+  await page.getByLabel('Beta input', { exact: true }).fill('outside editing continues')
+  await sync(treeUpdate(tree, paragraph.node_id, 'failed'), treeUpdate(tree, item.node_id, 'cancelled'), treeUpdate(tree, cell.node_id, 'failed'))
+  await expect(page.getByText('Opening paragraph without a heading.', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Alpha input')).toHaveValue('latest list draft')
+  expect(await original!.evaluate(element => element.isConnected && element === window.chapterFixture.host.querySelector('#v-view-a-input'))).toBe(true)
+  await expect(page.getByLabel('Beta input', { exact: true })).toHaveValue('outside editing continues')
+  await expect(page.getByLabel('Beta input', { exact: true })).toBeFocused()
+  await expect(page.locator('#v-view-shared')).toBeEnabled()
+})
+
+test('virtual section replaces all sibling roots and a stale save cannot disturb its successor', async () => {
+  const html = '<article><h2>First section</h2><p>First body paragraph.</p><p>Second body paragraph.</p><h2>Next section</h2><p>Other section remains.</p></article>' + treeInputs
+  const tree = buildContentTree(html)
+  const section = tree.nodes.find(node => node.kind === 'section' && node.title === 'First section')!
+  const paragraph = tree.nodes.find(node => node.parent_id === section.node_id && node.kind === 'paragraph')!
+  await fixture({ html, tree })
+  await sync(treeUpdate(tree, section.node_id))
+  await expect(page.getByRole('heading', { name: 'First section', exact: true })).toBeHidden()
+  await expect(page.getByText('First body paragraph.', { exact: true })).toBeHidden()
+  await expect(page.getByText('Second body paragraph.', { exact: true })).toBeHidden()
+  await expect(page.getByRole('heading', { name: 'Next section', exact: true })).toBeVisible()
+  await card(section.node_id).getByRole('button', { name: '查看上一版', exact: true }).click()
+  await expect(card(section.node_id).getByText('First body paragraph.', { exact: true })).toBeVisible()
+  await expect(card(section.node_id).getByText('Second body paragraph.', { exact: true })).toBeVisible()
+  await sync(treeUpdate(tree, section.node_id, 'cancelled'))
+  await page.evaluate(() => { window.chapterFixture.mode = 'pending' })
+  await sync(treeUpdate(tree, section.node_id, 'generating', 2))
+  const newer = treeUpdate(tree, paragraph.node_id, 'waiting_approval', 3)
+  await sync(newer, treeUpdate(tree, section.node_id, 'superseded', 2))
+  await page.evaluate(() => window.chapterFixture.pendingSaves[0]!())
+  expect(await page.getByText('First body paragraph.', { exact: true }).evaluate((element: HTMLElement) => element.inert)).toBe(true)
+  await page.evaluate(() => { window.chapterFixture.mode = 'immediate'; window.chapterFixture.pendingSaves[1]!() })
+  await expect(page.getByText('First body paragraph.', { exact: true })).toBeHidden()
+  await expect(page.getByText('Second body paragraph.', { exact: true })).toBeVisible()
+  await expect(card(section.node_id)).toHaveCount(0)
+  await sync({ ...newer, state: 'unknown' }, treeUpdate(tree, section.node_id, 'failed', 2))
+  await expect(card(paragraph.node_id)).toHaveAttribute('data-chapter-update', newer.update_id)
+  await expect(card(paragraph.node_id).locator('.activity')).toHaveCount(0)
+  await expect(card(paragraph.node_id).getByRole('button', { name: '查询原操作', exact: true })).toBeVisible()
+  await sync({ ...newer, state: 'failed' })
+  await expect(page.getByText('First body paragraph.', { exact: true })).toBeVisible()
+})
+
+test('insertion shows a legal gap status while existing content remains usable', async () => {
+  const html = '<ul><li>First retained item.</li><li>Second retained item.</li></ul><input id="a-input" aria-label="Alpha input" value="alpha draft">' + treeInputs
+  const tree = buildContentTree(html)
+  const list = tree.nodes.find(node => node.kind === 'list')!
+  const insert: ChapterUpdate = { ...treeUpdate(tree, list.node_id), tree_operations: [{ type: 'insert', parent_id: list.node_id, position: 'before', anchor_id: list.children[1]! }, { type: 'insert', parent_id: list.node_id, position: 'end' }] }
+  await fixture({ html, tree })
+  await sync(insert)
+  await expect(card(list.node_id)).toHaveCount(2)
+  await expect(page.getByText('First retained item.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Second retained item.', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Alpha input')).toBeEditable()
+  await expect(page.locator('#v-view-shared')).toBeEnabled()
+  expect(await card(list.node_id).evaluateAll(elements => elements.every(element => element.parentElement?.localName === 'li' && element.parentElement.parentElement?.localName === 'ul'))).toBe(true)
+  expect(await page.evaluate(id => {
+    const state = window.chapterFixture, node = state.manifest.content_tree!.nodes.find(node => node.node_id === id)!
+    return window.ChapterUI.chapterElement(state.host, node.selector)?.textContent
+  }, list.children[1]!)).toBe('Second retained item.')
+  await expect(card(list.node_id).getByRole('button', { name: '查看上一版', exact: true })).toHaveCount(0)
+  await sync({ ...insert, state: 'cancelled' })
+  expect(await page.evaluate(() => window.chapterFixture.host.querySelectorAll('ul > li').length)).toBe(4)
+  await sync()
+  expect(await page.evaluate(() => window.chapterFixture.host.querySelectorAll('ul > li').length)).toBe(2)
+})
+
+test('independent insertion updates under one parent retain their own gap status', async () => {
+  const html = '<ul><li>First retained item.</li><li>Second retained item.</li></ul>' + treeInputs
+  const tree = buildContentTree(html), list = tree.nodes.find(node => node.kind === 'list')!
+  const first: ChapterUpdate = { ...treeUpdate(tree, list.node_id), update_id: 'first-gap', tree_operations: [{ type: 'insert', parent_id: list.node_id, position: 'before', anchor_id: list.children[1]! }] }
+  const second: ChapterUpdate = { ...treeUpdate(tree, list.node_id, 'generating', 2), intent_revision: 1, update_id: 'last-gap', tree_operations: [{ type: 'insert', parent_id: list.node_id, position: 'end' }] }
+  await fixture({ html, tree })
+  await sync(first, second)
+  await expect(card(list.node_id)).toHaveCount(2)
+  await expect(page.locator('[data-chapter-update="first-gap"]')).toHaveCount(1)
+  await expect(page.locator('[data-chapter-update="last-gap"]')).toHaveCount(1)
+  await page.locator('[data-chapter-update="first-gap"]').getByRole('button', { name: '取消更新', exact: true }).click()
+  expect(await page.evaluate(() => window.chapterFixture.calls)).toContain('cancel:first-gap')
+  const newer: ChapterUpdate = { ...first, update_id: 'corrected-first-gap', region_intents: [{ region_id: list.node_id, intent_revision: 3 }] }
+  await sync(first, second, newer)
+  await expect(card(list.node_id)).toHaveCount(2)
+  await expect(page.locator('[data-chapter-update="first-gap"]')).toHaveCount(0)
+  await expect(page.locator('[data-chapter-update="corrected-first-gap"]')).toHaveCount(1)
+  await expect(page.locator('[data-chapter-update="last-gap"]')).toHaveCount(1)
+  await expect(page.getByText('First retained item.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Second retained item.', { exact: true })).toBeVisible()
+  await sync({ ...newer, state: 'succeeded' }, second)
+  await expect(card(list.node_id)).toHaveCount(1)
+  await expect(page.locator('[data-chapter-update="last-gap"]')).toHaveCount(1)
+})
+
+test('deleting an unlabelled node restores focus and reading to its retained neighbor', async () => {
+  const html = Array.from({ length: 35 }, (_, index) => `<p>Reading paragraph ${index}.</p>`).join('') + '<input id="a-input" aria-label="Alpha input" value="alpha draft">' + treeInputs
+  const tree = buildContentTree(html)
+  const target = tree.nodes.find(node => html.slice(node.span.start, node.span.end) === '<p>Reading paragraph 15.</p>')!
+  const next = applyContentOperations({ html, tree, operations: [{ type: 'delete', node_ids: [target.node_id] }] })
+  await fixture({ html, tree })
+  const selected = page.getByText('Reading paragraph 15.', { exact: true })
+  await selected.evaluate((element: HTMLElement) => { element.tabIndex = -1; element.scrollIntoView({ block: 'start' }); element.focus({ preventScroll: true }) })
+  const before = await selected.boundingBox()
+  await page.evaluate(({ html, next }) => window.chapterFixture.rebuild([[html, next.html]], [], next.tree), { html, next })
+  const neighbor = page.getByText('Reading paragraph 16.', { exact: true })
+  await expect(neighbor).toBeFocused()
+  const after = await neighbor.boundingBox()
+  expect(Math.abs(after!.y - before!.y)).toBeLessThan(3)
+  expect(await page.locator('.workspace-scroll').evaluate(element => element.scrollTop)).toBeGreaterThan(300)
 })

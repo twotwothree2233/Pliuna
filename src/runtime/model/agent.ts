@@ -213,7 +213,11 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
             repeatedRejection = rejectedInput === signature
             rejectedInput = signature
           }
-          result = toolError(errorCall, e instanceof ContractError || e instanceof ModelError ? e.code : 'TOOL_FAILED', collator ? 'Collator tool request was denied; only frozen runner metadata is available' : e instanceof ContractError ? e.message : 'Tool not executed; no automatic replay', !collator && e instanceof ContractError ? modelToolSuggestion(call.function.name, raw, e) : undefined)
+          const suggestion = !collator && e instanceof ContractError ? modelToolSuggestion(call.function.name, raw, e, request => {
+            if (!tools.some(tool => tool.function.name === request.type)) throw new ContractError('WORKER_CAPABILITY_DENIED', 'Suggested tool is unavailable')
+            profile?.authorize(request)
+          }) : undefined
+          result = toolError(errorCall, e instanceof ContractError || e instanceof ModelError ? e.code : 'TOOL_FAILED', collator ? 'Collator tool request was denied; only frozen runner metadata is available' : e instanceof ContractError ? e.message : 'Tool not executed; no automatic replay', suggestion)
         }
       }
       const content = JSON.stringify(result)

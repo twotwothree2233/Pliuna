@@ -13,7 +13,8 @@ Object.assign(names, {
   ChapterDependency: 'runner_chapter_dependency', ChapterOwnership: 'runner_chapter_ownership', ChapterRegion: 'runner_chapter_region',
   ChapterManifest: 'runner_chapter_manifest', ChapterIntent: 'runner_chapter_intent', ChapterUpdate: 'runner_chapter_update',
   ChapterReplacement: 'runner_chapter_replacement', ChapterProposal: 'runner_chapter_proposal', ChapterInheritance: 'runner_chapter_inheritance',
-  ChapterPublication: 'runner_chapter_publication'
+  ChapterPublication: 'runner_chapter_publication', ContentNode: 'runner_content_node', ContentLineage: 'runner_content_lineage',
+  ContentTree: 'runner_content_tree', ContentOperation: 'runner_content_operation', ContentOperationPlan: 'runner_content_operation_plan'
 })
 let output = '/* Generated from src/shared/contracts/core.schema.json. Do not edit. */\n'
 for (const [name, definition] of Object.entries(names)) {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import type { Bundle, ChapterDependency, ChapterManifest, ChapterRegion } from '../../src/shared/contracts.generated'
 import { assembleChapterUpdate, chapterCandidateTemplate, chapterContext, chapterDependencyValid, chapterInput, deriveChapterMapping, validateChapterCandidate, validateChapterMapping } from '../../src/runtime/runner/chapter-content'
 import defaults from '../../src/shared/contracts/development-defaults.json'
+import { buildContentTree } from '../../src/runtime/runner/content-tree'
 
 function bundle(html = '<section><h2 id="a-title">Alpha</h2><div id="a-body"><p>Alpha original</p></div></section>\n<section><h2 id="b-title">Beta</h2><div id="b-body"><p>Beta original</p></div></section>'): Bundle {
   return { profile: 'managed-v1', html, css: '/* shared */\np { line-height: 1.5; }\n#a-body p { color: red; }\n#b-body p { color: blue; }', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'v1' }, forms: [], behaviors: [], references: [], export: [] }
@@ -46,8 +47,11 @@ describe('stable chapter mapping', () => {
     expect(mapped.chapters[0]!.region_id).toBe('stable-1')
   })
 
-  test('does not guess a body range or introduce a layout-changing wrapper', () => {
+  test('uses a virtual content section for multiple paragraphs while retaining the legacy boundary rule', () => {
     const original = bundle('<section><h2>Title</h2><p>First paragraph</p><p>Second paragraph</p></section>')
+    const tree = buildContentTree(original.html), section = tree.nodes.find(node => node.kind === 'section')!
+    expect(section.children.map(id => tree.nodes.find(node => node.node_id === id)!.kind)).toEqual(['paragraph', 'paragraph'])
+    expect(original.html.slice(section.span.start, section.span.end)).toBe('<h2>Title</h2><p>First paragraph</p><p>Second paragraph</p>')
     checkError(() => deriveChapterMapping(original, { view_id: 'view' }), 'CHAPTER_MAPPING_REQUIRED')
     expect(original.html).toContain('<p>First paragraph</p><p>Second paragraph</p>')
   })

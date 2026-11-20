@@ -5,6 +5,27 @@ import { sameDependencies, validateRunnerContract } from '../../shared/runner-va
 import { ContractError, validateModel } from '../../shared/validation'
 import { createWorkerProfile, type WorkerGrant, type WorkerProfile } from './worker-profile'
 import { validateProducerBundle } from './production-profile'
+import { CONTENT_OPERATIONS } from './content-tree-host'
+
+export function createContentProfile(update: ChapterUpdate, owner: ExecutionScope, grants: readonly WorkerGrant[], submitted: () => ChapterProposal | null): WorkerProfile<ChapterProposal> {
+  if (!update.base_manifest.content_tree || owner.purpose !== 'production' || owner.update_id !== update.update_id || owner.role !== 'producer' || !isDeepStrictEqual(owner, update.source)) throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Content producer requires its exact tree authority')
+  return createWorkerProfile({
+    id: 'chapter-producer-v1', role: 'producer',
+    grants: [{ type: 'list', kind: 'content_tree' }, { type: 'read', kind: 'content_tree' }, { type: 'read', kind: 'content_node' }, { type: 'call', capability: CONTENT_OPERATIONS }, ...grants.filter(grant => grant.type !== 'write')],
+    system: `Continue the Task conversation and fulfill the bound content request.
+Navigate with content_tree and read exact HTML/baselines with content_node. Submit {operations:[{type:"replace|insert|delete|move",node_ids?:["id"],parent_id?:"id",position?:"before|after|start|end",anchor_id?:"id",html?:"HTML fragment"}]} through call capability ${CONTENT_OPERATIONS}.
+When bound operations are present, preserve their order, types, IDs and positions exactly; add only HTML to replace/insert. Keep each replacement group intact and supply its complete resulting fragment.
+Read affected content before submitting. Replace/insert supplies HTML; delete/move does not. For list items and cells supply inner HTML. Preserve current styling and forms. Retain inherited requirements within this scope unless a newer requirement supersedes them. A whole chapter may be one fragment; the host parses it. Operate only inside bound nodes or planned gaps. Finish after a successful submission; publication belongs to the host.
+Bound scope: ${JSON.stringify({ view_id: update.view_id, node_ids: update.region_ids, operations: update.tree_operations ?? [] })}`,
+    resultCorrection: 'Read affected nodes, preserve any bound operation plan, and correct the submitted HTML or fields. Submit successfully before finishing.',
+    parseResult(response) {
+      if (response.finish !== 'stop' || response.calls.length) throw new ContractError('INVALID_WORKER_RESULT', 'Complete the content operation submission first')
+      const proposal = submitted()
+      if (!proposal) throw new ContractError('INVALID_WORKER_RESULT', 'No content operations were submitted successfully')
+      return proposal
+    }
+  })
+}
 
 export function createChapterProfile(rawUpdate: ChapterUpdate, rawOwner: ExecutionScope, grants: readonly WorkerGrant[] = [], checkCandidate?: (proposal: ChapterProposal) => void, templateChapters?: readonly ChapterRegion[]): WorkerProfile<ChapterProposal> {
   const update = structuredClone(validateRunnerContract('runner_chapter_update', rawUpdate)), owner = structuredClone(validateRunnerContract('runner_execution_scope', rawOwner))

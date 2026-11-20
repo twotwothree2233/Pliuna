@@ -1,0 +1,9 @@
+{
+  "type": "move",
+  "node_ids": [
+    "node-a"
+  ],
+  "parent_id": "document",
+  "position": "after",
+  "anchor_id": "node-b"
+}

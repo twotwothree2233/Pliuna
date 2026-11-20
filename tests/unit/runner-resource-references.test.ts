@@ -5,6 +5,8 @@ import runnerSql from '../../src/shared/contracts/002-runner.sql?raw'
 import { upgradeCandidate } from '../../src/runtime/schema-upgrade'
 import { registerRunnerResources, runnerResourceReferences, validateRunnerResourceReferences } from '../../src/runtime/runner/resource-references'
 import { ChapterState } from '../../src/runtime/runner/chapter-state'
+import { ContentTreeState } from '../../src/runtime/runner/content-tree-state'
+import { contentTree } from '../helpers/content-tree'
 
 let db: Database.Database
 const task = 'task', other = 'other-task'
@@ -22,6 +24,17 @@ function history(id: string, revision: number, payload: unknown): void {
   db.prepare("INSERT INTO actions(id,task_id,kind,state,result,source_json,request_json,commit_valid,created_at) VALUES (?,?,'mutation','ended','success','{}','{}',0,'now')").run(action, task)
   db.prepare('INSERT INTO runner_surface_history VALUES (?,?,?,?,?,?)').run(id, task, 'surface', revision, action, JSON.stringify(payload))
 }
+
+it('retains frozen content tree resources when reference projections are missing', () => {
+  resource('tree-bundle')
+  db.exec("INSERT INTO surfaces VALUES ('tree-surface','task',1,'{}'); INSERT INTO views(id,surface_id,revision,bundle_resource_id,state_revision,draft_json,compatibility_version) VALUES ('tree-view','tree-surface',1,'tree-bundle',1,'{}','v1')")
+  new ContentTreeState(db).install({ task_id: task, view_id: 'tree-view', view_revision: 1, state_revision: 1, bundle_resource_id: 'tree-bundle' }, contentTree(), null)
+  db.prepare("DELETE FROM object_references WHERE source_kind='runner_content_trees'").run()
+  expect(runnerResourceReferences(db)).toContainEqual({ task_id: task, resource_id: 'tree-bundle' })
+  expect(() => validateRunnerResourceReferences(db)).not.toThrow()
+  db.prepare("DELETE FROM task_resources WHERE task_id=? AND resource_id='tree-bundle'").run(task)
+  expect(() => validateRunnerResourceReferences(db)).toThrow(expect.objectContaining({ code: 'RUNNER_RESOURCE_FACTS_INVALID' }))
+})
 
 it('installs task-associated protection with its owning transaction and retries idempotently', () => {
   resource('bundle')

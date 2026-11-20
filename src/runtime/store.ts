@@ -93,8 +93,13 @@ import type { ChapterManifest, ChapterProposal, ChapterPublication, ChapterUpdat
 import { ChapterHost } from './runner/chapter-host'
 import { chapterTerminal } from './runner/chapter-state'
 import { assembleChapterUpdate, chapterCandidateTemplate, chapterContext, chapterInput, validateChapterCandidate } from './runner/chapter-content'
-import { createChapterProfile } from './runner/chapter-profile'
+import { createChapterProfile, createContentProfile } from './runner/chapter-profile'
 import { createChapterRouterProfile, validateChapterRoute } from './runner/chapter-router'
+import { ContentTreeState } from './runner/content-tree-state'
+import { ContentTreeQueries } from './runner/content-tree-queries'
+import { CONTENT_OPERATIONS, assembleContentUpdate, assertContentAuthority, contentUpdatesOverlap, reconcileRetainedContentScope, updateContentScope } from './runner/content-tree-host'
+import type { ContentOperation } from '../shared/contracts.generated'
+import { validateRunnerContract } from '../shared/runner-validation'
 
 const id = () => randomUUID()
 const now = () => new Date().toISOString()
@@ -153,6 +158,7 @@ export class RuntimeStore {
   private runnerCompositionState?: RunnerCompositionState
   private compositionPublications = new Map<string, Promise<PublicationResult>>()
   private chapterFlights = new Map<string, Promise<void>>()
+  private continuingContentRemainders = new Set<string>()
   private chapterRoutes = new Map<string, AbortController>()
   private runnerAdmission = new RunnerAdmission()
   private pendingWorkers = new Map<string, { task: string; work: RunnerAdmissionWork; start(): void; reject(error: unknown): void }>()
@@ -555,25 +561,32 @@ export class RuntimeStore {
       valid()
       const history = loadConversation(this.db, task, input.conversation)
       const budget = new RunBudget(lease.config)
-      const fitted = fitConversation(history, candidate => !budget.plan([{ role: 'system', content: profile.system }, ...candidate.messages.map(item => item.message), { role: 'user', content: text }], []).needsCompaction)
-      const messages: ChatMessage[] = [{ role: 'system', content: profile.system }, ...fitted.messages.map(item => item.message), { role: 'user', content: text }]
-      const reservation = budget.reserve(messages, [], lease.config, 'main-input')
+      const fitted = fitConversation(history, candidate => !budget.plan([{ role: 'system', content: profile.system }, ...candidate.messages.map(item => item.message), { role: 'user', content: text }], profile.tools).needsCompaction)
+      const messages: ChatMessage[] = [...fitted.messages.map(item => item.message), { role: 'user', content: text }]
       this.record(task, 'chapter.route.started', { request_id: requestId, operation_id: operation })
-      const response = await this.models.request(lease, task, messages, [], controller.signal, undefined, lease.config.max_output_tokens)
-      budget.settle(reservation, response); valid()
-      const route = validateChapterRoute(profile.parseResult(response), this.publishedChapterManifests(task))
+      let route!: ReturnType<typeof validateChapterRoute>
+      await runAgent(this.models, lease, task, messages, {
+        valid, state: () => {}, budget: () => {},
+        record: (kind, payload) => { this.record(task, kind, { ...payload, routing_operation_id: operation, input_request_id: requestId }) },
+        tool: async request => {
+          valid(); profile.authorize(request)
+          const result = await this.contentTreeQuery(task, validateModel(request) as Extract<ModelRequest, { type: 'read' | 'list' }>, `chapter-route:${operation}`, false)
+          valid(); return result
+        }
+      }, controller.signal, budget, { profile, onResult: value => { valid(); route = validateChapterRoute(value, this.publishedChapterManifests(task)) } })
+      valid()
       this.record(task, 'chapter.route.resolved', { request_id: requestId, operation_id: operation, route })
       if (route.kind === 'update') {
         const current = this.chapters().state.manifest(task, route.view_id)!
         const view = this.one('SELECT revision,state_revision FROM views WHERE id=?', route.view_id)
-        const update = this.startChapterUpdate({ type: 'chapter.update', task_id: task, input_event_id: `chapter-input:${requestId}`, update_id: `chapter-update:${requestId}`, view_id: route.view_id, view_revision: view.revision, state_revision: view.state_revision, region_ids: route.region_ids, text, model_config_id: config }, { record_id: input.user_record_id, conversation: input.conversation, material_resource_ids: attachments.map(item => item.id) })
+        const update = this.startChapterUpdate({ type: 'chapter.update', task_id: task, input_event_id: `chapter-input:${requestId}`, update_id: `chapter-update:${requestId}`, view_id: route.view_id, view_revision: view.revision, state_revision: view.state_revision, region_ids: route.region_ids, text, model_config_id: config, ...(route.tree_operations ? { tree_operations: route.tree_operations } : {}) }, { record_id: input.user_record_id, conversation: input.conversation, material_resource_ids: attachments.map(item => item.id) })
         if (current.request_id !== update.request_id) fail('CHAPTER_CONFLICT', 'Chapter goal changed while routing')
         this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, chapter_route: route, chapter_update_id: update.update_id, chapter_run_id: update.source?.run_id, code: null }), task, requestId)
         return update.source!.run_id
       }
       if (route.kind === 'ambiguous') {
         this.db.prepare("UPDATE requests SET state='confirmation_required',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: 'CHAPTER_SCOPE_REQUIRED', chapter_route: route }), task, requestId)
-        this.record(task, 'chapter.route.clarification', { request_id: requestId, text: '请明确要修改的章节，或在正文中选择范围。' })
+        this.record(task, 'chapter.route.clarification', { request_id: requestId, text: '请说明要修改哪部分内容。' })
         return ''
       }
       const chapterQuery = (route.kind === 'query' || route.kind === 'explanation') && route.view_id && route.region_ids
@@ -1045,9 +1058,9 @@ export class RuntimeStore {
     const query = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', taskId, requestId).input_json).chapter_query as { manifest: ChapterManifest; region_ids: string[] } | undefined
     const chapterDependencies = query ? [...new Map([
       { kind: 'chapter' as const, task_id: taskId, view_id: query.manifest.view_id, revision: query.manifest.shared_revision },
-      ...query.manifest.chapters.filter(chapter => query.region_ids.includes(chapter.region_id)).flatMap(chapter => [
+      ...(query.manifest.content_tree ? query.manifest.content_tree.nodes.filter(node => query.region_ids.includes(node.node_id)).map(node => ({ kind: 'chapter' as const, task_id: taskId, view_id: query.manifest.view_id, region_id: node.node_id, revision: node.revision })) : query.manifest.chapters.filter(chapter => query.region_ids.includes(chapter.region_id)).flatMap(chapter => [
         { kind: 'chapter' as const, task_id: taskId, view_id: query.manifest.view_id, region_id: chapter.region_id, revision: chapter.revision }, ...chapter.dependencies
-      ])
+      ]))
     ].map(dependency => [json(dependency), dependency])).values()] : []
     const ledger = new RunnerBudgetLedger(this.db)
     const previous = this.db.prepare("SELECT budget_id FROM runner_budgets WHERE task_id=? AND request_id=? AND purpose='production' ORDER BY rowid LIMIT 1").get(taskId, requestId) as Row | undefined
@@ -1194,6 +1207,7 @@ export class RuntimeStore {
           if (!this.closed && this.epoch === epoch) this.record(task, 'runner.recovery.blocked', { batch_id: row.batch_id, operation_id: batch.operation_id, reason: error instanceof ContractError ? error.code : 'COMPOSITION_RECOVERY_FAILED' })
         })
       }
+      this.resumeContentRemainders(task)
       this.pumpRunnerWorkers(task)
       this.pumpRunnerGoals(task)
     }
@@ -1248,6 +1262,7 @@ export class RuntimeStore {
     // Queries enforce Task ownership; request materials describe inputs, not the tool access boundary.
     const capabilities = this.pluginDirectory.discovery(task).map(capability => capability.id as string)
     return [
+      { type: 'list', kind: 'content_tree' }, { type: 'read', kind: 'content_tree' }, { type: 'read', kind: 'content_node' },
       { type: 'list', kind: 'resource' }, { type: 'read', kind: 'resource' },
       { type: 'read', kind: 'event', ids: [...new Set([...conversation.refs.map(ref => ref.id), ...conversation.messages.map(item => item.source.id)])] },
       { type: 'list', kind: 'task_data' }, { type: 'read', kind: 'task_data' },
@@ -1271,8 +1286,9 @@ export class RuntimeStore {
     let result: ProducerResult
     const text = this.runnerGoalText(work.task_id, work.request_id, work.intent_revision)
     const chapterQuery = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', work.task_id, work.request_id).input_json).chapter_query as { manifest: ChapterManifest; region_ids: string[] } | undefined
-    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation, bound: { materials, ...(chapterQuery ? { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) } }
+    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation, bound: { materials, ...(chapterQuery ? chapterQuery.manifest.content_tree ? { content_query: { view_id: chapterQuery.manifest.view_id, node_ids: chapterQuery.region_ids } } : { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) } }
     try { result = await this.executeWorker(attemptId, profile, input, (result, source) => {
+      this.checkContentReads(work.task_id, source)
       const accepted = host.accept(result, source, resourceId => {
         const loaded = loadBundleSource(this.db, this.root, work.task_id, { type: 'resource', resource: { kind: 'resource', id: resourceId } }, row => this.journal.assertResource(row))
         validateProducerBundle(loaded.bundle); this.checkedBundle(work.task_id, loaded.bundle, source.attempt_id)
@@ -1683,8 +1699,56 @@ export class RuntimeStore {
       ) LIMIT 1`).get({ run: runId })
   }
   private runnerArtifacts(): RunnerArtifactState { return this.runnerArtifactState ??= new RunnerArtifactState(this.db, new RunnerWorkState(this.db, this.epoch)) }
+  private contentTreeQuery(task: string, request: Extract<ModelRequest, { type: 'read' | 'list' }>, source: string, bodyAllowed = true): unknown {
+    const queries = new ContentTreeQueries(new ContentTreeState(this.db), () => this.publishedChapterManifests(task), resource => this.bundle(resource), dependency => {
+      const worker = this.workers.get(source)
+      if (worker) this.record(task, 'content.node.read', { owner: worker.owner, ...dependency })
+    })
+    return queries.query(task, source, request, bodyAllowed)
+  }
+  private contentReads(task: string, owner: ExecutionScope): Row[] {
+    return (this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='content.node.read' AND json_extract(payload_json,'$.owner.attempt_id')=? ORDER BY sequence").all(task, owner.attempt_id) as Row[]).map(row => JSON.parse(row.payload_json))
+  }
+  private checkContentReads(task: string, owner: ExecutionScope): void {
+    for (const read of this.contentReads(task, owner)) {
+      const node = this.chapters().state.manifest(task, read.view_id)?.content_tree?.nodes.find(node => node.node_id === read.node_id)
+      if (!node || node.revision !== read.revision || node.position_revision !== read.position_revision) fail('CONTENT_DEPENDENCY_STALE', 'A content node read by this worker changed')
+    }
+  }
+  private submittedContentProposal(task: string, owner: ExecutionScope): ChapterProposal | null {
+    const row = this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='content.operations.submitted' AND json_extract(payload_json,'$.source.attempt_id')=? ORDER BY sequence DESC LIMIT 1").get(task, owner.attempt_id) as Row | undefined
+    return row ? validateRunnerContract('runner_chapter_proposal', JSON.parse(row.payload_json)) : null
+  }
+  private submitContentOperations(task: string, owner: ExecutionScope, raw: unknown, signal: AbortSignal, valid: () => void): unknown {
+    valid()
+    const update = owner.purpose === 'production' && owner.update_id ? this.chapters().state.assertCurrent(task, owner.update_id) : fail('WORKER_CAPABILITY_DENIED', 'Content operations require bound content work')
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => key !== 'operations') || !Array.isArray((raw as Row).operations) || !(raw as Row).operations.length) fail('CONTENT_OPERATION_INVALID', 'Submit a nonempty operations array')
+    const operations = (raw as Row).operations.map((operation: unknown) => validateRunnerContract('runner_content_operation', operation)) as ContentOperation[]
+    assertContentAuthority(update, operations)
+    const reads = this.contentReads(task, owner)
+    const targets = operations.flatMap(operation => 'node_ids' in operation ? operation.node_ids : [])
+    const tree = update.base_manifest.content_tree!
+    if (targets.some(nodeId => {
+      const node = tree.nodes.find(item => item.node_id === nodeId)
+      if (!node) fail('CONTENT_NODE_NOT_FOUND', 'The affected node is unavailable in the bound snapshot')
+      return !reads.some(read => read.node_id === nodeId || tree.nodes.some(parent => parent.node_id === read.node_id && parent.span.start <= node.span.start && parent.span.end >= node.span.end))
+    })) fail('CONTENT_BASELINE_REQUIRED', 'Read each affected node before submitting its operations')
+    this.checkContentReads(task, owner)
+    const previous = this.submittedContentProposal(task, owner)
+    if (previous && json(previous.tree_operations) === json(operations)) return { execution: 'success', delivery: 'delivered', data: { proposal_id: previous.proposal_id, state: 'staged' } }
+    const latest = this.chapters().state.manifest(task, update.view_id)!
+    const assembled = assembleContentUpdate({ bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, update, operations)
+    validateProducerBundle(assembled.bundle); this.checkedBundle(task, assembled.bundle, owner.attempt_id)
+    const resourceInput = { type: 'resource.create' as const, display_name: 'Content candidate', content: { type: 'json' as const, value: JSON.parse(json(assembled.bundle)) } }, actionId = id()
+    this.db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','registered',?,?,1,?)").run(actionId, task, owner.run_id, json({ type: 'worker', owner }), json(resourceInput), now())
+    const context: ExecutionActionContext = { id: actionId, owner, signal, valid, authorize: request => { if (json(request) !== json({ type: 'write', input: resourceInput })) fail('WORKER_CAPABILITY_DENIED', 'Only the exact compiled content candidate is authorized') } }
+    const created = this.resourceCreate(task, owner.run_id, resourceInput, context) as { data: { id: string } }
+    const proposal = validateRunnerContract('runner_chapter_proposal', { task_id: task, update_id: update.update_id, intent_revision: update.intent_revision, proposal_id: id(), source: owner, bundle_resource_id: created.data.id, replacements: [], dependencies: update.dependencies, tree_operations: operations })
+    valid(); this.record(task, 'content.operations.submitted', proposal)
+    return { execution: 'success', delivery: 'delivered', data: { proposal_id: proposal.proposal_id, state: 'staged' } }
+  }
   private chapters(): ChapterHost { return new ChapterHost(this.db, this.epoch, resource => this.bundle(resource), (task, kind, payload) => this.record(task, kind, payload)) }
-  startChapterUpdate(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[] }): ChapterUpdate {
+  startChapterUpdate(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[]; inherited_requirements?: Row[] }): ChapterUpdate {
     this.acceptWork(); this.recovery.assertWrite(); this.task(input.task_id)
     let clarified: { request_id: string; input: Row; row: Row } | undefined
     if (input.source_request_id) {
@@ -1738,11 +1802,135 @@ export class RuntimeStore {
       })()
       this.agents.set(producer.run_id, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: this.approvalMode, managed: true })
       for (const old of update.previous_update_ids) this.cancelChapterExecution(update.task_id, old)
+      this.continueContentRemainders(update)
       const flight = this.executeChapterUpdate(update.task_id, update.update_id, producer.attempt_id)
       this.chapterFlights.set(update.update_id, flight)
       void flight.finally(() => this.chapterFlights.delete(update.update_id)).catch(() => {})
       return host.state.update(update.task_id, update.update_id)!
     } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
+  }
+  private continueContentRemainders(update: ChapterUpdate): void {
+    if (!update.base_manifest.content_tree) return
+    this.resumeContentRemainders(update.task_id)
+  }
+  private resumeContentRemainders(task: string): void {
+    if (this.closed || this.closing || this.continuingContentRemainders.has(task) || this.task(task).state !== 'active') return
+    this.continuingContentRemainders.add(task)
+    try {
+      const host = this.chapters()
+      host.reconcile(task)
+      const rows = this.db.prepare('SELECT update_id,previous_update_id,payload_json FROM runner_content_intent_relations WHERE task_id=? ORDER BY rowid').all(task) as Row[]
+      const updates = this.db.prepare('SELECT rowid AS ordinal,update_id FROM runner_chapter_updates WHERE task_id=? ORDER BY rowid').all(task) as Row[]
+      const origins = new Map<string, string>()
+      for (const row of rows) {
+        const relation = JSON.parse(row.payload_json)
+        for (const continuation of [relation.continuation_update_id, ...(relation.previous_continuation_update_ids ?? [])]) if (continuation) origins.set(continuation, row.previous_update_id)
+      }
+      const ordinal = (updateId: string): number => {
+        const seen = new Set<string>()
+        while (origins.has(updateId) && !seen.has(updateId)) { seen.add(updateId); updateId = origins.get(updateId)! }
+        return updates.find(row => row.update_id === updateId)?.ordinal ?? 0
+      }
+      const unresolved = (update: ChapterUpdate): boolean => update.state === 'unknown' || !!(update.publication_operation_id && ['dispatched', 'unknown'].includes(host.state.publication(task, update.publication_operation_id)?.operation.state ?? ''))
+      for (const row of rows) {
+        let relation: Row = JSON.parse(row.payload_json)
+        if (!relation.retained_node_ids.length || ['failed', 'completed', 'settled', 'superseded'].includes(relation.continuation_state)) continue
+        const save = (fields: Row): void => {
+          relation = { ...relation, ...fields }
+          this.db.prepare('UPDATE runner_content_intent_relations SET payload_json=? WHERE task_id=? AND update_id=? AND previous_update_id=?').run(json(relation), task, row.update_id, row.previous_update_id)
+        }
+        const previous = host.state.update(task, row.previous_update_id), takeover = host.state.update(task, row.update_id)
+        if (!previous || !takeover) continue
+        let continuationId: string | undefined = relation.continuation_update_id
+        const existing = continuationId ? host.state.update(task, continuationId) : null
+        if (existing) {
+          if (unresolved(existing)) continue
+          if (existing.state === 'succeeded') { save({ continuation_state: 'completed' }); continue }
+          if (existing.state !== 'interrupted') {
+            if (chapterTerminal.has(existing.state)) save({ continuation_state: 'settled' })
+            continue
+          }
+          // A lost execution gets a new identity only after its original operation is known.
+          if (!existing.source || new RunnerWorkState(this.db, this.epoch).run(existing.source.run_id).runtime_epoch === this.epoch) { save({ continuation_state: 'settled' }); continue }
+        }
+        try {
+          const manifest = host.state.manifest(task, takeover.view_id)!
+          if (manifest.request_id !== previous.request_id || manifest.intent_revision !== previous.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'Continuation must retain its original request authority')
+          let remainder: ChapterUpdate = { ...previous, base_manifest: takeover.base_manifest, region_ids: relation.retained_node_ids, tree_operations: relation.retained_tree_operations }
+          // Preserve intent order across crashes and deferred dispatch, including completed later requests.
+          for (const laterRow of updates) {
+            if (ordinal(laterRow.update_id) <= ordinal(takeover.update_id) || origins.get(laterRow.update_id) === previous.update_id) continue
+            const later = host.state.update(task, laterRow.update_id)!
+            if (later.view_id !== previous.view_id) continue
+            const retained = reconcileRetainedContentScope(remainder, later)
+            remainder = { ...remainder, region_ids: retained.retained_node_ids, tree_operations: retained.retained_tree_operations }
+            if (!remainder.region_ids.length) break
+          }
+          if (!remainder.region_ids.length) { save({ continuation_state: 'superseded' }); continue }
+          const rebased: ChapterUpdate = { ...remainder, base_manifest: manifest }
+          // Validates original node and location identities against the current tree.
+          updateContentScope(rebased)
+          const blocked = host.state.updates(task, takeover.view_id).some(active => active.update_id !== continuationId && (!chapterTerminal.has(active.state) || unresolved(active)) && contentUpdatesOverlap(rebased, active))
+          if (blocked || unresolved(takeover)) { save({ continuation_state: 'deferred' }); continue }
+          if (existing) {
+            save({ previous_continuation_update_ids: [...(relation.previous_continuation_update_ids ?? []), continuationId] })
+            continuationId = undefined
+          }
+          continuationId ??= id()
+          save({ continuation_update_id: continuationId, continuation_state: 'starting' })
+          const original = JSON.parse(this.one('SELECT payload_json FROM records WHERE task_id=? AND id=?', task, previous.record_id).payload_json)
+          const view = this.one('SELECT revision,state_revision FROM views WHERE id=?', takeover.view_id)
+          const continuation = this.startChapterUpdate({ type: 'chapter.update', task_id: task, input_event_id: `content-continuation:${continuationId}`, update_id: continuationId, view_id: takeover.view_id, view_revision: view.revision, state_revision: view.state_revision, region_ids: remainder.region_ids, text: previous.text, model_config_id: previous.model_config_id ?? takeover.model_config_id!, ...(remainder.tree_operations?.length ? { tree_operations: remainder.tree_operations } : {}) }, { record_id: original.source_record_id ?? previous.record_id, conversation: original.conversation, material_resource_ids: original.material_resource_ids ?? [], inherited_requirements: this.inheritedContentRequirements(previous) })
+          save({ continuation_state: 'started' })
+          this.record(task, 'content.intent.continued', { update_id: continuationId, previous_update_id: previous.update_id, takeover_update_id: takeover.update_id, source_record_id: previous.record_id, region_ids: continuation.region_ids, request_id: previous.request_id })
+        } catch (error) {
+          const code = error instanceof ContractError ? error.code : 'CONTENT_CONTINUATION_FAILED'
+          const waiting = ['MODEL_NOT_CONFIGURED', 'MODEL_NOT_VALIDATED', 'CREDENTIAL_REQUIRED', 'CONFIGURATION_BUSY', 'COMPACTION_CONFIGURATION_CHANGED'].includes(code)
+          const changed = relation.continuation_state !== (waiting ? 'deferred' : 'failed') || relation.code !== code
+          save({ continuation_state: waiting ? 'deferred' : 'failed', code })
+          if (changed) this.record(task, waiting ? 'content.intent.continuation.waiting' : 'content.intent.continuation.failed', { update_id: continuationId, previous_update_id: previous.update_id, takeover_update_id: takeover.update_id, code })
+        }
+      }
+    } finally { this.continuingContentRemainders.delete(task) }
+  }
+  private inheritedContentRequirements(update: ChapterUpdate): Row[] {
+    const seen = new Set<string>(), requirements: Row[] = []
+    const visit = (current: ChapterUpdate): void => {
+      const accepted = JSON.parse(this.one('SELECT payload_json FROM records WHERE task_id=? AND id=?', update.task_id, current.record_id).payload_json)
+      requirements.push(...(accepted.inherited_requirements ?? []))
+      for (const previousId of current.previous_update_ids) {
+        if (seen.has(previousId)) continue
+        seen.add(previousId)
+        const previous = this.chapters().state.update(update.task_id, previousId)
+        if (!previous) fail('RUNNER_OWNERSHIP_INVALID', 'Inherited content requirements lost their original input')
+        visit(previous)
+        const original = JSON.parse(this.one('SELECT payload_json FROM records WHERE task_id=? AND id=?', update.task_id, previous.record_id).payload_json)
+        const scope = updateContentScope(previous)
+        requirements.push({ source_record_id: original.source_record_id ?? previous.record_id, request_id: previous.request_id, intent_revision: previous.intent_revision, node_ids: scope.node_ids, gaps: scope.gaps, text: previous.text, effect: 'retain_unless_superseded', superseding_record_id: current.record_id })
+      }
+    }
+    visit(update)
+    const tree = update.base_manifest.content_tree!, scope = updateContentScope(update)
+    const within = (id: string, parent: string): boolean => {
+      let node = tree.nodes.find(node => node.node_id === id)
+      while (node) { if (node.node_id === parent) return true; node = tree.nodes.find(item => item.node_id === node!.parent_id) }
+      return false
+    }
+    const projected: Row[] = requirements.flatMap((requirement): Row[] => {
+      const nodeIds = new Set<string>()
+      for (const original of requirement.node_ids ?? []) for (const target of scope.node_ids) {
+        if (within(original, target)) nodeIds.add(original)
+        else if (within(target, original)) nodeIds.add(target)
+      }
+      const gaps = (requirement.gaps ?? []).filter((gap: Row) => scope.node_ids.some(node => within(gap.parent_id, node)) || scope.gaps.some(current => current.parent_id === gap.parent_id && current.before_id === gap.before_id && current.after_id === gap.after_id))
+      return nodeIds.size || gaps.length ? [{ ...requirement, node_ids: [...nodeIds], gaps }] : []
+    })
+    const merged = new Map<string, Row>()
+    for (const requirement of projected) {
+      const previous = merged.get(requirement.source_record_id)
+      merged.set(requirement.source_record_id, { ...requirement, node_ids: [...new Set([...(previous?.node_ids ?? []), ...requirement.node_ids])], gaps: [...new Map([...(previous?.gaps ?? []), ...requirement.gaps].map(gap => [json(gap), gap])).values()] })
+    }
+    return [...merged.values()]
   }
   private cancelChapterExecution(task: string, updateId: string): void {
     const state = new RunnerWorkState(this.db, this.epoch)
@@ -1760,23 +1948,33 @@ export class RuntimeStore {
     const initial = host.state.assertCurrent(task, updateId), runId = state.attempt(producerId).run_id
     try {
       const owner = this.workerOwner(state.qualify(producerId, 'dispatch'))
-      const context = chapterInput(this.bundle(initial.base_manifest.bundle_resource_id), initial.base_manifest, initial.region_ids, initial.dependencies)
-      const template = chapterCandidateTemplate(this.bundle(initial.base_manifest.bundle_resource_id), initial.base_manifest, initial.region_ids, initial.dependencies)
+      const treePath = !!initial.base_manifest.content_tree
+      const context = treePath ? null : chapterInput(this.bundle(initial.base_manifest.bundle_resource_id), initial.base_manifest, initial.region_ids, initial.dependencies)
+      const template = treePath ? null : chapterCandidateTemplate(this.bundle(initial.base_manifest.bundle_resource_id), initial.base_manifest, initial.region_ids, initial.dependencies)
       const checkCandidate = (proposal: ChapterProposal, source: ExecutionScope): void => {
         state.qualify(producerId)
         const resource = this.db.prepare("SELECT a.source_json FROM actions a WHERE a.task_id=? AND a.result='success' AND json_extract(a.result_json,'$.data.id')=?").get(task, proposal.bundle_resource_id) as Row | undefined
         if (!resource || json(captureExecutionScope(JSON.parse(resource.source_json).owner)) !== json(source)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter proposal requires a resource created by its exact producer')
         const bundle = loadBundleSource(this.db, this.root, task, { type: 'resource', resource: { kind: 'resource', id: proposal.bundle_resource_id } }, row => this.journal.assertResource(row)).bundle
         validateProducerBundle(bundle); this.checkedBundle(task, bundle, source.attempt_id)
-        validateChapterCandidate(bundle, proposal.replacements.flatMap(group => group.chapters))
         const latest = host.state.manifest(task, initial.view_id)!
-        assembleChapterUpdate({ latest: { bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, baseline: initial.base_manifest, candidate: bundle, replacements: proposal.replacements, dependencies: proposal.dependencies })
+        if (proposal.tree_operations) {
+          this.checkContentReads(task, source)
+          assembleContentUpdate({ bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, initial, proposal.tree_operations)
+        } else {
+          validateChapterCandidate(bundle, proposal.replacements.flatMap(group => group.chapters))
+          assembleChapterUpdate({ latest: { bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, baseline: initial.base_manifest, candidate: bundle, replacements: proposal.replacements, dependencies: proposal.dependencies })
+        }
       }
       const accepted = this.one('SELECT payload_json FROM records WHERE task_id=? AND id=?', task, initial.record_id)
       const conversation = loadConversation(this.db, task, JSON.parse(accepted.payload_json).conversation)
-      const profile = createChapterProfile(initial, owner, this.contentToolGrants(task, conversation), proposal => checkCandidate(proposal, owner), template.chapters)
+      const profile = treePath
+        ? createContentProfile(initial, owner, this.contentToolGrants(task, conversation), () => this.submittedContentProposal(task, owner))
+        : createChapterProfile(initial, owner, this.contentToolGrants(task, conversation), proposal => checkCandidate(proposal, owner), template!.chapters)
       host.state.stage(task, updateId, 'generating'); this.record(task, 'chapter.update.stage', { update_id: updateId, state: 'generating' })
-      await this.executeWorker(producerId, profile, { text: initial.text, bound: { chapter_context: context.bundle, chapter_fragments: context.chapters, chapter_template: template.bundle }, conversation }, (proposal, source) => {
+      const inherited = treePath ? this.inheritedContentRequirements(initial) : []
+      if (inherited.length) this.record(task, 'content.intent.reconciled', { update_id: updateId, source_record_id: initial.record_id, requirements: inherited })
+      await this.executeWorker(producerId, profile, { text: initial.text, bound: treePath ? { inherited_requirements: inherited } : { chapter_context: context!.bundle, chapter_fragments: context!.chapters, chapter_template: template!.bundle }, conversation }, (proposal, source) => {
         checkCandidate(proposal, source)
         host.state.recordProposal(proposal)
         this.record(task, 'chapter.proposal.accepted', { update_id: updateId, proposal_id: proposal.proposal_id, owner: source })
@@ -1796,7 +1994,9 @@ export class RuntimeStore {
         if (publisher && !['succeeded', 'failed', 'cancelled', 'invalidated'].includes(publisher.state)) state.revokeWork(publisher.work_id, { kind: 'failure', work_id: publisher.work_id })
         this.record(task, 'chapter.update.ended', { update_id: updateId, state: host.state.update(task, updateId)!.state, reason: host.state.update(task, updateId)!.reason })
       }
-    } finally { if (!this.closed) this.aggregateWorkerRun(task, runId) }
+    } finally {
+      if (!this.closed && this.db.open) { this.aggregateWorkerRun(task, runId); this.resumeContentRemainders(task) }
+    }
   }
   private async publishChapterUpdate(task: string, updateId: string, attemptId: string): Promise<void> {
     const host = this.chapters(), chapters = host.state, state = new RunnerWorkState(this.db, this.epoch)
@@ -1819,7 +2019,10 @@ export class RuntimeStore {
         if (view.revision !== latest.view_revision || view.bundle_resource_id !== latest.bundle_resource_id) fail('CHAPTER_BASELINE_CONFLICT', 'Published content changed outside the current chapter mapping')
         const candidate = loadBundleSource(this.db, this.root, task, { type: 'resource', resource: { kind: 'resource', id: proposal.bundle_resource_id } }, row => this.journal.assertResource(row)).bundle
         const dependencyManifests = proposal.dependencies.flatMap(dependency => { const manifest = chapters.manifest(task, dependency.view_id); return manifest ? [manifest] : [] })
-        const assembled = assembleChapterUpdate({ latest: { bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, baseline: update.base_manifest, candidate, replacements: proposal.replacements, dependencies: proposal.dependencies, dependency_manifests: dependencyManifests })
+        if (proposal.tree_operations) this.checkContentReads(task, proposal.source)
+        const assembled = proposal.tree_operations
+          ? assembleContentUpdate({ bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, update, proposal.tree_operations)
+          : assembleChapterUpdate({ latest: { bundle: this.bundle(latest.bundle_resource_id), manifest: latest }, baseline: update.base_manifest, candidate, replacements: proposal.replacements, dependencies: proposal.dependencies, dependency_manifests: dependencyManifests })
         if (assembled.invalid_kept_region_ids.length) fail('CHAPTER_DEPENDENCY_CONFLICT', 'Dependent chapters require an explicit wider update scope')
         validateProducerBundle(assembled.bundle); this.checkedBundle(task, assembled.bundle, attemptId)
         const resourceAction = id(), resourceInput = { type: 'resource.create' as const, display_name: 'Chapter assembly', content: { type: 'json' as const, value: JSON.parse(json(assembled.bundle)) } }
@@ -1839,16 +2042,16 @@ export class RuntimeStore {
         const context: ExecutionActionContext = { id: actionId, owner, signal, valid, hostPublication: true, authorize: raw => { if (json(raw) !== json(request)) fail('WORKER_CAPABILITY_DENIED', 'Chapter publisher can execute only its exact compiled action') } }
         let installedResource: string | undefined
         const hooks: CompositionPublicationHooks = {
-          check: () => { valid(); if (chapters.manifest(task, view.id)?.manifest_revision !== latest.manifest_revision) fail('VERSION_CONFLICT', 'Chapter publication requires reassembly on the latest content') },
+          check: () => { valid(); if (proposal.tree_operations) this.checkContentReads(task, proposal.source); if (chapters.manifest(task, view.id)?.manifest_revision !== latest.manifest_revision) fail('VERSION_CONFLICT', 'Chapter publication requires reassembly on the latest content') },
           prepared: prepared => { installedResource = prepared.find(item => item.viewId === view.id)?.resourceId },
           committed: (recordId, surfaceRevision) => {
             if (!installedResource) fail('CHAPTER_CONFLICT', 'Chapter publication has no installed resource')
             const artifact = latest.artifact_id ? this.db.prepare('SELECT candidate_id FROM runner_artifacts WHERE task_id=? AND artifact_id=? AND artifact_revision=?').get(task, latest.artifact_id, latest.artifact_revision) as Row | undefined : undefined
             const requirements = latest.artifact_id ? (artifact && this.runnerArtifacts().candidate(task, artifact.candidate_id)?.candidate.requirement_ids) ?? fail('RUNNER_OWNERSHIP_INVALID', 'Chapter inheritance requires its original accepted coverage') : state.goal(update.request_id).requirements.map(requirement => requirement.requirement_id)
             state.updateAttempt({ ...state.attempt(attemptId), state: 'succeeded', result_ref: { task_id: task, kind: 'record', id: recordId } })
-            const manifest: ChapterManifest = { ...latest, chapters: assembled.chapters, view_revision: view.revision + 1, state_revision: view.state_revision + 1, bundle_resource_id: installedResource!, manifest_revision: latest.manifest_revision + 1, ...(latest.artifact_revision ? { artifact_revision: latest.artifact_revision + 1 } : {}) }
+            const manifest: ChapterManifest = { ...latest, chapters: assembled.chapters, ...('tree' in assembled ? { content_tree: assembled.tree } : {}), view_revision: view.revision + 1, state_revision: view.state_revision + 1, bundle_resource_id: installedResource!, manifest_revision: latest.manifest_revision + 1, ...(latest.artifact_revision ? { artifact_revision: latest.artifact_revision + 1 } : {}) }
             chapters.installManifest(manifest, latest.manifest_revision)
-            for (const keep of assembled.kept) chapters.keep({ task_id: task, update_id: updateId, view_id: view.id, region_id: keep.region_id, region_revision: keep.revision, source_bundle_resource_id: latest.bundle_resource_id, source_manifest_revision: latest.manifest_revision, request_id: latest.request_id, intent_revision: latest.intent_revision, ...(latest.artifact_id ? { artifact_id: latest.artifact_id, artifact_revision: latest.artifact_revision } : {}), requirement_ids: requirements, dependencies: keep.dependencies, valid: true })
+            for (const keep of assembled.kept) if (proposal.tree_operations || !update.region_ids.includes(keep.region_id)) chapters.keep({ task_id: task, update_id: updateId, view_id: view.id, region_id: keep.region_id, region_revision: keep.revision, source_bundle_resource_id: latest.bundle_resource_id, source_manifest_revision: latest.manifest_revision, request_id: latest.request_id, intent_revision: latest.intent_revision, ...(latest.artifact_id ? { artifact_id: latest.artifact_id, artifact_revision: latest.artifact_revision } : {}), requirement_ids: requirements, dependencies: keep.dependencies, valid: true })
             const result = { operation_id: operationId, action_id: actionId, state: 'published', view_id: view.id, view_revision: manifest.view_revision, state_revision: manifest.state_revision, manifest_revision: manifest.manifest_revision, surface_record_id: recordId, surface_revision: surfaceRevision }
             chapters.publicationStage(task, operationId, 'published', result)
             const succeeded = chapters.stage(task, updateId, 'succeeded')
@@ -2267,7 +2470,8 @@ export class RuntimeStore {
     let value: unknown
     if (request.type === 'list' || request.type === 'read') value = await this.query(owner.task_id, request, attemptId)
     else if (request.type === 'call') {
-      if (request.input.capability === MONTY_ID && this.monty.available) value = await this.monty.call(owner.task_id, owner.run_id, request.input.arguments, request.input.references, signal, { owner, valid, authorize: current => worker.profile.authorize(current) })
+      if (request.input.capability === CONTENT_OPERATIONS) value = this.submitContentOperations(owner.task_id, owner, request.input.arguments, signal, valid)
+      else if (request.input.capability === MONTY_ID && this.monty.available) value = await this.monty.call(owner.task_id, owner.run_id, request.input.arguments, request.input.references, signal, { owner, valid, authorize: current => worker.profile.authorize(current) })
       else if (request.input.capability.startsWith('plugin:')) value = await this.invokePlugin(owner.task_id, owner.run_id, request.input, signal, worker)
       else value = this.modelTool(owner.task_id, owner.run_id, request)
       valid()
@@ -2492,7 +2696,10 @@ export class RuntimeStore {
       case 'model.channel.remove': return this.models.removeChannel(raw.channel_id)
       case 'model.channel.discover': return this.models.discoverChannel(raw.channel_id, raw.operation_id)
       case 'model.list': return { models: this.models.list(), channels: this.models.channelList(), storage: this.models.storageStatus(), approval: { mode: this.approvalMode, model_id: this.approvalModel }, features: { view_replacement: this.features.viewReplacement } }
-      case 'model.test': return this.models.test(raw.model_id, raw.role, raw.operation_id)
+      case 'model.test': return this.models.test(raw.model_id, raw.role, raw.operation_id).then(result => {
+        void this.recoverRunnerWork().catch(() => {})
+        return result
+      })
       case 'model.discover': return this.models.discover(raw.model_id, raw.operation_id, raw.include_metadata)
       case 'model.probe': return this.models.probe(raw)
       case 'model.cancel': return this.models.cancel(raw.operation_id)
@@ -2531,6 +2738,8 @@ export class RuntimeStore {
     return this.publish(taskId, runId, request)
   }
   private query(taskId: string, request: Extract<ModelRequest, { type: 'list' | 'read' }>, source = 'host'): unknown {
+    const kind = request.type === 'list' ? request.input.kind : request.input.target.kind
+    if (kind === 'content_tree' || kind === 'content_node') return this.contentTreeQuery(taskId, request, source)
     if (request.type === 'read' && modelReadOptions(request)) return this.readCursors.read(taskId, source, request, restored => this.queryPage(taskId, restored, source))
     return this.queryPage(taskId, request, source)
   }

@@ -237,13 +237,15 @@ describe('Collator tool error isolation', () => {
     })
   })
 
-  it('keeps detailed contract diagnostics for ordinary worker roles', async () => {
+  it.each([true, false])('keeps ordinary worker diagnostics and gates suggestions by contract access (granted: %s)', async granted => {
     const collator = createCollator(fixture()), s = setup(collator)
-    const profile = createWorkerProfile({ id: 'producer', role: 'producer', system: 'Produce an answer', grants: [{ type: 'read', kind: 'resource' }], parseResult: response => response.text })
+    const profile = createWorkerProfile({ id: 'producer', role: 'producer', system: 'Produce an answer', grants: [{ type: 'read', kind: 'resource' }, ...(granted ? [{ type: 'read' as const, kind: 'object_type', ids: ['tool.read'] }] : [])], parseResult: response => response.text })
     s.complete.mockResolvedValueOnce(completion('', [tool('read', { kind: 'unknown-kind', id: 'id' })])).mockResolvedValueOnce(completion('done'))
     await runAgent(s.service, s.lease, 'task', [], { ...s.host, context: undefined }, new AbortController().signal, undefined, { profile, onResult: vi.fn() })
     const result = s.record.mock.calls.find(([kind]) => kind === 'model.tool_result')![1].message
-    expect(JSON.parse(result.content).error).toHaveProperty('suggestion')
-    expect(JSON.parse(result.content).error.message).not.toBe('Collator tool request was denied; only frozen runner metadata is available')
+    const error = JSON.parse(result.content).error
+    if (granted) expect(JSON.parse(error.suggestion)).toEqual({ name: 'read', arguments: { kind: 'object_type', id: 'tool.read' } })
+    else expect(error).not.toHaveProperty('suggestion')
+    expect(error.message).not.toBe('Collator tool request was denied; only frozen runner metadata is available')
   })
 })

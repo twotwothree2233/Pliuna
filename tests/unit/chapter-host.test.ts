@@ -4,6 +4,7 @@ import coreSql from '../../src/shared/contracts/001-core.sql?raw'
 import runnerSql from '../../src/shared/contracts/002-runner.sql?raw'
 import type { IpcRequest } from '../../src/shared/contracts.generated'
 import { ChapterHost } from '../../src/runtime/runner/chapter-host'
+import { ContentTreeState } from '../../src/runtime/runner/content-tree-state'
 import { chapterBundle, chapterManifest, chapterProposal, chapterPublication, chapterUpdate } from '../helpers/chapters'
 
 const databases: Database.Database[] = []
@@ -61,6 +62,20 @@ function unknownPublication(fixture: ReturnType<typeof setup>, result: 'failure'
 }
 
 describe('chapter host admission and recovery', () => {
+  it.each([
+    '<p>Opening paragraph</p><p>Second paragraph</p><ul><li>One item</li></ul>',
+    '<article><header><p>Context</p><h1>Guide</h1></header><section><h2>Details</h2><p>First detail</p><p>Second detail</p><table><tbody><tr><td>Value</td></tr></tbody></table></section></article>'
+  ])('indexes an initial publication with conservative boundaries without changing its body: %s', html => {
+    const { db, host, bundle } = setup(false); publishedSource(db)
+    const original = { ...chapterBundle(), html }
+    bundle.mockReturnValue(original)
+    const mapped = host.map('task', 'view', 1)
+    expect(mapped.content_tree!.nodes.filter(node => node.kind === 'paragraph').length).toBeGreaterThanOrEqual(2)
+    expect(new ContentTreeState(db).snapshot('task', 'view')!.tree).toEqual(mapped.content_tree)
+    expect(original.html).toBe(html)
+    expect(db.prepare('SELECT revision,bundle_resource_id,state_revision,draft_json FROM views').get()).toEqual({ revision: 1, bundle_resource_id: 'original', state_revision: 1, draft_json: '{}' })
+  })
+
   it('retries the original input idempotently when object properties arrive in another order', () => {
     const { host, input, record, db } = setup(), update = host.start(input)
     const retry = { model_config_id: input.model_config_id, text: input.text, region_ids: [...input.region_ids], state_revision: input.state_revision, view_revision: input.view_revision, view_id: input.view_id, update_id: input.update_id, input_event_id: input.input_event_id, task_id: input.task_id, type: input.type }
@@ -86,13 +101,67 @@ describe('chapter host admission and recovery', () => {
     expect(host.state.manifest('task', 'view')).toBeNull()
   })
 
+  it('versions an externally replaced View without reviving its previous descendants', () => {
+    const { db, host, bundle, record, reopen } = setup()
+    const first = host.map('task', 'view', 1), oldTree = first.content_tree!
+    const trees = new ContentTreeState(db)
+    db.exec("UPDATE views SET revision=2,bundle_resource_id='candidate' WHERE id='view'")
+    bundle.mockReturnValue({ ...chapterBundle(), html: '<h2 id="new-title">New section</h2><div id="new-body"><p>New body</p></div>' })
+    const mapped = host.map('task', 'view', 2), tree = mapped.content_tree!
+    expect(tree.revision).toBe(oldTree.revision + 1)
+    expect(tree.root_id).toBe(oldTree.root_id)
+    expect(tree.nodes.find(node => node.node_id === tree.root_id)!.revision).toBe(oldTree.nodes[0]!.revision + 1)
+    for (const node of oldTree.nodes.filter(node => node.node_id !== oldTree.root_id)) {
+      expect(tree.nodes.some(current => current.node_id === node.node_id)).toBe(false)
+      expect(trees.lookup('task', 'view', node.node_id)).toMatchObject({ state: 'retired', tree_revision: 2, lineage: { previous_node_id: node.node_id, revision: 2, reason: 'replaced' } })
+    }
+    expect(trees.snapshot('task', 'view', 1)!.tree).toEqual(oldTree)
+    expect(trees.snapshot('task', 'view', 2)!.tree).toEqual(tree)
+    const calls = record.mock.calls.length, bundleCalls = bundle.mock.calls.length
+    expect(host.map('task', 'view', 2)).toEqual(mapped)
+    expect(reopen().map('task', 'view', 2)).toEqual(mapped)
+    expect(record).toHaveBeenCalledTimes(calls)
+    expect(bundle).toHaveBeenCalledTimes(bundleCalls)
+  })
+
+  it('rolls back tree activation when its manifest installation fails', () => {
+    const { db, host } = setup(), before = host.state.manifest('task', 'view')
+    const trees = new ContentTreeState(db)
+    const references = db.prepare('SELECT * FROM object_references ORDER BY rowid').all()
+    db.exec("CREATE TEMP TRIGGER fail_tree_activation BEFORE INSERT ON runner_chapter_manifests WHEN NEW.manifest_revision=2 BEGIN SELECT RAISE(ABORT,'activation failed'); END")
+    expect(() => host.map('task', 'view', 1)).toThrow('activation failed')
+    expect(host.state.manifest('task', 'view')).toEqual(before)
+    expect(trees.snapshot('task', 'view')).toBeNull()
+    expect(db.prepare('SELECT count(*) n FROM runner_content_trees').get()).toEqual({ n: 0 })
+    expect(db.prepare('SELECT * FROM object_references ORDER BY rowid').all()).toEqual(references)
+    expect(db.prepare('SELECT revision,bundle_resource_id FROM views').get()).toEqual({ revision: 1, bundle_resource_id: 'original' })
+    db.exec('DROP TRIGGER fail_tree_activation')
+    expect(host.map('task', 'view', 1).content_tree!.revision).toBe(1)
+  })
+
+  it('keeps the previous tree and history when external remapping fails atomically', () => {
+    const { db, host, bundle, record } = setup(), first = host.map('task', 'view', 1)
+    const trees = new ContentTreeState(db), references = db.prepare('SELECT * FROM object_references ORDER BY rowid').all()
+    db.exec("UPDATE views SET revision=2,bundle_resource_id='candidate' WHERE id='view'")
+    bundle.mockReturnValue({ ...chapterBundle(), html: '<p>Replacement without headings</p>' })
+    record.mockImplementationOnce(() => { throw Error('record failed') })
+    expect(() => host.map('task', 'view', 2)).toThrow('record failed')
+    expect(host.state.manifest('task', 'view')).toEqual(first)
+    expect(trees.snapshot('task', 'view')!.tree).toEqual(first.content_tree)
+    expect(trees.snapshot('task', 'view', 2)).toBeNull()
+    expect(db.prepare('SELECT * FROM object_references ORDER BY rowid').all()).toEqual(references)
+    expect(db.prepare('SELECT revision,bundle_resource_id FROM views').get()).toEqual({ revision: 2, bundle_resource_id: 'candidate' })
+    expect(host.map('task', 'view', 2).content_tree!.revision).toBe(2)
+  })
+
   it('marks a queued update without an execution source interrupted after restart', () => {
     const { host, input, reopen, record, bundle } = setup()
     const update = host.start(input), calls = record.mock.calls.length
+    const bundleCalls = bundle.mock.calls.length
     const recovered = reopen(); recovered.reconcile('task'); recovered.reconcile('task')
     expect(recovered.state.update('task', update.update_id)).toMatchObject({ state: 'interrupted', reason: 'execution_no_longer_current' })
     expect(record).toHaveBeenCalledTimes(calls)
-    expect(bundle).not.toHaveBeenCalled()
+    expect(bundle).toHaveBeenCalledTimes(bundleCalls)
   })
 
   it.each(['failure', 'not_executed', 'cancelled'] as const)('settles an unknown publication from the persisted %s action without another dispatch', result => {
@@ -118,12 +187,13 @@ describe('chapter host admission and recovery', () => {
     const { db, host, input, reopen, record, bundle } = setup(), update = host.start(input)
     host.state.stage('task', update.update_id, 'cancelled', { reason: 'user_cancelled' })
     const calls = record.mock.calls.length
+    const bundleCalls = bundle.mock.calls.length
     reopen().reconcile('task'); reopen('another-epoch').reconcile('task')
     expect(host.state.update('task', update.update_id)).toMatchObject({ state: 'cancelled', reason: 'user_cancelled' })
     expect(host.start(input).state).toBe('cancelled')
     expect(db.prepare('SELECT COUNT(*) n FROM runner_chapter_updates').get()).toEqual({ n: 1 })
     expect(db.prepare('SELECT COUNT(*) n FROM runner_chapter_publications').get()).toEqual({ n: 0 })
     expect(record).toHaveBeenCalledTimes(calls)
-    expect(bundle).not.toHaveBeenCalled()
+    expect(bundle).toHaveBeenCalledTimes(bundleCalls)
   })
 })

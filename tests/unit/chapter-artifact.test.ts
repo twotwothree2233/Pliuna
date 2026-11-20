@@ -15,13 +15,16 @@ import defaults from '../../src/shared/contracts/development-defaults.json'
 import { RunnerPublicationState } from '../../src/runtime/runner/publication-state'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { chapterBundle, chapterManifest, chapterRegion } from '../helpers/chapters'
+import type { ContentOperation } from '../../src/shared/contracts.generated'
+import { buildContentTree } from '../../src/runtime/runner/content-tree'
+import { assembleContentUpdate, treeChapters } from '../../src/runtime/runner/content-tree-host'
 
 const core = readFileSync(new URL('../../src/shared/contracts/001-core.sql', import.meta.url), 'utf8')
 const runner = readFileSync(new URL('../../src/shared/contracts/002-runner.sql', import.meta.url), 'utf8')
 const databases: Database.Database[] = []
 afterEach(() => { for (const db of databases.splice(0)) db.close() })
 
-function setup(materials: { original?: string[]; updates?: string[]; publishedCopy?: boolean } = {}) {
+function setup(materials: { original?: string[]; updates?: string[]; publishedCopy?: boolean; tree?: boolean | 'legacy' } = {}) {
   const db = new Database(':memory:'); databases.push(db); db.pragma('foreign_keys=ON'); db.exec(core); db.exec(runner)
   db.exec("INSERT INTO tasks(id,title,state,revision) VALUES ('task','Task','active',1); INSERT INTO requests VALUES ('goal','task','started','{}','{}','time')")
   const work = new RunnerWorkState(db, 'epoch'), artifacts = new RunnerArtifactState(db, work), chapters = new ChapterState(db), composition = new RunnerCompositionState(db, work, artifacts), publications = new RunnerPublicationState(db)
@@ -30,7 +33,8 @@ function setup(materials: { original?: string[]; updates?: string[]; publishedCo
     const row = db.prepare("SELECT COALESCE(MAX(sequence),0)+1 n FROM records WHERE task_id='task'").get() as { n: number }
     db.prepare("INSERT INTO records VALUES (?,'task',?,?,?,'time')").run(id, row.n, kind, JSON.stringify(payload))
   }
-  const resource = (id: string, bundle = chapterBundle()) => {
+  const initialBundle = materials.tree ? { ...chapterBundle(), html: materials.tree === 'legacy' ? '<article><section><h2>A</h2><p>First</p><div><h3>Nested A</h3><p>Retained A</p></div></section><section><h2>B</h2><p>Second</p><div><h3>Nested B</h3><p>Retained B</p></div></section><section><h2>C</h2><p>Third</p></section></article>' : '<h2>A</h2><p>First</p><p>Second</p><h2>B</h2><p>Third</p>' } : chapterBundle()
+  const resource = (id: string, bundle = initialBundle) => {
     db.prepare("INSERT INTO resources VALUES (?,?,'fixture',?,'application/json','Body','time')").run(id, id, Buffer.byteLength(JSON.stringify(bundle)))
     db.prepare("INSERT INTO task_resources VALUES ('task',?)").run(id)
     bundles.set(id, bundle)
@@ -79,7 +83,9 @@ function setup(materials: { original?: string[]; updates?: string[]; publishedCo
   db.prepare("INSERT INTO surfaces VALUES ('surface','task',1,?)").run(JSON.stringify(layout))
   db.prepare("INSERT INTO views(id,surface_id,revision,bundle_resource_id,state_revision,draft_json,compatibility_version) VALUES ('view','surface',1,?,1,'{}','v1')").run(publishedOriginal)
   db.prepare("INSERT INTO view_history VALUES ('history-1','task','view',1,?,'{}')").run(publishedOriginal)
-  const baseline: ChapterManifest = { ...chapterManifest(), bundle_resource_id: publishedOriginal, artifact_id: 'artifact', artifact_revision: 1 }
+  const tree = materials.tree ? buildContentTree(initialBundle.html) : undefined
+  const mappedChapters = tree && (materials.tree === 'legacy' ? tree.nodes.filter(node => node.kind === 'section' && node.tag === 'h3').map(node => ({ ...chapterRegion(node.node_id), title: node.title, title_selector: node.selector, body_selector: node.end_selector })) : treeChapters(tree))
+  const baseline: ChapterManifest = { ...chapterManifest(), bundle_resource_id: publishedOriginal, artifact_id: 'artifact', artifact_revision: 1, ...(tree ? { content_tree: tree, chapters: mappedChapters! } : {}) }
   chapters.installManifest(baseline, null)
   const batch = { task_id: 'task', batch_id: 'initial-batch', composition_version: 1, run_id: 'initial-composition', trigger_request_id: 'goal', model_config_id: 'model', model_config_revision: 1, state: 'published', targets: [{ task_id: 'task', request_id: 'goal', intent_revision: 1 }], indexes: [{ task_id: 'task', artifact_id: 'artifact', artifact_revision: 1 }], sections: [{ section_id: 'section', position_revision: 1, order_key: 'a' }] }
   db.prepare('INSERT INTO runner_batches(batch_id,task_id,composition_version,payload_json) VALUES (?,?,?,?)').run(batch.batch_id, 'task', 1, JSON.stringify(batch))
@@ -87,28 +93,29 @@ function setup(materials: { original?: string[]; updates?: string[]; publishedCo
   const entry: PublicationEntry = { task_id: 'task', batch_id: batch.batch_id, request_id: 'goal', intent_revision: 1, artifact_id: 'artifact', artifact_revision: 1, section_id: 'section', view_id: 'view', view_revision: 1, state_revision: 1, source_bundle_resource_id: 'original', published_bundle_resource_id: publishedOriginal, surface_history_id: 'initial-history' }
   db.prepare('INSERT INTO runner_view_mappings VALUES (?,?,?,?,?,?,?,?,?)').run('task', 'artifact', 1, batch.batch_id, 'view', 1, 'original', publishedOriginal, JSON.stringify(entry))
 
-  const begin = (id = 'a-update', regionIds = ['a'], nextRegionIds = regionIds) => {
+  const begin = (id = 'a-update', regionIds = ['a'], nextRegionIds = regionIds, operations?: ContentOperation[]) => {
     const base = chapters.manifest('task', 'view')!
     record(`record-${id}`)
-    const update = chapters.start({ task_id: 'task', update_id: id, input_event_id: `input-${id}`, record_id: `record-${id}`, request_id: 'goal', intent_revision: 1, view_id: 'view', base_manifest: base, region_ids: regionIds, region_intents: regionIds.map(region_id => ({ region_id, intent_revision: 1 })), previous_update_ids: [], dependencies: [{ kind: 'chapter', task_id: 'task', view_id: 'view', revision: base.shared_revision }], state: 'queued', text: 'Revise this chapter' })
+    const update = chapters.start({ task_id: 'task', update_id: id, input_event_id: `input-${id}`, record_id: `record-${id}`, request_id: 'goal', intent_revision: 1, view_id: 'view', base_manifest: base, region_ids: regionIds, region_intents: regionIds.map(region_id => ({ region_id, intent_revision: 1 })), previous_update_ids: [], dependencies: [{ kind: 'chapter', task_id: 'task', view_id: 'view', revision: base.shared_revision }], state: 'queued', text: 'Revise this chapter', ...(operations ? { tree_operations: operations } : {}) })
     run(`run-${id}`, id)
     const source = start(`producer-${id}`, `run-${id}`, update), publisher = start(`publisher-${id}`, `run-${id}`, update, true)
     chapters.stage('task', id, 'generating', { source })
     const nextChapters = nextRegionIds.map(region => chapterRegion(region, (base.chapters.find(item => item.region_id === region)?.revision ?? 0) + 1))
-    resource(`candidate-${id}`, { ...chapterBundle(), html: nextChapters.map(chapter => `<h2 id="${chapter.region_id}-title">${chapter.title}</h2><div id="${chapter.region_id}-body">Generated ${chapter.region_id}</div>`).join('') })
-    const proposal: ChapterProposal = { task_id: 'task', update_id: id, proposal_id: `proposal-${id}`, intent_revision: 1, bundle_resource_id: `candidate-${id}`, replacements: [{ previous_region_ids: regionIds, chapters: nextChapters }], dependencies: update.dependencies, source }
+    resource(`candidate-${id}`, operations ? assembleContentUpdate({ bundle: bundles.get(base.bundle_resource_id)!, manifest: base }, update, operations).bundle : { ...chapterBundle(), html: nextChapters.map(chapter => `<h2 id="${chapter.region_id}-title">${chapter.title}</h2><div id="${chapter.region_id}-body">Generated ${chapter.region_id}</div>`).join('') })
+    const proposal: ChapterProposal = { task_id: 'task', update_id: id, proposal_id: `proposal-${id}`, intent_revision: 1, bundle_resource_id: `candidate-${id}`, replacements: operations ? [] : [{ previous_region_ids: regionIds, chapters: nextChapters }], dependencies: update.dependencies, source, ...(operations ? { tree_operations: operations } : {}) }
     chapters.recordProposal(proposal)
     finish(source)
     return { update, proposal, publisher, source }
   }
   const commit = (session: ReturnType<typeof begin>, beforeInstall?: (input: ChapterAssemblyInstall) => void) => db.transaction(() => {
     const latestManifest = chapters.manifest('task', 'view')!, { update, proposal, publisher } = session
-    const assembled = assembleChapterUpdate({ latest: { bundle: bundles.get(latestManifest.bundle_resource_id)!, manifest: latestManifest }, baseline: update.base_manifest, candidate: bundles.get(proposal.bundle_resource_id)!, replacements: proposal.replacements, dependencies: proposal.dependencies })
+    const assembled = proposal.tree_operations ? assembleContentUpdate({ bundle: bundles.get(latestManifest.bundle_resource_id)!, manifest: latestManifest }, update, proposal.tree_operations) : assembleChapterUpdate({ latest: { bundle: bundles.get(latestManifest.bundle_resource_id)!, manifest: latestManifest }, baseline: update.base_manifest, candidate: bundles.get(proposal.bundle_resource_id)!, replacements: proposal.replacements, dependencies: proposal.dependencies })
     const resourceId = `published-${update.update_id}`, operationId = `publication-${update.update_id}`, actionId = `action-${update.update_id}`
     resource(resourceId, assembled.bundle)
     const assembledResourceId = materials.publishedCopy ? `assembled-${update.update_id}` : resourceId
     if (assembledResourceId !== resourceId) resource(assembledResourceId, assembled.bundle)
-    for (const chapter of latestManifest.chapters.filter(chapter => !update.region_ids.includes(chapter.region_id))) chapters.keep({ task_id: 'task', update_id: update.update_id, view_id: 'view', region_id: chapter.region_id, region_revision: chapter.revision, source_bundle_resource_id: latestManifest.bundle_resource_id, source_manifest_revision: latestManifest.manifest_revision, request_id: 'goal', intent_revision: 1, artifact_id: 'artifact', artifact_revision: latestManifest.artifact_revision!, requirement_ids: ['content'], dependencies: chapter.dependencies, valid: chapter.dependencies.every(dependency => chapters.dependencyCurrent(dependency)) })
+    const retained = latestManifest.chapters.filter(chapter => 'tree' in assembled ? assembled.tree.nodes.some(node => node.node_id === chapter.region_id && node.revision === chapter.revision) : !update.region_ids.includes(chapter.region_id))
+    for (const chapter of retained) chapters.keep({ task_id: 'task', update_id: update.update_id, view_id: 'view', region_id: chapter.region_id, region_revision: chapter.revision, source_bundle_resource_id: latestManifest.bundle_resource_id, source_manifest_revision: latestManifest.manifest_revision, request_id: 'goal', intent_revision: 1, artifact_id: 'artifact', artifact_revision: latestManifest.artifact_revision!, requirement_ids: ['content'], dependencies: chapter.dependencies, valid: chapter.dependencies.every(dependency => chapters.dependencyCurrent(dependency)) })
     const surface = db.prepare("SELECT revision FROM surfaces WHERE id='surface'").get() as { revision: number }
     const published: ChapterAssemblyInstall['published'] = { operation_id: operationId, action_id: actionId, bundle_resource_id: resourceId, view_id: 'view', view_revision: latestManifest.view_revision + 1, state_revision: latestManifest.state_revision + 1, surface_record_id: `record-${operationId}`, surface_revision: surface.revision + 1 }
     const request: ChapterPublication['request'] = { type: 'write', input: { type: 'surface.update', surface_id: 'surface', expected_revision: surface.revision, operations: [{ type: 'view.replace', view_id: 'view', expected_view_revision: latestManifest.view_revision, bundle: { type: 'resource', resource: { kind: 'resource', id: assembledResourceId } }, state_transition: { type: 'preserve', expected_state_revision: latestManifest.state_revision, compatibility_version: 'v1' } }] } }
@@ -121,7 +128,7 @@ function setup(materials: { original?: string[]; updates?: string[]; publishedCo
     db.prepare("UPDATE surfaces SET revision=? WHERE id='surface'").run(published.surface_revision)
     record(published.surface_record_id, 'surface.published', { action_id: actionId, revision: published.surface_revision })
     work.updateAttempt({ ...work.attempt(publisher.attempt_id), state: 'succeeded', result_ref: { task_id: 'task', kind: 'record', id: published.surface_record_id } })
-    chapters.installManifest({ ...latestManifest, view_revision: published.view_revision, state_revision: published.state_revision, bundle_resource_id: resourceId, manifest_revision: latestManifest.manifest_revision + 1, artifact_revision: latestManifest.artifact_revision! + 1, chapters: assembled.chapters }, latestManifest.manifest_revision)
+    chapters.installManifest({ ...latestManifest, view_revision: published.view_revision, state_revision: published.state_revision, bundle_resource_id: resourceId, manifest_revision: latestManifest.manifest_revision + 1, artifact_revision: latestManifest.artifact_revision! + 1, chapters: assembled.chapters, ...('tree' in assembled ? { content_tree: assembled.tree } : {}) }, latestManifest.manifest_revision)
     chapters.publicationStage('task', operationId, 'published', { view_revision: published.view_revision })
     chapters.stage('task', update.update_id, 'succeeded')
     const input: ChapterAssemblyInstall = { update, latestManifest, proposal, publisherOwner: publisher, published }
@@ -363,6 +370,109 @@ it('uses the current chapter assembly in later composition and never reloads the
   const compiled = host.publication('task', prepared.batch.batch_id, prepared.collator.rulePlan(), { viewReplacement: true }, () => { throw Error('A placement must preserve the current published Bundle') })
   expect(compiled.request.input.operations.map(operation => operation.type)).toEqual(['layout.set'])
   expect(ctx.db.prepare("SELECT revision,bundle_resource_id FROM views WHERE id='view'").get()).toEqual({ revision: 2, bundle_resource_id: 'published-a-update' })
+})
+
+it('publishes a paragraph update with frozen tree ranges and original materials', () => {
+  const ctx = setup({ tree: true, original: ['source-material'], updates: [] })
+  const before = ctx.chapters.manifest('task', 'view')!, tree = before.content_tree!
+  const paragraphs = tree.nodes.filter(node => node.kind === 'paragraph'), target = paragraphs[0]!, untouched = paragraphs[1]!
+  const session = ctx.begin('paragraph', [target.node_id], [], [{ type: 'replace', node_ids: [target.node_id], html: '<p>Rewritten</p>' }])
+  const { index } = ctx.commit(session)
+  const manifest = ctx.chapters.manifest('task', 'view')!, after = manifest.content_tree!
+  expect(after.nodes.find(node => node.node_id === target.node_id)?.revision).toBe(2)
+  expect(after.nodes.find(node => node.node_id === untouched.node_id)?.revision).toBe(1)
+  const row = ctx.db.prepare('SELECT payload_json FROM runner_chapter_assemblies WHERE artifact_revision=2').get() as { payload_json: string }
+  const evidence = JSON.parse(row.payload_json).content_tree
+  expect(evidence.source_tree_revision).toBe(1)
+  expect(evidence.tree_revision).toBe(2)
+  expect(evidence.retained_nodes).toContainEqual(expect.objectContaining({ node_id: untouched.node_id, revision: 1, source_span: untouched.span }))
+  expect(ctx.artifacts.checkChapterAssembly(index)).not.toBeNull()
+  expect(ctx.artifacts.chapterMaterialDependencies(index)).toEqual([{ kind: 'resource', task_id: 'task', resource_id: 'source-material' }])
+  expect(ctx.artifacts.resolveChapterReference(ctx.original)).toEqual(index)
+})
+
+it.each(['paragraph', 'section'])('publishes a %s update with inherited legacy nested chapters', scope => {
+  const ctx = setup({ tree: 'legacy', original: ['source-material'], updates: [] })
+  const baseline = ctx.chapters.manifest('task', 'view')!, tree = baseline.content_tree!
+  const target = tree.nodes.find(node => scope === 'paragraph' ? node.kind === 'paragraph' : node.kind === 'section' && node.title === 'A')!
+  const html = scope === 'paragraph' ? '<p>Updated</p>' : '<h2>A</h2><p>Updated</p>'
+  const session = ctx.begin('legacy-nested', [target.node_id], [], [{ type: 'replace', node_ids: [target.node_id], html }])
+  const { index } = ctx.commit(session), manifest = ctx.chapters.manifest('task', 'view')!
+  const retained = baseline.chapters.filter(chapter => manifest.content_tree!.nodes.some(node => node.node_id === chapter.region_id && node.revision === chapter.revision))
+  expect(retained.length).toBeGreaterThan(0)
+  expect(retained.every(chapter => !manifest.chapters.some(current => current.region_id === chapter.region_id))).toBe(true)
+  expect(ctx.chapters.inheritance('task', session.update.update_id).map(item => item.region_id)).toEqual(retained.map(chapter => chapter.region_id))
+  expect(manifest.chapters).toEqual(treeChapters(manifest.content_tree!, baseline.chapters))
+  expect(ctx.chapters.manifest('task', 'view', 1)).toEqual(baseline)
+  expect(ctx.artifacts.checkChapterAssembly(index)).not.toBeNull()
+  expect(ctx.artifacts.chapterMaterialDependencies(index)).toEqual([{ kind: 'resource', task_id: 'task', resource_id: 'source-material' }])
+  expect(ctx.completeness().state).toBe('complete')
+  expect(ctx.db.pragma('foreign_key_check')).toEqual([])
+})
+
+it.each(['source_bundle_resource_id', 'region_revision', 'requirement_ids', 'dependencies'] as const)('rejects tampered legacy nested inheritance %s and rolls back publication', field => {
+  const ctx = setup({ tree: 'legacy' }), baseline = ctx.chapters.manifest('task', 'view')!
+  const target = baseline.content_tree!.nodes.find(node => node.kind === 'paragraph')!
+  const session = ctx.begin('tampered-legacy-keep', [target.node_id], [], [{ type: 'replace', node_ids: [target.node_id], html: '<p>Updated</p>' }])
+  expect(() => ctx.commit(session, () => {
+    const row = ctx.db.prepare('SELECT rowid,payload_json FROM runner_chapter_inheritance WHERE update_id=? LIMIT 1').get(session.update.update_id) as { rowid: number; payload_json: string }
+    const keep = JSON.parse(row.payload_json)
+    keep[field] = field === 'source_bundle_resource_id' ? 'material' : field === 'region_revision' ? 2 : field === 'requirement_ids' ? ['other'] : [{ kind: 'chapter', task_id: 'task', view_id: 'view', revision: baseline.shared_revision }]
+    ctx.db.prepare('UPDATE runner_chapter_inheritance SET payload_json=? WHERE rowid=?').run(JSON.stringify(keep), row.rowid)
+  })).toThrow(expect.objectContaining({ code: 'RUNNER_OUTPUT_INCOMPLETE' }))
+  expect(ctx.chapters.manifest('task', 'view')).toEqual(baseline)
+  expect(ctx.artifacts.artifact('task', 'artifact')).toEqual(ctx.original)
+  expect(ctx.publications.mapping('task', 'artifact')!.artifact_revision).toBe(1)
+  expect(ctx.db.prepare("SELECT revision,state_revision,bundle_resource_id FROM views WHERE id='view'").get()).toEqual({ revision: 1, state_revision: 1, bundle_resource_id: 'original' })
+  expect(ctx.db.prepare("SELECT revision FROM surfaces WHERE id='surface'").get()).toEqual({ revision: 1 })
+  for (const table of ['runner_chapter_assemblies', 'runner_chapter_inheritance', 'runner_chapter_publications']) expect(ctx.db.prepare(`SELECT count(*) n FROM ${table}`).get()).toEqual({ n: 0 })
+  expect(ctx.db.prepare('SELECT count(*) n FROM runner_content_trees').get()).toEqual({ n: 1 })
+  expect(ctx.db.pragma('foreign_key_check')).toEqual([])
+})
+
+it('retains explicit split and merge node lineage through consecutive artifact publications', () => {
+  const ctx = setup({ tree: true }), tree = ctx.chapters.manifest('task', 'view')!.content_tree!
+  const target = tree.nodes.find(node => node.kind === 'paragraph')!
+  ctx.commit(ctx.begin('split-node', [target.node_id], [], [{ type: 'replace', node_ids: [target.node_id], html: '<p>One</p><p>Two</p>' }]))
+  const split = ctx.chapters.manifest('task', 'view')!.content_tree!
+  const relation = split.lineage.find(item => item.previous_node_id === target.node_id)!
+  expect(relation.reason).toBe('split')
+  expect(relation.successor_node_ids).toHaveLength(2)
+  const { index } = ctx.commit(ctx.begin('merge-node', relation.successor_node_ids, [], [{ type: 'replace', node_ids: relation.successor_node_ids, html: '<p>Combined</p>' }]))
+  const merged = ctx.chapters.manifest('task', 'view')!.content_tree!
+  expect(merged.lineage).toContainEqual(relation)
+  for (const id of relation.successor_node_ids) expect(merged.lineage.find(item => item.previous_node_id === id)?.reason).toBe('merge')
+  expect(index.artifact_revision).toBe(3)
+  expect(ctx.artifacts.resolveChapterReference(ctx.original)).toEqual(index)
+})
+
+it('moves a whole section while preserving its exact content and inheritance', () => {
+  const ctx = setup({ tree: true }), tree = ctx.chapters.manifest('task', 'view')!.content_tree!
+  const root = tree.nodes.find(node => node.node_id === tree.root_id)!, first = root.children[0]!, second = root.children[1]!
+  const { index } = ctx.commit(ctx.begin('move-section', [second], [], [{ type: 'move', node_ids: [second], parent_id: root.node_id, position: 'before', anchor_id: first }]))
+  const next = ctx.chapters.manifest('task', 'view')!
+  expect(next.content_tree!.nodes.find(node => node.node_id === tree.root_id)!.children).toEqual([second, first])
+  expect(next.content_tree!.nodes.find(node => node.node_id === second)).toEqual(expect.objectContaining({ revision: 1, position_revision: 2 }))
+  expect(ctx.chapters.inheritance('task', 'move-section').map(item => item.region_id).sort()).toEqual([first, second].sort())
+  expect(ctx.artifacts.checkChapterAssembly(index)).not.toBeNull()
+})
+
+it('rolls back a structural publication when an unaffected node version changes', () => {
+  const ctx = setup({ tree: true }), baseline = ctx.chapters.manifest('task', 'view')!
+  const paragraphs = baseline.content_tree!.nodes.filter(node => node.kind === 'paragraph')
+  const session = ctx.begin('tampered-tree', [paragraphs[0]!.node_id], [], [{ type: 'replace', node_ids: [paragraphs[0]!.node_id], html: '<p>Updated</p>' }])
+  expect(() => ctx.commit(session, () => {
+    const manifest = ctx.chapters.manifest('task', 'view')!
+    manifest.content_tree!.nodes.find(node => node.node_id === paragraphs[1]!.node_id)!.revision = 2
+    ctx.db.prepare('UPDATE runner_chapter_manifests SET payload_json=? WHERE manifest_revision=2').run(JSON.stringify(manifest))
+    const row = ctx.db.prepare('SELECT payload_json FROM runner_content_trees WHERE tree_revision=2').get() as { payload_json: string }
+    const snapshot = JSON.parse(row.payload_json); snapshot.tree = manifest.content_tree
+    ctx.db.prepare('UPDATE runner_content_trees SET payload_json=? WHERE tree_revision=2').run(JSON.stringify(snapshot))
+  })).toThrow(expect.objectContaining({ code: 'RUNNER_OUTPUT_INCOMPLETE' }))
+  expect(ctx.chapters.manifest('task', 'view')).toEqual(baseline)
+  expect(ctx.artifacts.artifact('task', 'artifact')!.artifact_revision).toBe(1)
+  expect(ctx.db.prepare('SELECT count(*) n FROM runner_chapter_assemblies').get()).toEqual({ n: 0 })
+  expect(ctx.db.prepare('SELECT count(*) n FROM runner_content_trees').get()).toEqual({ n: 1 })
 })
 
 const replacementGroups = [

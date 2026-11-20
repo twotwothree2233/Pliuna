@@ -26,6 +26,27 @@ import './style.css'
 
 const request = hostRequest
 interface ViewEditor { taskId: string; hold(): () => void; save(token?: string): Promise<void> }
+type SurfaceActionPage = { metadata: { state: string; result?: string | null }; data: { result_data?: { code?: string; error?: { code?: string } }; text?: string }; representation?: string; truncated?: boolean; next_cursor?: string | null }
+async function surfaceOutcome(taskId: string, actionId: string): Promise<{ settled: boolean; error: string }> {
+  const read = (cursor?: string) => request<SurfaceActionPage>({ type: 'task.query', task_id: taskId, query: { type: 'read', input: { target: { kind: 'action', id: actionId }, ...(cursor ? { cursor } : {}) } } })
+  let page = await read()
+  const result = page.metadata.result
+  if (page.metadata.state !== 'ended' || !['success', 'not_executed', 'failure', 'cancelled'].includes(result ?? '')) return { settled: false, error: '原替换结果尚未确认，输入继续暂停。' }
+  if (result === 'success') return { settled: true, error: '' }
+  let value = page.data
+  if (page.representation) {
+    let text = page.data.text ?? ''
+    while (page.truncated) {
+      if (!page.next_cursor) throw new Error('原动作结果缺少后续页')
+      page = await read(page.next_cursor)
+      text += page.data.text ?? ''
+    }
+    value = JSON.parse(text) as SurfaceActionPage['data']
+  }
+  const code = value.result_data?.code ?? value.result_data?.error?.code
+  const reason = code === 'RUNNER_OUTPUT_INCOMPLETE' ? '发布完整性校验未通过' : code === 'VERSION_CONFLICT' ? '正文或输入版本已变化' : result === 'cancelled' ? '原动作已取消' : '原动作未提交'
+  return { settled: true, error: `替换未完成：${reason}${code ? `（${code}）` : ''}。当前正文和输入已保留。` }
+}
 function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmission, register, onChapterResolve, sourceRequest, onSourceResolved }: { view: View; taskId: string; modelId: string; enabled: boolean; refresh: () => Promise<void>; onDirty: (id: string, dirty: boolean) => void; onSubmission: (id: string, pending: boolean) => void; register: (id: string, editor: ViewEditor | null) => void; onChapterResolve: () => void; sourceRequest?: ChapterSourceRequest; onSourceResolved(): void }) {
   const root = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement | null>(null)
@@ -45,6 +66,9 @@ function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmi
   const bindings = useRef<ReturnType<typeof bindManagedBehaviors> | null>(null)
   const chapters = useRef<ChapterPresentation | null>(null)
   const position = useRef<ChapterPosition | null>(null)
+  const heldFocus = useRef<ChapterPosition['focus']>(undefined)
+  const currentManifest = useRef(view.chapter_manifest)
+  currentManifest.current = view.chapter_manifest
   const checked = view.presentation
   async function save(token?: string): Promise<void> {
     clearTimeout(timer.current)
@@ -78,6 +102,7 @@ function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmi
     style.textContent = 'button,input,textarea,select{font-size:calc(13.3333px * var(--text-scale,1))}\n' + managedTextStyles(checked.css) + '\n' + managedThemeStyles(checked.css)
     const host = document.createElement('div')
     host.dataset.view = 'v-' + view.id
+    host.inert = held.current
     content.current = host
     shadow.replaceChildren(style, host)
     if (renderedRevision.current !== view.revision) resetDraft.current = null
@@ -109,7 +134,7 @@ function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmi
       const el = host.querySelector<HTMLElement>('#v-' + view.id + '-' + b.element_id)!
       if (b.type === 'submit') el.onclick = async () => {
         if (submitting.current || held.current || answerUnknown.current) return
-        if (chapters.current?.blocksForm(b.form_id)) { setStatus('此表单包含正在更新的章节，请等待更新完成'); return }
+        if (chapters.current?.blocksForm(b.form_id)) { setStatus('此表单包含正在更新的内容，请等待更新完成'); return }
         submitting.current = true; onSubmission(view.id, true)
         host.querySelectorAll('button').forEach(button => { button.disabled = true })
         try {
@@ -126,9 +151,8 @@ function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmi
       query: async update => { await request({ type: 'chapter.status', task_id: taskId, update_id: update.update_id }); await refresh() },
       resolve: onChapterResolve
     })
-    let heldFocus: ChapterPosition['focus']
     const trackFocus = (event: FocusEvent) => {
-      if (held.current && !event.composedPath().includes(host) && event.target !== document.body) heldFocus = undefined
+      if (held.current && !event.composedPath().includes(host) && event.target !== document.body) heldFocus.current = undefined
     }
     document.addEventListener('focusin', trackFocus, true)
     if (position.current) { restoreChapterPosition(position.current, host, view.chapter_manifest); position.current = null }
@@ -136,17 +160,19 @@ function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmi
     register(view.id, { taskId, save, hold: () => {
       if (submitting.current || held.current || answerUnknown.current) throw new Error('答案提交或替换未确认，请先核对原结果；不会创建恢复点')
       clearTimeout(timer.current)
-      heldFocus = captureChapterPosition(host, view.chapter_manifest).focus
+      heldFocus.current = captureChapterPosition(host, view.chapter_manifest).focus
       held.current = true; host.inert = true
       return () => {
         held.current = false; host.inert = false
-        if (host.isConnected && heldFocus) restoreChapterPosition({ focus: heldFocus }, host, view.chapter_manifest)
-        heldFocus = undefined
+        const current = content.current
+        if (current) current.inert = false
+        if (current?.isConnected && heldFocus.current) restoreChapterPosition({ focus: heldFocus.current }, current, currentManifest.current)
+        heldFocus.current = undefined
       }
     } })
     return () => {
       position.current = captureChapterPosition(host, view.chapter_manifest)
-      if (!position.current.focus && heldFocus) position.current.focus = heldFocus
+      if (!position.current.focus && heldFocus.current) position.current.focus = heldFocus.current
       document.removeEventListener('focusin', trackFocus, true)
       chapters.current?.dispose(); chapters.current = null
       clearTimeout(timer.current); register(view.id, null)
@@ -220,7 +246,7 @@ function App() {
   const [detachedDrafts, setDetachedDrafts] = useState<string[]>([])
   const [maintenanceUnknown, setMaintenanceUnknown] = useState(false)
   const replacing = useRef(false)
-  const unsettledSurface = useRef<{ taskId: string; actionId: string; epoch: string; releases: (() => void)[] } | null>(null)
+  const unsettledSurface = useRef<{ taskId: string; actionId: string; releases: (() => void)[] } | null>(null)
   const [surfaceUnknown, setSurfaceUnknown] = useState(false)
   const registerEditor = useCallback((id: string, editor: ViewEditor | null) => { if (editor) editors.current.set(id, editor); else editors.current.delete(id) }, [])
   const onDirty = (id: string, value: boolean) => { if (value) dirty.current.add(id); else dirty.current.delete(id) }
@@ -426,10 +452,13 @@ function App() {
       if (!submitted) {
         try { await request({ type: 'surface.respond', task_id: taskId, action_id: update.action_id, proceed: false, confirm_discard: false }) } catch { /* Only cancel a proposal never sent for commit. */ }
         settled = true
+      } else {
+        try { settled = await synchronizeSurfaceOutcome(taskId, update.action_id) }
+        catch { setError('原替换结果查询失败，输入继续暂停。请查询原动作。') }
       }
     } finally {
       if (settled) { for (const release of releases.reverse()) release(); replacing.current = false }
-      else { unsettledSurface.current = { taskId, actionId: update.action_id, epoch: snapshot.runtime_epoch, releases }; setSurfaceUnknown(true) }
+      else { unsettledSurface.current = { taskId, actionId: update.action_id, releases }; setSurfaceUnknown(true) }
       setBusy(false)
     }
   }
@@ -445,18 +474,22 @@ function App() {
     } catch (error) { setError(String(error)) }
     finally { releases.reverse().forEach(release => release()); setBusy(false) }
   }
+  async function synchronizeSurfaceOutcome(taskId: string, actionId: string): Promise<boolean> {
+    const outcome = await surfaceOutcome(taskId, actionId)
+    const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId })
+    flushSync(() => { if (selected.current === taskId) installSnapshot(next) })
+    setError(outcome.error)
+    return outcome.settled
+  }
   async function querySurfaceOutcome() {
     const pending = unsettledSurface.current
     if (!pending || busy) return
     setBusy(true)
     try {
-      const operation = await request<{ metadata: { state: string } }>({ type: 'task.query', task_id: pending.taskId, query: { type: 'read', input: { target: { kind: 'action', id: pending.actionId } } } })
-      const next = await request<Snapshot>({ type: 'task.snapshot', task_id: pending.taskId })
-      if (next.runtime_epoch === pending.epoch && operation.metadata.state !== 'ended') throw new Error('原动作尚未确认结束；继续保持输入暂停，只查询，不重发')
-      flushSync(() => { if (selected.current === pending.taskId) installSnapshot(next) })
+      if (!await synchronizeSurfaceOutcome(pending.taskId, pending.actionId)) return
       for (const release of pending.releases.reverse()) release()
-      unsettledSurface.current = null; replacing.current = false; setSurfaceUnknown(false); setError('')
-    } catch (e) { setError(String(e)) }
+      unsettledSurface.current = null; replacing.current = false; setSurfaceUnknown(false)
+    } catch { setError('原替换结果查询失败，输入继续暂停。请查询原动作。') }
     finally { setBusy(false) }
   }
   const selected = useRef<string | null>(null)

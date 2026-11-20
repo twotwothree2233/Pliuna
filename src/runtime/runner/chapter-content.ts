@@ -1,4 +1,4 @@
-import { parse, parseFragment, type DefaultTreeAdapterMap } from 'parse5'
+import type { DefaultTreeAdapterMap } from 'parse5'
 import * as css from 'css-tree'
 import { randomUUID } from 'node:crypto'
 import type { Bundle, ChapterDependency, ChapterManifest, ChapterRegion } from '../../shared/contracts.generated'
@@ -7,6 +7,7 @@ import { ContractError, validateBundle } from '../../shared/validation'
 import { localResourceName } from '../../shared/branding'
 import { checkBundle } from '../managed'
 import { checkExportFragments } from '../export-fragments'
+import { parseContentMarkup } from './content-markup'
 
 type Node = DefaultTreeAdapterMap['node']
 type Element = DefaultTreeAdapterMap['element']
@@ -41,22 +42,14 @@ function inside(node: Node, parent: Element): boolean {
   return false
 }
 function index(html: string): Markup {
-  const document = /<!doctype\s|<html[\s>]|<head[\s>]|<body[\s>]/i.test(html)
-  const root = document
-    ? parse(html, { sourceCodeLocationInfo: true }) : parseFragment(html, { sourceCodeLocationInfo: true })
-  const elements: Element[] = [], ids = new Map<string, Element>()
-  function visit(node: Node): void {
-    if ('tagName' in node) {
-      elements.push(node)
-      const value = id(node)
-      if (value) {
-        if (!/^[A-Za-z][\w-]*$/.test(value) || ids.has(value)) fail('CHAPTER_MAPPING_INVALID', 'Markup contains duplicate or invalid stable element identities')
-        ids.set(value, node)
-      }
+  const { root, elements, document } = parseContentMarkup(html), ids = new Map<string, Element>()
+  for (const node of elements) {
+    const value = id(node)
+    if (value) {
+      if (!/^[A-Za-z][\w-]*$/.test(value) || ids.has(value)) fail('CHAPTER_MAPPING_INVALID', 'Markup contains duplicate or invalid stable element identities')
+      ids.set(value, node)
     }
-    if ('childNodes' in node) for (const child of node.childNodes) visit(child)
   }
-  visit(root)
   return { root, elements, ids, document }
 }
 function renderedTag(markup: Markup, element: Element): string { return markup.document && ['html', 'head', 'body'].includes(element.tagName) ? 'div' : element.tagName }

@@ -1,0 +1,36 @@
+{
+  "task_id": "task",
+  "update_id": "update",
+  "proposal_id": "proposal",
+  "intent_revision": 1,
+  "bundle_resource_id": "candidate",
+  "replacements": [],
+  "dependencies": [
+    {
+      "kind": "chapter",
+      "task_id": "task",
+      "view_id": "view",
+      "revision": 1
+    }
+  ],
+  "source": {
+    "task_id": "task",
+    "run_id": "run",
+    "work_id": "work",
+    "attempt_id": "attempt",
+    "role": "producer",
+    "purpose": "production",
+    "request_id": "goal",
+    "intent_revision": 1,
+    "update_id": "update"
+  },
+  "tree_operations": [
+    {
+      "type": "replace",
+      "node_ids": [
+        "node-a"
+      ],
+      "html": "<p>Updated</p>"
+    }
+  ]
+}

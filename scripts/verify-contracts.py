@@ -82,7 +82,12 @@ con.executescript((BASE / '003-chapters.sql').read_text(encoding='utf-8'))
 assert not con.execute('SELECT * FROM runner_chapter_updates').fetchall()
 assert not con.execute('SELECT * FROM runner_chapter_assemblies').fetchall()
 assert not con.execute('PRAGMA foreign_key_check').fetchall()
+for _ in range(2):
+    con.executescript((BASE / '004-content-tree.sql').read_text(encoding='utf-8'))
+assert not con.execute('SELECT * FROM runner_content_trees').fetchall()
+assert not con.execute('SELECT * FROM runner_content_intent_relations').fetchall()
+assert not con.execute('PRAGMA foreign_key_check').fetchall()
 con.close()
 
-print(f'PASS: {len(fixtures)} schema fixtures; v1/v2/chapter SQL, request/recovery uniqueness, independent submissions and rollback')
+print(f'PASS: {len(fixtures)} schema fixtures; v1/v2/chapter/content-tree SQL, request/recovery uniqueness, independent submissions and rollback')
 print('Not tested: documentation, runtime behavior, DOM/CSS safety, model quality, native packaging or crash durability.')

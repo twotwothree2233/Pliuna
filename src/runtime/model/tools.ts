@@ -52,7 +52,7 @@ export const modelTools: ToolDefinition[] = [
     "type": "function",
     "function": {
       "name": "read",
-      "description": "读取正文、对象或契约。纯文本默认正文，契约默认指南；lines/pages 为含首尾范围，find 为字面搜索。续读只需 kind/id/cursor。示例：{\"kind\":\"resource\",\"id\":\"<资源ID>\",\"selection\":{\"lines\":[1,20]}}",
+      "description": "读取正文、对象或契约。content_tree 以 View/节点 ID 分页查询子结构，可用 find 搜索标题；content_node 返回准确 HTML 和基线。续读使用 kind/id/cursor。纯文本支持 lines/pages/find。示例：{\"kind\":\"resource\",\"id\":\"<资源ID>\"}",
       "parameters": {
         "type": "object",
         "properties": {

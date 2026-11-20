@@ -10,6 +10,9 @@ import { ChapterState } from './chapter-state'
 import { RunnerPublicationState } from './publication-state'
 import { registerRunnerResources } from './resource-references'
 import type { RunnerWorkState } from './work-state'
+import type { ContentNode } from '../../shared/contracts.generated'
+import { ContentTreeState } from './content-tree-state'
+import { assertContentAuthority, contentBaselineCurrent, treeChapters } from './content-tree-host'
 
 export interface ChapterAssemblyInstall {
   update: ChapterUpdate
@@ -36,6 +39,14 @@ export interface ChapterArtifactAssembly {
   published: ChapterAssemblyInstall['published']
   keep: ChapterInheritance[]
   entry: PublicationEntry
+  content_tree?: ContentTreeAssemblyEvidence
+}
+export interface ContentTreeAssemblyEvidence {
+  source_tree_revision: number
+  tree_revision: number
+  retained_nodes: { node_id: string; revision: number; position_revision: number; source_span: ContentNode['span']; span: ContentNode['span'] }[]
+  changed_node_ids: string[]
+  retired_node_ids: string[]
 }
 type Row = { payload_json: string }
 type MaterialDependency = Extract<WorkDependency, { kind: 'resource' }>
@@ -74,6 +85,57 @@ export class ChapterArtifactState {
     if (!equal({ ...metadata, artifact_revision: base_artifact_revision + 1, acceptance_state: 'accepted' }, index)) fail('RUNNER_DEPENDENCY_INVALID', 'Accepted artifact metadata lost its original candidate binding')
     this.resource(index.task_id, index.bundle_resource_id)
     return record.candidate
+  }
+
+  private contentEvidence(update: ChapterUpdate, baseline: ChapterManifest, manifest: ChapterManifest, proposal: ChapterProposal): ContentTreeAssemblyEvidence {
+    const before = baseline.content_tree, after = manifest.content_tree, operations = proposal.tree_operations
+    if (!before || !after || !operations?.length || after.revision !== before.revision + 1 || !contentBaselineCurrent(update, baseline)) fail('RUNNER_OUTPUT_INCOMPLETE', 'Content assembly requires exact current structural baselines')
+    assertContentAuthority(update, operations)
+    const trees = new ContentTreeState(this.db), oldSnapshot = trees.snapshot(update.task_id, baseline.view_id, before.revision), snapshot = trees.snapshot(update.task_id, manifest.view_id, after.revision)
+    if (!oldSnapshot || !snapshot || !equal(oldSnapshot.tree, before) || !equal(snapshot.tree, after) || oldSnapshot.bundle_resource_id !== baseline.bundle_resource_id || oldSnapshot.view_revision !== baseline.view_revision || oldSnapshot.state_revision !== baseline.state_revision || snapshot.bundle_resource_id !== manifest.bundle_resource_id || snapshot.view_revision !== manifest.view_revision || snapshot.state_revision !== manifest.state_revision || !equal(manifest.chapters, treeChapters(after, baseline.chapters))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Content assembly lost its exact installed tree and chapter projection')
+    const previous = new Map(before.nodes.map(node => [node.node_id, node])), current = new Map(after.nodes.map(node => [node.node_id, node]))
+    const mutable = new Set<string>(), ancestors = new Set<string>(), moved = new Set<string>()
+    const ascend = (id: string | null): void => {
+      while (id !== null) {
+        const node = previous.get(id)
+        if (!node) fail('RUNNER_OUTPUT_INCOMPLETE', 'Content operation lost its source container')
+        ancestors.add(id); id = node.parent_id
+      }
+    }
+    for (const operation of operations) {
+      if (operation.type === 'replace' || operation.type === 'delete') for (const id of operation.node_ids) {
+        const node = previous.get(id)
+        if (!node) fail('RUNNER_OUTPUT_INCOMPLETE', 'Content operation lost its selected source')
+        ascend(node.parent_id)
+        const pending = [id]
+        while (pending.length) { const child = pending.pop()!; mutable.add(child); pending.push(...previous.get(child)!.children) }
+      }
+      if (operation.type === 'move') {
+        const node = previous.get(operation.node_ids[0]!)
+        if (!node) fail('RUNNER_OUTPUT_INCOMPLETE', 'Content move lost its selected source')
+        moved.add(node.node_id); ascend(node.parent_id)
+      }
+      if ('parent_id' in operation) ascend(operation.parent_id)
+    }
+    const retained: ContentTreeAssemblyEvidence['retained_nodes'] = []
+    for (const node of before.nodes) {
+      const next = current.get(node.node_id)
+      if (mutable.has(node.node_id)) {
+        if (next && (next.revision < node.revision || next.revision > node.revision + 1 || next.position_revision !== node.position_revision)) fail('RUNNER_OUTPUT_INCOMPLETE', 'Replaced content has inconsistent node versions')
+        continue
+      }
+      if (!next || next.kind !== node.kind || next.tag !== node.tag || next.title !== node.title || next.revision !== node.revision + (ancestors.has(node.node_id) ? 1 : 0) || next.position_revision !== node.position_revision + (moved.has(node.node_id) ? 1 : 0) || !moved.has(node.node_id) && next.parent_id !== node.parent_id || !ancestors.has(node.node_id) && !equal(next.children, node.children)) fail('RUNNER_OUTPUT_INCOMPLETE', 'Content assembly must preserve every unaffected node and version')
+      if (!ancestors.has(node.node_id)) {
+        if (next.span.end - next.span.start !== node.span.end - node.span.start || next.inner_span.start - next.span.start !== node.inner_span.start - node.span.start || next.inner_span.end - next.span.start !== node.inner_span.end - node.span.start) fail('RUNNER_OUTPUT_INCOMPLETE', 'Retained content must preserve its exact source range length')
+        retained.push({ node_id: node.node_id, revision: node.revision, position_revision: next.position_revision, source_span: node.span, span: next.span })
+      }
+    }
+    for (const node of after.nodes) if (!previous.has(node.node_id) && (node.revision !== 1 || node.position_revision !== 1)) fail('RUNNER_OUTPUT_INCOMPLETE', 'New content starts with a new node identity and version')
+    return {
+      source_tree_revision: before.revision, tree_revision: after.revision, retained_nodes: retained,
+      changed_node_ids: after.nodes.filter(node => { const old = previous.get(node.node_id); return !old || old.revision !== node.revision || old.position_revision !== node.position_revision }).map(node => node.node_id),
+      retired_node_ids: before.nodes.filter(node => !current.has(node.node_id)).map(node => node.node_id)
+    }
   }
 
   private materials(task: string, dependencies: WorkDependency[], checking: Set<string>): MaterialDependency[] {
@@ -135,6 +197,7 @@ export class ChapterArtifactState {
     // Ordinary indexes retain the source; chapter indexes retain the installed Bundle.
     const mappedArtifactResource = mapping && ('chapter_update_id' in mapping ? mapping.published_bundle_resource_id : mapping.source_bundle_resource_id)
     if (!previous || !sameGoal(index, previous) || !baseline || !sameGoal(previous, baseline) || baseline.artifact_id !== previous.artifact_id || baseline.artifact_revision !== previous.artifact_revision || !mapping || !sameGoal(previous, mapping) || mapping.view_id !== baseline.view_id || mapping.view_revision !== baseline.view_revision || mappedArtifactResource !== previous.bundle_resource_id || mapping.published_bundle_resource_id !== baseline.bundle_resource_id || !this.db.prepare('SELECT 1 FROM view_history WHERE task_id=? AND view_id=? AND view_revision=? AND bundle_resource_id=?').get(index.task_id, baseline.view_id, baseline.view_revision, baseline.bundle_resource_id)) fail('RUNNER_DEPENDENCY_INVALID', 'Chapter inheritance lost its exact previous artifact and published manifest')
+    if (proposal.tree_operations ? !equal(assembly.content_tree, this.contentEvidence(update, baseline, manifest, proposal)) : assembly.content_tree !== undefined) fail('RUNNER_DEPENDENCY_INVALID', 'Content assembly lost its frozen structural inheritance evidence')
     this.resource(index.task_id, baseline.bundle_resource_id)
     const materials = [...new Map([...this.materialDependencies(previous, checking), ...this.materials(index.task_id, attempt.input_versions, checking)].map(material => [material.resource_id, material])).values()]
     this.resource(index.task_id, index.bundle_resource_id)
@@ -189,8 +252,9 @@ export class ChapterArtifactState {
     const previousCandidate = this.db.prepare('SELECT candidate_id FROM runner_artifacts WHERE task_id=? AND artifact_id=? AND artifact_revision=?').get(update.task_id, previous.artifact_id, previous.artifact_revision) as { candidate_id: string }
     const coverage = this.artifacts.candidate(update.task_id, previousCandidate.candidate_id)!.candidate.requirement_ids
     const replaced = proposal.replacements.flatMap(group => group.previous_region_ids), next = proposal.replacements.flatMap(group => group.chapters), keep = state.inheritance(update.task_id, update.update_id)
-    const retained = latestManifest.chapters.filter(chapter => !replaced.includes(chapter.region_id))
-    if (!equal([...replaced].sort(), [...update.region_ids].sort()) || retained.length !== keep.length || manifest.chapters.length !== retained.length + next.length || next.some(chapter => !manifest.chapters.some(current => equal(regionContent(current), regionContent(chapter)))) || retained.some(chapter => !manifest.chapters.some(current => equal(regionContent(current), regionContent(chapter))) || !keep.some(item => item.region_id === chapter.region_id && item.region_revision === chapter.revision && item.view_id === latestManifest.view_id && sameGoal(item, update) && item.artifact_id === previous.artifact_id && item.artifact_revision === previous.artifact_revision && item.source_manifest_revision === latestManifest.manifest_revision && item.source_bundle_resource_id === latestManifest.bundle_resource_id && equal([...item.requirement_ids].sort(), [...coverage].sort()) && sameDependencies(item.dependencies, chapter.dependencies)))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Host assembly must enumerate every replacement and exact inherited chapter')
+    const structural = proposal.tree_operations ? this.contentEvidence(update, latestManifest, manifest, proposal) : undefined
+    const retained = latestManifest.chapters.filter(chapter => structural ? manifest.content_tree!.nodes.some(node => node.node_id === chapter.region_id && node.revision === chapter.revision) : !replaced.includes(chapter.region_id))
+    if (!structural && (!equal([...replaced].sort(), [...update.region_ids].sort()) || manifest.chapters.length !== retained.length + next.length || next.some(chapter => !manifest.chapters.some(current => equal(regionContent(current), regionContent(chapter))))) || retained.length !== keep.length || retained.some(chapter => !structural && !manifest.chapters.some(current => equal(regionContent(current), regionContent(chapter))) || !keep.some(item => item.region_id === chapter.region_id && item.region_revision === chapter.revision && item.view_id === latestManifest.view_id && sameGoal(item, update) && item.artifact_id === previous.artifact_id && item.artifact_revision === previous.artifact_revision && item.source_manifest_revision === latestManifest.manifest_revision && item.source_bundle_resource_id === latestManifest.bundle_resource_id && equal([...item.requirement_ids].sort(), [...coverage].sort()) && sameDependencies(item.dependencies, chapter.dependencies)))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Host assembly must enumerate every replacement and exact inherited chapter')
     const pubWork = this.work.work(publisher.work_id), attempt = this.work.attempt(publisher.attempt_id), run = this.work.run(publisher.run_id)
     if (pubWork.current_attempt_id !== publisher.attempt_id || pubWork.state !== 'succeeded' || attempt.state !== 'succeeded' || !attempt.result_ref || run.runtime_epoch !== this.work.epoch || attempt.runtime_epoch !== this.work.epoch || !run.commit_valid || !['running', 'waiting'].includes(run.state) || publisher.work_id === proposal.source.work_id) fail('RUNNER_OWNERSHIP_INVALID', 'A new successful host publisher must install the assembled artifact')
     const action = this.db.prepare('SELECT task_id,run_id,state,result,commit_valid,source_json,request_json FROM actions WHERE id=?').get(published.action_id) as { task_id: string; run_id: string; state: string; result: string | null; commit_valid: number; source_json: string; request_json: string } | undefined
@@ -205,7 +269,7 @@ export class ChapterArtifactState {
     const surface = this.db.prepare('SELECT s.id,s.revision,s.layout_json,v.revision view_revision,v.state_revision,v.bundle_resource_id FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? AND v.id=?').get(update.task_id, published.view_id) as { id: string; revision: number; layout_json: string; view_revision: number; state_revision: number; bundle_resource_id: string } | undefined
     if (!surface || surface.revision !== published.surface_revision || surface.view_revision !== published.view_revision || surface.state_revision !== published.state_revision || surface.bundle_resource_id !== published.bundle_resource_id) fail('RUNNER_ARTIFACT_CONFLICT', 'Chapter artifact must point to the actual committed content')
     const entry = validateRunnerContract('runner_publication_entry', { task_id: update.task_id, chapter_update_id: update.update_id, chapter_operation_id: published.operation_id, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision, request_id: update.request_id, intent_revision: update.intent_revision, section_id: index.section_id, view_id: published.view_id, view_revision: published.view_revision, state_revision: published.state_revision, source_bundle_resource_id: operation.operation.assembled_bundle_resource_id, published_bundle_resource_id: published.bundle_resource_id, surface_history_id: `chapter-history:${published.operation_id}` })
-    const assembly: ChapterArtifactAssembly = { update_id: update.update_id, proposal_id: proposal.proposal_id, operation_id: published.operation_id, previous_artifact_revision: previous.artifact_revision, source_manifest_revision: latestManifest.manifest_revision, manifest_revision: manifest.manifest_revision, candidate_id: candidate.candidate_id, index, publisher, published, keep, entry }
+    const assembly: ChapterArtifactAssembly = { update_id: update.update_id, proposal_id: proposal.proposal_id, operation_id: published.operation_id, previous_artifact_revision: previous.artifact_revision, source_manifest_revision: latestManifest.manifest_revision, manifest_revision: manifest.manifest_revision, candidate_id: candidate.candidate_id, index, publisher, published, keep, entry, ...(structural ? { content_tree: structural } : {}) }
     this.source(assembly)
     const historyViews = this.db.prepare('SELECT v.id view_id,v.revision view_revision,v.state_revision,v.bundle_resource_id,h.id view_history_id FROM views v LEFT JOIN view_history h ON h.view_id=v.id AND h.view_revision=v.revision AND h.task_id=? AND h.bundle_resource_id=v.bundle_resource_id WHERE v.surface_id=? ORDER BY v.id').all(update.task_id, surface.id) as { view_id: string; view_revision: number; state_revision: number; bundle_resource_id: string; view_history_id: string | null }[]
     const layout = JSON.parse(surface.layout_json), visible: string[] = layout.slots.flatMap((slot: { groups: { views: string[] }[] }) => slot.groups.flatMap(group => group.views))

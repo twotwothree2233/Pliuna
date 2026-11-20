@@ -18,7 +18,7 @@ sources: SummaryTarget[]
 certainty: ("recorded" | "inferred" | "uncertain")
 }
 export interface SummaryTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -44,7 +44,7 @@ sequence: number
 changes: [SyncDeltaSyncChange, ...(SyncDeltaSyncChange)[]]
 }
 export interface SyncDeltaTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -129,7 +129,7 @@ name: string
 target: BundleTarget
 }
 export interface BundleTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -505,6 +505,11 @@ state_revision: number
 region_ids: string[]
 text: string
 model_config_id: IpcRequestRunnerId
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+tree_operations?: ContentOperationPlan[]
 } | {
 type: "chapter.cancel"
 task_id: IpcRequestRunnerId
@@ -537,12 +542,12 @@ max_chars?: number
 export type IpcRequestRunnerId = string
 
 export interface IpcRequestTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
 export interface IpcRequestList {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 filters?: {
 name_query?: string
 status?: string
@@ -715,7 +720,7 @@ export type ModelRequestJsonValue = ({
 } | ModelRequestJsonValue[] | string | number | boolean | null)
 
 export interface ModelRequestList {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 filters?: {
 name_query?: string
 status?: string
@@ -726,7 +731,7 @@ limit?: number
 cursor?: string
 }
 export interface ModelRequestModelTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "runner_outline" | "runner_batch" | "runner_artifact_index" | "runner_layout")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "runner_outline" | "runner_batch" | "runner_artifact_index" | "runner_layout" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -777,7 +782,7 @@ name: string
 target: ModelRequestTarget
 }
 export interface ModelRequestTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -1849,6 +1854,7 @@ export_ids: ChapterRegionRunnerId[]
 css_selectors: string[]
 }
 export type ChapterManifestRunnerId = string
+export type ChapterManifestRunnerContentTree = ContentTree
 
 export interface ChapterManifest {
 task_id: ChapterManifestRunnerId
@@ -1867,6 +1873,7 @@ artifact_revision?: number
  * @maxItems 256
  */
 chapters: ChapterRegion[]
+content_tree?: ChapterManifestRunnerContentTree
 }
 export type ChapterIntentRunnerId = string
 
@@ -1875,6 +1882,7 @@ region_id: ChapterIntentRunnerId
 intent_revision: number
 }
 export type ChapterUpdateRunnerId = string
+export type ChapterUpdateRunnerContentTree = ContentTree
 export type ChapterUpdateRunnerExecutionScope = ({
 task_id: ChapterUpdateRunnerId
 run_id: ChapterUpdateRunnerId
@@ -1932,6 +1940,11 @@ action_id?: ChapterUpdateRunnerId
  */
 previous_update_ids: ChapterUpdateRunnerId[]
 reason?: string
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+tree_operations?: ContentOperationPlan[]
 }
 export interface ChapterUpdateRunnerChapterManifest {
 task_id: ChapterUpdateRunnerId
@@ -1950,6 +1963,7 @@ artifact_revision?: number
  * @maxItems 256
  */
 chapters: ChapterRegion[]
+content_tree?: ChapterUpdateRunnerContentTree
 }
 export interface ChapterUpdateRunnerChapterDependency {
 kind: "chapter"
@@ -1970,6 +1984,30 @@ previous_region_ids: string[]
  */
 chapters: ChapterRegion[]
 }
+export type ChapterProposal = ({
+[k: string]: unknown
+} & {
+task_id: ChapterProposalRunnerId
+update_id: ChapterProposalRunnerId
+proposal_id: ChapterProposalRunnerId
+intent_revision: number
+bundle_resource_id: ChapterProposalRunnerId
+/**
+ * @minItems 0
+ * @maxItems 256
+ */
+replacements: ChapterReplacement[]
+/**
+ * @maxItems 256
+ */
+dependencies: ChapterProposalRunnerChapterDependency[]
+source: ChapterProposalRunnerExecutionScope
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+tree_operations?: ContentOperation[]
+})
 export type ChapterProposalRunnerId = string
 export type ChapterProposalRunnerExecutionScope = ({
 task_id: ChapterProposalRunnerId
@@ -1993,23 +2031,6 @@ composition_version: number
 trigger_request_id: ChapterProposalRunnerId
 })
 
-export interface ChapterProposal {
-task_id: ChapterProposalRunnerId
-update_id: ChapterProposalRunnerId
-proposal_id: ChapterProposalRunnerId
-intent_revision: number
-bundle_resource_id: ChapterProposalRunnerId
-/**
- * @minItems 1
- * @maxItems 256
- */
-replacements: ChapterReplacement[]
-/**
- * @maxItems 256
- */
-dependencies: ChapterProposalRunnerChapterDependency[]
-source: ChapterProposalRunnerExecutionScope
-}
 export interface ChapterProposalRunnerChapterDependency {
 kind: "chapter"
 task_id: ChapterProposalRunnerId
@@ -2233,7 +2254,7 @@ action_id?: ChapterPublicationRunnerId
 state: ("registered" | "prepared" | "dispatched" | "published" | "failure" | "cancelled" | "unknown" | "superseded")
 }
 export interface ChapterPublicationList {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 filters?: {
 name_query?: string
 status?: string
@@ -2244,7 +2265,7 @@ limit?: number
 cursor?: string
 }
 export interface ChapterPublicationModelTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "runner_outline" | "runner_batch" | "runner_artifact_index" | "runner_layout")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "runner_outline" | "runner_batch" | "runner_artifact_index" | "runner_layout" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -2295,7 +2316,7 @@ name: string
 target: ChapterPublicationTarget
 }
 export interface ChapterPublicationTarget {
-kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary")
+kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
 id: string
 expected_revision?: number
 }
@@ -2350,3 +2371,151 @@ capability: string
 arguments: ChapterPublicationJsonValue
 references: ChapterPublicationReferences
 }
+export type ContentNodeRunnerId = string
+
+export interface ContentNode {
+node_id: ContentNodeRunnerId
+parent_id: (ContentNodeRunnerId | null)
+kind: ("document" | "section" | "paragraph" | "list" | "list_item" | "table" | "row" | "cell" | "code" | "formula" | "image" | "block")
+revision: number
+position_revision: number
+title: string
+/**
+ * @minItems 0
+ * @maxItems 10000
+ */
+children: string[]
+selector: string
+end_selector: string
+tag: string
+span: {
+start: number
+end: number
+}
+inner_span: {
+start: number
+end: number
+}
+}
+export type ContentLineageRunnerId = string
+
+export interface ContentLineage {
+previous_node_id: ContentLineageRunnerId
+/**
+ * @minItems 0
+ * @maxItems 10000
+ */
+successor_node_ids: string[]
+revision: number
+reason: ("split" | "merge" | "deleted" | "replaced")
+}
+export type ContentTreeRunnerId = string
+
+export interface ContentTree {
+version: 1
+revision: number
+root_id: ContentTreeRunnerId
+/**
+ * @minItems 1
+ * @maxItems 10000
+ */
+nodes: ContentNode[]
+/**
+ * @maxItems 10000
+ */
+lineage: ContentLineage[]
+}
+export type ContentOperation = ({
+type: "replace"
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+node_ids: string[]
+html: string
+} | {
+type: "insert"
+parent_id: ContentOperationRunnerId
+position: ("before" | "after")
+anchor_id: ContentOperationRunnerId
+html: string
+} | {
+type: "insert"
+parent_id: ContentOperationRunnerId
+position: ("start" | "end")
+html: string
+} | {
+type: "delete"
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+node_ids: string[]
+} | {
+type: "move"
+/**
+ * @minItems 1
+ * @maxItems 1
+ */
+node_ids: string[]
+parent_id: ContentOperationRunnerId
+position: ("before" | "after")
+anchor_id: ContentOperationRunnerId
+} | {
+type: "move"
+/**
+ * @minItems 1
+ * @maxItems 1
+ */
+node_ids: string[]
+parent_id: ContentOperationRunnerId
+position: ("start" | "end")
+})
+export type ContentOperationRunnerId = string
+export type ContentOperationPlan = ({
+type: "replace"
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+node_ids: string[]
+html?: string
+} | {
+type: "insert"
+parent_id: ContentOperationPlanRunnerId
+position: ("before" | "after")
+anchor_id: ContentOperationPlanRunnerId
+html?: string
+} | {
+type: "insert"
+parent_id: ContentOperationPlanRunnerId
+position: ("start" | "end")
+html?: string
+} | {
+type: "delete"
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+node_ids: string[]
+} | {
+type: "move"
+/**
+ * @minItems 1
+ * @maxItems 1
+ */
+node_ids: string[]
+parent_id: ContentOperationPlanRunnerId
+position: ("before" | "after")
+anchor_id: ContentOperationPlanRunnerId
+} | {
+type: "move"
+/**
+ * @minItems 1
+ * @maxItems 1
+ */
+node_ids: string[]
+parent_id: ContentOperationPlanRunnerId
+position: ("start" | "end")
+})
+export type ContentOperationPlanRunnerId = string

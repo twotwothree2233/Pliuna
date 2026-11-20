@@ -5,6 +5,7 @@ import type {
 } from './contracts.generated'
 import { assertContract, ContractError } from './validation'
 import { assertIndexBytes, assertIndexTitle, assertRunnerId } from '../runtime/runner/limits'
+import type { ContentLineage, ContentNode, ContentOperation, ContentOperationPlan, ContentTree } from './contracts.generated'
 
 export interface RunnerContractTypes {
   runner_input_event: InputEvent
@@ -40,6 +41,11 @@ export interface RunnerContractTypes {
   runner_chapter_proposal: ChapterProposal
   runner_chapter_inheritance: ChapterInheritance
   runner_chapter_publication: ChapterPublication
+  runner_content_tree: ContentTree
+  runner_content_node: ContentNode
+  runner_content_lineage: ContentLineage
+  runner_content_operation: ContentOperation
+  runner_content_operation_plan: ContentOperationPlan
 }
 
 function invalid(message: string): never { throw new ContractError('INVALID_RUNNER_CONTRACT', message) }
@@ -81,6 +87,7 @@ function fields(value: unknown, key = '', task?: string): void {
   } else if (value && typeof value === 'object') {
     for (const [name, item] of Object.entries(value)) fields(item, name, task)
   } else {
+    if (key === 'parent_id' && value === null) return
     if (key === 'id' || key.endsWith('_id') || key === 'order_key' || key === 'runtime_epoch') assertRunnerId(value, key)
     if (key === 'title') assertIndexTitle(value)
     if (key === 'task_id' && task !== undefined && value !== task) ownership()
@@ -150,6 +157,9 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
   if (definition === 'runner_chapter_update') chapterUpdate(record as ChapterUpdate)
   if (definition === 'runner_chapter_replacement') chapterReplacement(record as ChapterReplacement)
   if (definition === 'runner_chapter_proposal') chapterProposal(record as ChapterProposal)
+  if (definition === 'runner_content_tree') contentTree(record as ContentTree)
+  if (definition === 'runner_content_node') contentNode(record as ContentNode)
+  if (definition === 'runner_content_operation' || definition === 'runner_content_operation_plan') contentOperation(record as ContentOperationPlan)
   if (definition === 'runner_chapter_inheritance') {
     const keep = record as ChapterInheritance
     if (keep.valid && keep.reason !== undefined) invalid('Valid inherited contributions cannot retain an invalidation reason')
@@ -166,16 +176,17 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
 function chapterOwnership(ownership: ChapterOwnership): void {
   for (const [field, values] of Object.entries(ownership)) unique(values, `chapter ${field}`)
 }
-function chapterRegion(region: ChapterRegion): void {
-  if (region.title_selector === region.body_selector) invalid('Chapter title and body require separate boundaries')
+function chapterRegion(region: ChapterRegion, structural = false): void {
+  if (!structural && region.title_selector === region.body_selector) invalid('Chapter title and body require separate boundaries')
   chapterOwnership(region.ownership)
   unique(region.dependencies.map(dependencyKey), 'chapter dependencies')
 }
 function chapterManifest(manifest: ChapterManifest): void {
   unique(manifest.chapters.map(chapter => chapter.region_id), 'chapter identities')
-  unique(manifest.chapters.flatMap(chapter => [chapter.title_selector, chapter.body_selector]), 'chapter boundaries')
-  for (const chapter of manifest.chapters) chapterRegion(chapter)
+  unique(manifest.chapters.flatMap(chapter => manifest.content_tree ? [...new Set([chapter.title_selector, chapter.body_selector])] : [chapter.title_selector, chapter.body_selector]), 'chapter boundaries')
+  for (const chapter of manifest.chapters) chapterRegion(chapter, !!manifest.content_tree)
   for (const field of ['form_ids', 'behavior_ids', 'reference_ids', 'export_ids', 'css_selectors'] as const) unique(manifest.chapters.flatMap(chapter => chapter.ownership[field]), `owned chapter ${field}`)
+  if (manifest.content_tree) contentTree(manifest.content_tree)
 }
 function chapterUpdate(update: ChapterUpdate): void {
   chapterManifest(update.base_manifest)
@@ -185,7 +196,18 @@ function chapterUpdate(update: ChapterUpdate): void {
   unique(update.region_intents.map(intent => intent.region_id), 'chapter intents')
   unique(update.previous_update_ids, 'previous updates')
   if (update.previous_update_ids.includes(update.update_id)) invalid('Chapter update cannot supersede itself')
-  if (update.region_ids.some(id => !update.base_manifest.chapters.some(chapter => chapter.region_id === id)) || update.region_intents.length !== update.region_ids.length || update.region_intents.some(intent => !update.region_ids.includes(intent.region_id))) invalid('Update scope and chapter intent bindings must match the exact baseline')
+  const baseline = new Set([...update.base_manifest.chapters.map(chapter => chapter.region_id), ...(update.base_manifest.content_tree?.nodes.map(node => node.node_id) ?? [])])
+  if (update.region_ids.some(id => !baseline.has(id)) || update.region_intents.length !== update.region_ids.length || update.region_intents.some(intent => !update.region_ids.includes(intent.region_id))) invalid('Update scope and chapter intent bindings must match the exact baseline')
+  if (update.tree_operations) {
+    const tree = update.base_manifest.content_tree
+    if (!tree) invalid('Content operations require an exact structural baseline')
+    const ids = new Set(tree.nodes.map(node => node.node_id))
+    for (const operation of update.tree_operations) {
+      contentOperation(operation)
+      const references = [...('node_ids' in operation ? operation.node_ids : []), ...('parent_id' in operation ? [operation.parent_id] : []), ...('anchor_id' in operation ? [operation.anchor_id] : [])]
+      if (references.some(id => !ids.has(id))) invalid('Content operations reference unavailable baseline nodes')
+    }
+  }
   if (update.source && (update.source.purpose !== 'production' || update.source.update_id !== update.update_id || update.source.request_id !== update.request_id || update.source.intent_revision !== update.intent_revision)) ownership()
 }
 function chapterReplacement(replacement: ChapterReplacement): void {
@@ -197,7 +219,66 @@ function chapterProposal(proposal: ChapterProposal): void {
   unique(proposal.replacements.flatMap(replacement => replacement.previous_region_ids), 'proposal replaced chapters')
   unique(proposal.replacements.flatMap(replacement => replacement.chapters.map(chapter => chapter.region_id)), 'proposal chapter identities')
   for (const replacement of proposal.replacements) chapterReplacement(replacement)
+  for (const operation of proposal.tree_operations ?? []) contentOperation(operation)
   if (proposal.source.purpose !== 'production' || proposal.source.update_id !== proposal.update_id || proposal.source.intent_revision !== proposal.intent_revision) ownership()
+}
+
+function contentNode(node: ContentNode): void {
+  unique(node.children, 'content children')
+  for (const id of node.children) assertRunnerId(id, 'content child')
+  if (node.span.start > node.inner_span.start || node.inner_span.start > node.inner_span.end || node.inner_span.end > node.span.end) invalid('Content node boundaries are inconsistent')
+  if (node.children.includes(node.node_id) || node.parent_id === node.node_id) invalid('Content nodes cannot contain themselves')
+}
+
+function contentOperation(operation: ContentOperationPlan): void {
+  if ('node_ids' in operation) unique(operation.node_ids, 'content operation targets')
+  if ('anchor_id' in operation && 'node_ids' in operation && operation.node_ids.includes(operation.anchor_id)) invalid('A content move cannot anchor to itself')
+}
+
+function contentTree(tree: ContentTree): void {
+  unique(tree.nodes.map(node => node.node_id), 'content node identities')
+  unique(tree.lineage.map(item => item.previous_node_id), 'retired content identities')
+  const nodes = new Map(tree.nodes.map(node => [node.node_id, node]))
+  const root = nodes.get(tree.root_id)
+  if (!root || root.parent_id !== null || root.kind !== 'document') invalid('Content tree requires one document root')
+  for (const node of tree.nodes) {
+    contentNode(node)
+    if (node.revision > tree.revision || node.position_revision > tree.revision) invalid('Content node versions exceed their snapshot')
+    if (node.node_id !== root.node_id && (node.parent_id === null || !nodes.has(node.parent_id))) invalid('Content nodes require an existing parent')
+    let previousEnd = node.span.start
+    for (const id of node.children) {
+      const child = nodes.get(id)
+      if (!child || child.parent_id !== node.node_id || child.span.start < node.span.start || child.span.end > node.span.end || child.span.start < previousEnd) invalid('Content child order or containment is inconsistent')
+      previousEnd = child.span.end
+    }
+    if (node.parent_id !== null && !nodes.get(node.parent_id)?.children.includes(node.node_id)) invalid('Content parent links must be reciprocal')
+  }
+  const visited = new Set<string>(), pending = [root.node_id]
+  while (pending.length) {
+    const id = pending.pop()!
+    if (visited.has(id)) invalid('Content tree cannot contain cycles')
+    visited.add(id)
+    pending.push(...nodes.get(id)!.children)
+  }
+  if (visited.size !== nodes.size) invalid('Content tree must be connected')
+  const lineage = new Map(tree.lineage.map(item => [item.previous_node_id, item]))
+  for (const item of tree.lineage) {
+    unique(item.successor_node_ids, 'content successors')
+    if (nodes.has(item.previous_node_id) || item.revision > tree.revision || item.successor_node_ids.some(id => id === item.previous_node_id || !nodes.has(id) && !lineage.has(id))) invalid('Content lineage must retain retired identities and valid successors')
+    if (item.reason === 'deleted' && item.successor_node_ids.length) invalid('Deleted content cannot declare successors')
+  }
+  const completed = new Set<string>(), active = new Set<string>()
+  for (const id of lineage.keys()) {
+    const pending: [string, boolean][] = [[id, false]]
+    while (pending.length) {
+      const [current, expanded] = pending.pop()!
+      if (expanded) { active.delete(current); completed.add(current); continue }
+      if (completed.has(current) || nodes.has(current)) continue
+      if (active.has(current)) invalid('Content lineage cannot contain cycles')
+      active.add(current); pending.push([current, true])
+      for (const successor of lineage.get(current)!.successor_node_ids) pending.push([successor, false])
+    }
+  }
 }
 
 export interface ArtifactAcceptanceContext {

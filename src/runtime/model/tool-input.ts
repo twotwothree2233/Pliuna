@@ -50,7 +50,7 @@ export function modelToolRequest(name: string, raw: unknown): ModelRequest {
     if ([selection.lines, selection.pages, selection.find].filter(item => item !== undefined).length > 1) fail('Choose only one of lines, pages or find')
     for (const range of [selection.lines, selection.pages]) if (range && (!range.every(Number.isSafeInteger) || range[0] > range[1])) fail('Selection start must not exceed end')
     const locating = selection.lines || selection.pages || selection.find !== undefined
-    if (locating && !(value.kind === 'resource' && (view === undefined || view === 'text') || selection.lines && view === 'object')) fail('lines require text or object; pages/find require a text resource')
+    if (locating && !(value.kind === 'resource' && (view === undefined || view === 'text') || value.kind === 'content_tree' && selection.find !== undefined || selection.lines && view === 'object')) fail('lines require text or object; pages/find require a text resource or content structure')
     if (selection.find !== undefined && Buffer.from(selection.find).toString() !== selection.find) fail('find must contain valid Unicode text')
     if (selection.revision !== undefined && (!Number.isSafeInteger(selection.revision) || selection.revision < 1)) fail('Invalid revision')
     if (view === 'text' && (value.kind !== 'resource' || selection.revision !== undefined)) fail('Text requires an immutable resource without revision')
@@ -84,8 +84,17 @@ export function modelToolResult(name: string, raw: unknown, result: unknown): un
   return { ...result, data: { ...result.data, next_call: { name, arguments: name === 'read' ? { kind: (raw as any).kind, id: (raw as any).id, cursor: result.data.next_cursor } : { ...raw as object, cursor: result.data.next_cursor } } } }
 }
 
-export function modelToolSuggestion(name: string, raw: unknown, error: ContractError): string | undefined {
-  if (error.suggestion) return error.suggestion
+export function modelToolSuggestion(name: string, raw: unknown, error: ContractError, authorize?: (request: ModelRequest) => void): string | undefined {
+  const permitted = (suggestion: string): string | undefined => {
+    if (!authorize) return suggestion
+    try {
+      const next = JSON.parse(suggestion)
+      if (!object(next) || typeof next.name !== 'string') return undefined
+      authorize(modelToolRequest(next.name, next.arguments))
+      return suggestion
+    } catch { return undefined }
+  }
+  if (error.suggestion) return permitted(error.suggestion)
   if (!object(raw)) return undefined
   const target = name === 'write' && typeof raw.operation === 'string' && (core.$defs.write.oneOf.some(branch => branch.properties.type.const === raw.operation))
     ? { kind: 'object_type', id: raw.operation }
@@ -104,5 +113,5 @@ export function modelToolSuggestion(name: string, raw: unknown, error: ContractE
       } catch { /* An invalid input stays invalid; only a readable branch may be linked. */ }
     }
   }
-  return JSON.stringify({ name: 'read', arguments: { ...target, ...(section ? { selection: { view: 'guide', section } } : {}) } })
+  return permitted(JSON.stringify({ name: 'read', arguments: { ...target, ...(section ? { selection: { view: 'guide', section } } : {}) } }))
 }

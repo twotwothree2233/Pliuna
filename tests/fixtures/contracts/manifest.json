@@ -163,5 +163,35 @@
     "file": "invalid-13.json",
     "definition": "ipc_request",
     "valid": false
+  },
+  {
+    "file": "21-content-tree.json",
+    "definition": "runner_content_tree",
+    "valid": true
+  },
+  {
+    "file": "22-content-operation.json",
+    "definition": "runner_content_operation",
+    "valid": true
+  },
+  {
+    "file": "23-content-proposal.json",
+    "definition": "runner_chapter_proposal",
+    "valid": true
+  },
+  {
+    "file": "24-content-update-ipc.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "invalid-14.json",
+    "definition": "runner_content_operation",
+    "valid": false
+  },
+  {
+    "file": "invalid-15.json",
+    "definition": "runner_chapter_proposal",
+    "valid": false
   }
 ]

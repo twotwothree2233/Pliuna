@@ -4,6 +4,8 @@ import { sameDependencies, validateRunnerContract } from '../../shared/runner-va
 import { ContractError } from '../../shared/validation'
 import chapterSql from '../../shared/contracts/003-chapters.sql?raw'
 import { registerRunnerResources } from './resource-references'
+import { ContentTreeState } from './content-tree-state'
+import { assertContentAuthority, contentBaselineCurrent, contentUpdatesOverlap, reconcileRetainedContentScope } from './content-tree-host'
 
 type Row = { payload_json: string }
 type PublicationRow = Row & { state: ChapterPublication['state']; result_json: string | null }
@@ -31,8 +33,8 @@ function equivalent(left: unknown, right: unknown): boolean {
   return json(ordered(left)) === json(ordered(right))
 }
 function original(update: ChapterUpdate): unknown {
-  const { task_id, update_id, input_event_id, record_id, request_id, intent_revision, view_id, base_manifest, region_ids, dependencies, text, model_config_id } = update
-  return { task_id, update_id, input_event_id, record_id, request_id, intent_revision, view_id, base_manifest, region_ids, dependencies, text, ...(model_config_id ? { model_config_id } : {}) }
+  const { task_id, update_id, input_event_id, record_id, request_id, intent_revision, view_id, base_manifest, region_ids, dependencies, text, model_config_id, tree_operations } = update
+  return { task_id, update_id, input_event_id, record_id, request_id, intent_revision, view_id, base_manifest, region_ids, dependencies, text, ...(model_config_id ? { model_config_id } : {}), ...(tree_operations ? { tree_operations } : {}) }
 }
 
 // Safe on an existing v2 database and on a private upgrade candidate.
@@ -57,7 +59,7 @@ export function installChapterSchema(db: Database.Database): void {
 }
 
 export class ChapterState {
-  constructor(private readonly db: Database.Database) { installChapterSchema(db) }
+  constructor(private readonly db: Database.Database) { installChapterSchema(db); new ContentTreeState(db) }
 
   manifest(task: string, view: string, revision?: number): ChapterManifest | null {
     const row = revision === undefined
@@ -78,6 +80,10 @@ export class ChapterState {
       if ((current?.manifest_revision ?? null) !== expectedManifestRevision || manifest.manifest_revision !== (expectedManifestRevision ?? 0) + 1) conflict('Chapter mapping no longer matches its installation baseline')
       const view = this.db.prepare('SELECT v.revision,v.state_revision,v.bundle_resource_id FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? AND v.id=?').get(manifest.task_id, manifest.view_id) as { revision: number; state_revision: number; bundle_resource_id: string } | undefined
       if (!view || view.revision !== manifest.view_revision || view.state_revision !== manifest.state_revision || view.bundle_resource_id !== manifest.bundle_resource_id) conflict('Chapter mapping requires the exact currently published View and state')
+      if (manifest.content_tree) {
+        const trees = new ContentTreeState(this.db), previous = trees.snapshot(manifest.task_id, manifest.view_id)
+        trees.install(manifest, manifest.content_tree, previous?.tree.revision ?? null)
+      }
       this.protect(manifest.task_id, 'manifest', `${manifest.view_id}:${manifest.manifest_revision}`, [manifest.bundle_resource_id])
       this.db.prepare('INSERT INTO runner_chapter_manifests(task_id,view_id,manifest_revision,view_revision,bundle_resource_id,payload_json,installed_at) VALUES (?,?,?,?,?,?,?)').run(manifest.task_id, manifest.view_id, manifest.manifest_revision, manifest.view_revision, manifest.bundle_resource_id, json(manifest), new Date().toISOString())
       this.db.prepare('INSERT INTO runner_chapter_heads(task_id,view_id,manifest_revision) VALUES (?,?,?) ON CONFLICT(task_id,view_id) DO UPDATE SET manifest_revision=excluded.manifest_revision').run(manifest.task_id, manifest.view_id, manifest.manifest_revision)
@@ -105,10 +111,20 @@ export class ChapterState {
       if (input.state !== 'queued' || input.source || input.proposal_id || input.publication_operation_id || input.action_id) conflict('New chapter work must start without execution or publication authority')
       this.assertGoal(input)
       if (!this.db.prepare('SELECT 1 FROM records WHERE id=? AND task_id=?').get(input.record_id, input.task_id)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter input record does not belong to its Task')
-      const manifest = this.manifest(input.task_id, input.view_id)
-      if (!manifest || !equivalent(manifest, input.base_manifest)) conflict('Chapter request must bind the current published manifest')
+      const manifest = this.manifest(input.task_id, input.view_id) ?? conflict('Chapter request must bind the current published manifest')
+      if (!equivalent(manifest, input.base_manifest)) conflict('Chapter request must bind the current published manifest')
       if (input.dependencies.some(dependency => !this.dependencyCurrent(dependency))) conflict('Chapter input dependency changed')
-      const superseded = this.updates(input.task_id, input.view_id).filter(update => !chapterTerminal.has(update.state) && update.region_ids.some(id => input.region_ids.includes(id)))
+      const active = this.updates(input.task_id, input.view_id).filter(update => !chapterTerminal.has(update.state))
+      const unresolved = (update: ChapterUpdate): boolean => update.state === 'unknown' || !!(update.publication_operation_id && ['unknown', 'dispatched'].includes(this.publication(update.task_id, update.publication_operation_id)?.operation.state ?? ''))
+      const current = active.filter(update => {
+        if (update.base_manifest.content_tree && manifest.content_tree && !unresolved(update) && !contentBaselineCurrent(update, manifest)) {
+          this.stage(input.task_id, update.update_id, 'interrupted', { reason: 'content_baseline_changed' })
+          return false
+        }
+        return true
+      })
+      const superseded = current.filter(update => contentUpdatesOverlap(update, input))
+      if (superseded.some(unresolved)) fail('CHAPTER_OUTCOME_UNKNOWN', 'Query the original publication before replacing its uncertain scope')
       for (const update of superseded) this.stage(input.task_id, update.update_id, 'superseded', { reason: 'newer_chapter_intent' })
       const region_intents = input.region_ids.map(region_id => {
         const previous = this.db.prepare('SELECT intent_revision FROM runner_chapter_intents WHERE task_id=? AND view_id=? AND region_id=?').get(input.task_id, input.view_id, region_id) as { intent_revision: number } | undefined
@@ -117,6 +133,10 @@ export class ChapterState {
       const update = validateRunnerContract('runner_chapter_update', { ...input, region_intents, previous_update_ids: superseded.map(previous => previous.update_id) })
       this.db.prepare('INSERT INTO runner_chapter_updates(task_id,update_id,input_event_id,request_id,intent_revision,view_id,state,input_json,payload_json,installed_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(update.task_id, update.update_id, update.input_event_id, update.request_id, update.intent_revision, update.view_id, update.state, json(original(input)), json(update), new Date().toISOString())
       for (const intent of region_intents) this.db.prepare('INSERT INTO runner_chapter_intents(task_id,view_id,region_id,intent_revision,update_id) VALUES (?,?,?,?,?) ON CONFLICT(task_id,view_id,region_id) DO UPDATE SET intent_revision=excluded.intent_revision,update_id=excluded.update_id').run(update.task_id, update.view_id, intent.region_id, intent.intent_revision, update.update_id)
+      if (manifest.content_tree) for (const previous of superseded) {
+        const relation = { source_record_id: previous.record_id, ...reconcileRetainedContentScope(previous, input), superseded_node_ids: input.region_ids, original_request_id: previous.request_id, original_intent_revision: previous.intent_revision, superseding_record_id: input.record_id, requirement_effect: 'retain_unless_superseded' }
+        this.db.prepare('INSERT INTO runner_content_intent_relations(task_id,update_id,previous_update_id,payload_json) VALUES (?,?,?,?)').run(input.task_id, input.update_id, previous.update_id, json(relation))
+      }
       this.protect(update.task_id, 'update', update.update_id, [update.base_manifest.bundle_resource_id])
       return copy(update)
     })()
@@ -131,7 +151,7 @@ export class ChapterState {
   dependencyCurrent(dependency: ChapterDependency): boolean {
     validateRunnerContract('runner_chapter_dependency', dependency)
     const manifest = this.manifest(dependency.task_id, dependency.view_id)
-    return !!manifest && this.viewCurrent(manifest) && (dependency.region_id === undefined ? manifest.shared_revision === dependency.revision : manifest.chapters.some(chapter => chapter.region_id === dependency.region_id && chapter.revision === dependency.revision))
+    return !!manifest && this.viewCurrent(manifest) && (dependency.region_id === undefined ? manifest.shared_revision === dependency.revision : manifest.content_tree?.nodes.some(node => node.node_id === dependency.region_id && node.revision === dependency.revision) || manifest.chapters.some(chapter => chapter.region_id === dependency.region_id && chapter.revision === dependency.revision))
   }
   assertCurrent(task: string, id: string): ChapterUpdate {
     const update = this.update(task, id) ?? fail('RUNNER_NOT_FOUND', 'Chapter update is unavailable')
@@ -139,7 +159,9 @@ export class ChapterState {
     if (chapterTerminal.has(update.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter update no longer has commit authority')
     const manifest = this.manifest(task, update.view_id)
     if (!manifest || !this.viewCurrent(manifest)) fail('RUNNER_OWNERSHIP_INVALID', 'Published chapter mapping is unavailable or replaced')
-    for (const intent of update.region_intents) {
+    if (update.base_manifest.content_tree) {
+      if (!contentBaselineCurrent(update, manifest)) fail('RUNNER_OWNERSHIP_INVALID', 'Content subtree or destination baseline changed')
+    } else for (const intent of update.region_intents) {
       const head = this.db.prepare('SELECT intent_revision,update_id FROM runner_chapter_intents WHERE task_id=? AND view_id=? AND region_id=?').get(task, update.view_id, intent.region_id) as { intent_revision: number; update_id: string } | undefined
       const before = update.base_manifest.chapters.find(chapter => chapter.region_id === intent.region_id)
       if (!head || head.update_id !== id || head.intent_revision !== intent.intent_revision || !before || !manifest.chapters.some(chapter => chapter.region_id === intent.region_id && chapter.revision === before.revision)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter scope or local intent is no longer current')
@@ -170,7 +192,8 @@ export class ChapterState {
       const update = this.assertCurrent(proposal.task_id, proposal.update_id)
       if (proposal.intent_revision !== update.intent_revision || proposal.source.purpose !== 'production' || proposal.source.request_id !== update.request_id || proposal.source.update_id !== update.update_id || update.source && !equivalent(update.source, proposal.source) || !sameDependencies(proposal.dependencies, update.dependencies)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter proposal source does not match its authorized work')
       const replaced = proposal.replacements.flatMap(group => group.previous_region_ids)
-      if (replaced.length !== update.region_ids.length || update.region_ids.some(id => !replaced.includes(id))) conflict('Chapter proposal must replace its entire authorized group')
+      if (proposal.tree_operations) assertContentAuthority(update, proposal.tree_operations)
+      else if (replaced.length !== update.region_ids.length || update.region_ids.some(id => !replaced.includes(id))) conflict('Chapter proposal must replace its entire authorized group')
       this.protect(proposal.task_id, 'proposal', proposal.proposal_id, [proposal.bundle_resource_id])
       this.db.prepare('INSERT INTO runner_chapter_proposals(task_id,proposal_id,update_id,bundle_resource_id,payload_json) VALUES (?,?,?,?,?)').run(proposal.task_id, proposal.proposal_id, proposal.update_id, proposal.bundle_resource_id, json(proposal))
       this.stage(proposal.task_id, proposal.update_id, 'assembling', { proposal_id: proposal.proposal_id })
@@ -183,7 +206,7 @@ export class ChapterState {
       const update = this.update(keep.task_id, keep.update_id) ?? fail('RUNNER_NOT_FOUND', 'Chapter inheritance update is unavailable')
       const source = this.manifest(keep.task_id, keep.view_id, keep.source_manifest_revision)
       const region = source?.chapters.find(chapter => chapter.region_id === keep.region_id && chapter.revision === keep.region_revision)
-      if (update.view_id !== keep.view_id || update.region_ids.includes(keep.region_id) || !source || !region || source.bundle_resource_id !== keep.source_bundle_resource_id || source.request_id !== keep.request_id || source.intent_revision !== keep.intent_revision || !sameDependencies(region.dependencies, keep.dependencies)) conflict('Kept contribution requires its exact original source and dependencies')
+      if (update.view_id !== keep.view_id || !update.base_manifest.content_tree && update.region_ids.includes(keep.region_id) || !source || !region || source.bundle_resource_id !== keep.source_bundle_resource_id || source.request_id !== keep.request_id || source.intent_revision !== keep.intent_revision || !sameDependencies(region.dependencies, keep.dependencies)) conflict('Kept contribution requires its exact original source and dependencies')
       if (keep.valid && keep.dependencies.some(dependency => !this.dependencyCurrent(dependency))) conflict('Changed dependencies cannot be inherited as current')
       this.protect(keep.task_id, 'inheritance', `${keep.update_id}:${keep.region_id}`, [keep.source_bundle_resource_id])
       const existing = this.db.prepare('SELECT payload_json FROM runner_chapter_inheritance WHERE task_id=? AND update_id=? AND region_id=?').get(keep.task_id, keep.update_id, keep.region_id) as Row | undefined

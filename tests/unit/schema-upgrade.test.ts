@@ -12,6 +12,7 @@ import { hasV2Writes, openBusinessDatabase, prepareBusinessDatabase, purgeRunner
 import { RuntimeStore } from '../../src/runtime/store'
 import { validateRunnerContract } from '../../src/shared/runner-validation'
 import { chapterManifest, chapterUpdate as makeChapterUpdate } from '../helpers/chapters'
+import { contentTree } from '../helpers/content-tree'
 
 const roots: string[] = [], connections: Database.Database[] = [], journals: RestoreJournal[] = [], managers: RecoveryManager[] = []
 const runtimes: RuntimeStore[] = []
@@ -118,6 +119,11 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
     insert("INSERT INTO runner_chapter_resources VALUES (?,'manifest',?,?)", task, view, resource)
     insert("INSERT INTO runner_chapter_publication_evidence VALUES (?,?,1,'published','{}',?)", task, chapterOperation, now)
     insert('INSERT INTO runner_chapter_assemblies VALUES (?,?,1,?,?,?)', task, artifact, chapterUpdate, chapterOperation, JSON.stringify({ entry: { ...entry, chapter_update_id: chapterUpdate, chapter_operation_id: chapterOperation } }))
+    const content = { task_id: task, view_id: view, view_revision: 1, state_revision: 1, bundle_resource_id: resource, tree: contentTree() }
+    insert('INSERT INTO runner_content_trees VALUES (?,?,1,1,1,?,?,?)', task, view, resource, JSON.stringify(content), now)
+    insert('INSERT INTO runner_content_tree_heads VALUES (?,?,1)', task, view)
+    insert('INSERT INTO runner_content_tree_cursors VALUES (?,?,?,1,?)', randomUUID(), task, view, JSON.stringify({ source: 'tree', offset: 1 }))
+    insert('INSERT INTO runner_content_intent_relations VALUES (?,?,?,?)', task, chapterUpdate, randomUUID(), JSON.stringify({ source_record_id: record, retained_node_ids: [], superseded_node_ids: [] }))
   })()
   return { read }
 }

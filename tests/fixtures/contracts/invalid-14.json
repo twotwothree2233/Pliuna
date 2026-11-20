@@ -1,0 +1,6 @@
+{
+  "type": "insert",
+  "parent_id": "document",
+  "position": "before",
+  "html": "<p>Invalid</p>"
+}

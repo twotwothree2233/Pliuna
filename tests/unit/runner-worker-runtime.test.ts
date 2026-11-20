@@ -135,7 +135,14 @@ it('checks the profile again at host dispatch and returns no denied resource bod
   const query = vi.spyOn(s.internal, 'query'), selected = { ...base, authorize }
   s.complete.mockResolvedValueOnce(toolResponse(call(resource))).mockResolvedValueOnce(answer())
   await expect(s.store.executeWorker('attempt-alpha', selected, { text: 'Read only while authorized' })).resolves.toEqual({ answer: 'done' })
-  expect(authorize).toHaveBeenCalledTimes(2)
+  const requested = modelToolRequest('read', { kind: 'resource', id: resource })
+  expect(authorize).toHaveBeenNthCalledWith(1, requested)
+  expect(authorize).toHaveBeenNthCalledWith(2, requested)
+  expect(authorize.mock.results[0]).toMatchObject({ type: 'return' })
+  expect(authorize.mock.results[1]).toMatchObject({ type: 'throw', value: { code: 'WORKER_CAPABILITY_DENIED' } })
+  const suggestions = authorize.mock.calls.slice(2)
+  expect(suggestions.length).toBeGreaterThan(0)
+  for (const [request] of suggestions) expect(request).toEqual(modelToolRequest('read', { kind: 'object_type', id: 'tool.read' }))
   expect(query).not.toHaveBeenCalled()
   const delivered = s.complete.mock.calls[1]![2].find(message => message.role === 'tool')!
   expect(JSON.parse(delivered.content!)).toMatchObject({ execution: 'not_executed', error: { code: 'WORKER_CAPABILITY_DENIED' } })

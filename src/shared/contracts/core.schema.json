@@ -24,7 +24,9 @@
             "call",
             "action",
             "approval",
-            "summary"
+            "summary",
+            "content_tree",
+            "content_node"
           ]
         },
         "id": {
@@ -1051,7 +1053,9 @@
             "call",
             "action",
             "approval",
-            "summary"
+            "summary",
+            "content_tree",
+            "content_node"
           ]
         },
         "filters": {
@@ -3875,6 +3879,15 @@
             },
             "model_config_id": {
               "$ref": "#/$defs/runner_id"
+            },
+            "tree_operations": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_content_operation_plan"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "ContentOperationPlan[]"
             }
           },
           "required": [
@@ -8445,13 +8458,35 @@
       "oneOf": [
         {
           "tsType": "{ batch_id: string; chapter_update_id?: never; chapter_operation_id?: never }",
-          "required": ["batch_id"],
-          "not": { "anyOf": [{ "required": ["chapter_update_id"] }, { "required": ["chapter_operation_id"] }] }
+          "required": [
+            "batch_id"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "chapter_update_id"
+                ]
+              },
+              {
+                "required": [
+                  "chapter_operation_id"
+                ]
+              }
+            ]
+          }
         },
         {
           "tsType": "{ batch_id?: never; chapter_update_id: string; chapter_operation_id: string }",
-          "required": ["chapter_update_id", "chapter_operation_id"],
-          "not": { "required": ["batch_id"] }
+          "required": [
+            "chapter_update_id",
+            "chapter_operation_id"
+          ],
+          "not": {
+            "required": [
+              "batch_id"
+            ]
+          }
         }
       ],
       "additionalProperties": false
@@ -8549,7 +8584,9 @@
             "runner_outline",
             "runner_batch",
             "runner_artifact_index",
-            "runner_layout"
+            "runner_layout",
+            "content_tree",
+            "content_node"
           ]
         },
         "id": {
@@ -8855,6 +8892,10 @@
           "maxItems": 256,
           "minItems": 1,
           "tsType": "ChapterRegion[]"
+        },
+        "content_tree": {
+          "$ref": "#/$defs/runner_content_tree",
+          "tsType": "ContentTree"
         }
       },
       "required": [
@@ -8990,6 +9031,15 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 512
+        },
+        "tree_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation_plan"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperationPlan[]"
         }
       },
       "required": [
@@ -9064,7 +9114,7 @@
             "$ref": "#/$defs/runner_chapter_replacement"
           },
           "maxItems": 256,
-          "minItems": 1,
+          "minItems": 0,
           "tsType": "ChapterReplacement[]"
         },
         "dependencies": {
@@ -9076,6 +9126,15 @@
         },
         "source": {
           "$ref": "#/$defs/runner_execution_scope"
+        },
+        "tree_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperation[]"
         }
       },
       "required": [
@@ -9088,7 +9147,24 @@
         "dependencies",
         "source"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "tree_operations"
+            ]
+          },
+          "then": {},
+          "else": {
+            "properties": {
+              "replacements": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     },
     "runner_chapter_inheritance": {
       "type": "object",
@@ -9255,6 +9331,577 @@
         "state"
       ],
       "additionalProperties": false
+    },
+    "runner_content_node": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/runner_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "document",
+            "section",
+            "paragraph",
+            "list",
+            "list_item",
+            "table",
+            "row",
+            "cell",
+            "code",
+            "formula",
+            "image",
+            "block"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "position_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "minItems": 0,
+          "maxItems": 10000,
+          "tsType": "string[]"
+        },
+        "selector": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "end_selector": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "tag": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "span": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "additionalProperties": false
+        },
+        "inner_span": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "kind",
+        "revision",
+        "position_revision",
+        "title",
+        "children",
+        "selector",
+        "end_selector",
+        "tag",
+        "span",
+        "inner_span"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_lineage": {
+      "type": "object",
+      "properties": {
+        "previous_node_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "successor_node_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "minItems": 0,
+          "maxItems": 10000,
+          "tsType": "string[]"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "enum": [
+            "split",
+            "merge",
+            "deleted",
+            "replaced"
+          ]
+        }
+      },
+      "required": [
+        "previous_node_id",
+        "successor_node_ids",
+        "revision",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_tree": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "root_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_node"
+          },
+          "minItems": 1,
+          "maxItems": 10000,
+          "tsType": "ContentNode[]"
+        },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_lineage"
+          },
+          "maxItems": 10000,
+          "tsType": "ContentLineage[]"
+        }
+      },
+      "required": [
+        "version",
+        "revision",
+        "root_id",
+        "nodes",
+        "lineage"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "replace"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "html"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position",
+            "html",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position",
+            "html"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "delete"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_content_operation_plan": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "replace"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "node_ids"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "delete"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "$ref": "#/$defs/model_request"
