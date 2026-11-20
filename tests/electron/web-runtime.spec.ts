@@ -1,3 +1,4 @@
+import { artifactDraft } from '../helpers/producer-draft'
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -215,7 +216,7 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
         bundle_resource_id: resourceId!, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input',
         provenance_ref: { task_id: owner.task_id, kind: 'resource', id: resourceId! }, dependencies, requirement_ids, unresolved: [], title: '学习次数讲义'
       }
-      complete(response, { content: JSON.stringify({ version: 1, complete: true, answer: reply, artifacts: [candidate], requirement_ids, unresolved: [] }) })
+      complete(response, { content: JSON.stringify({ version: 1, complete: true, answer: reply, artifacts: [artifactDraft(candidate)], requirement_ids, unresolved: [] }) })
     } catch (error) {
       serverErrors.push(error instanceof Error ? error.message : String(error)); response.writeHead(500); response.end('Managed resource recovery fixture failed')
     }
@@ -267,7 +268,8 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
     const center = page.getByRole('main')
     await expect(center.getByRole('heading', { name: 'RAW_DRAFT_RECOVERED', exact: true })).toBeVisible()
     await expect(center.getByRole('textbox', { name: '学习次数', exact: true })).toHaveValue('0')
-    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText(reply)
+    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText('任务已完成，内容已发布。')
+    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).not.toContainText(reply)
     await expect.poll(async () => (await snapshot()).runner?.goals[0]?.run?.state).toBe('completed')
     const published = await snapshot()
     expect(published.runner?.goals[0]?.delivery).toBe('published')

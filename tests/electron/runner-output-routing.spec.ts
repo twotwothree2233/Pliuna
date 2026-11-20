@@ -1,3 +1,4 @@
+import { artifactDraft } from '../helpers/producer-draft'
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
@@ -53,6 +54,9 @@ for (const mode of ['wrapped valid', 'malformed', 'repeated invalid tool', 'unre
           return { artifact: { task_id: index.task_id, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision }, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, slot_id: 'main', layout_mode: 'column', width_constraint: index.width_constraint }
         }) }) }); return
       }
+      if (system.startsWith('Route the latest user turn')) {
+        complete(response, { content: JSON.stringify({ kind: 'explanation' }) }); return
+      }
       const current = [...messages].reverse().find(message => message.role === 'user')
       const request = JSON.parse(current?.content ?? '').request
       if (request === followup) { histories.push(structuredClone(messages)); complete(response, { content: secondReply }); return }
@@ -100,7 +104,7 @@ for (const mode of ['wrapped valid', 'malformed', 'repeated invalid tool', 'unre
         bundle_resource_id: resourceId, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none',
         provenance_ref: { task_id: owner.task_id, kind: 'resource', id: resourceId }, dependencies, requirement_ids, unresolved: [], title: '多臂老虎机讲义'
       }
-      const encoded = JSON.stringify({ version: 1, complete: true, answer: reply, artifacts: [candidate], requirement_ids, unresolved: [] })
+      const encoded = JSON.stringify({ version: 1, complete: true, answer: reply, artifacts: [artifactDraft(candidate)], requirement_ids, unresolved: [] })
       const protocol = malformed ? encoded.replace(/"([a-z_]+)":/g, '$1:') : encoded
       producedResults++
       complete(response, { content: `${prefix}\n\n\`\`\`json\n${protocol}\n\`\`\`\n这是内部交付结果。` })

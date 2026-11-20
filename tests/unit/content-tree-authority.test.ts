@@ -4,12 +4,9 @@ import coreSql from '../../src/shared/contracts/001-core.sql?raw'
 import runnerSql from '../../src/shared/contracts/002-runner.sql?raw'
 import type { Bundle, ChapterManifest, ContentOperation, ContentOperationPlan } from '../../src/shared/contracts.generated'
 import { ContractError } from '../../src/shared/validation'
-import { modelToolRequest } from '../../src/runtime/model/tool-input'
 import { ChapterState } from '../../src/runtime/runner/chapter-state'
 import { applyContentOperations, buildContentTree } from '../../src/runtime/runner/content-tree'
-import { assembleContentUpdate, assertContentAuthority, contentBaselineCurrent, contentUpdatesOverlap, remainingContentScope, treeChapters } from '../../src/runtime/runner/content-tree-host'
-import { ContentTreeQueries } from '../../src/runtime/runner/content-tree-queries'
-import { ContentTreeState } from '../../src/runtime/runner/content-tree-state'
+import { assembleContentUpdate, assertContentAuthority, assertContentBoundary, completedContentUpdatesOverlap, contentBaselineCurrent, contentUpdatesOverlap, parseContentRequest, remainingContentScope, treeChapters } from '../../src/runtime/runner/content-tree-host'
 import { chapterBundle, chapterManifest, chapterUpdate } from '../helpers/chapters'
 
 const databases: Database.Database[] = []
@@ -43,7 +40,7 @@ function setup(html = '<h2>A</h2><p>First</p><p>Second</p><h2>B</h2><p>Outside</
 }
 
 describe('content tree host authority', () => {
-  test('guides an out-of-plan submission back to its authorized operations and readable baseline', () => {
+  test('rejects an expanded target while allowing a revised operation combination', () => {
     const s = setup(), [first, second] = s.paragraphs
     const baseline = assembleContentUpdate({ bundle: s.bundle, manifest: s.manifest }, s.update('outside', [s.paragraphs[2]!.node_id]), [{ type: 'replace', node_ids: [s.paragraphs[2]!.node_id], html: '<p>Outside revised</p>' }])
     const manifest = s.install(baseline), current = { bundle: baseline.bundle, manifest }
@@ -51,7 +48,8 @@ describe('content tree host authority', () => {
       { type: 'replace', node_ids: [first!.node_id] },
       { type: 'delete', node_ids: [second!.node_id] }
     ]
-    const update = s.state.start(s.update('combine', [first!.node_id, second!.node_id], plans))
+    const bound = s.state.start(s.update('combine', [first!.node_id, second!.node_id], plans))
+    const update = { ...bound, scope_revision: 1 }
     let failure: unknown
     try {
       assembleContentUpdate(current, update, [{ type: 'replace', node_ids: [s.sections[0]!.node_id], html: '<h2>A</h2><p>Combined</p>' }])
@@ -59,40 +57,23 @@ describe('content tree host authority', () => {
     expect(failure).toBeInstanceOf(ContractError)
     if (!(failure instanceof ContractError)) throw new Error('Expected the operation group to be rejected')
     expect(failure.code).toBe('WORKER_CAPABILITY_DENIED')
-    expect(failure.message).toContain(JSON.stringify(plans))
     expect(failure.message).not.toContain('<p>Combined</p>')
     expect(s.state.assertCurrent('task', update.update_id).state).toBe('queued')
     expect(s.state.manifest('task', 'view')!.content_tree).toEqual(baseline.tree)
 
-    const suggestion = JSON.parse(failure.suggestion!)
-    expect(baseline.tree.revision).not.toBe(first!.revision)
-    expect(suggestion).toEqual({ name: 'read', arguments: { kind: 'content_tree', id: first!.node_id, selection: { revision: baseline.tree.revision } } })
-    const request = modelToolRequest(suggestion.name, suggestion.arguments)
-    if (request.type !== 'read') throw new Error('Expected a structural read suggestion')
-    const queries = new ContentTreeQueries(new ContentTreeState(s.db), () => [manifest], () => { throw new Error('Structural recovery must not read body content') })
-    expect(queries.query('task', 'worker', request, false)).toMatchObject({ data: { node_id: first!.node_id, tree_revision: baseline.tree.revision }, truncated: false })
-
-    const corrected = plans.map((operation): ContentOperation => operation.type === 'replace' || operation.type === 'insert' ? { ...operation, html: '<p>Combined</p>' } : operation)
+    const corrected: ContentOperation[] = [{ type: 'replace', node_ids: [first!.node_id, second!.node_id], html: '<p>Combined</p>' }]
     const completed = assembleContentUpdate(current, update, corrected)
     expect(completed.bundle.html).toBe('<h2>A</h2><p>Combined</p><h2>B</h2><p>Outside revised</p>')
-    expect(completed.tree.nodes.find(node => node.node_id === first!.node_id)?.kind).toBe('paragraph')
-    expect(completed.tree.lineage.find(lineage => lineage.previous_node_id === second!.node_id)?.reason).toBe('deleted')
+    expect(completed.tree.lineage.find(lineage => lineage.previous_node_id === second!.node_id)?.reason).toBe('merge')
   })
 
-  test('reports the complete ordered plan and navigates to the parent of an insertion', () => {
+  test('accepts reordered operations within a registered node scope', () => {
     const s = setup(), section = s.sections[0]!, [first, second] = s.paragraphs
     const insert: Extract<ContentOperationPlan, { type: 'insert' }> = { type: 'insert', parent_id: section.node_id, position: 'after', anchor_id: first!.node_id }
     const move: Extract<ContentOperationPlan, { type: 'move' }> = { type: 'move', node_ids: [second!.node_id], parent_id: section.node_id, position: 'start' }
     const plans: ContentOperationPlan[] = [insert, move]
-    const update = s.update('rearrange', [section.node_id], plans)
-    let failure: unknown
-    try {
-      assertContentAuthority(update, [move, { ...insert, html: '<p>Inserted</p>' }])
-    } catch (error) { failure = error }
-    expect(failure).toBeInstanceOf(ContractError)
-    if (!(failure instanceof ContractError)) throw new Error('Expected the reordered operation group to be rejected')
-    expect(failure.message).toContain(JSON.stringify(plans))
-    expect(JSON.parse(failure.suggestion!)).toEqual({ name: 'read', arguments: { kind: 'content_tree', id: section.node_id, selection: { revision: s.tree.revision } } })
+    const update = { ...s.update('rearrange', [section.node_id], plans), scope_revision: 1 }
+    expect(() => assertContentAuthority(update, [move, { ...insert, html: '<p>Inserted</p>' }])).not.toThrow()
   })
 
   test('merges two nodes of one chapter in reverse completion order', () => {
@@ -153,6 +134,53 @@ describe('content tree host authority', () => {
     expect(s.state.start(separate).previous_update_ids).toEqual([])
   })
 
+  test.each(['split', 'delete'] as const)('projects a completed %s without blocking another branch', type => {
+    const s = setup(), first = s.paragraphs[0]!, section = s.sections[0]!
+    const operation: ContentOperation = type === 'split'
+      ? { type: 'replace', node_ids: [first.node_id], html: '<p>Split one</p><p>Split two</p>' }
+      : { type: 'delete', node_ids: [first.node_id] }
+    const completed = { ...s.update('completed', [first.node_id], [{ type: operation.type, node_ids: [first.node_id] }]), state: 'succeeded' as const }
+    const result = applyContentOperations({ html: s.bundle.html, tree: s.tree, operations: [operation] })
+    const latest = { ...s.manifest, content_tree: result.tree, chapters: treeChapters(result.tree) }
+    const next = (id: string, operations?: ContentOperationPlan[]) => ({ ...chapterUpdate('next', [id], latest), ...(operations ? { tree_operations: operations } : {}) })
+    const unrelated = next(s.paragraphs[2]!.node_id)
+    expect(contentUpdatesOverlap(completed, unrelated)).toBe(true)
+    expect(completedContentUpdatesOverlap(completed, unrelated)).toBe(false)
+    expect(completedContentUpdatesOverlap({ ...completed, state: 'unknown' }, unrelated)).toBe(true)
+    expect(completedContentUpdatesOverlap(completed, next(section.node_id))).toBe(true)
+    if (type === 'split') {
+      const successor = result.tree.lineage.find(entry => entry.previous_node_id === first.node_id)!.successor_node_ids[0]!
+      expect(completedContentUpdatesOverlap(completed, next(successor))).toBe(true)
+    } else {
+      expect(completedContentUpdatesOverlap(completed, next(section.node_id, [{ type: 'insert', parent_id: section.node_id, position: 'start' }]))).toBe(true)
+    }
+  })
+
+  test('projects a completed insertion onto its new nodes and physical gaps', () => {
+    const s = setup(), section = s.sections[0]!, [first, second] = s.paragraphs
+    const plan: ContentOperationPlan = { type: 'insert', parent_id: section.node_id, position: 'after', anchor_id: first!.node_id }
+    const completed = { ...s.update('completed', [section.node_id], [plan]), state: 'succeeded' as const }
+    const result = applyContentOperations({ html: s.bundle.html, tree: s.tree, operations: [{ ...plan, html: '<p>Inserted</p>' }] })
+    const latest = { ...s.manifest, content_tree: result.tree, chapters: treeChapters(result.tree) }
+    const inserted = result.tree.nodes.find(node => node.kind === 'paragraph' && !s.tree.nodes.some(old => old.node_id === node.node_id))!
+    expect(completedContentUpdatesOverlap(completed, chapterUpdate('new-node', [inserted.node_id], latest))).toBe(true)
+    expect(completedContentUpdatesOverlap(completed, chapterUpdate('neighbor', [first!.node_id], latest))).toBe(false)
+    expect(completedContentUpdatesOverlap(completed, chapterUpdate('outside', [s.paragraphs[2]!.node_id], latest))).toBe(false)
+    expect(completedContentUpdatesOverlap(completed, { ...chapterUpdate('same-gap', [section.node_id], latest), tree_operations: [{ type: 'insert', parent_id: section.node_id, position: 'before', anchor_id: second!.node_id }] })).toBe(true)
+  })
+
+  test('follows successor lineage through later deletion and keeps unresolved identities conservative', () => {
+    const s = setup(), first = s.paragraphs[0]!
+    const completed = { ...s.update('completed', [first.node_id], [{ type: 'replace', node_ids: [first.node_id] }]), state: 'succeeded' as const }
+    const split = applyContentOperations({ html: s.bundle.html, tree: s.tree, operations: [{ type: 'replace', node_ids: [first.node_id], html: '<p>One</p><p>Two</p>' }] })
+    const successors = split.tree.lineage.find(entry => entry.previous_node_id === first.node_id)!.successor_node_ids
+    const deleted = applyContentOperations({ html: split.html, tree: split.tree, operations: [{ type: 'delete', node_ids: successors }] })
+    const latest = { ...s.manifest, content_tree: deleted.tree, chapters: treeChapters(deleted.tree) }
+    const unrelated = chapterUpdate('outside', [s.paragraphs[2]!.node_id], latest)
+    expect(completedContentUpdatesOverlap(completed, unrelated)).toBe(false)
+    expect(completedContentUpdatesOverlap(completed, { ...unrelated, base_manifest: { ...latest, content_tree: { ...deleted.tree, lineage: [] } } })).toBe(true)
+  })
+
   test('invalidates an insertion baseline when its destination container moves', () => {
     const s = setup(), section = s.sections[0]!
     const pending = s.update('insert', [section.node_id], [{ type: 'insert', parent_id: section.node_id, position: 'end' }])
@@ -174,5 +202,50 @@ describe('content tree host authority', () => {
     expect(() => assertContentAuthority(update, [{ type: 'replace', node_ids: [outside.node_id], html: '<p>Denied</p>' }])).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
     expect(() => assertContentAuthority(update, [{ type: 'move', node_ids: [first.node_id], parent_id: destination.node_id, position: 'before', anchor_id: outside.node_id }])).not.toThrow()
     expect(() => assertContentAuthority(update, [{ type: 'move', node_ids: [first.node_id], parent_id: destination.node_id, position: 'after', anchor_id: outside.node_id }])).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+  })
+
+  test('keeps candidates separate from user boundaries and registered eligibility', () => {
+    const s = setup(), [first, second] = s.paragraphs
+    const update = {
+      ...s.update('autonomous', [first!.node_id]), scope_revision: 0,
+      candidate_region_ids: [first!.node_id],
+      authorization: { record_id: 'record', input_event_id: 'input', region_ids: [s.sections[0]!.node_id] }
+    }
+    const operation: ContentOperation = { type: 'replace', node_ids: [second!.node_id], html: '<p>Resolved target</p>' }
+    expect(() => assertContentBoundary(update, [operation])).not.toThrow()
+    expect(() => assertContentAuthority(update, [operation])).toThrow(expect.objectContaining({ code: 'CONTENT_SCOPE_UNREGISTERED' }))
+    expect(() => assertContentAuthority({ ...update, scope_revision: 1, region_ids: [second!.node_id], tree_operations: [{ type: 'replace', node_ids: [second!.node_id] }] }, [operation])).not.toThrow()
+    expect(() => assertContentBoundary(update, [{ type: 'delete', node_ids: [s.paragraphs[2]!.node_id] }])).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+  })
+
+  test('checks registered gaps and both ends of a move independently', () => {
+    const s = setup(), [first, second] = s.paragraphs, section = s.sections[0]!
+    const insert: ContentOperationPlan = { type: 'insert', parent_id: section.node_id, position: 'before', anchor_id: second!.node_id }
+    const update = {
+      ...s.update('gap-revision', [section.node_id], [insert]), scope_revision: 1,
+      authorization: { record_id: 'record', input_event_id: 'input', region_ids: [section.node_id] }
+    }
+    expect(() => assertContentAuthority(update, [{ type: 'insert', parent_id: section.node_id, position: 'after', anchor_id: first!.node_id, html: '<p>Same physical gap</p>' }])).not.toThrow()
+    expect(() => assertContentAuthority(update, [{ type: 'insert', parent_id: section.node_id, position: 'end', html: '<p>Another gap</p>' }])).toThrow(expect.objectContaining({ code: 'CONTENT_SCOPE_INVALID' }))
+    expect(() => assertContentAuthority(update, [{ type: 'delete', node_ids: [first!.node_id] }])).toThrow(expect.objectContaining({ code: 'CONTENT_SCOPE_INVALID' }))
+    expect(() => assertContentBoundary(update, [{ type: 'move', node_ids: [first!.node_id], parent_id: s.sections[1]!.node_id, position: 'end' }])).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+    expect(() => assertContentBoundary(update, [{ type: 'move', node_ids: [s.paragraphs[2]!.node_id], parent_id: section.node_id, position: 'end' }])).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+    expect(() => assertContentBoundary(update, [{ type: 'insert', parent_id: first!.node_id, position: 'end' }])).toThrow(expect.objectContaining({ code: 'CONTENT_CONTAINER_INVALID' }))
+    expect(() => assertContentBoundary(update, [{ type: 'replace', node_ids: [first!.node_id], html: '<style>p{color:red}</style><p>Changed</p>' } as ContentOperation])).toThrow(expect.objectContaining({ code: 'CONTENT_SHARED_SCOPE_REQUIRED' }))
+  })
+
+  test('parses composable scope, submission and original-operation query calls', () => {
+    const replace: ContentOperation = { type: 'replace', node_ids: ['node'], html: '<p>Changed</p>' }
+    expect(parseContentRequest({ operations: [replace], read_refs: ['read'] })).toEqual({ action: 'submit', operations: [replace], read_refs: ['read'] })
+    expect(parseContentRequest({ action: 'register', operations: [{ type: 'replace', node_ids: ['node'] }] })).toEqual({ action: 'register', operations: [{ type: 'replace', node_ids: ['node'] }] })
+    expect(parseContentRequest({ action: 'query', operation_id: 'original' })).toEqual({ action: 'query', operation_id: 'original' })
+    for (const raw of [
+      { operations: [] }, { action: 'submit', operations: [replace], scope_revision: 2 },
+      { operations: [replace], read_refs: ['read', 'read'] },
+      { operations: [{ type: 'replace', node_ids: ['node'] }] },
+      { operations: [{ type: 'delete', node_ids: ['node'], html: '<p>Unexpected</p>' }] },
+      { action: 'register', operations: [replace] },
+      { action: 'query', operation_id: 'original', operations: [replace] }
+    ]) expect(() => parseContentRequest(raw)).toThrow(expect.objectContaining({ code: 'CONTENT_OPERATION_INVALID' }))
   })
 })

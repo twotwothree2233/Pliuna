@@ -10,6 +10,7 @@ import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import type { RunnerAdmission } from '../../src/runtime/runner/admission'
 import { RuntimeStore } from '../../src/runtime/store'
+import { artifactDraft } from '../helpers/producer-draft'
 import type { ArtifactCandidate, Bundle, ModelConfiguration } from '../../src/shared/contracts.generated'
 
 const stores: RuntimeStore[] = []
@@ -86,7 +87,7 @@ function produceFragments(s: ReturnType<typeof setup>, task: string, count: numb
   const bundle: Bundle = { profile: 'managed-v1', html: '<section><p>Immutable published content</p></section>', css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'v1' }, forms: [], behaviors: [], references: [], export: [] }
   const resource = (s.store.modelTool(task, work.run_id, { type: 'write', input: { type: 'resource.create', display_name: 'Source bundle', content: { type: 'json', value: bundle } } }) as { data: { id: string } }).data.id
   const candidates: ArtifactCandidate[] = Array.from({ length: count }, (_, i) => ({ candidate_id: `candidate-${i}`, task_id: task, request_id: work.request_id, intent_revision: work.intent_revision, run_id: work.run_id, work_id: work.work_id, attempt_id: work.current_attempt_id!, artifact_id: `artifact-${i}`, base_artifact_revision: 0, plan_revision: work.plan_revision, bundle_resource_id: resource, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: task, kind: 'record', id: s.state.input(goal.input_event_id).record_id }, requirement_ids: ['answer'], unresolved: [], dependencies: work.dependencies }))
-  return answer(JSON.stringify({ version: 1, complete: true, answer: 'Fragmented final', artifacts: candidates, requirement_ids: ['answer'], unresolved: [] }))
+  return answer(JSON.stringify({ version: 1, complete: true, answer: 'Fragmented final', artifacts: candidates.map(artifactDraft), requirement_ids: ['answer'], unresolved: [] }))
 }
 
 it('automatically publishes the first fragment and drains multiple fixed batches without a false blocker', async () => {

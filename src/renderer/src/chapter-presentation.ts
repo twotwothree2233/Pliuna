@@ -7,7 +7,7 @@ interface ReadingPosition extends RegionPosition { element: Element; id: string;
 export interface ChapterPosition { reading?: ReadingPosition; focus?: FocusPosition }
 const chapterCards = new WeakSet<Element>()
 
-type InsertPlan = Extract<ContentOperationPlan, { type: 'insert' }>
+type InsertPlan = Extract<ContentOperationPlan, { type: 'insert' | 'move' }>
 interface ContentRange { id: string; roots: HTMLElement[]; inner: boolean; gap?: { container: HTMLElement; before: Node | null } }
 interface StatusScope { key: string; id: string; update: ChapterUpdate; insert?: InsertPlan }
 
@@ -268,6 +268,7 @@ export interface ChapterPresentationOptions {
 export class ChapterPresentation {
   private manifest?: ChapterManifest
   private updates: ChapterUpdate[] = []
+  private readonly revisions = new Map<string, ChapterUpdate>()
   private cards = new Map<string, InstalledCard>()
   private guardButtons = new Map<HTMLButtonElement, { disabled: boolean; title: string }>()
   private disposed = false
@@ -279,14 +280,21 @@ export class ChapterPresentation {
   }
 
   sync(manifest: ChapterManifest | undefined, updates: ChapterUpdate[] = [], force = false): void {
-    const signature = JSON.stringify([manifest?.manifest_revision, manifest?.view_revision, manifest?.content_tree?.revision, updates.map(update => [update.update_id, update.state, update.region_ids, update.region_intents, update.tree_operations, update.reason, update.action_id])])
+    updates = updates.map(update => {
+      const previous = this.revisions.get(update.update_id)
+      if (previous && (previous.scope_revision ?? -1) > (update.scope_revision ?? -1)) return previous
+      if (previous?.scope_active === false && (previous.scope_revision ?? 0) > 0 && previous.scope_revision === update.scope_revision && update.scope_active !== false) return previous
+      this.revisions.set(update.update_id, structuredClone(update))
+      return update
+    })
+    const signature = JSON.stringify([manifest?.manifest_revision, manifest?.view_revision, manifest?.content_tree?.revision, updates.map(update => [update.update_id, update.scope_revision, update.scope_active, update.state, update.region_ids, update.region_intents, update.tree_operations, update.reason, update.action_id])])
     this.manifest = manifest; this.updates = updates
     if (!force && signature === this.signature) return
     this.signature = signature
     const wanted = new Map<string, StatusScope>()
     const intent = (id: string, update: ChapterUpdate) => update.region_intents.find(item => item.region_id === id)?.intent_revision ?? update.intent_revision
-    for (const update of updates) for (const id of update.region_ids) {
-      const scopes: StatusScope[] = (update.tree_operations ?? []).filter((operation): operation is InsertPlan => operation.type === 'insert' && operation.parent_id === id).map(insert => ({ key: gapKey(manifest, insert), id, update, insert }))
+    for (const update of updates.filter(update => update.scope_revision !== 0 && update.scope_active !== false)) for (const id of update.region_ids) {
+      const scopes: StatusScope[] = (update.tree_operations ?? []).filter((operation): operation is InsertPlan => (operation.type === 'insert' || operation.type === 'move') && operation.parent_id === id).map(insert => ({ key: gapKey(manifest, insert), id, update, insert }))
       if (!update.tree_operations?.length || update.tree_operations.some(operation => operation.type !== 'insert' && operation.node_ids.includes(id))) scopes.push({ key: id, id, update })
       for (const scope of scopes) {
         const previous = wanted.get(scope.key)
@@ -300,7 +308,7 @@ export class ChapterPresentation {
     }
     for (const [id, card] of this.cards) {
       const update = selected.get(id)?.update
-      if (!update || update.update_id !== card.update.update_id || activeStates.has(card.update.state) && !activeStates.has(update.state)) this.removeCard(id)
+      if (!update || update.update_id !== card.update.update_id || update.scope_revision !== card.update.scope_revision || activeStates.has(card.update.state) && !activeStates.has(update.state)) this.removeCard(id)
     }
     for (const [key, { id, update, insert }] of selected) {
       const range = insert ? insertionRange(this.options.host, manifest, insert) : contentRange(this.options.host, manifest, id)
@@ -354,6 +362,7 @@ export class ChapterPresentation {
     chapterCards.add(element)
     element.dataset.chapterUpdate = update.update_id
     element.dataset.chapterRegion = range.id
+    if (update.scope_revision !== undefined) element.dataset.chapterRevision = String(update.scope_revision)
     element.setAttribute('aria-label', '内容更新')
     const shadow = element.attachShadow({ mode: 'open' })
     const style = document.createElement('style'); style.textContent = cardStyle

@@ -98,7 +98,7 @@ async function legacyProfile(outcome: 'completed' | 'rolled_back' = 'completed')
     const saved = control(root)
     const history = database(root, selected, db => {
       expect(readBusinessSchema(db)).toBe(1)
-      return Object.fromEntries(['requests', 'runs', 'records'].map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]))
+      return Object.fromEntries(['requests', 'runs', 'records'].map(table => [table, db.prepare<[], Row>(`SELECT * FROM ${table} ORDER BY rowid`).all()]))
     })
     expect(saved).toMatchObject({ selected, operations: [{ previous: 'trellis.sqlite', phase: outcome }], retirements: [{ phase: 'released' }, { file: 'trellis.sqlite', phase: 'retired', attempt: 1 }] })
     expect(saved.retirements[1].members[0].state).toBe('deleting')
@@ -129,7 +129,10 @@ function upgradeOperation(profile: Profile): Row {
 }
 function originalHistory(profile: Profile): void {
   database(profile.root, control(profile.root).selected, db => {
-    for (const [table, rows] of Object.entries(profile.history)) expect(db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(), table).toEqual(rows)
+    for (const [table, rows] of Object.entries(profile.history)) {
+      const expected = table === 'runs' ? rows.map(row => ({ ...row, chapter_update_id: null })) : rows
+      expect(db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(), table).toEqual(expected)
+    }
     for (const table of ['runner_inputs', 'runner_runs', 'runner_outlines', 'runner_artifacts']) expect(db.prepare(`SELECT * FROM ${table}`).all(), table).toEqual([])
   })
 }

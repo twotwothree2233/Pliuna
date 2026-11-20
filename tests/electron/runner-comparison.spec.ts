@@ -1,3 +1,4 @@
+import { artifactDraft } from '../helpers/producer-draft'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ServerResponse } from 'node:http'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -67,7 +68,7 @@ async function compareMode(mode: 'single' | 'dual') {
       const prompt = body.messages.find((message: any) => message.role === 'system' && message.content.includes('Bound data: '))?.content as string | undefined
       if (!prompt) throw Error('Comparison request has no production binding')
       const binding = JSON.parse(prompt.slice(prompt.indexOf('Bound data: ') + 'Bound data: '.length)) as ProducerBinding
-      const user = body.messages.find((message: any) => message.role === 'user').content as string
+      const user = [...body.messages].reverse().find((message: any) => message.role === 'user').content as string
       const name: GoalName = user.includes('COMPARE_ALPHA') ? 'ALPHA' : user.includes('COMPARE_BETA') ? 'BETA' : (() => { throw Error('Unknown comparison goal') })()
       const last = body.messages.at(-1)
       if (last.role !== 'tool') {
@@ -85,7 +86,7 @@ async function compareMode(mode: 'single' | 'dual') {
       const section = sections[0]!, resource = result.data.id as string
       const candidate: ArtifactCandidate = { candidate_id: `candidate-${name}`, task_id: owner.task_id, request_id: owner.request_id, intent_revision: owner.intent_revision, run_id: owner.run_id, work_id: owner.work_id, attempt_id: owner.attempt_id, artifact_id: `artifact-${name}`, base_artifact_revision: 0, plan_revision, bundle_resource_id: resource, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: owner.task_id, kind: 'resource', id: material }, requirement_ids, unresolved: [], dependencies }
       const answer = name === 'ALPHA' ? 'ALPHA_FINAL：12 × 8 = 96 本。' : 'BETA_FINAL：9 × 7 = 63 本。'
-      await delayed(response, 'producer', 'answer', 40, { content: JSON.stringify({ version: 1, complete: true, answer, artifacts: [candidate], requirement_ids, unresolved: [] }) }, 'stop')
+      await delayed(response, 'producer', 'answer', 40, { content: JSON.stringify({ version: 1, complete: true, answer, artifacts: [artifactDraft(candidate)], requirement_ids, unresolved: [] }) }, 'stop')
     } catch (error) {
       serverErrors.push(error instanceof Error ? error.message : String(error))
       if (!response.headersSent) response.writeHead(500)

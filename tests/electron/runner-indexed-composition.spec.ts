@@ -1,3 +1,4 @@
+import { artifactDraft } from '../helpers/producer-draft'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ServerResponse } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -279,11 +280,11 @@ test('real resources reach the working copy through bounded model Collators whil
     const result = JSON.parse(last.content)
     expect(result).toMatchObject({ execution: 'success', data: { id: expect.any(String) } })
     const resource = result.data.id as string
-    sourceResources.set(name, resource)
     const system = body.messages.find((message: any) => message.role === 'system' && message.content.includes('Bound data: ')).content as string
     const binding = JSON.parse(system.slice(system.indexOf('Bound data: ') + 'Bound data: '.length)) as ProducerBinding
     const { owner, dependencies, plan_revision, sections, requirement_ids } = binding, section = sections[0]!
     if (owner.purpose !== 'production') throw Error('Expected real production source')
+    sourceResources.set(owner.work_id, resource)
     const candidate: ArtifactCandidate = {
       candidate_id: `candidate-${name.toLowerCase()}`, task_id: owner.task_id, request_id: owner.request_id, intent_revision: owner.intent_revision,
       run_id: owner.run_id, work_id: owner.work_id, attempt_id: owner.attempt_id, artifact_id: `artifact-${name.toLowerCase()}`, base_artifact_revision: 0,
@@ -291,7 +292,7 @@ test('real resources reach the working copy through bounded model Collators whil
       presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: owner.task_id, kind: 'resource', id: resource },
       requirement_ids, unresolved: [], dependencies
     }
-    textStream(response, JSON.stringify({ version: 1, complete: true, answer: `${name}_FINAL_ANSWER`, artifacts: [candidate], requirement_ids, unresolved: [] }))
+    textStream(response, JSON.stringify({ version: 1, complete: true, answer: `${name}_FINAL_ANSWER`, artifacts: [artifactDraft(candidate)], requirement_ids, unresolved: [] }))
   })
   const directory = await mkdtemp(join(tmpdir(), 'pliuna-indexed-resource-desktop-'))
   const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory, PLIUNA_TEST_RUNNER: 'dual', PLIUNA_TEST_RUNNER_COLLATOR: 'model' } })
@@ -339,7 +340,9 @@ test('real resources reach the working copy through bounded model Collators whil
     await expect(center.getByRole('heading', { name: 'BETA_PUBLISHED', exact: true })).toHaveCount(0)
     await expect(center.getByRole('heading', { name: '尚无已发布内容', exact: true })).toHaveCount(0)
     await expect(workingCopy).toContainText('渐进工作版')
-    await expect(reply).toContainText('ALPHA_FINAL_ANSWER')
+    await reply.getByRole('combobox', { name: '选择目标' }).selectOption(first.runner!.goals.find(goal => goal.title.startsWith('RESOURCE_ALPHA'))!.request_id)
+    await expect(reply).toContainText('任务已完成，内容已发布。')
+    await expect(reply).not.toContainText('ALPHA_FINAL_ANSWER')
     await expect(center).not.toContainText('ALPHA_FINAL_ANSWER')
     await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
     expect(first.runner?.scope).toMatchObject({ required_goal_count: 2, published_count: 1 })
@@ -364,7 +367,8 @@ test('real resources reach the working copy through bounded model Collators whil
     await expect(workingCopy).toContainText('当前成稿已完整')
     const beta = complete.runner!.goals.find(goal => goal.title.startsWith('RESOURCE_BETA'))!
     await reply.getByRole('combobox', { name: '选择目标' }).selectOption(beta.request_id)
-    await expect(reply).toContainText('BETA_FINAL_ANSWER')
+    await expect(reply).toContainText('任务已完成，内容已发布。')
+    await expect(reply).not.toContainText('BETA_FINAL_ANSWER')
     await expect(center).not.toContainText('BETA_FINAL_ANSWER')
     await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
     expect(complete.surface.id).toBe(first.surface.id)
@@ -385,7 +389,7 @@ test('real resources reach the working copy through bounded model Collators whil
       expect(Buffer.byteLength(request)).toBeLessThanOrEqual(RUNNER_LIMITS.index.page_bytes)
       expect(request).not.toMatch(/BODY_SENTINEL_|ALPHA_FINAL_ANSWER|BETA_FINAL_ANSWER|resource-alpha|resource-beta/)
       expect(snapshot.indexes.length).toBeLessThanOrEqual(RUNNER_LIMITS.composition.batch_fragments)
-      for (const index of snapshot.indexes) expect(index.bundle_resource_id).toBe(sourceResources.get(index.artifact_id === 'artifact-alpha' ? 'ALPHA' : 'BETA'))
+      for (const index of snapshot.indexes) expect(index.bundle_resource_id).toBe(sourceResources.get(index.work_id))
     }
     await page.screenshot({ path: test.info().outputPath('runner-resource-composition-actual-store.png') })
     expect(errors).toEqual([])

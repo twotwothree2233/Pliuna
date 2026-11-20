@@ -5,7 +5,7 @@ import type {
 } from './contracts.generated'
 import { assertContract, ContractError } from './validation'
 import { assertIndexBytes, assertIndexTitle, assertRunnerId } from '../runtime/runner/limits'
-import type { ContentLineage, ContentNode, ContentOperation, ContentOperationPlan, ContentTree } from './contracts.generated'
+import type { ContentAuthorization, ContentScopeRevision, ContentLineage, ContentNode, ContentOperation, ContentOperationPlan, ContentTree } from './contracts.generated'
 
 export interface RunnerContractTypes {
   runner_input_event: InputEvent
@@ -46,6 +46,8 @@ export interface RunnerContractTypes {
   runner_content_lineage: ContentLineage
   runner_content_operation: ContentOperation
   runner_content_operation_plan: ContentOperationPlan
+  runner_content_authorization: ContentAuthorization
+  runner_content_scope_revision: ContentScopeRevision
 }
 
 function invalid(message: string): never { throw new ContractError('INVALID_RUNNER_CONTRACT', message) }
@@ -155,6 +157,14 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
   if (definition === 'runner_chapter_region') chapterRegion(record as ChapterRegion)
   if (definition === 'runner_chapter_manifest') chapterManifest(record as ChapterManifest)
   if (definition === 'runner_chapter_update') chapterUpdate(record as ChapterUpdate)
+  if (definition === 'runner_content_authorization') unique(object.region_ids, 'content authorization nodes')
+  if (definition === 'runner_content_scope_revision') {
+    const revision = record as ContentScopeRevision
+    chapterManifest(revision.base_manifest)
+    unique(revision.read_refs, 'content read references')
+    for (const operation of revision.operations) contentOperation(operation)
+    if (revision.source.purpose !== 'production' || revision.source.update_id !== revision.update_id || revision.source.task_id !== revision.task_id || revision.base_manifest.task_id !== revision.task_id) ownership()
+  }
   if (definition === 'runner_chapter_replacement') chapterReplacement(record as ChapterReplacement)
   if (definition === 'runner_chapter_proposal') chapterProposal(record as ChapterProposal)
   if (definition === 'runner_content_tree') contentTree(record as ContentTree)
@@ -195,8 +205,16 @@ function chapterUpdate(update: ChapterUpdate): void {
   unique(update.region_ids, 'update chapters')
   unique(update.region_intents.map(intent => intent.region_id), 'chapter intents')
   unique(update.previous_update_ids, 'previous updates')
+  if (update.scope_revision !== undefined) {
+    if (!update.authorization || !update.base_manifest.content_tree) invalid('Revisable content work requires an original tree authorization')
+    if (update.scope_revision === 0 && (update.region_ids.length || update.region_intents.length || update.tree_operations)) invalid('Candidate scopes cannot grant write authority')
+    if (update.scope_revision > 0 && !update.tree_operations?.length) invalid('Registered content work requires its actual operation scope')
+    unique(update.authorization.region_ids, 'content authorization nodes')
+    unique(update.candidate_region_ids ?? [], 'content candidate nodes')
+  } else if (!update.region_ids.length) invalid('Legacy chapter work requires an exact scope')
   if (update.previous_update_ids.includes(update.update_id)) invalid('Chapter update cannot supersede itself')
   const baseline = new Set([...update.base_manifest.chapters.map(chapter => chapter.region_id), ...(update.base_manifest.content_tree?.nodes.map(node => node.node_id) ?? [])])
+  if (update.scope_revision === 0 && (update.authorization!.region_ids.some(id => !baseline.has(id)) || update.candidate_region_ids?.some(id => !baseline.has(id)))) invalid('Original authorization and candidates require available baseline nodes')
   if (update.region_ids.some(id => !baseline.has(id)) || update.region_intents.length !== update.region_ids.length || update.region_intents.some(intent => !update.region_ids.includes(intent.region_id))) invalid('Update scope and chapter intent bindings must match the exact baseline')
   if (update.tree_operations) {
     const tree = update.base_manifest.content_tree
@@ -216,6 +234,7 @@ function chapterReplacement(replacement: ChapterReplacement): void {
   for (const chapter of replacement.chapters) chapterRegion(chapter)
 }
 function chapterProposal(proposal: ChapterProposal): void {
+  if (proposal.read_refs) unique(proposal.read_refs, 'proposal read references')
   unique(proposal.replacements.flatMap(replacement => replacement.previous_region_ids), 'proposal replaced chapters')
   unique(proposal.replacements.flatMap(replacement => replacement.chapters.map(chapter => chapter.region_id)), 'proposal chapter identities')
   for (const replacement of proposal.replacements) chapterReplacement(replacement)

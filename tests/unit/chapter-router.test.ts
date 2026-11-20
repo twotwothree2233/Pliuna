@@ -52,6 +52,10 @@ describe('chapter semantic route boundary', () => {
       expect(profile.parseResult(completion(route))).toEqual(route)
     }
     for (const kind of ['query', 'explanation', 'ambiguous', 'new'] as const) expect(profile.parseResult(completion({ kind }))).toEqual({ kind })
+    for (const kind of ['update', 'query', 'explanation'] as const) {
+      const route = { kind, view_id: 'view-a' }
+      expect(profile.parseResult(completion(route))).toEqual(route)
+    }
   })
 
   test('passes an entire replacement group without adding body-generation authority', () => {
@@ -107,7 +111,7 @@ describe('chapter semantic route boundary', () => {
       { kind: 'update', view_id: 'view-a', region_ids: ['a', 'c'] },
       { kind: 'update', view_id: 'view-a', region_ids: ['a', 'a'] },
       { kind: 'update', view_id: 'missing', region_ids: ['a'] },
-      { kind: 'query', view_id: 'view-a' }, { kind: 'ambiguous', view_id: 'view-a', region_ids: ['a'] },
+      { kind: 'update', region_ids: ['a'] }, { kind: 'ambiguous', view_id: 'view-a', region_ids: ['a'] },
       { kind: 'new', region_ids: ['a'] }, { kind: 'update', view_id: 'view-a', region_ids: ['a'], allow_read: true }
     ]) expect(() => profile.parseResult(completion(result))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
   })

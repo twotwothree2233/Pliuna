@@ -1,3 +1,4 @@
+import { artifactDraft } from '../helpers/producer-draft'
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import type { ServerResponse } from 'node:http'
@@ -56,7 +57,7 @@ function producerResult(binding: ProducerBinding, resource: string, name: string
     presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: { task_id: owner.task_id, kind: 'resource', id: resource },
     requirement_ids, unresolved: [], dependencies
   }
-  return { version: 1, complete: true, answer: `${name}_FINAL`, artifacts: [candidate], requirement_ids, unresolved: [] }
+  return { version: 1, complete: true, answer: `${name}_FINAL`, artifacts: [artifactDraft(candidate)], requirement_ids, unresolved: [] }
 }
 function collate(body: WireBody, response: ServerResponse, observations: CollatorInput[]): boolean {
   if (!body.messages[0]?.content.startsWith('You are the Collator.')) return false
@@ -253,7 +254,7 @@ test('a waiting Composition rebuilds after an independent publication and reconc
   const server = await modelServer(({ body }, response) => {
     try {
       if (synthetic(body, response) || collate(body, response, collators)) return
-      const binding = producerBinding(body), name = JSON.stringify(body.messages).includes('CONCURRENT_ALPHA') ? 'ALPHA' : 'BETA'
+      const binding = producerBinding(body), name = [...body.messages].reverse().find(message => message.role === 'user')?.content.includes('CONCURRENT_ALPHA') ? 'ALPHA' : 'BETA'
       const last = (body as WireBody).messages.at(-1)!
       if (last.role !== 'tool') { held.set(name, response); return }
       expect(last.tool_call_id).toBe(`resource-${name}`)
@@ -371,7 +372,7 @@ test('a correction fences an explicitly released old HTTP production result whil
       if (synthetic(body, response) || collate(body, response, collators)) return
       const binding = producerBinding(body)
       if (binding.owner.purpose !== 'production') throw Error('Expected a production source')
-      const name = JSON.stringify(body.messages).includes('LATE_ALPHA') ? binding.owner.intent_revision === 1 ? 'STALE_ALPHA' : 'CURRENT_ALPHA' : 'INDEPENDENT_BETA'
+      const name = [...body.messages].reverse().find(message => message.role === 'user')?.content.includes('LATE_ALPHA') ? binding.owner.intent_revision === 1 ? 'STALE_ALPHA' : 'CURRENT_ALPHA' : 'INDEPENDENT_BETA'
       const last = (body as WireBody).messages.at(-1)!
       if (last.role !== 'tool') {
         if (name === 'STALE_ALPHA') createResource(response, name)
@@ -420,7 +421,9 @@ test('a correction fences an explicitly released old HTTP production result whil
     expect(retired).toEqual({ commit_valid: 0, state: 'closing' })
     // Closing keeps the old Run's admission slot until its dispatched HTTP
     // response settles. Release the real old result only after revocation.
-    expect(original.result.artifacts[0]).toMatchObject({ request_id: alpha.request_id, intent_revision: 1, attempt_id: original.binding.owner.attempt_id })
+    expect(original.binding.owner).toMatchObject({ request_id: alpha.request_id, intent_revision: 1 })
+    expect(original.result.artifacts[0]).toMatchObject({ output_key: `artifact-${alpha.request_id}` })
+    expect(original.result.artifacts[0]).not.toHaveProperty('candidate_id')
     expect(original.response.destroyed).toBe(false)
     expect(original.response.writableEnded).toBe(false)
     complete(original.response, { content: JSON.stringify(original.result) })

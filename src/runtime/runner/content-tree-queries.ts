@@ -3,11 +3,13 @@ import { ContractError } from '../../shared/validation'
 import { modelReadOptions } from '../model/tool-input'
 import { ContentTreeState, type ContentTreeSnapshot } from './content-tree-state'
 import { RUNNER_LIMITS } from './limits'
+import { randomUUID } from 'node:crypto'
 
 type Query = Extract<ModelRequest, { type: 'read' | 'list' }>
 type ReadQuery = Extract<Query, { type: 'read' }>
 type ListQuery = Extract<Query, { type: 'list' }>
-type ReadCursor = { mode: 'read'; task: string; source: string; kind: string; id: string; view: string; revision: number; offset: number; chars: number; query?: string }
+type ReadCursor = { mode: 'read'; task: string; source: string; kind: string; id: string; view: string; revision: number; offset: number; chars: number; query?: string; read_ref?: string }
+export interface ContentReadDependency { view_id: string; node_id: string; revision: number; position_revision: number; bundle_resource_id: string; tree_revision: number }
 type ListItem = { kind: 'content_tree' | 'content_node'; id: string; view_id: string; root_id: string; revision: number }
 type ListCursor = { mode: 'list'; task: string; source: string; kind: string; limit: number; filter: string; items: ListItem[]; next: string | null }
 const fail = (code: string, message: string): never => { throw new ContractError(code, message) }
@@ -65,7 +67,7 @@ export class ContentTreeQueries {
     private readonly state: ContentTreeState,
     private readonly manifests: () => ChapterManifest[],
     private readonly bundle: (resource: string) => Bundle,
-    private readonly readDependency: (value: { view_id: string; node_id: string; revision: number; position_revision: number; bundle_resource_id: string }) => void = () => {}
+    private readonly readDependency: (value: ContentReadDependency, readRef?: string) => string | void = () => {}
   ) {}
 
   query(task: string, source: string, request: Query, bodyAllowed = true): unknown {
@@ -113,7 +115,7 @@ export class ContentTreeQueries {
     let cursor: ReadCursor | undefined
     if (request.input.cursor) {
       const saved = this.state.readCursor(task, request.input.cursor)
-      if (!object(saved) || saved.mode !== 'read' || saved.task !== task || saved.source !== source || saved.kind !== kind || saved.id !== target.id || typeof saved.view !== 'string' || !integer(saved.revision, 1) || !integer(saved.offset) || !integer(saved.chars, 1) || saved.chars > 32000 || saved.query !== undefined && typeof saved.query !== 'string') return invalidCursor()
+      if (!object(saved) || saved.mode !== 'read' || saved.task !== task || saved.source !== source || saved.kind !== kind || saved.id !== target.id || typeof saved.view !== 'string' || !integer(saved.revision, 1) || !integer(saved.offset) || !integer(saved.chars, 1) || saved.chars > 32000 || saved.query !== undefined && typeof saved.query !== 'string' || saved.read_ref !== undefined && (typeof saved.read_ref !== 'string' || !saved.read_ref)) return invalidCursor()
       if (options?.explicit?.max_chars !== undefined && options.explicit.max_chars !== saved.chars || selection?.find !== undefined && selection.find !== saved.query) return invalidCursor()
       cursor = saved as ReadCursor
     }
@@ -125,7 +127,7 @@ export class ContentTreeQueries {
     if (kind === 'content_tree' && target.expected_revision !== undefined && target.expected_revision !== tree.revision) return fail('READ_VERSION_CHANGED', 'Content tree revision conflicts with the fixed snapshot')
     const node = tree.nodes.find(item => item.node_id === (target.id === snapshot.view_id ? tree.root_id : target.id))
     const offset = cursor?.offset ?? 0
-    const base: ReadCursor = { mode: 'read', task, source, kind, id: target.id, view: snapshot.view_id, revision: tree.revision, offset, chars, ...(query === undefined ? {} : { query }) }
+    const base: ReadCursor = { mode: 'read', task, source, kind, id: target.id, view: snapshot.view_id, revision: tree.revision, offset, chars, ...(query === undefined ? {} : { query }), ...(cursor?.read_ref ? { read_ref: cursor.read_ref } : {}) }
     const continuation = (nextOffset: number, total: number) => nextOffset < total ? this.state.createCursor(task, snapshot.view_id, { ...base, offset: nextOffset }, tree.revision) : null
     if (!node) {
       const lineage = tree.lineage.find(item => item.previous_node_id === target.id)
@@ -150,7 +152,8 @@ export class ContentTreeQueries {
     if (target.expected_revision !== undefined && target.expected_revision !== node.revision) return fail('READ_VERSION_CHANGED', 'The node changed; read its current baseline')
     const html = this.bundle(snapshot.bundle_resource_id).html.slice(node.span.start, node.span.end)
     if (offset > html.length || textEnd(html, 0, offset) !== offset) return invalidCursor()
-    const envelope = (text: string, next: string | null) => ({ data: { ...binding, node: metadata(node), html: text }, next_cursor: next, truncated: next !== null })
+    let readRef = cursor?.read_ref ?? cursorPlaceholder
+    const envelope = (text: string, next: string | null) => ({ data: { ...binding, read_ref: readRef, node: metadata(node), html: text }, next_cursor: next, truncated: next !== null })
     let end = html.length
     if (responseSize(envelope(html.slice(offset), null)) > chars) {
       let low = offset, high = html.length - 1
@@ -162,9 +165,11 @@ export class ContentTreeQueries {
       end = textEnd(html, offset, low)
       if (end === offset) return tooSmall()
     }
+    if (responseSize(envelope(html.slice(offset, end), end < html.length ? cursorPlaceholder : null)) > chars) return tooSmall()
+    readRef = this.readDependency({ view_id: snapshot.view_id, node_id: node.node_id, revision: node.revision, position_revision: node.position_revision, bundle_resource_id: snapshot.bundle_resource_id, tree_revision: tree.revision }, cursor?.read_ref) ?? cursor?.read_ref ?? randomUUID()
+    base.read_ref = readRef
     const result = envelope(html.slice(offset, end), continuation(end, html.length))
     if (responseSize(result) > chars) return tooSmall()
-    this.readDependency({ view_id: snapshot.view_id, node_id: node.node_id, revision: node.revision, position_revision: node.position_revision, bundle_resource_id: snapshot.bundle_resource_id })
     return result
   }
 

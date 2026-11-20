@@ -1881,31 +1881,9 @@ export interface ChapterIntent {
 region_id: ChapterIntentRunnerId
 intent_revision: number
 }
-export type ChapterUpdateRunnerId = string
-export type ChapterUpdateRunnerContentTree = ContentTree
-export type ChapterUpdateRunnerExecutionScope = ({
-task_id: ChapterUpdateRunnerId
-run_id: ChapterUpdateRunnerId
-work_id: ChapterUpdateRunnerId
-attempt_id: ChapterUpdateRunnerId
-role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
-purpose: "production"
-request_id: ChapterUpdateRunnerId
-intent_revision: number
-update_id?: ChapterUpdateRunnerId
-} | {
-task_id: ChapterUpdateRunnerId
-run_id: ChapterUpdateRunnerId
-work_id: ChapterUpdateRunnerId
-attempt_id: ChapterUpdateRunnerId
-role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
-purpose: "composition"
-batch_id: ChapterUpdateRunnerId
-composition_version: number
-trigger_request_id: ChapterUpdateRunnerId
-})
-
-export interface ChapterUpdate {
+export type ChapterUpdate = ({
+[k: string]: unknown
+} & {
 task_id: ChapterUpdateRunnerId
 update_id: ChapterUpdateRunnerId
 input_event_id: ChapterUpdateRunnerId
@@ -1915,12 +1893,12 @@ intent_revision: number
 view_id: ChapterUpdateRunnerId
 base_manifest: ChapterUpdateRunnerChapterManifest
 /**
- * @minItems 1
+ * @minItems 0
  * @maxItems 256
  */
 region_ids: string[]
 /**
- * @minItems 1
+ * @minItems 0
  * @maxItems 256
  */
 region_intents: ChapterIntent[]
@@ -1945,7 +1923,44 @@ reason?: string
  * @maxItems 256
  */
 tree_operations?: ContentOperationPlan[]
-}
+authorization?: ChapterUpdateRunnerContentAuthorization
+/**
+ * @maxItems 256
+ */
+candidate_region_ids?: string[]
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+candidate_operations?: ContentOperationPlan[]
+scope_revision?: number
+request_order?: number
+scope_active?: boolean
+})
+export type ChapterUpdateRunnerId = string
+export type ChapterUpdateRunnerContentTree = ContentTree
+export type ChapterUpdateRunnerExecutionScope = ({
+task_id: ChapterUpdateRunnerId
+run_id: ChapterUpdateRunnerId
+work_id: ChapterUpdateRunnerId
+attempt_id: ChapterUpdateRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "production"
+request_id: ChapterUpdateRunnerId
+intent_revision: number
+update_id?: ChapterUpdateRunnerId
+} | {
+task_id: ChapterUpdateRunnerId
+run_id: ChapterUpdateRunnerId
+work_id: ChapterUpdateRunnerId
+attempt_id: ChapterUpdateRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "composition"
+batch_id: ChapterUpdateRunnerId
+composition_version: number
+trigger_request_id: ChapterUpdateRunnerId
+})
+
 export interface ChapterUpdateRunnerChapterManifest {
 task_id: ChapterUpdateRunnerId
 view_id: ChapterUpdateRunnerId
@@ -1971,6 +1986,15 @@ task_id: ChapterUpdateRunnerId
 view_id: ChapterUpdateRunnerId
 revision: number
 region_id?: ChapterUpdateRunnerId
+}
+export interface ChapterUpdateRunnerContentAuthorization {
+record_id: ChapterUpdateRunnerId
+input_event_id: ChapterUpdateRunnerId
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+region_ids: string[]
 }
 export interface ChapterReplacement {
 /**
@@ -2007,6 +2031,11 @@ source: ChapterProposalRunnerExecutionScope
  * @maxItems 256
  */
 tree_operations?: ContentOperation[]
+scope_revision?: number
+/**
+ * @maxItems 256
+ */
+read_refs?: string[]
 })
 export type ChapterProposalRunnerId = string
 export type ChapterProposalRunnerExecutionScope = ({
@@ -2252,6 +2281,7 @@ source_bundle_resource_ids: string[]
 previous_operation_id?: ChapterPublicationRunnerId
 action_id?: ChapterPublicationRunnerId
 state: ("registered" | "prepared" | "dispatched" | "published" | "failure" | "cancelled" | "unknown" | "superseded")
+scope_revision?: number
 }
 export interface ChapterPublicationList {
 kind: ("task" | "message" | "event" | "answer" | "surface" | "view" | "view_history" | "task_data" | "resource" | "object_type" | "plugin" | "capability" | "run" | "call" | "action" | "approval" | "summary" | "content_tree" | "content_node")
@@ -2408,6 +2438,88 @@ previous_node_id: ContentLineageRunnerId
 successor_node_ids: string[]
 revision: number
 reason: ("split" | "merge" | "deleted" | "replaced")
+}
+export type ContentAuthorizationRunnerId = string
+
+export interface ContentAuthorization {
+record_id: ContentAuthorizationRunnerId
+input_event_id: ContentAuthorizationRunnerId
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+region_ids: string[]
+}
+export type ContentScopeRevisionRunnerId = string
+export type ContentScopeRevisionRunnerExecutionScope = ({
+task_id: ContentScopeRevisionRunnerId
+run_id: ContentScopeRevisionRunnerId
+work_id: ContentScopeRevisionRunnerId
+attempt_id: ContentScopeRevisionRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "production"
+request_id: ContentScopeRevisionRunnerId
+intent_revision: number
+update_id?: ContentScopeRevisionRunnerId
+} | {
+task_id: ContentScopeRevisionRunnerId
+run_id: ContentScopeRevisionRunnerId
+work_id: ContentScopeRevisionRunnerId
+attempt_id: ContentScopeRevisionRunnerId
+role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diagnostic")
+purpose: "composition"
+batch_id: ContentScopeRevisionRunnerId
+composition_version: number
+trigger_request_id: ContentScopeRevisionRunnerId
+})
+export type ContentScopeRevisionRunnerContentTree = ContentTree
+
+export interface ContentScopeRevision {
+task_id: ContentScopeRevisionRunnerId
+update_id: ContentScopeRevisionRunnerId
+revision: number
+request_order: number
+source: ContentScopeRevisionRunnerExecutionScope
+base_manifest: ContentScopeRevisionRunnerChapterManifest
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+operations: ContentOperationPlan[]
+/**
+ * @maxItems 256
+ */
+read_refs: string[]
+/**
+ * @maxItems 256
+ */
+dependencies: ContentScopeRevisionRunnerChapterDependency[]
+}
+export interface ContentScopeRevisionRunnerChapterManifest {
+task_id: ContentScopeRevisionRunnerId
+view_id: ContentScopeRevisionRunnerId
+view_revision: number
+state_revision: number
+bundle_resource_id: ContentScopeRevisionRunnerId
+manifest_revision: number
+shared_revision: number
+request_id: ContentScopeRevisionRunnerId
+intent_revision: number
+artifact_id?: ContentScopeRevisionRunnerId
+artifact_revision?: number
+/**
+ * @minItems 1
+ * @maxItems 256
+ */
+chapters: ChapterRegion[]
+content_tree?: ContentScopeRevisionRunnerContentTree
+}
+export interface ContentScopeRevisionRunnerChapterDependency {
+kind: "chapter"
+task_id: ContentScopeRevisionRunnerId
+view_id: ContentScopeRevisionRunnerId
+revision: number
+region_id?: ContentScopeRevisionRunnerId
 }
 export type ContentTreeRunnerId = string
 

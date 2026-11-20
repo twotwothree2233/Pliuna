@@ -4,7 +4,7 @@ import { ContractError } from '../../src/shared/validation'
 import type { ChatMessage, Completion } from '../../src/runtime/model/adapter'
 import { runAgent, type AgentHost, type WorkerExecution, type WorkerResultIssue } from '../../src/runtime/model/agent'
 import { ModelService, type ModelLease } from '../../src/runtime/model/service'
-import { createProducerProfile, type ProducerResult, type ProductionResultBinding } from '../../src/runtime/runner/production-profile'
+import { createProducerProfile, validateProducerResult, type ProducerResult, type ProductionResultBinding } from '../../src/runtime/runner/production-profile'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -56,7 +56,9 @@ function setup(responses: Completion[]) {
   const host: AgentHost = { valid() {}, state() {}, budget() {}, tool, record(kind, payload) { records.push({ kind, payload: structuredClone(payload) }) } }
   const onResult = vi.fn<WorkerExecution<ProducerResult>['onResult']>()
   const controller = new AbortController()
-  const execute = (validateResult?: WorkerExecution<ProducerResult>['validateResult']) => runAgent(service, lease, 'task', [{ role: 'user', content: 'Create the document.' }], host, controller.signal, undefined, { profile: createProducerProfile(binding), onResult, ...(validateResult ? { validateResult } : {}) })
+  // Exercise the generic preflight loop independently of production identity binding.
+  const profile = { ...createProducerProfile(binding), parseResult: (response: Completion) => validateProducerResult(JSON.parse(response.text), binding) }
+  const execute = (validateResult?: WorkerExecution<ProducerResult>['validateResult']) => runAgent(service, lease, 'task', [{ role: 'user', content: 'Create the document.' }], host, controller.signal, undefined, { profile, onResult, ...(validateResult ? { validateResult } : {}) })
   return { request, messages, records, tool, onResult, controller, execute }
 }
 

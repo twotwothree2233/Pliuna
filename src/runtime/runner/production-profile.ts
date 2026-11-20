@@ -15,7 +15,16 @@ export interface ProductionResultBinding {
   goal: GoalRevision
   sections: readonly OutlineSection[]
 }
-export interface ProducerProfileInput extends ProductionResultBinding { grants?: readonly WorkerGrant[] }
+export interface ProducerProfileInput extends ProductionResultBinding {
+  grants?: readonly WorkerGrant[]
+  normalize?(draft: ProducerDraft, response: Completion): ProducerResult
+}
+type ArtifactDraftBody = Pick<ArtifactCandidate, 'section_id' | 'bundle_resource_id' | 'presentation_kind' | 'width_constraint' | 'interaction_kind' | 'provenance_ref' | 'requirement_ids' | 'unresolved' | 'title'>
+export type ArtifactDraft = ArtifactDraftBody & (
+  | { output_key: string; artifact_id?: never; base_artifact_revision?: never }
+  | { artifact_id: string; base_artifact_revision: number; output_key?: never }
+)
+export interface ProducerDraft extends Omit<ProducerResult, 'artifacts'> { artifacts: ArtifactDraft[] }
 export interface ProducerResult {
   version: 1
   complete: true
@@ -25,7 +34,7 @@ export interface ProducerResult {
   unresolved: RequirementRef[]
 }
 export interface RouterResult { version: 1; outline: Outline }
-export interface RouterProfileInput extends ProducerProfileInput { outline?: Outline | null }
+export interface RouterProfileInput extends ProductionResultBinding { grants?: readonly WorkerGrant[]; outline?: Outline | null }
 export interface RuleOutlineOptions { order_key?: string; title?: string }
 
 function invalid(): never { throw new ContractError('INVALID_WORKER_RESULT', 'Production result must retain its exact source, complete output set and requirement coverage') }
@@ -108,6 +117,43 @@ export function validateProducerResult(raw: unknown, input: ProductionResultBind
   return boundedCopy({ version: 1, complete: true, answer: value.answer, artifacts, ...coverage })
 }
 
+export function materializeProducerDraft(draft: ProducerDraft, source: ProductionResultBinding, identities: readonly { artifact_id: string; candidate_id: string }[]): ProducerResult {
+  return validateProducerResult({ ...draft, artifacts: draft.artifacts.map((artifact, index) => {
+    const { output_key: _key, ...body } = artifact
+    const section = source.sections.find(item => item.section_id === artifact.section_id)
+    return {
+      ...body, ...identities[index], base_artifact_revision: artifact.base_artifact_revision ?? 0,
+      task_id: source.owner.task_id, request_id: source.goal.request_id, intent_revision: source.goal.intent_revision,
+      run_id: source.owner.run_id, work_id: source.owner.work_id, attempt_id: source.owner.attempt_id,
+      plan_revision: source.work.plan_revision, dependencies: source.work.dependencies,
+      section_position_revision: section?.position_revision, order_key: section?.order_key
+    }
+  }) }, source)
+}
+
+export function validateProducerDraft(raw: unknown, source: ProductionResultBinding): ProducerDraft {
+  const value = boundedCopy(raw)
+  if (!object(value, ['version', 'complete', 'answer', 'artifacts', 'requirement_ids', 'unresolved']) || !Array.isArray(value.artifacts)) return invalid()
+  for (const artifact of value.artifacts) {
+    if (!object(artifact, ['output_key', 'artifact_id', 'base_artifact_revision', 'section_id', 'bundle_resource_id', 'presentation_kind', 'width_constraint', 'interaction_kind', 'provenance_ref', 'requirement_ids', 'unresolved', 'title'])) return invalid()
+    try {
+      if ('output_key' in artifact) {
+        assertRunnerId(artifact.output_key, 'output_key')
+        if ('artifact_id' in artifact || 'base_artifact_revision' in artifact) return invalid()
+      } else {
+        assertRunnerId(artifact.artifact_id, 'artifact_id')
+        if (!Number.isSafeInteger(artifact.base_artifact_revision) || (artifact.base_artifact_revision as number) < 1) return invalid()
+      }
+    } catch (error) { if (error instanceof ContractError) return invalid(); throw error }
+  }
+  const draft = value as unknown as ProducerDraft
+  distinct(draft.artifacts.filter(artifact => artifact.output_key !== undefined).map(artifact => artifact.output_key!))
+  distinct(draft.artifacts.filter(artifact => artifact.artifact_id !== undefined).map(artifact => artifact.artifact_id!))
+  // Reuse the complete result validator without allocating or persisting IDs.
+  materializeProducerDraft(draft, source, draft.artifacts.map((_, index) => ({ artifact_id: `draft-artifact-${index}`, candidate_id: `draft-candidate-${index}` })))
+  return draft
+}
+
 // The same 256 KiB bundle ceiling applies to a newly created resource and to a
 // later immutable resource load. A larger output requires independent fragments.
 export function validateProducerBundle(raw: unknown): Bundle {
@@ -174,14 +220,15 @@ The last example contains a Surface operation in input_json. Parse input_json an
 For artifacts, first call resource.create for each complete managed-v1 JSON bundle. Pass operation as "resource.create" and use the write tool's structured input object with display_name and content. Set content.type to "json" and content.value to the actual complete bundle object, never a JSON string. Do not use input_json for resource.create; the structured input avoids an extra JSON encoding layer around HTML and CSS. Text, Markdown and HTML-only resources are not managed-v1 bundles and cannot be an artifact's bundle_resource_id.
 State initial values use raw control representations: number/integer fields must be strings such as "0", even for a numeric field without an input behavior. Their schema remains number/integer. Resource creation validates the complete bundle; if rejected, correct the reported issue and create a valid resource before returning its candidate.
 One bundle is at most ${defaults.surface.inline_bundle_bytes} UTF-8 JSON bytes. Split larger output into independent fragments. Resource references do not enlarge the limit.
-Then return exactly one strict JSON object, with double-quoted keys and strings, no code fence and no prose before or after it. Its fields are "version":1, "complete":true, "answer":a string or null, "artifacts":an array of ArtifactCandidate objects, "requirement_ids":an array of strings and "unresolved":an array of objects with "task_id", "request_id", "intent_revision" and "requirement_id". An answer-only example is {"version":1,"complete":true,"answer":"The learner-facing result.","artifacts":[],"requirement_ids":["answer"],"unresolved":[]}; replace its coverage with the exact assigned requirements.
+Then return exactly one strict JSON object without a code fence or surrounding prose: {"version":1,"complete":true,"answer":a string or null,"artifacts":an array of artifact drafts,"requirement_ids":an array of strings,"unresolved":an array of objects with task_id,request_id,intent_revision,requirement_id}.
 With artifacts, answer is a brief completion notice, not a copy or summary of their content; never claim publication. Otherwise answer the learner directly. Keep resource IDs and internal protocol details outside answer.
 If this work has an assigned answer requirement, return its answer as a nonempty string. Artifacts cannot replace the answer. If it cannot be fulfilled, list that requirement in unresolved instead of claiming coverage. Never claim an answer requirement with answer:null.
 The artifacts array is the complete output set, never a partial preview. Every assigned requirement must be covered or unresolved. Do not claim that structure alone proves semantic correctness.
 Creating a managed-v1 resource does not deliver it. Include its artifact candidate, or mark the unfinished requirements unresolved.
-Each ArtifactCandidate includes task_id,request_id,run_id,work_id,attempt_id,intent_revision,artifact_id,candidate_id,base_artifact_revision,plan_revision,section_id,section_position_revision,order_key,bundle_resource_id,presentation_kind,width_constraint,interaction_kind,provenance_ref,dependencies,requirement_ids,unresolved and optional short title. Set presentation_kind to "managed-v1", width_constraint to "full" or "flexible", and interaction_kind to "none" or "input". The provenance_ref object has task_id, kind ("record", "resource" or "action") and id.
+Each artifact draft includes section_id,bundle_resource_id,presentation_kind,width_constraint,interaction_kind,provenance_ref,requirement_ids,unresolved and optional short title. Set presentation_kind to "managed-v1", width_constraint to "full" or "flexible", and interaction_kind to "none" or "input".
+For a new artifact, provide a stable output_key unique within this work. For an update, provide the existing artifact_id and its current base_artifact_revision instead. The host assigns formal artifact and candidate IDs and binds execution metadata automatically.
 Copy provenance_ref from the relevant host-provided material or tool result; do not infer an evidence ID from other identifiers.
-Use exact bound work, dependencies and current section position. Copy dependencies exactly from Bound data; do not append newly created output resources to dependencies. Put their resource IDs in bundle_resource_id or provenance_ref. For a new artifact set base_artifact_revision to the integer 0, never null; for an update use the artifact's actual current revision. Copy section_id and order_key from the same bound sections entry, and set section_position_revision to that entry's position_revision. Use resource identities returned by the host, not invented resource IDs. A proposal does not publish or seal anything.
+Choose section_id from the bound sections. Use resource IDs returned by tools. The provenance_ref object has task_id, kind ("record", "resource" or "action") and id. A proposal does not publish or seal anything.
 Bound data: ${snapshot(source)}`
   const grants: WorkerGrant[] = [
     { type: 'list', kind: 'object_type' },
@@ -192,16 +239,22 @@ Bound data: ${snapshot(source)}`
   ]
   return profile({
     id: `${source.work.role}-output-v1`, role: source.work.role, system, grants, onBundleAttempt: () => { attemptedBundle = true },
-    resultCorrection: `The host rejected the final result: INVALID_WORKER_RESULT. Nothing from that proposal was accepted or published. Correct the final JSON against the original output contract and the exact bound data below. Every base_artifact_revision must be a nonnegative integer: use 0 for a new artifact, never null, or the actual current revision for an update. Copy dependencies exactly from Bound data without adding output resources; output resource IDs belong in bundle_resource_id or provenance_ref. Copy each artifact's section_id, section_position_revision and order_key from one of these exact positions: ${JSON.stringify(positions)}. Retain exact owner, plan_revision and requirement coverage. Reuse successfully created bundle_resource_id values and existing tool results; do not repeat successful writes or calls merely to correct metadata. Return one complete ProducerResult JSON object without prose. Bound data: ${snapshot(source)}`,
+    resultCorrection: `The host rejected the final result: INVALID_WORKER_RESULT. Correct the complete draft JSON. New artifacts use output_key; updates use artifact_id and a positive base_artifact_revision. Do not supply candidate IDs or execution metadata. Choose section_id from ${JSON.stringify(positions.map(position => position.section_id))}. Cover or mark unresolved every assigned requirement. Reuse successful resources and tool results; do not repeat successful operations. Bound data: ${snapshot(source)}`,
     parseResult(response) {
       const text = completion(response), trimmed = text.trim()
       let decoded: unknown
       try { decoded = decodeProducerResult(text) } catch { return invalid() }
-      if (decoded !== undefined) return validateProducerResult(decoded, source)
+      const normalize = (value: unknown): ProducerResult => {
+        const draft = validateProducerDraft(value, source)
+        if (input.normalize) return validateProducerResult(input.normalize(draft, response), source)
+        if (draft.artifacts.length) return invalid()
+        return validateProducerResult(draft, source)
+      }
+      if (decoded !== undefined) return normalize(decoded)
       if (trimmed.startsWith('{') || trimmed.startsWith('[') || /^```(?:json)?\s/.test(trimmed)) {
         let value: unknown
         try { value = JSON.parse(trimmed) } catch { return invalid() }
-        return validateProducerResult(value, source)
+        return normalize(value)
       }
       if (attemptedBundle) return invalid()
       return plainAnswer(text, source)

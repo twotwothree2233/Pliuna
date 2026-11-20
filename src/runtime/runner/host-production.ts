@@ -3,10 +3,12 @@ import type { ArtifactCandidate, ArtifactIndex, ContributionInventory, Execution
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import type { WorkerResultIssue } from '../model/agent'
+import type { Completion } from '../model/adapter'
 import { canonical } from '../surface-transition'
 import { RunnerArtifactState } from './artifact-state'
 import { RunnerCompositionState } from './composition-state'
-import { validateProducerResult, type ProducerResult } from './production-profile'
+import { validateProducerDraft, validateProducerResult, type ProducerDraft, type ProducerResult } from './production-profile'
+import { bindProductionIdentities } from './production-identity'
 import { RunnerWorkState } from './work-state'
 
 function fail(code: string, message: string): never { throw new ContractError(code, message) }
@@ -32,6 +34,34 @@ export class RunnerHostProduction {
     const payload = row ? JSON.parse(row.payload_json) : null
     if (!row || canonical(payload.owner) !== canonical(owner)) fail('RUNNER_RESULT_INVALID', 'Production acceptance requires its exact persisted final result')
     return { id: row!.id, value: payload.value }
+  }
+
+  normalize(raw: ProducerDraft, rawOwner: ExecutionScope, response: Completion): ProducerResult {
+    return this.db.transaction(() => {
+      const owner = validateRunnerContract('runner_execution_scope', rawOwner), { work, goal } = this.work.qualify(owner.attempt_id)
+      if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.task_id !== owner.task_id || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'Draft normalization requires its current exact production source')
+      const lookup = "SELECT id,payload_json FROM records WHERE task_id=? AND kind='model.response' AND json_extract(payload_json,'$.owner.attempt_id')=?"
+      const row = (response.request_link
+        ? this.db.prepare(lookup + " AND json_extract(payload_json,'$.request_link.request_id')=? AND json_extract(payload_json,'$.request_link.evidence_event_id')=? ORDER BY sequence DESC LIMIT 1").get(owner.task_id, owner.attempt_id, response.request_link.request_id, response.request_link.evidence_event_id)
+        : this.db.prepare(lookup + ' ORDER BY sequence DESC LIMIT 1').get(owner.task_id, owner.attempt_id)) as { id: string; payload_json: string } | undefined
+      const evidence = row ? JSON.parse(row.payload_json) : null
+      if (!row || canonical(evidence.owner) !== canonical(owner) || evidence.finish !== 'stop' || evidence.message?.content !== response.text || evidence.message?.tool_calls?.length || canonical(evidence.request_link ?? null) !== canonical(response.request_link ?? null)) fail('RUNNER_RESULT_INVALID', 'Draft identities require their original recorded model response')
+      const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
+      const source = { owner, work, goal, sections }, draft = validateProducerDraft(raw, source)
+      return bindProductionIdentities(this.db, draft, source, row!.id)
+    }).immediate()
+  }
+
+  private artifactSource(candidate: ArtifactCandidate, work: LogicalWork): ReturnType<RunnerArtifactState['owner']> {
+    const previous = this.artifacts.owner(candidate.task_id, candidate.artifact_id)
+    if (!previous) {
+      if (candidate.base_artifact_revision !== 0) fail('RUNNER_OWNERSHIP_INVALID', 'An update must reference an existing artifact in this Task')
+      return null
+    }
+    const source = this.work.work(previous.work_id)
+    if (work.purpose !== 'production' || source.purpose !== 'production' || source.request_id !== work.request_id || source.task_id !== work.task_id || previous.work_id !== work.work_id && source.intent_revision === work.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'A result cannot acquire another current work fragment without an installed reassignment')
+    if (previous.current_revision !== candidate.base_artifact_revision) fail('RUNNER_ARTIFACT_CONFLICT', 'Artifact accepted baseline is no longer current')
+    return previous
   }
 
   private receipt(owner: ExecutionScope): AcceptedProduction | null {
@@ -71,6 +101,11 @@ export class RunnerHostProduction {
     const delivery = this.deliveryIssue(result, owner)
     if (delivery) return delivery
     for (const [index, candidate] of result.artifacts.entries()) {
+      try { this.artifactSource(candidate, work) }
+      catch (error) {
+        if (!(error instanceof ContractError)) throw error
+        return { code: error.code, path: `artifacts[${index}]`, value: { artifact_id: candidate.artifact_id, base_artifact_revision: candidate.base_artifact_revision }, message: error.message }
+      }
       try { this.artifacts.checkProvenance(owner.task_id, candidate.provenance_ref) }
       catch (error) {
         if (!(error instanceof ContractError) || error.code !== 'RUNNER_PROVENANCE_INVALID') throw error
@@ -123,11 +158,7 @@ export class RunnerHostProduction {
       const indexes = result.artifacts.map(candidate => {
         try {
         validateResource(candidate.bundle_resource_id)
-        const previous = this.artifacts.owner(owner.task_id, candidate.artifact_id)
-        if (previous) {
-          const source = this.work.work(previous.work_id)
-          if (source.purpose !== 'production' || source.request_id !== work.request_id || source.task_id !== work.task_id || previous.work_id !== work.work_id && source.intent_revision === work.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'A result cannot acquire another current work fragment without an installed reassignment')
-        }
+        const previous = this.artifactSource(candidate, work)
         this.artifacts.assign([{
           task_id: work.task_id, artifact_id: candidate.artifact_id, section_id: candidate.section_id,
           work_id: work.work_id, plan_revision: work.plan_revision, base_artifact_revision: candidate.base_artifact_revision,

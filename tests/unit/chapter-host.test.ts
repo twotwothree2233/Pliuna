@@ -2,10 +2,12 @@ import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import coreSql from '../../src/shared/contracts/001-core.sql?raw'
 import runnerSql from '../../src/shared/contracts/002-runner.sql?raw'
-import type { IpcRequest } from '../../src/shared/contracts.generated'
+import type { ExecutionAttempt, IpcRequest, LogicalWork } from '../../src/shared/contracts.generated'
 import { ChapterHost } from '../../src/runtime/runner/chapter-host'
 import { ContentTreeState } from '../../src/runtime/runner/content-tree-state'
-import { chapterBundle, chapterManifest, chapterProposal, chapterPublication, chapterUpdate } from '../helpers/chapters'
+import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
+import { RunnerWorkState } from '../../src/runtime/runner/work-state'
+import { chapterBundle, chapterManifest, chapterProposal, chapterPublication, chapterSource, chapterUpdate } from '../helpers/chapters'
 
 const databases: Database.Database[] = []
 afterEach(() => { for (const db of databases.splice(0)) db.close() })
@@ -59,6 +61,37 @@ function unknownPublication(fixture: ReturnType<typeof setup>, result: 'failure'
   host.state.stage('task', update.update_id, 'unknown')
   db.prepare("INSERT INTO actions(id,task_id,kind,state,result,source_json,request_json,result_json,commit_valid,created_at) VALUES ('action','task','mutation','ended',?,'{}','{}',?,0,'time')").run(result, JSON.stringify({ code: result === 'failure' ? 'APPROVAL_DENIED' : 'EXECUTION_INTERRUPTED' }))
   return operation
+}
+
+function liveUnknownPublication() {
+  const fixture = setup(), { db, host, input } = fixture
+  const update = host.start(input), state = new RunnerWorkState(db, 'epoch')
+  new RunnerBudgetLedger(db).create({ budget_id: 'budget', task_id: 'task', purpose: 'production', request_id: 'goal' })
+  db.exec("INSERT INTO runs(id,task_id,request_id,state,commit_valid,runtime_epoch,limits_json,budget_json,created_at) VALUES ('run','task','goal','running',1,'epoch','{}','{}','time')")
+  const identity = { task_id: 'task', run_id: 'run', purpose: 'production' as const, request_id: 'goal', intent_revision: 1, update_id: update.update_id }
+  state.registerRun({ ...identity, runtime_epoch: 'epoch', state: 'running', commit_valid: true, budget_id: 'budget' })
+  const dependencies = [{ kind: 'goal' as const, task_id: 'task', request_id: 'goal', intent_revision: 1 }]
+  const works: LogicalWork[] = ['producer', 'lightweight'].map((role, index) => ({ ...identity, work_id: index ? 'publisher' : 'work', plan_revision: 1, role: role as LogicalWork['role'], required: true, requirement_ids: [], dependencies, state: 'planned', max_attempts: 1 }))
+  state.installPlan(works)
+  const base = { ...identity, runtime_epoch: 'epoch', attempt_number: 1, model_config_id: 'model', model_config_revision: 1, input_versions: dependencies, state: 'registered' as const, dispatch_state: 'not_dispatched' as const, usage_refs: [] }
+  const attempts: ExecutionAttempt[] = [{ ...base, attempt_id: 'attempt', work_id: 'work', profile_id: 'chapter-producer-v1' }, { ...base, attempt_id: 'host-attempt', work_id: 'publisher', profile_id: 'chapter-host-publisher-v1' }]
+  for (const attempt of attempts) {
+    state.createAttempt(attempt)
+    state.updateAttempt({ ...attempt, state: 'dispatched', dispatch_state: 'dispatched', operation_id: `operation-${attempt.attempt_id}` })
+  }
+  state.updateAttempt({ ...state.attempt('attempt'), state: 'waiting' })
+  const scoped = host.state.reviseScope('task', update.update_id, { operations: [{ type: 'replace', node_ids: ['a'] }], source: chapterSource(update) })
+  host.state.recordProposal({ ...chapterProposal(scoped), scope_revision: 1, read_refs: [], replacements: [], tree_operations: [{ type: 'replace', node_ids: ['a'], html: '<h2>A</h2><p>Updated</p>' }] })
+  const operation = { ...chapterPublication(scoped), action_id: 'action', scope_revision: 1 }
+  host.state.registerPublication(operation)
+  host.state.publicationStage('task', operation.operation_id, 'prepared')
+  host.state.publicationStage('task', operation.operation_id, 'dispatched')
+  host.state.publicationStage('task', operation.operation_id, 'unknown', { code: 'OPERATION_UNKNOWN' })
+  host.state.stage('task', update.update_id, 'unknown')
+  state.updateAttempt({ ...state.attempt('host-attempt'), state: 'unknown', dispatch_state: 'unknown' })
+  db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,result,source_json,request_json,result_json,commit_valid,created_at) VALUES ('action','task','run','mutation','ended','unknown',?,'{}',?,0,'time')").run(JSON.stringify({ type: 'host_chapter', owner: { ...chapterSource(scoped), work_id: 'publisher', attempt_id: 'host-attempt', role: 'lightweight' } }), JSON.stringify({ code: 'OPERATION_UNKNOWN' }))
+  const settle = (result: string, code: string, denied = false) => db.prepare("UPDATE actions SET result=?,result_json=? WHERE id='action'").run(result, JSON.stringify({ code, ...(denied ? { denied: true } : {}) }))
+  return { ...fixture, update: scoped, state, operation, settle }
 }
 
 describe('chapter host admission and recovery', () => {
@@ -181,6 +214,63 @@ describe('chapter host admission and recovery', () => {
     expect(recovered.state.publication('task', operation.operation_id)!.operation.state).toBe('unknown')
     expect(recovered.state.update('task', 'update-a')!.state).toBe('unknown')
     expect(fixture.db.prepare('SELECT COUNT(*) n FROM runner_chapter_publications').get()).toEqual({ n: 1 })
+  })
+
+  it.each(['failure', 'not_executed'])('returns a verified correctable %s to the live producer without replaying its old action', outcome => {
+    const { db, host, state, update, operation, settle } = liveUnknownPublication()
+    host.reconcile('task')
+    expect(state.attempt('host-attempt').state).toBe('unknown')
+    expect(() => state.updateAttempt({ ...state.attempt('host-attempt'), state: 'running', dispatch_state: 'dispatched' })).toThrow()
+    settle(outcome, 'CONTENT_BASELINE_STALE')
+    host.reconcile('task'); host.reconcile('task')
+    expect(host.state.publication('task', operation.operation_id)).toMatchObject({ operation: { state: 'failure' }, result: { code: 'CONTENT_BASELINE_STALE' } })
+    expect(host.state.update('task', update.update_id)).toMatchObject({ state: 'generating', scope_revision: 1, scope_active: false })
+    expect(state.qualify('attempt').attempt.state).toBe('waiting')
+    expect(state.attempt('host-attempt')).toMatchObject({ state: 'running', dispatch_state: 'dispatched', operation_id: 'operation-host-attempt' })
+    expect(state.work('publisher').state).toBe('running')
+    expect(() => host.state.assertCurrent('task', update.update_id)).toThrow(expect.objectContaining({ code: 'CONTENT_SCOPE_REQUIRED' }))
+    expect(host.state.reviseScope('task', update.update_id, { operations: [{ type: 'replace', node_ids: ['a'] }], source: chapterSource(update) }).scope_revision).toBe(2)
+    expect(db.prepare('SELECT state FROM runner_chapter_publication_evidence ORDER BY sequence').all()).toEqual([{ state: 'unknown' }, { state: 'failure' }])
+    expect(db.prepare('SELECT COUNT(*) n FROM actions').get()).toEqual({ n: 1 })
+  })
+
+  it.each([
+    ['not_executed', 'CONFIRMED_NO_EFFECT', false, 'epoch', 'failed'],
+    ['failure', 'APPROVAL_DENIED', false, 'epoch', 'failed'],
+    ['not_executed', 'CONTENT_BASELINE_STALE', true, 'epoch', 'failed'],
+    ['cancelled', 'CONTENT_BASELINE_STALE', false, 'epoch', 'cancelled'],
+    ['not_executed', 'CONTENT_BASELINE_STALE', false, 'new-epoch', 'failed']
+  ])('settles host work after %s/%s when correction is unavailable', (outcome, code, denied, epoch, terminal) => {
+    const { host, reopen, state, update, settle } = liveUnknownPublication()
+    settle(String(outcome), String(code), Boolean(denied))
+    reopen(String(epoch)).reconcile('task')
+    expect(host.state.update('task', update.update_id)?.state).toBe(terminal)
+    expect(state.attempt('host-attempt')).toMatchObject({ state: terminal, dispatch_state: 'dispatched' })
+    expect(state.work('publisher').state).toBe(terminal)
+    expect(() => state.qualify('attempt')).toThrow()
+  })
+
+  it.each(['completed-producer', 'old-scope'] as const)('does not restore unknown host work from %s evidence', condition => {
+    const { db, host, state, update, settle } = liveUnknownPublication()
+    if (condition === 'completed-producer') state.updateAttempt({ ...state.attempt('attempt'), state: 'succeeded' })
+    else {
+      const publication = host.state.publication('task', 'publication')!.operation
+      db.prepare("UPDATE runner_chapter_publications SET payload_json=? WHERE operation_id='publication'").run(JSON.stringify({ ...publication, scope_revision: 2 }))
+    }
+    settle('not_executed', 'CONTENT_BASELINE_STALE'); host.reconcile('task')
+    expect(host.state.update('task', update.update_id)?.state).toBe('failed')
+    expect(state.attempt('host-attempt').state).toBe('failed')
+  })
+
+  it('keeps cancelled unknown work terminal while settling its original host outcome', () => {
+    const { host, state, update, settle } = liveUnknownPublication()
+    host.state.stage('task', update.update_id, 'cancelled')
+    host.reconcile('task')
+    expect(host.state.update('task', update.update_id)?.state).toBe('cancelled')
+    expect(state.attempt('host-attempt').state).toBe('unknown')
+    settle('not_executed', 'CONTENT_BASELINE_STALE'); host.reconcile('task')
+    expect(host.state.update('task', update.update_id)?.state).toBe('cancelled')
+    expect(state.attempt('host-attempt').state).toBe('cancelled')
   })
 
   it('keeps a cancelled update terminal across repeated restarts without creating new work', () => {

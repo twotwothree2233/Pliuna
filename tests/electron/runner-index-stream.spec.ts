@@ -1,3 +1,4 @@
+import { artifactDraft } from '../helpers/producer-draft'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ServerResponse } from 'node:http'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -38,6 +39,7 @@ async function runnerLimits(): Promise<RunnerLimits> {
 test('a fixed first batch publishes while unrelated indexes continue arriving', async () => {
   test.setTimeout(120000)
   const RUNNER_LIMITS = await runnerLimits()
+  const sourceResources = new Map<number, string>()
   const total = 8, collators: { input: CollatorInput; bytes: number; text: string }[] = [], failures: string[] = []
   let first: { response: ServerResponse; plan: unknown } | undefined
   let last: { response: ServerResponse; name: number } | undefined
@@ -54,6 +56,9 @@ test('a fixed first batch publishes while unrelated indexes continue arriving', 
   const server = await modelServer(({ body }, response) => {
     try {
       if (synthetic(body, response)) return
+      if (body.messages[0]?.content.startsWith('Route the latest user turn')) {
+        respond(response, { role: 'assistant', content: JSON.stringify({ kind: 'new' }) }); return
+      }
       if (body.messages[0]?.content.startsWith('You are the Collator.')) {
         const input = JSON.parse(body.messages.find((message: any) => message.role === 'user').content) as CollatorInput
         const text = JSON.stringify(body.messages)
@@ -69,7 +74,7 @@ test('a fixed first batch publishes while unrelated indexes continue arriving', 
       const prompt = body.messages.find((message: any) => message.role === 'system' && message.content.includes('Bound data: '))?.content as string | undefined
       if (!prompt) throw Error('Missing real producer binding')
       const binding = JSON.parse(prompt.slice(prompt.indexOf('Bound data: ') + 'Bound data: '.length)) as Binding
-      const text = body.messages.find((message: any) => message.role === 'user').content as string
+      const text = [...body.messages].reverse().find((message: any) => message.role === 'user').content as string
       const name = Number(/STREAM_REQUEST_(\d+)/.exec(text)?.[1])
       if (!Number.isSafeInteger(name) || name < 0 || name >= total) throw Error('Unexpected stream goal')
       const latest = body.messages.at(-1)
@@ -82,6 +87,7 @@ test('a fixed first batch publishes while unrelated indexes continue arriving', 
       const { owner, plan_revision, dependencies, requirement_ids, sections } = binding
       if (owner.purpose !== 'production') throw Error('Expected production scope')
       const section = sections[0]!, id = created.data.id as string
+      sourceResources.set(name, id)
       const candidate: ArtifactCandidate = {
         candidate_id: `stream-candidate-${name}`, task_id: owner.task_id, request_id: owner.request_id, intent_revision: owner.intent_revision,
         run_id: owner.run_id, work_id: owner.work_id, attempt_id: owner.attempt_id, artifact_id: `stream-artifact-${name}`, base_artifact_revision: 0,
@@ -89,7 +95,7 @@ test('a fixed first batch publishes while unrelated indexes continue arriving', 
         presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: owner.task_id, kind: 'resource', id },
         requirement_ids, unresolved: [], dependencies
       }
-      respond(response, { role: 'assistant', content: JSON.stringify({ version: 1, complete: true, answer: `STREAM_FINAL_${name}`, artifacts: [candidate], requirement_ids, unresolved: [] }) })
+      respond(response, { role: 'assistant', content: JSON.stringify({ version: 1, complete: true, answer: `STREAM_FINAL_${name}`, artifacts: [artifactDraft(candidate)], requirement_ids, unresolved: [] }) })
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error))
       if (!response.headersSent) response.writeHead(500)
@@ -127,7 +133,8 @@ test('a fixed first batch publishes while unrelated indexes continue arriving', 
     await expect.poll(async () => { await approve(); expect(failures).toEqual([]); return Boolean(first) }, { timeout: 20000 }).toBe(true)
     const fixed = structuredClone(collators[0]!.input.batch)
     expect(fixed.indexes).toHaveLength(1)
-    expect(fixed.indexes[0]!.artifact_id).toBe('stream-artifact-0')
+    expect(fixed.indexes[0]!.artifact_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(collators[0]!.input.indexes[0]!.bundle_resource_id).toBe(sourceResources.get(0))
     expect(fixed.operation_id).toEqual(expect.any(String))
     expect(fixed.action_id).toEqual(expect.any(String))
     const inspectFixed = (): Promise<FixedBatchRead> => app.evaluate((_electron, input) => {

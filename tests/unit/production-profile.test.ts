@@ -6,9 +6,15 @@ import { RunBudget, runAgent, type AgentHost } from '../../src/runtime/model/age
 import { ModelService, type ModelLease } from '../../src/runtime/model/service'
 import { contractRepresentation, operationContract } from '../../src/runtime/model/operation-contracts'
 import { modelReadOptions, modelToolRequest } from '../../src/runtime/model/tool-input'
-import { createProducerProfile, createRouterProfile, ruleRouterOutline, validateProducerBundle, validateProducerResult, type ProducerResult, type ProductionResultBinding } from '../../src/runtime/runner/production-profile'
+import { createProducerProfile as makeProducerProfile, materializeProducerDraft, validateProducerDraft, createRouterProfile, ruleRouterOutline, validateProducerBundle, validateProducerResult, type ProducerResult, type ProductionResultBinding } from '../../src/runtime/runner/production-profile'
 import { containsProducerResult } from '../../src/runtime/runner/production-result'
 import * as contracts from '../../src/shared/validation'
+
+import { producerDraft } from '../helpers/producer-draft'
+import type { ProducerProfileInput } from '../../src/runtime/runner/production-profile'
+function createProducerProfile(input: ProducerProfileInput) {
+  return makeProducerProfile({ ...input, normalize: input.normalize ?? (draft => materializeProducerDraft(draft, input, draft.artifacts.map((artifact, index) => ({ artifact_id: artifact.output_key ?? artifact.artifact_id!, candidate_id: `candidate-${index}` })))) })
+}
 
 function source(role: ProductionResultBinding['work']['role'] = 'producer'): ProductionResultBinding {
   const goal: GoalRevision = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
@@ -26,12 +32,40 @@ function artifactSource(role: ProductionResultBinding['work']['role'] = 'produce
   return value
 }
 function candidate(fields: Partial<ArtifactCandidate> = {}): ArtifactCandidate {
-  return { task_id: 'task', request_id: 'goal', intent_revision: 1, run_id: 'run', work_id: 'work', attempt_id: 'attempt', plan_revision: 1, dependencies: [{ kind: 'goal', task_id: 'task', request_id: 'goal', intent_revision: 1 }], artifact_id: 'artifact', candidate_id: 'candidate', base_artifact_revision: 0, bundle_resource_id: 'bundle-resource', section_id: 'section', section_position_revision: 1, order_key: 'first', presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: 'task', kind: 'record', id: 'original-evidence' }, requirement_ids: ['document'], unresolved: [], ...fields }
+  return { task_id: 'task', request_id: 'goal', intent_revision: 1, run_id: 'run', work_id: 'work', attempt_id: 'attempt', plan_revision: 1, dependencies: [{ kind: 'goal', task_id: 'task', request_id: 'goal', intent_revision: 1 }], artifact_id: 'artifact', candidate_id: 'candidate-0', base_artifact_revision: 0, bundle_resource_id: 'bundle-resource', section_id: 'section', section_position_revision: 1, order_key: 'first', presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: 'task', kind: 'record', id: 'original-evidence' }, requirement_ids: ['document'], unresolved: [], ...fields }
 }
 function result(fields: Partial<ProducerResult> = {}): ProducerResult {
   return { version: 1, complete: true, answer: 'Result explanation', artifacts: [candidate()], requirement_ids: ['answer', 'document'], unresolved: [], ...fields }
 }
 const final = (text: string): Completion => ({ text, finish: 'stop', calls: [] })
+
+it('binds draft identities through the host without exposing execution metadata to the model', () => {
+  const input = artifactSource(), raw = producerDraft(result()), formal = result()
+  const normalize = vi.fn(() => formal), response = final(JSON.stringify(raw))
+  expect(makeProducerProfile({ ...input, normalize }).parseResult(response)).toEqual(formal)
+  expect(normalize).toHaveBeenCalledExactlyOnceWith(raw, response)
+  expect(raw.artifacts[0]).toMatchObject({ output_key: 'artifact' })
+  for (const key of ['candidate_id', 'artifact_id', 'task_id', 'run_id', 'attempt_id', 'dependencies']) expect(raw.artifacts[0]).not.toHaveProperty(key)
+})
+
+it('accepts explicit updates and rejects ambiguous or repeated draft identities before host binding', () => {
+  const input = artifactSource(), raw = producerDraft(result()), body = raw.artifacts[0]!
+  const { output_key: _key, ...metadata } = body
+  const updated = { ...raw, artifacts: [{ ...metadata, artifact_id: 'existing', base_artifact_revision: 3 }] }
+  expect(validateProducerDraft(updated, input)).toEqual(updated)
+  const invalid = [
+    { ...raw, artifacts: [body, body] },
+    { ...raw, artifacts: [{ ...body, artifact_id: 'existing', base_artifact_revision: 3 }] },
+    { ...raw, artifacts: [{ ...metadata, artifact_id: 'missing-baseline' }] },
+    { ...raw, artifacts: [{ ...metadata, artifact_id: 'existing', base_artifact_revision: 0 }] },
+    { ...updated, artifacts: [updated.artifacts[0], updated.artifacts[0]] },
+    { ...raw, artifacts: [{ ...body, candidate_id: 'model-candidate' }] },
+    { ...raw, artifacts: [{ ...body, attempt_id: 'model-attempt' }] }
+  ]
+  const normalize = vi.fn(), profile = makeProducerProfile({ ...input, normalize })
+  for (const value of invalid) expect(() => profile.parseResult(final(JSON.stringify(value)))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
+  expect(normalize).not.toHaveBeenCalled()
+})
 function bundle(): Bundle {
   return { profile: 'managed-v1', html: '<article>Result</article>', css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: '1' }, forms: [], behaviors: [], references: [], export: [] }
 }
@@ -54,8 +88,8 @@ it('keeps artifact, content-check and provenance requirements unresolved for ord
 })
 
 it('validates a full candidate set and retains exact resource and dependency references', () => {
-  const input = artifactSource(), raw = result({ artifacts: [candidate(), candidate({ artifact_id: 'second-fragment', candidate_id: 'second-candidate', bundle_resource_id: 'second-resource', width_constraint: 'flexible' })] })
-  const parsed = createProducerProfile(input).parseResult(final(JSON.stringify(raw)))
+  const input = artifactSource(), raw = result({ artifacts: [candidate(), candidate({ artifact_id: 'second-fragment', candidate_id: 'candidate-1', bundle_resource_id: 'second-resource', width_constraint: 'flexible' })] })
+  const parsed = createProducerProfile(input).parseResult(final(JSON.stringify(producerDraft(raw))))
   expect(parsed).toEqual(raw)
   expect(parsed).not.toBe(raw)
   raw.artifacts[0]!.title = 'Changed after parsing'
@@ -64,7 +98,7 @@ it('validates a full candidate set and retains exact resource and dependency ref
 })
 
 it('decodes one exact production result surrounded by prose or a JSON fence', () => {
-  const raw = result(), encoded = JSON.stringify(raw), profile = createProducerProfile(artifactSource())
+  const raw = result(), encoded = JSON.stringify(producerDraft(raw)), profile = createProducerProfile(artifactSource())
   for (const text of [`Prepared output:\n${encoded}\nComplete.`, `我已制作讲义。\n\`\`\`json\n${encoded}\n\`\`\`\n请阅读。`]) {
     expect(profile.parseResult(final(text))).toEqual(raw)
   }
@@ -102,14 +136,14 @@ it('does not combine unrelated object fields or inspect JSON string contents as 
 
 it('rejects a result whose learner answer embeds another production protocol', () => {
   const raw = result({ answer: `Prepared output:\n${JSON.stringify(result())}` })
-  expect(() => createProducerProfile(artifactSource()).parseResult(final(JSON.stringify(raw)))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
+  expect(() => createProducerProfile(artifactSource()).parseResult(final(JSON.stringify(producerDraft(raw))))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
 })
 
 it('requires a result envelope after attempting a managed bundle without restricting ordinary resources', () => {
   const profile = createProducerProfile(artifactSource())
   profile.authorize({ type: 'write', input: { type: 'resource.create', display_name: 'Lecture', content: { type: 'json', value: bundle() } } })
   expect(() => profile.parseResult(final('I created the lecture.'))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
-  expect(profile.parseResult(final(JSON.stringify(result())))).toEqual(result())
+  expect(profile.parseResult(final(JSON.stringify(producerDraft(result()))))).toEqual(result())
   const ordinary = createProducerProfile(source())
   ordinary.authorize({ type: 'write', input: { type: 'resource.create', display_name: 'Data', content: { type: 'json', value: { data: 'ordinary' } } } })
   expect(ordinary.parseResult(final('Saved the data.')).answer).toBe('Saved the data.')
@@ -381,7 +415,7 @@ it('recovers a rejected bundle by reading the suggested schema before creating i
         expect(schema).toMatchObject({ properties: { references: { $ref: '#/$defs/references' } }, $defs: { reference: { required: ['name', 'target'], additionalProperties: false } } })
         return call('corrected', 'write', write(bundle()))
       }
-      case 3: return final(JSON.stringify(result()))
+      case 3: return final(JSON.stringify(producerDraft(result())))
       default: throw Error('Unexpected model retry')
     }
   })
@@ -408,13 +442,13 @@ it('recovers a rejected bundle by reading the suggested schema before creating i
   } finally { requests.mockRestore() }
 })
 
-it('corrects a new artifact revision and exact dependencies without replaying resource creation', async () => {
+it('corrects draft identity and rejects supplied execution metadata without replaying resource creation', async () => {
   const input = artifactSource(), selected = createProducerProfile(input), config = { id: 'model', base_url: 'https://example.invalid', wire_model_id: 'synthetic', context_tokens: 100000, max_output_tokens: 4096, compatibility_profile: 'chat-max-tokens' as const }
   const service = new ModelService(), lease: ModelLease = { id: 'model', revision: 1, config, owner: input.owner, release() {} }
   const write = { id: 'create-bundle', type: 'function' as const, function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input_json: JSON.stringify({ display_name: 'Fragment', content: { type: 'json', value: bundle() } }) }) } }
   const invalidRevision = { ...result(), artifacts: [{ ...candidate(), base_artifact_revision: null }] }
-  const invalidDependencies = result({ artifacts: [candidate({ dependencies: [...input.work.dependencies, { kind: 'resource', task_id: 'task', resource_id: 'bundle-resource' }] })] })
-  const responses: Completion[] = [{ text: '', finish: 'tool_calls', calls: [write] }, final(JSON.stringify(invalidRevision)), final(JSON.stringify(invalidDependencies)), final(JSON.stringify(result()))]
+  const invalidDependencies = { ...producerDraft(result()), artifacts: [{ ...producerDraft(result()).artifacts[0], dependencies: input.work.dependencies }] }
+  const responses: Completion[] = [{ text: '', finish: 'tool_calls', calls: [write] }, final(JSON.stringify(invalidRevision)), final(JSON.stringify(invalidDependencies)), final(JSON.stringify(producerDraft(result())))]
   const history: ChatMessage[][] = [], installed = vi.fn()
   const requests = vi.spyOn(service, 'request').mockImplementation(async (currentLease, task, messages, tools, _signal, _onText, _limit, onStart) => {
     expect(currentLease).toBe(lease); expect(task).toBe('task'); expect(tools).toEqual(selected.tools)
@@ -438,9 +472,9 @@ it('corrects a new artifact revision and exact dependencies without replaying re
     expect(correction[0]?.role).toBe('system')
     expect(correction[0]?.content).toContain(selected.system)
     expect(correction[0]?.content).toContain(selected.resultCorrection)
-    expect(selected.resultCorrection).toContain('"section_id":"section"')
-    expect(selected.resultCorrection).toContain('"section_position_revision":1')
-    expect(selected.resultCorrection).toContain('"order_key":"first"')
+    expect(selected.resultCorrection).toContain('section_id from ["section"]')
+    expect(selected.resultCorrection).toContain('Do not supply candidate IDs or execution metadata')
+    expect(selected.resultCorrection).toContain('New artifacts use output_key')
     expect(correction).toContainEqual({ role: 'assistant', content: JSON.stringify(invalidRevision) })
     expect(correction.filter(message => message.role === 'tool')).toHaveLength(1)
     expect(history[3]).toContainEqual({ role: 'assistant', content: JSON.stringify(invalidDependencies) })
@@ -448,7 +482,7 @@ it('corrects a new artifact revision and exact dependencies without replaying re
     expect(records.filter(item => item.kind === 'model.tool_result')).toHaveLength(1)
     expect(records.find(item => item.kind === 'model.tool_result')?.payload.message).toMatchObject({ tool_call_id: 'create-bundle' })
     expect(records.filter(item => item.kind === 'worker.result.rejected')).toEqual(Array.from({ length: 2 }, () => ({ kind: 'worker.result.rejected', payload: { code: 'INVALID_WORKER_RESULT' } })))
-    expect(records.filter(item => item.kind === 'message.assistant').map(item => item.payload.text)).toEqual([JSON.stringify(result())])
+    expect(records.filter(item => item.kind === 'message.assistant').map(item => item.payload.text)).toEqual([JSON.stringify(producerDraft(result()))])
     expect(budget.state).toMatchObject({ model_requests: 4, tool_requests: 1 })
   } finally { requests.mockRestore() }
 })

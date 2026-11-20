@@ -194,6 +194,106 @@ test('new intent controls the card while waiting and unknown states stay static'
   await expect(card('a').getByText('更新已中断', { exact: true })).toBeVisible()
 })
 
+test('candidate exploration keeps original content and submissions available until scope registration', async () => {
+  await fixture()
+  const candidate = { ...update('a'), scope_revision: 0, scope_active: false }
+  await page.getByLabel('Alpha input').fill('editing during target discovery')
+  await sync(candidate)
+  await expect(card('a')).toHaveCount(0)
+  await expect(body('a')).toBeVisible()
+  await expect(page.getByLabel('Alpha input')).toBeEditable()
+  await expect(page.getByRole('button', { name: 'Submit both', exact: true })).toBeEnabled()
+  expect(await page.evaluate(() => window.chapterFixture.saved)).toEqual([])
+  await sync({ ...candidate, scope_revision: 1, scope_active: true })
+  await expect(card('a')).toHaveAttribute('data-chapter-revision', '1')
+  await expect(body('a')).toBeHidden()
+  expect(await page.evaluate(() => window.chapterFixture.saved.at(-1)![0])).toBe('editing during target discovery')
+})
+
+test('scope revisions release old ranges and ignore stale results and draft saves', async () => {
+  await fixture()
+  await page.getByLabel('Alpha input').fill('retained Alpha draft')
+  await page.evaluate(() => { window.chapterFixture.mode = 'pending' })
+  const first = { ...update('a'), scope_revision: 1 }
+  const revised = { ...first, scope_revision: 2, region_ids: ['b'], region_intents: [{ region_id: 'b', intent_revision: 1 }] }
+  await sync(first)
+  await sync(revised)
+  await expect(card('a')).toHaveCount(0)
+  await expect(body('a')).toBeVisible()
+  await expect(page.getByLabel('Alpha input')).toBeEditable()
+  await expect(card('b')).toHaveAttribute('data-chapter-revision', '2')
+  await sync({ ...first, state: 'failed' })
+  await page.evaluate(() => window.chapterFixture.pendingSaves[0]!())
+  await expect(card('b')).toHaveAttribute('data-chapter-revision', '2')
+  await expect(card('b').getByText('正在更新内容', { exact: true })).toBeVisible()
+  await expect(body('b')).toBeVisible()
+  await page.evaluate(() => { window.chapterFixture.mode = 'immediate'; window.chapterFixture.pendingSaves[1]!() })
+  await expect(body('b')).toBeHidden()
+  await expect(page.getByLabel('Alpha input')).toHaveValue('retained Alpha draft')
+  await sync({ ...first, state: 'succeeded' })
+  await expect(body('b')).toBeHidden()
+  await expect(card('b')).toHaveAttribute('data-chapter-revision', '2')
+})
+
+test('a corrected scope shows actual delivery stages and keeps outside editing intact', async () => {
+  await fixture({ long: true })
+  const first = { ...update('a'), scope_revision: 1, scope_active: true }
+  await sync(first)
+  await expect(body('a')).toBeHidden()
+  await sync({ ...first, scope_active: false, reason: 'CONTENT_DEPENDENCY_CONFLICT' })
+  await expect(body('a')).toBeVisible()
+  await expect(card('a')).toHaveCount(0)
+  const corrected = { ...first, scope_revision: 2 }
+  await sync(corrected)
+  await expect(body('a')).toBeHidden()
+  await sync({ ...corrected, state: 'assembling' })
+  await expect(card('a').getByText('正在准备新版本', { exact: true })).toBeVisible()
+  await sync({ ...corrected, state: 'publishing' })
+  await expect(card('a').getByText('正在应用更新', { exact: true })).toBeVisible()
+  await expect(card('a').locator('.activity')).toHaveCount(0)
+  await sync({ ...corrected, state: 'unknown' })
+  await expect(card('a').getByText('正在核对发布结果', { exact: true })).toBeVisible()
+  await expect(card('a').locator('.activity')).toHaveCount(0)
+  await expect(card('a').getByRole('button', { name: '查询原操作', exact: true })).toBeVisible()
+  const screenshot = test.info().outputPath('publication-verification.png')
+  await page.screenshot({ path: screenshot })
+  await test.info().attach('publication-verification', { path: screenshot, contentType: 'image/png' })
+  await page.getByLabel('Beta input', { exact: true }).fill('continuing outside this correction')
+  await page.getByLabel('Beta input', { exact: true }).evaluate((element: HTMLInputElement) => element.setSelectionRange(3, 10, 'backward'))
+  const before = await page.getByLabel('Beta input', { exact: true }).boundingBox()
+  await page.evaluate(corrected => window.chapterFixture.rebuild([['a paragraph 0 continues the original chapter.', 'Corrected content published']], [{ ...corrected, state: 'succeeded' }]), corrected)
+  await expect(card('a')).toHaveCount(0)
+  await expect(body('a')).toBeVisible()
+  await expect(page.getByText('Corrected content published', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Beta input', { exact: true })).toHaveValue('continuing outside this correction')
+  await expect(page.getByLabel('Beta input', { exact: true })).toBeFocused()
+  expect(await page.getByLabel('Beta input', { exact: true }).evaluate((element: HTMLInputElement) => [element.selectionStart, element.selectionEnd, element.selectionDirection])).toEqual([3, 10, 'backward'])
+  const after = await page.getByLabel('Beta input', { exact: true }).boundingBox()
+  expect(Math.abs(after!.y - before!.y)).toBeLessThan(2)
+})
+
+test('released scope stays readable through late snapshots and saves until a new revision is registered', async () => {
+  await fixture()
+  await page.getByLabel('Alpha input').fill('draft survives correction')
+  await page.evaluate(() => { window.chapterFixture.mode = 'pending' })
+  const first = { ...update('a'), scope_revision: 1, scope_active: true }
+  await sync(first)
+  await sync({ ...first, scope_active: false, reason: 'CONTENT_DEPENDENCY_CONFLICT' })
+  await expect(card('a')).toHaveCount(0)
+  await expect(body('a')).toBeVisible()
+  await expect(page.getByLabel('Alpha input')).toBeEditable()
+  await expect(page.getByRole('button', { name: 'Submit both', exact: true })).toBeEnabled()
+  await sync({ ...first, state: 'publishing' })
+  await page.evaluate(() => window.chapterFixture.pendingSaves[0]!())
+  await expect(card('a')).toHaveCount(0)
+  await expect(body('a')).toBeVisible()
+  await page.evaluate(() => { window.chapterFixture.mode = 'immediate' })
+  await sync({ ...first, scope_revision: 2 })
+  await expect(card('a')).toHaveAttribute('data-chapter-revision', '2')
+  await expect(body('a')).toBeHidden()
+  expect(await page.evaluate(() => window.chapterFixture.saved.at(-1)![0])).toBe('draft survives correction')
+})
+
 test('long chapter collapse and preview retain current reading and focus', async () => {
   await fixture({ long: true })
   await page.locator('#v-view-a-p-30').evaluate(element => element.scrollIntoView({ block: 'start' }))
@@ -418,6 +518,24 @@ test('independent insertion updates under one parent retain their own gap status
   await sync({ ...newer, state: 'succeeded' }, second)
   await expect(card(list.node_id)).toHaveCount(1)
   await expect(page.locator('[data-chapter-update="last-gap"]')).toHaveCount(1)
+})
+
+test('moving a node shows its source range and destination gap without hiding destination siblings', async () => {
+  const html = '<ul><li>Moving item.</li><li>Retained item.</li></ul>' + treeInputs
+  const tree = buildContentTree(html), list = tree.nodes.find(node => node.kind === 'list')!
+  const source = list.children[0]!
+  const moving = { ...treeUpdate(tree, source), scope_revision: 1, region_ids: [source, list.node_id], tree_operations: [{ type: 'move' as const, node_ids: [source], parent_id: list.node_id, position: 'end' as const }] }
+  await fixture({ html, tree })
+  await sync(moving)
+  await expect(card(source)).toHaveAttribute('data-chapter-revision', '1')
+  await expect(card(list.node_id)).toHaveAttribute('data-chapter-revision', '1')
+  await expect(page.getByText('Moving item.', { exact: true })).toBeHidden()
+  await expect(page.getByText('Retained item.', { exact: true })).toBeVisible()
+  expect(await card(list.node_id).evaluate(element => element.parentElement!.localName)).toBe('li')
+  await sync({ ...moving, state: 'failed' })
+  await expect(page.locator('ul > li').first()).toBeVisible()
+  await expect(page.locator('ul > li').first()).toContainText('Moving item.')
+  await expect(page.getByText('Retained item.', { exact: true })).toBeVisible()
 })
 
 test('deleting an unlabelled node restores focus and reading to its retained neighbor', async () => {

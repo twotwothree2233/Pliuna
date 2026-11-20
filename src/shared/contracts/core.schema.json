@@ -8965,7 +8965,7 @@
             "$ref": "#/$defs/runner_id"
           },
           "maxItems": 256,
-          "minItems": 1,
+          "minItems": 0,
           "tsType": "string[]"
         },
         "region_intents": {
@@ -8974,7 +8974,7 @@
             "$ref": "#/$defs/runner_chapter_intent"
           },
           "maxItems": 256,
-          "minItems": 1,
+          "minItems": 0,
           "tsType": "ChapterIntent[]"
         },
         "dependencies": {
@@ -9040,6 +9040,40 @@
           "minItems": 1,
           "maxItems": 256,
           "tsType": "ContentOperationPlan[]"
+        },
+        "authorization": {
+          "$ref": "#/$defs/runner_content_authorization"
+        },
+        "candidate_region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]"
+        },
+        "candidate_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation_plan"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperationPlan[]"
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "scope_active": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -9058,7 +9092,75 @@
         "text",
         "previous_update_ids"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "scope_revision"
+            ]
+          },
+          "then": {
+            "required": [
+              "authorization"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "scope_revision": {
+                      "const": 0
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "region_ids": {
+                      "maxItems": 0
+                    },
+                    "region_intents": {
+                      "maxItems": 0
+                    },
+                    "scope_active": {
+                      "const": false
+                    }
+                  },
+                  "not": {
+                    "required": [
+                      "tree_operations"
+                    ]
+                  }
+                },
+                "else": {
+                  "required": [
+                    "tree_operations",
+                    "request_order",
+                    "source"
+                  ],
+                  "properties": {
+                    "region_ids": {
+                      "minItems": 1
+                    },
+                    "region_intents": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "region_ids": {
+                "minItems": 1
+              },
+              "region_intents": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     },
     "runner_chapter_replacement": {
       "type": "object",
@@ -9135,6 +9237,20 @@
           "minItems": 1,
           "maxItems": 256,
           "tsType": "ContentOperation[]"
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "read_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]"
         }
       },
       "required": [
@@ -9314,6 +9430,11 @@
             "unknown",
             "superseded"
           ]
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "required": [
@@ -9902,6 +10023,97 @@
           "additionalProperties": false
         }
       ]
+    },
+    "runner_content_authorization": {
+      "type": "object",
+      "properties": {
+        "record_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]",
+          "minItems": 1
+        }
+      },
+      "required": [
+        "record_id",
+        "input_event_id",
+        "region_ids"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_scope_revision": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source": {
+          "$ref": "#/$defs/runner_execution_scope"
+        },
+        "base_manifest": {
+          "$ref": "#/$defs/runner_chapter_manifest"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation_plan"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperationPlan[]"
+        },
+        "read_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "revision",
+        "request_order",
+        "source",
+        "base_manifest",
+        "operations",
+        "read_refs",
+        "dependencies"
+      ],
+      "additionalProperties": false
     }
   },
   "$ref": "#/$defs/model_request"

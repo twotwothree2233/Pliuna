@@ -202,6 +202,7 @@ it('retains bounded attempts and unknown operation evidence without permitting a
   state.updateAttempt({ ...state.attempt('second'), state: 'unknown', dispatch_state: 'unknown' })
   expect(() => state.createAttempt(attempt('third', { attempt_number: 3, previous_attempt_id: 'second' }))).toThrow(/bound/)
   expect(() => state.qualify('second')).toThrow(/authority/)
+  expect(() => state.updateAttempt({ ...state.attempt('second'), state: 'running', dispatch_state: 'dispatched' })).toThrow(/chapter/)
   expect(() => state.updateAttempt({ ...state.attempt('second'), state: 'queued', dispatch_state: 'not_dispatched' })).toThrow(/overwritten/)
   expect(() => state.createAttempt({ ...second, model_config_id: 'different' })).toThrow(/inputs/)
   expect(state.attempt('attempt')).toMatchObject({ state: 'failed', operation_id: 'operation-attempt' })

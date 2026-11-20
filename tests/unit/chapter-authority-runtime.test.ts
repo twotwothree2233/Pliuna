@@ -14,6 +14,7 @@ import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { loadConversation } from '../../src/runtime/runner/conversation'
 import { RuntimeStore } from '../../src/runtime/store'
 import { saveExport } from '../../src/main/export-save'
+import { artifactDraft } from '../helpers/producer-draft'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks() })
@@ -71,7 +72,7 @@ async function original(s: Fixture, content: Bundle = bundle()): Promise<Chapter
     if (producer.purpose !== 'production') throw Error('Expected producer')
     const goal = s.state().goal(producer.request_id), section = new RunnerArtifactState(s.internal().db, s.state()).outline(s.task)!.sections[0]!
     const candidate: ArtifactCandidate = { candidate_id: 'original-candidate', task_id: s.task, request_id: producer.request_id, intent_revision: producer.intent_revision, run_id: producer.run_id, work_id: producer.work_id, attempt_id: producer.current_attempt_id!, artifact_id: 'original-artifact', base_artifact_revision: 0, plan_revision: producer.plan_revision, bundle_resource_id: result.data.id, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: { task_id: s.task, kind: 'record', id: s.state().input(goal.input_event_id).record_id }, requirement_ids: producer.requirement_ids, unresolved: [], dependencies: producer.dependencies }
-    return answer({ version: 1, complete: true, answer: '正文已完成。', artifacts: [candidate], requirement_ids: producer.requirement_ids, unresolved: [] })
+    return answer({ version: 1, complete: true, answer: '正文已完成。', artifacts: [artifactDraft(candidate)], requirement_ids: producer.requirement_ids, unresolved: [] })
   })
   const run = s.store.start(s.task, 'Create two independently editable chapters', 'chapter-model', [])
   await vi.waitFor(() => expect(s.state().run(run).state).toBe('completed'))
@@ -86,7 +87,7 @@ function chapterModel(s: Fixture, source: () => Bundle = bundle) {
   s.complete.mockImplementation(async (_config, _key, messages) => {
     const system = messages.find(message => message.role === 'system')!.content!
     if (system.includes('Bound scope: ')) {
-      const binding = JSON.parse(system.slice(system.lastIndexOf('Bound scope: ') + 'Bound scope: '.length)) as { node_ids: string[] }
+      const binding = JSON.parse(system.slice(system.lastIndexOf('Bound scope: ') + 'Bound scope: '.length)) as { candidate_node_ids: string[] }
       const request = JSON.parse([...messages].reverse().find(message => message.role === 'user')!.content!).request
       const input = s.records('worker.input').reverse().find(record => record.owner.update_id && record.text === request)!
       const update = s.status(input.owner.update_id)
@@ -95,8 +96,8 @@ function chapterModel(s: Fixture, source: () => Bundle = bundle) {
       }
       const result = JSON.parse(messages.at(-1)!.content!)
       expect(result).toMatchObject({ execution: 'success' })
-      if (result.data.state === 'staged') return answer('更新已完成。')
-      const nodes = messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content!)).map(value => value.data?.data ?? value.data).filter(value => binding.node_ids.includes(value?.node_id))
+      if (result.data.state === 'published') return answer('更新已完成。')
+      const nodes = messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content!)).map(value => value.data?.data ?? value.data).filter(value => binding.candidate_node_ids.includes(value?.node_id))
       const operations = nodes.map(data => {
         let html = data.html as string
         for (const [from, to] of edits.get(update.update_id)!) html = html.replace(from, to)
@@ -120,7 +121,7 @@ function chapterModel(s: Fixture, source: () => Bundle = bundle) {
       const update = s.status(updateId)
       if (update.base_manifest.content_tree) {
         edits.set(updateId, replacements)
-        pending.get(updateId)!.resolve({ text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 10 }, calls: update.region_ids.map((id, index) => ({ id: 'read-content-' + index, type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'content_node', id }) } })) })
+        pending.get(updateId)!.resolve({ text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 10 }, calls: (update.candidate_region_ids ?? update.region_ids).map((id, index) => ({ id: 'read-content-' + index, type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'content_node', id }) } })) })
         return
       }
       const candidate = source()
@@ -240,7 +241,7 @@ test('content tools discover material and exact node baselines while host submis
     if (last.tool_call_id === 'read-material') return readResource(foreign, 'read-foreign')
     if (last.tool_call_id === 'read-foreign') return create(bundle())
     if (last.tool_call_id === 'create-bundle') return { text: '', finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 20 }, calls: [{ id: 'submit-content', type: 'function', function: { name: 'call', arguments: JSON.stringify({ capability: 'builtin:content-operations:v1', input_json: JSON.stringify({ operations: [{ type: 'replace', node_ids: [nodeId], html }] }) }) } }] }
-    expect(result).toMatchObject({ execution: 'success', data: { state: 'staged' } })
+    expect(result).toMatchObject({ execution: 'success', data: { state: 'published' } })
     return answer('更新已完成。')
   })
   const update = start(s, mapped, 'Alpha', 'content-tool-authority')

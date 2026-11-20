@@ -72,3 +72,12 @@ CREATE TABLE IF NOT EXISTS runner_chapter_assemblies (
 );
 CREATE INDEX IF NOT EXISTS runner_chapter_updates_by_view ON runner_chapter_updates(task_id,view_id,state);
 CREATE INDEX IF NOT EXISTS runner_chapter_publications_by_update ON runner_chapter_publications(task_id,update_id);
+-- A revision is immutable evidence. Only the update payload points to the current one.
+CREATE TABLE IF NOT EXISTS runner_content_scope_revisions (
+ task_id TEXT NOT NULL REFERENCES tasks(id), update_id TEXT NOT NULL,
+ revision INTEGER NOT NULL CHECK(revision>=1),
+ request_order INTEGER NOT NULL CHECK(request_order>=1),
+ payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), installed_at TEXT NOT NULL,
+ PRIMARY KEY(task_id,update_id,revision),
+ FOREIGN KEY(task_id,update_id) REFERENCES runner_chapter_updates(task_id,update_id)
+);

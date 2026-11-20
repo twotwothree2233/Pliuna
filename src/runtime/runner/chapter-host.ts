@@ -8,6 +8,7 @@ import { RunnerWorkState } from './work-state'
 import { captureConversation } from './conversation'
 import { buildContentTree } from './content-tree'
 import { treeChapters, treeTargetIds } from './content-tree-host'
+import { isCorrectableContentError } from './content-errors'
 
 type Row = Record<string, any>
 function fail(code: string, message: string): never { throw new ContractError(code, message) }
@@ -90,7 +91,7 @@ export class ChapterHost {
     return tree
   }
 
-  start(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[]; inherited_requirements?: Row[] }): ChapterUpdate {
+  start(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[]; inherited_requirements?: Row[]; content_authority?: { region_ids: string[] } }): ChapterUpdate {
     return this.db.transaction(() => {
       const existing = this.state.update(input.task_id, input.update_id)
       if (existing) {
@@ -107,7 +108,10 @@ export class ChapterHost {
       const shared = { kind: 'chapter' as const, task_id: input.task_id, view_id: input.view_id, revision: manifest.shared_revision }
       const dependencies = [...new Map([shared, ...selected.flatMap(chapter => chapter.dependencies)].map(dependency => [JSON.stringify(dependency), dependency])).values()]
       const record = this.record(input.task_id, received ? 'chapter.input.received' : 'message.user', { text: input.text, request_id: manifest.request_id, purpose: 'control_input', chapter_input: input, conversation: received?.conversation ?? captureConversation(this.db, input.task_id), ...(received ? { source_record_id: received.record_id, material_resource_ids: received.material_resource_ids, ...(received.inherited_requirements ? { inherited_requirements: received.inherited_requirements } : {}) } : {}) })
-      const update = this.state.start({ task_id: input.task_id, update_id: input.update_id, input_event_id: input.input_event_id, record_id: record, request_id: manifest.request_id, intent_revision: manifest.intent_revision, view_id: input.view_id, base_manifest: manifest, region_ids, region_intents: region_ids.map(region_id => ({ region_id, intent_revision: 1 })), dependencies, state: 'queued', text: input.text, model_config_id: input.model_config_id, previous_update_ids: [], ...(input.tree_operations ? { tree_operations: input.tree_operations } : {}) })
+      const scope = manifest.content_tree
+        ? { region_ids: [], region_intents: [], scope_revision: 0, scope_active: false, authorization: { record_id: received?.record_id ?? record, input_event_id: input.input_event_id, region_ids: treeTargetIds(manifest, received?.content_authority?.region_ids ?? input.region_ids) }, candidate_region_ids: region_ids, ...(input.tree_operations ? { candidate_operations: input.tree_operations } : {}) }
+        : { region_ids, region_intents: region_ids.map(region_id => ({ region_id, intent_revision: 1 })), ...(input.tree_operations ? { tree_operations: input.tree_operations } : {}) }
+      const update = this.state.start({ task_id: input.task_id, update_id: input.update_id, input_event_id: input.input_event_id, record_id: record, request_id: manifest.request_id, intent_revision: manifest.intent_revision, view_id: input.view_id, base_manifest: manifest, ...scope, dependencies, state: 'queued', text: input.text, model_config_id: input.model_config_id, previous_update_ids: [] })
       this.record(input.task_id, 'chapter.update.started', { update_id: update.update_id, input_event_id: update.input_event_id, view_id: update.view_id, region_ids: update.region_ids })
       return update
     })()
@@ -116,20 +120,38 @@ export class ChapterHost {
   reconcile(task?: string): void {
     const tasks = task ? [task] : (this.db.prepare('SELECT DISTINCT task_id FROM runner_chapter_updates').all() as { task_id: string }[]).map(row => row.task_id)
     for (const taskId of tasks) for (const update of this.state.updates(taskId)) {
-      if (chapterTerminal.has(update.state)) continue
       const publication = update.publication_operation_id ? this.state.publication(taskId, update.publication_operation_id) : null
+      if (chapterTerminal.has(update.state) && publication?.operation.state !== 'unknown') continue
       if (publication?.operation.state === 'published') { this.state.stage(taskId, update.update_id, 'succeeded'); continue }
       if (publication?.operation.state === 'unknown') {
-        const action = publication.operation.action_id ? this.db.prepare('SELECT state,result,result_json FROM actions WHERE id=? AND task_id=?').get(publication.operation.action_id, taskId) as Row | undefined : undefined
+        const action = publication.operation.action_id ? this.db.prepare('SELECT state,result,result_json,source_json FROM actions WHERE id=? AND task_id=?').get(publication.operation.action_id, taskId) as Row | undefined : undefined
         if (action?.state === 'ended' && ['failure', 'not_executed', 'cancelled'].includes(action.result)) {
           const result = { action_id: publication.operation.action_id, ...(action.result_json ? JSON.parse(action.result_json) : { code: 'EXECUTION_INTERRUPTED' }) }
-          this.state.publicationStage(taskId, publication.operation.operation_id, action.result === 'cancelled' ? 'cancelled' : 'failure', result)
-          this.state.stage(taskId, update.update_id, action.result === 'cancelled' ? 'cancelled' : 'failed', { reason: result.code ?? 'PUBLICATION_FAILED' })
-        } else if (update.state !== 'unknown') this.state.stage(taskId, update.update_id, 'unknown')
+          this.db.transaction(() => {
+            this.state.publicationStage(taskId, publication.operation.operation_id, action.result === 'cancelled' ? 'cancelled' : 'failure', result)
+            const state = new RunnerWorkState(this.db, this.epoch)
+            const owner = action.source_json ? JSON.parse(action.source_json).owner : undefined
+            const publisher = state.taskWorks(taskId).filter(work => work.purpose === 'production' && work.update_id === update.update_id && work.role === 'lightweight' && work.current_attempt_id).map(work => state.attempt(work.current_attempt_id!)).find(attempt => attempt.profile_id === 'chapter-host-publisher-v1' && (!owner?.attempt_id || attempt.attempt_id === owner.attempt_id))
+            let corrected = false
+            if (!chapterTerminal.has(update.state) && update.scope_revision !== undefined && publisher?.state === 'unknown' && action.result !== 'cancelled' && !result.denied && isCorrectableContentError(result.code ?? '')) {
+              try {
+                this.state.releaseScope(taskId, update.update_id, result.code)
+                state.updateAttempt({ ...publisher, state: 'running', dispatch_state: 'dispatched' })
+                corrected = true
+              } catch (error) { if (!(error instanceof ContractError)) throw error }
+            }
+            if (!corrected) {
+              const cancelled = action.result === 'cancelled' || update.state === 'cancelled'
+              if (!chapterTerminal.has(update.state)) this.state.stage(taskId, update.update_id, cancelled ? 'cancelled' : 'failed', { reason: result.code ?? 'PUBLICATION_FAILED' })
+              if (publisher && !['succeeded', 'failed', 'cancelled', 'revoked'].includes(publisher.state)) state.updateAttempt({ ...publisher, state: cancelled ? 'cancelled' : 'failed', dispatch_state: 'dispatched' })
+            }
+          })()
+        } else if (!chapterTerminal.has(update.state) && update.state !== 'unknown') this.state.stage(taskId, update.update_id, 'unknown')
         continue
       }
       try {
-        this.state.assertCurrent(taskId, update.update_id)
+        if (update.scope_revision !== undefined) this.state.assertLive(taskId, update.update_id)
+        else this.state.assertCurrent(taskId, update.update_id)
         if (update.source) {
           const run = new RunnerWorkState(this.db, this.epoch).run(update.source.run_id)
           if (run.runtime_epoch === this.epoch && run.commit_valid && ['running', 'waiting'].includes(run.state)) continue

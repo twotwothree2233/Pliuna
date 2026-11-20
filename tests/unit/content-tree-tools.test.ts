@@ -133,7 +133,10 @@ describe('content tree tools', () => {
     const body = '<p>' + '你好🙂 "quoted" \\'.repeat(150) + '</p>', s = setup(body)
     const tree = s.first.content_tree!, node = tree.nodes.find(item => item.kind === 'paragraph')!
     let result = s.query('read', { kind: 'content_node', id: node.node_id, max_chars: 900, selection: { revision: 1 } })
+    const readRef = result.data.read_ref
+    expect(readRef).toEqual(expect.any(String))
     expect(result.next_cursor).toEqual(expect.any(String))
+    code(() => s.query('read', { kind: 'content_node', id: node.node_id, cursor: result.next_cursor }, 'another-worker'), 'CONTENT_CURSOR_INVALID')
     const updated = applyContentOperations({ html: body, tree, operations: [{ type: 'replace', node_ids: [node.node_id], html: '<p>New body</p>' }] })
     s.publish('view', updated.html, updated.tree); s.hideManifests(); s.restart()
     let html = ''
@@ -141,13 +144,15 @@ describe('content tree tools', () => {
       expect(JSON.stringify(result).length).toBeLessThanOrEqual(900)
       expect(Buffer.from(result.data.html).toString()).toBe(result.data.html)
       expect(result.data.revision).toBe(1)
+      expect(result.data.read_ref).toBe(readRef)
       html += result.data.html
       if (!result.next_cursor) break
       code(() => s.query('read', { kind: 'content_node', id: node.node_id, cursor: result.next_cursor, selection: { revision: 2 } }), 'READ_VERSION_CHANGED')
       result = s.query('read', { kind: 'content_node', id: node.node_id, cursor: result.next_cursor })
     }
     expect(html).toBe(body)
-    expect(s.dependency).toHaveBeenCalledWith(expect.objectContaining({ node_id: node.node_id, revision: 1, bundle_resource_id: s.first.bundle_resource_id }))
+    expect(s.dependency).toHaveBeenCalledWith(expect.objectContaining({ node_id: node.node_id, revision: 1, bundle_resource_id: s.first.bundle_resource_id, tree_revision: 1 }), undefined)
+    expect(s.dependency).toHaveBeenCalledWith(expect.objectContaining({ node_id: node.node_id, revision: 1, bundle_resource_id: s.first.bundle_resource_id, tree_revision: 1 }), readRef)
   })
 
   it('pages direct retired successors without guessing a replacement', () => {
@@ -174,6 +179,19 @@ describe('content tree tools', () => {
     expect(ids).toEqual(successors)
     expect(ids).toContain(successors[0])
     expect(s.bundle).not.toHaveBeenCalled()
+  })
+
+  it('returns host evidence references for fresh node snapshots', () => {
+    const s = setup(), tree = s.first.content_tree!, node = tree.nodes.find(item => item.kind === 'paragraph')!
+    s.dependency.mockReturnValueOnce('read-original').mockReturnValueOnce('read-current')
+    const before = s.query('read', { kind: 'content_node', id: node.node_id })
+    expect(before.data).toMatchObject({ read_ref: 'read-original', revision: 1, bundle_resource_id: s.first.bundle_resource_id })
+    const updated = applyContentOperations({ html: s.bundle(s.first.bundle_resource_id).html, tree, operations: [{ type: 'replace', node_ids: [node.node_id], html: '<p>Current content</p>' }] })
+    const current = s.publish('view', updated.html, updated.tree)
+    const after = s.query('read', { kind: 'content_node', id: node.node_id })
+    expect(after.data).toMatchObject({ read_ref: 'read-current', revision: 2, bundle_resource_id: current.bundle_resource_id, html: '<p>Current content</p>' })
+    expect(before.data.read_ref).toBe('read-original')
+    expect(before.data.html).toBe('<p>Original content</p>')
   })
 
   it('reports a deleted node with an empty successor set', () => {

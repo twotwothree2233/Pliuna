@@ -193,5 +193,20 @@
     "file": "invalid-15.json",
     "definition": "runner_chapter_proposal",
     "valid": false
+  },
+  {
+    "file": "25-content-candidates.json",
+    "definition": "runner_chapter_update",
+    "valid": true
+  },
+  {
+    "file": "26-content-scope.json",
+    "definition": "runner_content_scope_revision",
+    "valid": true
+  },
+  {
+    "file": "invalid-16.json",
+    "definition": "runner_content_scope_revision",
+    "valid": false
   }
 ]

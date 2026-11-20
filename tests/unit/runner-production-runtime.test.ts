@@ -15,10 +15,20 @@ import type { ArtifactCandidate, Bundle, LogicalWork, ModelConfiguration, WorkDe
 import { modelToolRequest } from '../../src/runtime/model/tool-input'
 import type { PluginControl } from '../../src/runtime/plugins/control'
 
+import { producerDraft } from '../helpers/producer-draft'
+
 const stores: RuntimeStore[] = []
 afterEach(() => { for (const store of stores.splice(0)) store.close(); vi.restoreAllMocks() })
 function deferred<T>() { let resolve!: (value: T) => void; return { promise: new Promise<T>(done => { resolve = done }), resolve: (value: T) => resolve(value) } }
 const answer = (text: string): Completion => ({ text, calls: [], finish: 'stop', usage: { prompt_tokens: 30, completion_tokens: 8 } })
+const productionAnswer = (result: ProducerResult): Completion => answer(JSON.stringify(producerDraft(result)))
+function slotId(s: ReturnType<typeof setup>, key: string): string {
+  return (s.db.prepare('SELECT artifact_id FROM runner_artifact_slots WHERE task_id=? AND output_key=?').get(s.task, key) as { artifact_id: string } | undefined)?.artifact_id ?? key
+}
+function expectedResult(result: ProducerResult) {
+  return { ...result, artifacts: result.artifacts.map(candidate => ({ ...candidate, artifact_id: expect.any(String), candidate_id: expect.any(String) })) }
+}
+
 function setup(runner: { productionRuns: 1 | 2; collator?: 'rule' | 'model' } | null = { productionRuns: 2 }) {
   const adapter = new ChatAdapter(), models = new ModelService(adapter)
   const config: ModelConfiguration = { id: 'production', base_url: 'https://example.invalid/v1', wire_model_id: 'synthetic', context_tokens: 100000, max_output_tokens: 4096, compatibility_profile: 'chat-max-tokens' }
@@ -76,7 +86,7 @@ it('corrects a missing artifact in the same host conversation and reuses the suc
     expect(created).toMatchObject({ execution: 'success', delivery: 'delivered' })
     resourceId = created.data.id
     proposed = provenanceResult(s, resourceId, created.provenance_ref, 'delivery-corrected-candidate')
-    return answer(JSON.stringify(answerOnly('Content is ready.')))
+    return productionAnswer(answerOnly('Content is ready.'))
   })
   s.complete.mockImplementationOnce(async (_config, _key, messages) => {
     expect(messages[0]!.content).toContain('RUNNER_DELIVERY_MISSING')
@@ -86,16 +96,16 @@ it('corrects a missing artifact in the same host conversation and reuses the suc
     expect(s.records('runner.answer')).toEqual([])
     expect(s.db.prepare('SELECT count(*) n FROM runner_work_outputs').get()).toEqual({ n: 0 })
     expect(s.db.prepare('SELECT count(*) n FROM runner_contribution_inventories').get()).toEqual({ n: 0 })
-    return answer(JSON.stringify(proposed))
+    return productionAnswer(proposed!)
   })
   const run = s.store.start(s.task, 'Create and deliver one artifact', 'production', [])
   await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
   expect(s.complete).toHaveBeenCalledTimes(3)
   expect(s.records('resource.created')).toHaveLength(1)
   expect(s.records('worker.result.rejected')).toMatchObject([{ code: 'RUNNER_DELIVERY_MISSING', path: 'artifacts', value: [] }])
-  expect(s.records('worker.result')).toMatchObject([{ value: proposed }])
+  expect(s.records('worker.result')).toMatchObject([{ value: expectedResult(proposed!) }])
   expect(s.records('runner.answer')).toMatchObject([{ text: proposed!.answer }])
-  expect(s.records('runner.output.accepted')[0]!.artifacts).toEqual([{ task_id: s.task, artifact_id: 'provenance-artifact', artifact_revision: 1 }])
+  expect(s.records('runner.output.accepted')[0]!.artifacts).toEqual([{ task_id: s.task, artifact_id: slotId(s, 'provenance-artifact'), artifact_revision: 1 }])
 })
 
 it('rejects direct acceptance of an empty delivery after a successful exact-owner bundle action', async () => {
@@ -137,7 +147,7 @@ it.each(['ordinary answer', 'text resource', 'ordinary JSON resource', 'failed m
     s.complete.mockImplementationOnce(async (_config, _key, messages) => {
       const result = JSON.parse(messages.find(message => message.tool_call_id === 'answer-resource')!.content!)
       expect(result).toMatchObject(mode === 'failed managed bundle' ? { execution: 'not_executed', error: { code: 'RESOURCE_MISSING' } } : { execution: 'success', delivery: 'delivered' })
-      return answer(JSON.stringify(answerOnly('A direct answer.')))
+      return productionAnswer(answerOnly('A direct answer.'))
     })
   }
   const run = s.store.start(s.task, 'Answer the current question', 'production', [])
@@ -159,7 +169,7 @@ it('keeps an explicit unresolved delivery partial after a successful bundle acti
     expect(JSON.parse(messages.find(message => message.tool_call_id === 'unresolved-bundle')!.content!)).toMatchObject({ execution: 'success' })
     const work = s.state.taskWorks(s.task)[0]!
     if (work.purpose !== 'production') throw Error('Expected producer')
-    return answer(JSON.stringify({ ...answerOnly('The delivery remains unfinished.'), requirement_ids: [], unresolved: [{ task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, requirement_id: 'answer' }] }))
+    return productionAnswer({ ...answerOnly('The delivery remains unfinished.'), requirement_ids: [], unresolved: [{ task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, requirement_id: 'answer' }] })
   })
   const run = s.store.start(s.task, 'Keep an incomplete delivery explicit', 'production', [])
   await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
@@ -185,12 +195,12 @@ it('does not impose one active producer bundle on a sibling goal', async () => {
   })
   const first = s.store.start(s.task, 'Create an artifact for the first goal', 'production', [])
   await ready.promise
-  s.complete.mockResolvedValueOnce(answer(JSON.stringify(answerOnly('Independent sibling answer.'))))
+  s.complete.mockResolvedValueOnce(productionAnswer(answerOnly('Independent sibling answer.')))
   const second = s.store.start(s.task, 'Answer the second goal', 'production', [])
   await vi.waitFor(() => expect(s.state.run(second).state).toBe('completed'))
   expect(s.records('runner.answer')).toMatchObject([{ text: 'Independent sibling answer.', owner: { run_id: second } }])
   expect(s.records('worker.result.rejected')).toEqual([])
-  pending.resolve(answer(JSON.stringify(provenanceResult(s, resourceId, source!, 'sibling-source-candidate'))))
+  pending.resolve(productionAnswer(provenanceResult(s, resourceId, source!, 'sibling-source-candidate')))
   await vi.waitFor(() => expect(s.state.run(first).state).toBe('completed'))
   expect(s.complete).toHaveBeenCalledTimes(3)
   expect(s.records('runner.output.accepted')).toHaveLength(2)
@@ -207,7 +217,7 @@ it.each(['attempt_id', 'work_id', 'request_id'] as const)('ignores a successful 
     const source = JSON.parse(row.source_json)
     source.owner[field] = `previous-${field}`
     s.db.prepare('UPDATE actions SET source_json=? WHERE id=?').run(JSON.stringify(source), result.operation_id)
-    return answer(JSON.stringify(answerOnly('Only the current work is complete.')))
+    return productionAnswer(answerOnly('Only the current work is complete.'))
   })
   const run = s.store.start(s.task, 'Answer from the current attempt', 'production', [])
   await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
@@ -279,12 +289,12 @@ it('corrects a request id used as provenance without recreating or prematurely a
     const work = s.state.taskWorks(s.task)[0]!
     if (work.purpose !== 'production') throw Error('Expected producer')
     rejected = provenanceResult(s, bundleResource, { task_id: s.task, kind: 'record', id: work.request_id }, 'wrong-provenance')
-    return answer(JSON.stringify(rejected))
+    return productionAnswer(rejected)
   })
   s.complete.mockImplementationOnce(async (_config, _key, messages) => {
     expect(s.records('worker.result')).toEqual([])
     expect(new RunnerArtifactState(s.db, s.state).candidate(s.task, 'wrong-provenance')).toBeNull()
-    expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, 'provenance-artifact')).toBeNull()
+    expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, slotId(s, 'provenance-artifact'))).toBeNull()
     const feedback = messages.filter(message => message.role !== 'assistant' && message.role !== 'tool').map(message => message.content ?? '').join('\n')
     expect(feedback).toContain('RUNNER_PROVENANCE_INVALID')
     expect(feedback).toContain('artifacts[0].provenance_ref')
@@ -292,7 +302,7 @@ it('corrects a request id used as provenance without recreating or prematurely a
     const retained = messages.find(message => message.role === 'tool' && message.tool_call_id === 'create-provenance-bundle')
     expect(JSON.parse(retained?.content ?? '{}')).toMatchObject({ execution: 'success', data: { id: bundleResource } })
     corrected = provenanceResult(s, bundleResource, { task_id: s.task, kind: 'resource', id: bundleResource }, 'corrected-provenance')
-    return answer(JSON.stringify(corrected))
+    return productionAnswer(corrected)
   })
 
   const run = s.store.start(s.task, 'Create one complete artifact', 'production', [])
@@ -302,9 +312,9 @@ it('corrects a request id used as provenance without recreating or prematurely a
   expect(s.records('resource.created')).toHaveLength(1)
   expect(s.records('worker.tool.ended')).toMatchObject([{ state: 'completed' }])
   expect(s.records('worker.result.rejected')).toMatchObject([{ code: 'RUNNER_PROVENANCE_INVALID', path: 'artifacts[0].provenance_ref', value: rejected!.artifacts[0]!.provenance_ref }])
-  expect(s.records('worker.result')).toMatchObject([{ value: corrected }])
+  expect(s.records('worker.result')).toMatchObject([{ value: expectedResult(corrected!) }])
   expect(s.records('worker.ended')).toMatchObject([{ state: 'succeeded' }])
-  expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, 'provenance-artifact')).toMatchObject({ artifact_revision: 1, bundle_resource_id: bundleResource, provenance_ref: { task_id: s.task, kind: 'resource', id: bundleResource } })
+  expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, slotId(s, 'provenance-artifact'))).toMatchObject({ artifact_revision: 1, bundle_resource_id: bundleResource, provenance_ref: { task_id: s.task, kind: 'resource', id: bundleResource } })
 })
 
 it('rechecks provenance at acceptance and retains its rejection after the source becomes available again', async () => {
@@ -327,7 +337,7 @@ it('rechecks provenance at acceptance and retains its rejection after the source
     expect(sourceResult.execution).toBe('success')
     sourceResource = sourceResult.data.id
     proposed = provenanceResult(s, bundleResult.data.id, { task_id: s.task, kind: 'resource', id: sourceResource }, 'raced-provenance')
-    return answer(JSON.stringify(proposed))
+    return productionAnswer(proposed)
   })
 
   const run = s.store.start(s.task, 'Create one complete artifact', 'production', [])
@@ -336,19 +346,20 @@ it('rechecks provenance at acceptance and retains its rejection after the source
   expect(preflight).toHaveBeenCalledOnce()
   expect(s.complete).toHaveBeenCalledTimes(2)
   expect(s.records('worker.result.rejected')).toEqual([])
-  expect(s.records('worker.result')).toMatchObject([{ value: proposed }])
+  expect(s.records('worker.result')).toMatchObject([{ value: expectedResult(proposed!) }])
   expect(s.records('worker.ended')).toMatchObject([{ state: 'failed', code: 'RUNNER_PROVENANCE_INVALID' }])
-  const artifacts = new RunnerArtifactState(s.db, s.state), retained = artifacts.candidate(s.task, 'raced-provenance')
-  expect(retained).toEqual({ candidate: proposed!.artifacts[0], result: { state: 'rejected', code: 'RUNNER_PROVENANCE_INVALID' } })
-  expect(artifacts.owner(s.task, 'provenance-artifact')).toBeNull()
-  expect(artifacts.artifact(s.task, 'provenance-artifact')).toBeNull()
+  const formal = s.records('worker.result')[0]!.value as ProducerResult
+  const artifacts = new RunnerArtifactState(s.db, s.state), retained = artifacts.candidate(s.task, formal.artifacts[0]!.candidate_id)
+  expect(retained).toEqual({ candidate: formal.artifacts[0], result: { state: 'rejected', code: 'RUNNER_PROVENANCE_INVALID' } })
+  expect(artifacts.owner(s.task, slotId(s, 'provenance-artifact'))).toBeNull()
+  expect(artifacts.artifact(s.task, slotId(s, 'provenance-artifact'))).toBeNull()
   expect(s.db.prepare('UPDATE task_resources SET task_id=? WHERE task_id=? AND resource_id=?').run(s.task, otherTask, sourceResource).changes).toBe(1)
   expect(() => artifacts.checkProvenance(s.task, proposed!.artifacts[0]!.provenance_ref)).not.toThrow()
   if (!proposed || !owner) throw Error('Expected the original final result and owner')
   const host = new RunnerHostProduction(s.db, s.state.epoch), finalResult = proposed, finalOwner = owner
-  expect(() => host.accept(finalResult, finalOwner, () => {})).toThrow(expect.objectContaining({ code: 'RUNNER_PROVENANCE_INVALID' }))
-  expect(artifacts.candidate(s.task, 'raced-provenance')).toEqual(retained)
-  expect(s.records('worker.result')).toMatchObject([{ value: proposed }])
+  expect(() => host.accept(formal, finalOwner, () => {})).toThrow(expect.objectContaining({ code: 'RUNNER_PROVENANCE_INVALID' }))
+  expect(artifacts.candidate(s.task, formal.artifacts[0]!.candidate_id)).toEqual(retained)
+  expect(s.records('worker.result')).toMatchObject([{ value: expectedResult(proposed!) }])
 })
 
 it('lets a Producer discover contracts and create an accepted JSON bundle through its actual tools', async () => {
@@ -382,7 +393,7 @@ it('lets a Producer discover contracts and create an accepted JSON bundle throug
     if (work.purpose !== 'production') throw Error('Expected producer')
     const goal = s.state.goal(work.request_id), section = new RunnerArtifactState(s.db, s.state).outline(s.task)!.sections[0]!
     const candidate: ArtifactCandidate = { candidate_id: 'bandit-candidate', task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, run_id: work.run_id, work_id: work.work_id, attempt_id: work.current_attempt_id!, artifact_id: 'bandit-lecture', base_artifact_revision: 0, plan_revision: work.plan_revision, bundle_resource_id: result.data.id, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: s.task, kind: 'record', id: s.state.input(goal.input_event_id).record_id }, requirement_ids: ['answer'], unresolved: [], dependencies: work.dependencies }
-    return answer(JSON.stringify({ version: 1, complete: true, answer: 'Multi-armed bandit lecture is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] }))
+    return productionAnswer({ version: 1, complete: true, answer: 'Multi-armed bandit lecture is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] })
   })
   const run = s.store.start(s.task, 'Generate a multi-armed bandit lecture', 'production', [])
   await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
@@ -391,7 +402,7 @@ it('lets a Producer discover contracts and create an accepted JSON bundle throug
   expect(s.records('worker.ended')).toMatchObject([{ state: 'succeeded' }])
   expect(s.records('runner.answer')).toMatchObject([{ text: 'Multi-armed bandit lecture is ready.' }])
   expect(s.records('runner.output.accepted')).toHaveLength(1)
-  expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, 'bandit-lecture')).toMatchObject({ artifact_revision: 1 })
+  expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, slotId(s, 'bandit-lecture'))).toMatchObject({ artifact_revision: 1 })
 })
 
 it.each(['invalid raw draft', 'cross-task image'] as const)('returns %s bundle errors during resource creation and accepts a corrected tool round', async failure => {
@@ -443,7 +454,7 @@ it.each(['invalid raw draft', 'cross-task image'] as const)('returns %s bundle e
       if (work.purpose !== 'production') throw Error('Expected producer')
       const goal = s.state.goal(work.request_id), section = new RunnerArtifactState(s.db, s.state).outline(s.task)!.sections[0]!
       const candidate: ArtifactCandidate = { candidate_id: 'corrected-candidate', task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, run_id: work.run_id, work_id: work.work_id, attempt_id: work.current_attempt_id!, artifact_id: 'corrected-artifact', base_artifact_revision: 0, plan_revision: work.plan_revision, bundle_resource_id: result.data.id, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: s.task, kind: 'record', id: s.state.input(goal.input_event_id).record_id }, requirement_ids: ['answer'], unresolved: [], dependencies: work.dependencies }
-      return answer(JSON.stringify({ version: 1, complete: true, answer: 'Corrected artifact is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] }))
+      return productionAnswer({ version: 1, complete: true, answer: 'Corrected artifact is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] })
     })
     const run = s.store.start(s.task, 'Create one complete artifact', 'production', [])
     await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
@@ -451,7 +462,7 @@ it.each(['invalid raw draft', 'cross-task image'] as const)('returns %s bundle e
     expect(s.records('resource.created')).toHaveLength(1)
     expect(s.records('worker.tool.ended')).toMatchObject([{ state: 'failed', code: expectedError.code }, { state: 'completed' }])
     expect(s.records('worker.ended')).toMatchObject([{ state: 'succeeded' }])
-    expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, 'corrected-artifact')).toMatchObject({ artifact_revision: 1 })
+    expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, slotId(s, 'corrected-artifact'))).toMatchObject({ artifact_revision: 1 })
     await vi.waitFor(() => expect(s.store.snapshot(s.task).approvals.find(item => item.decision === 'pending' && item.validity === 'valid')).toBeDefined())
     const approval = s.store.snapshot(s.task).approvals.find(item => item.decision === 'pending' && item.validity === 'valid')!
     s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
@@ -485,7 +496,7 @@ it.each(['missing answer', 'text bundle'] as const)('still rejects a Producer re
     if (work.purpose !== 'production') throw Error('Expected producer')
     const goal = s.state.goal(work.request_id), section = new RunnerArtifactState(s.db, s.state).outline(s.task)!.sections[0]!
     const candidate: ArtifactCandidate = { candidate_id: 'invalid-candidate', task_id: s.task, request_id: work.request_id, intent_revision: work.intent_revision, run_id: work.run_id, work_id: work.work_id, attempt_id: work.current_attempt_id!, artifact_id: 'invalid-lecture', base_artifact_revision: 0, plan_revision: work.plan_revision, bundle_resource_id: resource, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: s.task, kind: 'record', id: s.state.input(goal.input_event_id).record_id }, requirement_ids: ['answer'], unresolved: [], dependencies: work.dependencies }
-    invalidResult = answer(JSON.stringify({ version: 1, complete: true, answer: failure === 'missing answer' ? null : 'Lecture is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] }))
+    invalidResult = productionAnswer({ version: 1, complete: true, answer: failure === 'missing answer' ? null : 'Lecture is ready.', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] })
     return invalidResult
   })
   s.complete.mockImplementationOnce(async () => invalidResult)
@@ -565,9 +576,16 @@ it('returns the exact installed production receipt after the source ended withou
   expect(() => host.accept({ ...record.value, answer: 'Changed payload' }, record.owner, validate)).toThrow(expect.objectContaining({ code: 'RUNNER_OUTPUT_CONFLICT' }))
 })
 
-it('retains a precise rejected candidate after outer installation rollback and preserves the old pointer', async () => {
+it('retains a precise rejected candidate after outer installation rollback and preserves the newer pointer', async () => {
   const s = setup(), artifacts = new RunnerArtifactState(s.db, s.state)
   let original: ArtifactCandidate
+  const originalPreflight = RunnerHostProduction.prototype.preflight
+  vi.spyOn(RunnerHostProduction.prototype, 'preflight').mockImplementation(function (this: RunnerHostProduction, raw, owner, sources) {
+    const issue = originalPreflight.call(this, raw, owner, sources)
+    expect(issue).toBeNull()
+    expect(artifacts.decide({ ...original, candidate_id: 'concurrent-update', base_artifact_revision: 1 }, { state: 'accepted' }).state).toBe('accepted')
+    return issue
+  })
   s.complete.mockImplementation(async () => {
     const work = s.state.taskWorks(s.task)[0]!
     if (work.purpose !== 'production') throw Error('Expected producer')
@@ -578,20 +596,21 @@ it('retains a precise rejected candidate after outer installation rollback and p
     original = candidate('stable-artifact', 'original-accepted')
     artifacts.assign([{ task_id: s.task, artifact_id: original.artifact_id, section_id: original.section_id, work_id: work.work_id, plan_revision: work.plan_revision, base_artifact_revision: 0 }])
     expect(artifacts.decide(original, { state: 'accepted' }).state).toBe('accepted')
-    const result: ProducerResult = { version: 1, complete: true, answer: 'Result with a stale fragment', artifacts: [candidate('new-fragment', 'rolled-back-fragment'), candidate('stable-artifact', 'rejected-stale-fragment')], requirement_ids: ['answer'], unresolved: [] }
-    return answer(JSON.stringify(result))
+    const result: ProducerResult = { version: 1, complete: true, answer: 'Result with a stale fragment', artifacts: [candidate('new-fragment', 'rolled-back-fragment'), { ...candidate('stable-artifact', 'rejected-stale-fragment'), base_artifact_revision: 1 }], requirement_ids: ['answer'], unresolved: [] }
+    return productionAnswer(result)
   })
   const run = s.store.start(s.task, 'Accept exact candidates atomically', 'production', [])
   await vi.waitFor(() => expect(s.state.run(run).state).toBe('failed'))
-  expect(artifacts.candidate(s.task, 'rolled-back-fragment')).toBeNull()
-  expect(artifacts.owner(s.task, 'new-fragment')).toBeNull()
-  expect(artifacts.candidate(s.task, 'rejected-stale-fragment')).toMatchObject({ result: { state: 'rejected', code: 'RUNNER_ARTIFACT_CONFLICT' } })
-  expect(artifacts.artifact(s.task, 'stable-artifact')).toMatchObject({ artifact_revision: 1, bundle_resource_id: original!.bundle_resource_id })
+  const record = s.records('worker.result')[0]!, [newFragment, rejected] = (record.value as ProducerResult).artifacts
+  expect(artifacts.candidate(s.task, newFragment!.candidate_id)).toBeNull()
+  expect(artifacts.owner(s.task, newFragment!.artifact_id)).toBeNull()
+  expect(artifacts.candidate(s.task, rejected!.candidate_id)).toMatchObject({ result: { state: 'rejected', code: 'RUNNER_ARTIFACT_CONFLICT' } })
+  expect(artifacts.artifact(s.task, 'stable-artifact')).toMatchObject({ artifact_revision: 2, bundle_resource_id: original!.bundle_resource_id })
   expect(s.db.prepare('SELECT count(*) n FROM runner_work_outputs').get()).toEqual({ n: 0 })
-  const record = s.records('worker.result')[0]!, host = new RunnerHostProduction(s.db, s.state.epoch), validate = vi.fn()
+  const host = new RunnerHostProduction(s.db, s.state.epoch), validate = vi.fn()
   expect(() => host.accept(record.value, record.owner, validate)).toThrow(expect.objectContaining({ code: 'RUNNER_ARTIFACT_CONFLICT' }))
   expect(validate).not.toHaveBeenCalled()
-  expect(artifacts.artifact(s.task, 'stable-artifact')?.artifact_revision).toBe(1)
+  expect(artifacts.artifact(s.task, 'stable-artifact')?.artifact_revision).toBe(2)
   expect(s.records('runner.output.accepted')).toEqual([])
 })
 
@@ -607,14 +626,14 @@ it('integrates an exact complete work output and seals with the original designa
   const unrelated = (s.store.modelTool(s.task, run, { type: 'write', input: { type: 'resource.create', display_name: 'Unrelated source', content: { type: 'text', text: 'UNRELATED_PRIVATE_BODY' } } }) as { data: { id: string } }).data.id
   const candidate: ArtifactCandidate = { candidate_id: 'source-candidate', task_id: s.task, request_id: producer.request_id, intent_revision: producer.intent_revision, run_id: run, work_id: producer.work_id, attempt_id: producer.current_attempt_id!, artifact_id: 'source-artifact', base_artifact_revision: 0, plan_revision: 1, bundle_resource_id: resource, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', provenance_ref: { task_id: s.task, kind: 'record', id: s.state.input(goal.input_event_id).record_id }, requirement_ids: ['answer'], unresolved: [], dependencies: producer.dependencies }
   const execute = integration(s, producer, [{ kind: 'work', task_id: s.task, work_id: producer.work_id, result_revision: 1 }])
-  pending.resolve(answer(JSON.stringify({ version: 1, complete: true, answer: 'Source answer', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] })))
+  pending.resolve(productionAnswer({ version: 1, complete: true, answer: 'Source answer', artifacts: [candidate], requirement_ids: ['answer'], unresolved: [] }))
   await vi.waitFor(() => expect(s.state.work(producer.work_id).state).toBe('succeeded'))
   expect(s.state.run(run).commit_valid).toBe(true)
   expect(composition.inventory(s.task, producer.request_id, 1)).toBeNull()
   s.complete.mockImplementationOnce(async (_config, _key, messages) => {
     const input = JSON.stringify(messages)
     expect(input).toContain(resource)
-    expect(input).toContain('source-artifact')
+    expect(input).toContain(slotId(s, 'source-artifact'))
     expect(input).not.toContain('DECLARED_SOURCE_BODY')
     expect(input).not.toContain(unrelated)
     return { text: '', calls: [{ id: 'read-declared-source', type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'resource', id: resource }) } }], finish: 'tool_calls', usage: { prompt_tokens: 30, completion_tokens: 8 } }
@@ -628,7 +647,7 @@ it('integrates an exact complete work output and seals with the original designa
   expect(s.state.run(run).state).toBe('completed')
   const inventory = composition.inventory(s.task, producer.request_id, 1)!
   expect(inventory.required_works.map(work => work.work_id)).toEqual([producer.work_id, 'integrator'])
-  expect(inventory.required_works[0]!.artifacts).toEqual([{ task_id: s.task, artifact_id: candidate.artifact_id, artifact_revision: 1 }])
+  expect(inventory.required_works[0]!.artifacts).toEqual([{ task_id: s.task, artifact_id: slotId(s, candidate.artifact_id), artifact_revision: 1 }])
   expect(inventory.sealed_by).toEqual({ work_id: producer.work_id, plan_revision: 1, run_id: run, attempt_id: producer.current_attempt_id, role: 'producer' })
   expect(s.records('runner.output.accepted').at(-1)?.inventory_revision).toBe(1)
 })

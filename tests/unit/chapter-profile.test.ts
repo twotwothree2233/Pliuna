@@ -31,20 +31,21 @@ function contentFixture() {
   const manifest = { ...chapterManifest(), content_tree: tree, chapters: treeChapters(tree) }
   const ids = tree.nodes.filter(node => node.kind === 'paragraph').map(node => node.node_id)
   const update = chapterUpdate('content-merge', ids.slice(0, 2), manifest)
+  update.scope_revision = 1
   update.tree_operations = [{ type: 'replace', node_ids: update.region_ids }]
   update.source = owner(update)
   return { bundle, tree, manifest, update, ids }
 }
 
 describe('content operation producer', () => {
-  it('keeps a router-bound merge intact while the worker supplies only its HTML fragment', () => {
+  it('offers routing suggestions while requiring a published result to finish', () => {
     const s = contentFixture(), route = createChapterRouterProfile([s.manifest]).parseResult(final({ kind: 'update', view_id: s.manifest.view_id, region_ids: s.update.region_ids, tree_operations: s.update.tree_operations }))
     if (route.kind !== 'update') throw Error('Expected an update route')
     s.update.tree_operations = route.tree_operations
     let proposal: ChapterProposal | null = null
     const profile = createContentProfile(s.update, owner(s.update), [], () => proposal)
     const binding = JSON.parse(profile.system.split('Bound scope: ')[1]!)
-    expect(binding.operations).toEqual([{ type: 'replace', node_ids: s.update.region_ids }])
+    expect(binding.operation_suggestions).toEqual([{ type: 'replace', node_ids: s.update.region_ids }])
     expect(profile.system).not.toContain(s.bundle.html)
     expect(() => profile.parseResult(final('Done'))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
     const operation: ContentOperation = { type: 'replace', node_ids: s.update.region_ids, html: '<p>Combined</p>' }
@@ -59,16 +60,16 @@ describe('content operation producer', () => {
     expect(() => profile.authorize(createResource(s.bundle))).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
   })
 
-  it('rejects changes to the bound replacement group even when all nodes were granted', () => {
+  it('allows a different operation combination within the authorized nodes', () => {
     const s = contentFixture(), [first, second] = s.update.region_ids
     const changed: ContentOperation[][] = [
       [{ type: 'replace', node_ids: [first!], html: '<p>Combined</p>' }, { type: 'delete', node_ids: [second!] }],
-      [{ type: 'replace', node_ids: [second!, first!], html: '<p>Combined</p>' }],
       [{ type: 'replace', node_ids: [first!], html: '<p>Partial</p>' }],
       [{ type: 'delete', node_ids: s.update.region_ids }]
     ]
-    for (const operations of changed) expect(() => assertContentAuthority(s.update, operations)).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
+    for (const operations of changed) expect(() => assertContentAuthority(s.update, operations)).not.toThrow()
     expect(() => assertContentAuthority(s.update, [{ type: 'replace', node_ids: s.update.region_ids, html: '<p>Corrected complete fragment</p>' }])).not.toThrow()
+    expect(() => assertContentAuthority(s.update, [{ type: 'replace', node_ids: [s.ids[2]!], html: '<p>Outside</p>' }])).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
   })
 })
 

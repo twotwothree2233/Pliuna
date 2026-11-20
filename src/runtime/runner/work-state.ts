@@ -7,6 +7,7 @@ import { RunnerBudgetLedger } from './budget'
 import { assertRunnerId } from './limits'
 import { ChapterState } from './chapter-state'
 import { RunnerArtifactState } from './artifact-state'
+import { isCorrectableContentError } from './content-errors'
 
 type PayloadRow = { payload_json: string }
 type CoreRun = { id: string; task_id: string; request_id: string | null; state: string; commit_valid: number; runtime_epoch: string }
@@ -191,7 +192,7 @@ export class RunnerWorkState {
       if (run.purpose === 'production') {
         const goal = this.goal(run.request_id)
         if (core.request_id !== run.request_id || goal.task_id !== run.task_id || goal.intent_revision !== run.intent_revision || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production Run does not match the current goal')
-        if (run.update_id) new ChapterState(this.db).assertCurrent(run.task_id, run.update_id)
+        if (run.update_id) new ChapterState(this.db).assertLive(run.task_id, run.update_id)
         const active = this.db.prepare("SELECT c.id FROM runs c LEFT JOIN runner_runs r ON r.run_id=c.id WHERE c.request_id=? AND c.id<>? AND c.state IN ('running','waiting') AND COALESCE(json_extract(r.payload_json,'$.update_id'),'')=?").get(run.request_id, run.run_id, run.update_id ?? '')
         if (active) fail('RUNNER_RUN_CONFLICT', 'A request already owns an active production Run')
       } else {
@@ -229,7 +230,7 @@ export class RunnerWorkState {
     if (run.purpose === 'production') {
       const goal = this.goal(run.request_id)
       if (goal.task_id !== run.task_id || goal.intent_revision !== run.intent_revision || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production goal revision is no longer current')
-      if (run.update_id) new ChapterState(this.db).assertCurrent(run.task_id, run.update_id)
+      if (run.update_id) new ChapterState(this.db).assertLive(run.task_id, run.update_id)
       return goal
     }
     const batch = this.db.prepare('SELECT payload_json FROM runner_batches WHERE batch_id=?').get(run.batch_id) as PayloadRow | undefined
@@ -261,7 +262,7 @@ export class RunnerWorkState {
     if (work.purpose === 'production') {
       const goal = this.goal(work.request_id)
       if (goal.intent_revision !== work.intent_revision || goal.state !== 'active') fail('RUNNER_DEPENDENCY_INVALID', 'Work dependency belongs to an obsolete goal revision')
-      if (work.update_id) new ChapterState(this.db).assertCurrent(work.task_id, work.update_id)
+      if (work.update_id) new ChapterState(this.db).assertLive(work.task_id, work.update_id)
     }
     if (checking.has(work.work_id)) fail('RUNNER_DEPENDENCY_CYCLE', 'Logical work dependencies must form a DAG')
     checking.add(work.work_id)
@@ -466,8 +467,11 @@ export class RunnerWorkState {
               const cause = choose(causes); memo.set(work.work_id, cause)
               return cause
             }
-            try { chapters.assertCurrent(taskId, work.update_id) }
-            catch { causes.push(this.cause(work, 'invalidation')) }
+            if (update?.state === 'failed' || update?.state === 'cancelled') causes.push(this.cause(work, update.state === 'failed' ? 'failure' : 'cancellation'))
+            else {
+              try { update?.scope_revision !== undefined ? chapters.assertLive(taskId, work.update_id) : chapters.assertCurrent(taskId, work.update_id) }
+              catch { causes.push(this.cause(work, 'invalidation')) }
+            }
           }
         }
         for (const dependency of work.dependencies) {
@@ -499,6 +503,22 @@ export class RunnerWorkState {
     }).immediate()
   }
 
+  private assertChapterPublisherCorrection(attempt: ExecutionAttempt): void {
+    if (attempt.purpose !== 'production') fail('RUNNER_ATTEMPT_CONFLICT', 'Only chapter production work permits publication correction')
+    const chapters = new ChapterState(this.db), work = this.work(attempt.work_id), run = this.run(attempt.run_id)
+    const update = attempt.update_id ? chapters.assertLive(attempt.task_id, attempt.update_id) : null
+    if (work.role !== 'lightweight' || attempt.profile_id !== 'chapter-host-publisher-v1' || attempt.dispatch_state !== 'dispatched' || !update?.source || update.scope_revision === undefined || update.scope_active !== false || update.state !== 'generating' || work.current_attempt_id !== attempt.attempt_id || terminalWork.has(work.state) || !sameSource(work, attempt) || !sameSource(run, attempt)) fail('RUNNER_ATTEMPT_CONFLICT', 'Only the current chapter host may resume after a verified ineffective publication')
+    this.sourceCurrent(run); this.dependenciesCurrent(attempt.input_versions, true)
+    const producer = this.qualify(update.source.attempt_id)
+    if (producer.work.role !== 'producer' || producer.work.work_id !== update.source.work_id || producer.run.run_id !== attempt.run_id || producer.attempt.purpose !== 'production' || producer.attempt.update_id !== update.update_id || !['dispatched', 'running', 'waiting'].includes(producer.attempt.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Publication correction requires its live original producer')
+    const publication = update.publication_operation_id ? chapters.publication(attempt.task_id, update.publication_operation_id) : null
+    const result = publication?.result as { code?: string; denied?: boolean } | null
+    const action = publication?.operation.action_id ? this.db.prepare('SELECT run_id,state,result,source_json,result_json FROM actions WHERE task_id=? AND id=?').get(attempt.task_id, publication.operation.action_id) as { run_id: string; state: string; result: string; source_json: string; result_json: string | null } | undefined : undefined
+    const outcome = action?.result_json ? JSON.parse(action.result_json) as { code?: string; denied?: boolean } : null
+    const owner = action ? JSON.parse(action.source_json).owner as { attempt_id?: string } | undefined : undefined
+    if (publication?.operation.state !== 'failure' || publication.operation.scope_revision !== update.scope_revision || !result?.code || !isCorrectableContentError(result.code) || result.denied || !action || action.run_id !== attempt.run_id || action.state !== 'ended' || !['failure', 'not_executed'].includes(action.result) || outcome?.code !== result.code || outcome.denied || owner?.attempt_id !== attempt.attempt_id || this.db.prepare("SELECT 1 FROM approvals WHERE action_id=? AND decision='deny'").get(publication.operation.action_id)) fail('RUNNER_ATTEMPT_CONFLICT', 'The original host action must have a verified correctable ineffective outcome')
+  }
+
   updateAttempt(raw: ExecutionAttempt, retryPlan?: LogicalWork): ExecutionAttempt {
     const value = validateRunnerContract('runner_execution_attempt', raw)
     return this.db.transaction(() => {
@@ -507,9 +527,10 @@ export class RunnerWorkState {
       const allowed: Record<ExecutionAttempt['state'], ExecutionAttempt['state'][]> = {
         registered: ['registered', 'queued', 'dispatched', 'revoked', 'cancelled'], queued: ['queued', 'dispatched', 'revoked', 'cancelled'],
         dispatched: ['dispatched', 'running', 'waiting', 'succeeded', 'failed', 'cancelled', 'unknown'], running: ['running', 'waiting', 'succeeded', 'failed', 'cancelled', 'unknown'],
-        waiting: ['waiting', 'running', 'succeeded', 'failed', 'cancelled', 'unknown'], unknown: ['unknown', 'succeeded', 'failed', 'cancelled'], succeeded: ['succeeded'], failed: ['failed'], cancelled: ['cancelled'], revoked: ['revoked']
+        waiting: ['waiting', 'running', 'succeeded', 'failed', 'cancelled', 'unknown'], unknown: ['unknown', 'running', 'succeeded', 'failed', 'cancelled'], succeeded: ['succeeded'], failed: ['failed'], cancelled: ['cancelled'], revoked: ['revoked']
       }
       if (!allowed[old.state].includes(value.state) || ['dispatched', 'running', 'waiting', 'succeeded', 'unknown'].includes(value.state) && value.dispatch_state === 'not_dispatched' || value.state === 'unknown' && value.dispatch_state !== 'unknown') fail('RUNNER_ATTEMPT_CONFLICT', 'Attempt execution and dispatch evidence are inconsistent')
+      if (old.state === 'unknown' && value.state === 'running') this.assertChapterPublisherCorrection(value)
       if (old.dispatch_state === 'not_dispatched' && value.dispatch_state !== 'not_dispatched') {
         this.qualify(value.attempt_id, 'dispatch')
         if (!value.operation_id) fail('RUNNER_ATTEMPT_CONFLICT', 'Dispatch must retain a stable operation identity')

@@ -89,6 +89,8 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
     insert("INSERT INTO runner_runs VALUES (?,?,'production',?,1,NULL,NULL,?,?)", run, task, request, budget, JSON.stringify(runner))
     insert("INSERT INTO runner_work VALUES (?,?,?,1,'completed','{}')", work, task, run)
     insert("INSERT INTO runner_attempts VALUES (?,?,?,?,1,'success','{}')", attempt, task, work, run)
+    insert('INSERT INTO runner_artifact_slots VALUES (?,?,?,?)', work, 'output', task, artifact)
+    insert("INSERT INTO runner_production_submissions VALUES (?,?,?,?,'{}','{}')", record, task, work, attempt)
     insert("INSERT INTO runner_outlines VALUES (?,1,'{}')", task)
     insert('INSERT INTO runner_artifact_owners VALUES (?,?,?,1,?,1)', artifact, task, work, randomUUID())
     insert("INSERT INTO runner_candidates VALUES (?,?,?,'{}','{}')", candidate, task, artifact)
@@ -124,6 +126,8 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
     insert('INSERT INTO runner_content_tree_heads VALUES (?,?,1)', task, view)
     insert('INSERT INTO runner_content_tree_cursors VALUES (?,?,?,1,?)', randomUUID(), task, view, JSON.stringify({ source: 'tree', offset: 1 }))
     insert('INSERT INTO runner_content_intent_relations VALUES (?,?,?,?)', task, chapterUpdate, randomUUID(), JSON.stringify({ source_record_id: record, retained_node_ids: [], superseded_node_ids: [] }))
+    const contentScope = validateRunnerContract('runner_content_scope_revision', { task_id: task, update_id: chapterUpdate, revision: 1, request_order: 1, source: { task_id: task, request_id: request, intent_revision: 1, run_id: run, work_id: work, attempt_id: attempt, purpose: 'production', role: 'producer', update_id: chapterUpdate }, base_manifest: manifest, operations: [{ type: 'replace', node_ids: ['a'] }], read_refs: [], dependencies: [] })
+    insert('INSERT INTO runner_content_scope_revisions VALUES (?,?,1,1,?,?)', task, chapterUpdate, JSON.stringify(contentScope), now)
   })()
   return { read }
 }
