@@ -45,7 +45,7 @@ it('freezes exactly the declared schema/value/references for every affected View
   const rows = query('view_history').items
   expect(rows).toHaveLength(2); expect(rows[0].evidence).toBeUndefined()
   for (const row of rows) expect(query('view_history', row.id).data.evidence.sources).toEqual([{ kind: 'task_data', id: a, revision: 1, schema, value: { text: '原始依据' }, references: [], resources: [] }])
-  expect(JSON.stringify(history())).not.toContain(b); expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 1 })
+  expect(JSON.stringify(history())).not.toContain(b); expect(db.prepare('SELECT version FROM schema_version').get()).toEqual({ version: 2 })
 })
 it.each([
   { kind: 'resource', id: 'x' }, { kind: 'view', id: 'x', expected_revision: 1 }, { kind: 'task_data', id: 'x' },

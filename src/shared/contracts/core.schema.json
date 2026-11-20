@@ -24,7 +24,9 @@
             "call",
             "action",
             "approval",
-            "summary"
+            "summary",
+            "content_tree",
+            "content_node"
           ]
         },
         "id": {
@@ -1051,7 +1053,9 @@
             "call",
             "action",
             "approval",
-            "summary"
+            "summary",
+            "content_tree",
+            "content_node"
           ]
         },
         "filters": {
@@ -1245,7 +1249,7 @@
               "const": "read"
             },
             "input": {
-              "$ref": "#/$defs/read"
+              "$ref": "#/$defs/model_read"
             }
           },
           "required": [
@@ -2926,6 +2930,10 @@
             "operation_id": {
               "type": "string",
               "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            },
+            "authorization_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
             }
           },
           "required": [
@@ -3017,6 +3025,67 @@
             "inputs_saved",
             "operation_id",
             "confirm_retire_replica"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "maintenance.replica.reauthorize.preview"
+            },
+            "token": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            },
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            },
+            "inputs_saved": {
+              "const": true
+            }
+          },
+          "required": [
+            "type",
+            "token",
+            "operation_id",
+            "inputs_saved"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "maintenance.replica.reauthorize.confirm"
+            },
+            "token": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            },
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            },
+            "authorization_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            },
+            "inputs_saved": {
+              "const": true
+            },
+            "confirm_reauthorize_replica": {
+              "const": true
+            }
+          },
+          "required": [
+            "type",
+            "token",
+            "operation_id",
+            "authorization_id",
+            "inputs_saved",
+            "confirm_reauthorize_replica"
           ],
           "additionalProperties": false
         },
@@ -3736,6 +3805,144 @@
             "confirm_cost"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapters.map"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "view_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "expected_view_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "view_id",
+            "expected_view_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapter.update"
+            },
+            "source_request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "input_event_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "view_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "view_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "state_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "region_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "tsType": "string[]"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "model_config_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "tree_operations": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_content_operation_plan"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "ContentOperationPlan[]"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "input_event_id",
+            "update_id",
+            "view_id",
+            "view_revision",
+            "state_revision",
+            "region_ids",
+            "text",
+            "model_config_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapter.cancel"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "update_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "chapter.status"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "task_id",
+            "update_id"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -3814,26 +4021,6 @@
               "maximum": 9007199254740991
             },
             "response_bytes": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            },
-            "run_tokens": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            },
-            "run_model_requests": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            },
-            "run_tool_requests": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            },
-            "run_wall_ms": {
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
@@ -5796,6 +5983,9 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 200
+              },
+              "owner": {
+                "$ref": "#/$defs/runner_execution_scope"
               }
             },
             "required": [
@@ -5946,6 +6136,9 @@
             ],
             "additionalProperties": false
           }
+        },
+        "owner": {
+          "$ref": "#/$defs/runner_execution_scope"
         }
       },
       "required": [
@@ -6163,6 +6356,9 @@
         "run_id": {
           "type": "string",
           "minLength": 1
+        },
+        "owner": {
+          "$ref": "#/$defs/runner_execution_scope"
         }
       },
       "required": [
@@ -6175,6 +6371,3747 @@
         "model_id",
         "model_revision",
         "installed_at"
+      ],
+      "additionalProperties": false
+    },
+    "runner_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "runner_provenance_ref": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "kind": {
+          "enum": [
+            "record",
+            "resource",
+            "action"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "task_id",
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "runner_outcome_requirement": {
+      "type": "object",
+      "properties": {
+        "requirement_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "kind": {
+          "enum": [
+            "answer",
+            "artifact",
+            "content_check"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "provenance_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "kind",
+        "required",
+        "provenance_required"
+      ],
+      "additionalProperties": false
+    },
+    "runner_goal_ref": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_artifact_ref": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "task_id",
+        "artifact_id",
+        "artifact_revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_requirement_ref": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "requirement_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision",
+        "requirement_id"
+      ],
+      "additionalProperties": false
+    },
+    "runner_goal_revision": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "withdrawn"
+          ]
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_outcome_requirement"
+          }
+        },
+        "previous_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision",
+        "input_event_id",
+        "state",
+        "requirements"
+      ],
+      "additionalProperties": false
+    },
+    "runner_work_dependency": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "goal"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "request_id",
+            "intent_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "work"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "result_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "work_id",
+            "result_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "artifact_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "artifact_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "artifact_id",
+            "artifact_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "resource"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "resource_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "resource_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/runner_chapter_dependency"
+        }
+      ]
+    },
+    "runner_consumption_stage": {
+      "enum": [
+        "received",
+        "routed",
+        "installed"
+      ]
+    },
+    "runner_input_event": {
+      "type": "object",
+      "properties": {
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "kind": {
+          "enum": [
+            "request",
+            "query",
+            "explanation",
+            "correction",
+            "cancel_work",
+            "cancel_run",
+            "stop_task",
+            "withdraw_goal",
+            "operation_completed",
+            "approval_decided"
+          ]
+        },
+        "record_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "caused_by_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "stage": {
+          "$ref": "#/$defs/runner_consumption_stage"
+        },
+        "route": {
+          "enum": [
+            "direct",
+            "clarification",
+            "semantic"
+          ]
+        },
+        "result_ref": {
+          "$ref": "#/$defs/runner_provenance_ref"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "input_event_id",
+        "task_id",
+        "kind",
+        "record_id",
+        "stage"
+      ],
+      "additionalProperties": false
+    },
+    "runner_run": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "runtime_epoch": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "state": {
+              "enum": [
+                "queued",
+                "running",
+                "waiting",
+                "closing",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            },
+            "commit_valid": {
+              "type": "boolean"
+            },
+            "budget_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "previous_run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "purpose": {
+              "const": "production"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "run_id",
+            "task_id",
+            "runtime_epoch",
+            "state",
+            "commit_valid",
+            "budget_id",
+            "purpose",
+            "request_id",
+            "intent_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "runtime_epoch": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "state": {
+              "enum": [
+                "queued",
+                "running",
+                "waiting",
+                "closing",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            },
+            "commit_valid": {
+              "type": "boolean"
+            },
+            "budget_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "previous_run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "purpose": {
+              "const": "composition"
+            },
+            "batch_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "composition_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "trigger_request_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "run_id",
+            "task_id",
+            "runtime_epoch",
+            "state",
+            "commit_valid",
+            "budget_id",
+            "purpose",
+            "batch_id",
+            "composition_version",
+            "trigger_request_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_work_cause": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "failure",
+            "cancellation",
+            "invalidation"
+          ]
+        },
+        "work_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "kind",
+        "work_id"
+      ],
+      "additionalProperties": false
+    },
+    "runner_logical_work": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "plan_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "requirement_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              }
+            },
+            "dependencies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_work_dependency"
+              }
+            },
+            "state": {
+              "enum": [
+                "planned",
+                "queued",
+                "running",
+                "waiting",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "invalidated",
+                "dependency_failed",
+                "dependency_cancelled"
+              ]
+            },
+            "current_attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "root_cause": {
+              "$ref": "#/$defs/runner_work_cause"
+            },
+            "result_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "purpose": {
+              "const": "production"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "work_id",
+            "task_id",
+            "run_id",
+            "plan_revision",
+            "role",
+            "required",
+            "requirement_ids",
+            "dependencies",
+            "state",
+            "max_attempts",
+            "purpose",
+            "request_id",
+            "intent_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "plan_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "requirement_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              }
+            },
+            "dependencies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_work_dependency"
+              }
+            },
+            "state": {
+              "enum": [
+                "planned",
+                "queued",
+                "running",
+                "waiting",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "invalidated",
+                "dependency_failed",
+                "dependency_cancelled"
+              ]
+            },
+            "current_attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "root_cause": {
+              "$ref": "#/$defs/runner_work_cause"
+            },
+            "result_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "purpose": {
+              "const": "composition"
+            },
+            "batch_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "composition_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "trigger_request_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "work_id",
+            "task_id",
+            "run_id",
+            "plan_revision",
+            "role",
+            "required",
+            "requirement_ids",
+            "dependencies",
+            "state",
+            "max_attempts",
+            "purpose",
+            "batch_id",
+            "composition_version",
+            "trigger_request_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_execution_scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "purpose": {
+              "const": "production"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "task_id",
+            "run_id",
+            "work_id",
+            "attempt_id",
+            "role",
+            "purpose",
+            "request_id",
+            "intent_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "purpose": {
+              "const": "composition"
+            },
+            "batch_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "composition_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "trigger_request_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "task_id",
+            "run_id",
+            "work_id",
+            "attempt_id",
+            "role",
+            "purpose",
+            "batch_id",
+            "composition_version",
+            "trigger_request_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_execution_attempt": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "runtime_epoch": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_number": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "profile_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "model_config_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "model_config_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "input_versions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_work_dependency"
+              }
+            },
+            "state": {
+              "enum": [
+                "registered",
+                "queued",
+                "dispatched",
+                "running",
+                "waiting",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "unknown",
+                "revoked"
+              ]
+            },
+            "dispatch_state": {
+              "enum": [
+                "not_dispatched",
+                "dispatched",
+                "unknown"
+              ]
+            },
+            "previous_attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "result_ref": {
+              "$ref": "#/$defs/runner_provenance_ref"
+            },
+            "usage_refs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              }
+            },
+            "purpose": {
+              "const": "production"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "update_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "task_id",
+            "run_id",
+            "work_id",
+            "runtime_epoch",
+            "attempt_number",
+            "profile_id",
+            "model_config_id",
+            "model_config_revision",
+            "input_versions",
+            "state",
+            "dispatch_state",
+            "usage_refs",
+            "purpose",
+            "request_id",
+            "intent_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "runtime_epoch": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_number": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "profile_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "model_config_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "model_config_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "input_versions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_work_dependency"
+              }
+            },
+            "state": {
+              "enum": [
+                "registered",
+                "queued",
+                "dispatched",
+                "running",
+                "waiting",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "unknown",
+                "revoked"
+              ]
+            },
+            "dispatch_state": {
+              "enum": [
+                "not_dispatched",
+                "dispatched",
+                "unknown"
+              ]
+            },
+            "previous_attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "result_ref": {
+              "$ref": "#/$defs/runner_provenance_ref"
+            },
+            "usage_refs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              }
+            },
+            "purpose": {
+              "const": "composition"
+            },
+            "batch_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "composition_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "trigger_request_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "task_id",
+            "run_id",
+            "work_id",
+            "runtime_epoch",
+            "attempt_number",
+            "profile_id",
+            "model_config_id",
+            "model_config_revision",
+            "input_versions",
+            "state",
+            "dispatch_state",
+            "usage_refs",
+            "purpose",
+            "batch_id",
+            "composition_version",
+            "trigger_request_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_outline_section": {
+      "type": "object",
+      "properties": {
+        "section_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "order_key": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "position_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "section_id",
+        "request_id",
+        "intent_revision",
+        "order_key",
+        "position_revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_outline": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "outline_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "base_outline_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_outline_section"
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "outline_revision",
+        "base_outline_revision",
+        "sections"
+      ],
+      "additionalProperties": false
+    },
+    "runner_presentation_kind": {
+      "const": "managed-v1"
+    },
+    "runner_width_constraint": {
+      "enum": [
+        "full",
+        "flexible"
+      ]
+    },
+    "runner_interaction_kind": {
+      "enum": [
+        "none",
+        "input"
+      ]
+    },
+    "runner_artifact_index": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "section_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "order_key": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "presentation_kind": {
+          "$ref": "#/$defs/runner_presentation_kind"
+        },
+        "width_constraint": {
+          "$ref": "#/$defs/runner_width_constraint"
+        },
+        "interaction_kind": {
+          "$ref": "#/$defs/runner_interaction_kind"
+        },
+        "provenance_ref": {
+          "$ref": "#/$defs/runner_provenance_ref"
+        },
+        "acceptance_state": {
+          "const": "accepted"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "run_id",
+        "work_id",
+        "attempt_id",
+        "intent_revision",
+        "artifact_id",
+        "artifact_revision",
+        "bundle_resource_id",
+        "section_id",
+        "order_key",
+        "presentation_kind",
+        "width_constraint",
+        "interaction_kind",
+        "provenance_ref",
+        "acceptance_state"
+      ],
+      "additionalProperties": false
+    },
+    "runner_artifact_candidate": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "section_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "order_key": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "presentation_kind": {
+          "$ref": "#/$defs/runner_presentation_kind"
+        },
+        "width_constraint": {
+          "$ref": "#/$defs/runner_width_constraint"
+        },
+        "interaction_kind": {
+          "$ref": "#/$defs/runner_interaction_kind"
+        },
+        "provenance_ref": {
+          "$ref": "#/$defs/runner_provenance_ref"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "base_artifact_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "section_position_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_work_dependency"
+          }
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_requirement_ref"
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "run_id",
+        "work_id",
+        "attempt_id",
+        "intent_revision",
+        "artifact_id",
+        "bundle_resource_id",
+        "section_id",
+        "order_key",
+        "presentation_kind",
+        "width_constraint",
+        "interaction_kind",
+        "provenance_ref",
+        "candidate_id",
+        "base_artifact_revision",
+        "plan_revision",
+        "section_position_revision",
+        "dependencies",
+        "requirement_ids",
+        "unresolved"
+      ],
+      "additionalProperties": false
+    },
+    "runner_presentation_intent": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/runner_artifact_ref"
+        },
+        "section_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "section_position_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "order_key": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "slot_id": {
+          "const": "main"
+        },
+        "layout_mode": {
+          "enum": [
+            "column",
+            "responsive_columns"
+          ]
+        },
+        "width_constraint": {
+          "$ref": "#/$defs/runner_width_constraint"
+        }
+      },
+      "required": [
+        "artifact",
+        "section_id",
+        "section_position_revision",
+        "order_key",
+        "slot_id",
+        "layout_mode",
+        "width_constraint"
+      ],
+      "additionalProperties": false
+    },
+    "runner_presentation_plan": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "composition_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "intents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_presentation_intent"
+          },
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "batch_id",
+        "composition_version",
+        "intents"
+      ],
+      "additionalProperties": false
+    },
+    "runner_work_output_declaration": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "result_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "result_ref": {
+          "$ref": "#/$defs/runner_provenance_ref"
+        },
+        "complete": {
+          "const": true
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_artifact_ref"
+          }
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_requirement_ref"
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision",
+        "run_id",
+        "work_id",
+        "attempt_id",
+        "plan_revision",
+        "result_revision",
+        "result_ref",
+        "complete",
+        "artifacts",
+        "requirement_ids",
+        "unresolved"
+      ],
+      "additionalProperties": false
+    },
+    "runner_contribution_source": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "work_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "role": {
+          "enum": [
+            "router",
+            "producer"
+          ]
+        }
+      },
+      "required": [
+        "run_id",
+        "work_id",
+        "attempt_id",
+        "plan_revision",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "runner_contribution_inventory": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "inventory_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "previous_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sealed_by": {
+          "$ref": "#/$defs/runner_contribution_source"
+        },
+        "required_works": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_work_output_declaration"
+          }
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_requirement_ref"
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision",
+        "inventory_revision",
+        "sealed_by",
+        "required_works",
+        "requirement_ids",
+        "unresolved"
+      ],
+      "additionalProperties": false
+    },
+    "runner_contribution_inventory_ref": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "inventory_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision",
+        "inventory_revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_scope_target": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          }
+        },
+        "contribution_inventory": {
+          "$ref": "#/$defs/runner_contribution_inventory_ref"
+        }
+      },
+      "required": [
+        "request_id",
+        "intent_revision",
+        "required",
+        "requirement_ids"
+      ],
+      "additionalProperties": false
+    },
+    "runner_composition_scope": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "composition_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "previous_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_scope_target"
+          }
+        },
+        "state": {
+          "enum": [
+            "working",
+            "complete"
+          ]
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_requirement_ref"
+          }
+        },
+        "publication_manifest_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "task_id",
+        "composition_version",
+        "targets",
+        "state",
+        "unresolved"
+      ],
+      "additionalProperties": false
+    },
+    "runner_section_constraint": {
+      "type": "object",
+      "properties": {
+        "section_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "position_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "order_key": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "section_id",
+        "position_revision",
+        "order_key"
+      ],
+      "additionalProperties": false
+    },
+    "runner_composition_batch": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "composition_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "run_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "trigger_request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "model_config_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "model_config_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "preparing",
+            "prepared",
+            "waiting",
+            "publishing",
+            "published",
+            "failed",
+            "unknown",
+            "cancelled",
+            "invalidated"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_goal_ref"
+          }
+        },
+        "indexes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_artifact_ref"
+          },
+          "maxItems": 16
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_section_constraint"
+          },
+          "maxItems": 16
+        },
+        "previous_batch_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "action_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "task_id",
+        "batch_id",
+        "composition_version",
+        "run_id",
+        "trigger_request_id",
+        "model_config_id",
+        "model_config_revision",
+        "state",
+        "targets",
+        "indexes",
+        "sections"
+      ],
+      "additionalProperties": false
+    },
+    "runner_delivery_record": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "delivery_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "record_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "input_event_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "purpose": {
+              "const": "final_answer"
+            }
+          },
+          "required": [
+            "delivery_id",
+            "task_id",
+            "run_id",
+            "work_id",
+            "attempt_id",
+            "role",
+            "record_id",
+            "input_event_id",
+            "request_id",
+            "intent_revision",
+            "purpose"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delivery_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "record_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "input_event_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "request_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "purpose": {
+              "enum": [
+                "progress",
+                "diagnostic"
+              ]
+            }
+          },
+          "required": [
+            "delivery_id",
+            "task_id",
+            "run_id",
+            "work_id",
+            "attempt_id",
+            "role",
+            "record_id",
+            "purpose"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delivery_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "work_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "role": {
+              "enum": [
+                "router",
+                "producer",
+                "lightweight",
+                "integrator",
+                "collator",
+                "diagnostic"
+              ]
+            },
+            "record_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "input_event_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "purpose": {
+              "const": "composition"
+            },
+            "batch_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "composition_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "publication_manifest_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "delivery_id",
+            "task_id",
+            "run_id",
+            "work_id",
+            "attempt_id",
+            "role",
+            "record_id",
+            "purpose",
+            "batch_id",
+            "composition_version"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_delivery_query": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "purpose": {
+          "enum": [
+            "final_answer",
+            "progress",
+            "diagnostic",
+            "composition"
+          ]
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "after_delivery_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "task_id",
+        "purpose",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "runner_publication_entry": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "chapter_update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "chapter_operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "section_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "source_bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "published_bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "surface_history_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "task_id",
+        "request_id",
+        "intent_revision",
+        "artifact_id",
+        "artifact_revision",
+        "section_id",
+        "source_bundle_resource_id",
+        "published_bundle_resource_id",
+        "view_id",
+        "view_revision",
+        "state_revision",
+        "surface_history_id"
+      ],
+      "oneOf": [
+        {
+          "tsType": "{ batch_id: string; chapter_update_id?: never; chapter_operation_id?: never }",
+          "required": [
+            "batch_id"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "chapter_update_id"
+                ]
+              },
+              {
+                "required": [
+                  "chapter_operation_id"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "tsType": "{ batch_id?: never; chapter_update_id: string; chapter_operation_id: string }",
+          "required": [
+            "chapter_update_id",
+            "chapter_operation_id"
+          ],
+          "not": {
+            "required": [
+              "batch_id"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "runner_publication_manifest": {
+      "type": "object",
+      "properties": {
+        "manifest_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "composition_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "action_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "surface_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "surface_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "enum": [
+            "partial",
+            "complete"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_goal_ref"
+          }
+        },
+        "contributions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_publication_entry"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_requirement_ref"
+          }
+        }
+      },
+      "required": [
+        "manifest_id",
+        "task_id",
+        "composition_version",
+        "operation_id",
+        "action_id",
+        "surface_id",
+        "surface_revision",
+        "state",
+        "targets",
+        "contributions",
+        "unresolved"
+      ],
+      "additionalProperties": false
+    },
+    "model_target": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "task",
+            "message",
+            "event",
+            "answer",
+            "surface",
+            "view",
+            "view_history",
+            "task_data",
+            "resource",
+            "object_type",
+            "plugin",
+            "capability",
+            "run",
+            "call",
+            "action",
+            "approval",
+            "summary",
+            "runner_outline",
+            "runner_batch",
+            "runner_artifact_index",
+            "runner_layout",
+            "content_tree",
+            "content_node"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "model_read": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/model_target"
+        },
+        "range": {
+          "type": "object",
+          "properties": {
+            "start_line": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "end_line": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "start_line",
+            "end_line"
+          ],
+          "additionalProperties": false
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "content": {
+          "type": "object",
+          "properties": {
+            "offset_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "end_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pages": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32000,
+              "default": 4000
+            }
+          },
+          "additionalProperties": false,
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "pages",
+                  "offset_bytes"
+                ]
+              },
+              {
+                "required": [
+                  "pages",
+                  "end_bytes"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "range",
+          "cursor"
+        ]
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "content",
+              "range"
+            ]
+          }
+        }
+      ]
+    },
+    "runner_chapter_dependency": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "chapter"
+        },
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        }
+      },
+      "required": [
+        "kind",
+        "task_id",
+        "view_id",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_ownership": {
+      "type": "object",
+      "properties": {
+        "form_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "behavior_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "reference_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "export_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "css_selectors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "form_ids",
+        "behavior_ids",
+        "reference_ids",
+        "export_ids",
+        "css_selectors"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_region": {
+      "type": "object",
+      "properties": {
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "title_selector": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 512
+        },
+        "body_selector": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 512
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "ownership": {
+          "$ref": "#/$defs/runner_chapter_ownership"
+        }
+      },
+      "required": [
+        "region_id",
+        "revision",
+        "title",
+        "title_selector",
+        "body_selector",
+        "dependencies",
+        "ownership"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_manifest": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "manifest_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "shared_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_region"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "ChapterRegion[]"
+        },
+        "content_tree": {
+          "$ref": "#/$defs/runner_content_tree",
+          "tsType": "ContentTree"
+        }
+      },
+      "required": [
+        "task_id",
+        "view_id",
+        "view_revision",
+        "state_revision",
+        "bundle_resource_id",
+        "manifest_revision",
+        "shared_revision",
+        "request_id",
+        "intent_revision",
+        "chapters"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_intent": {
+      "type": "object",
+      "properties": {
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "region_id",
+        "intent_revision"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_update": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "record_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "base_manifest": {
+          "$ref": "#/$defs/runner_chapter_manifest"
+        },
+        "region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "minItems": 0,
+          "tsType": "string[]"
+        },
+        "region_intents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_intent"
+          },
+          "maxItems": 256,
+          "minItems": 0,
+          "tsType": "ChapterIntent[]"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "generating",
+            "waiting_input",
+            "waiting_approval",
+            "assembling",
+            "publishing",
+            "unknown",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "superseded"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "model_config_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "source": {
+          "$ref": "#/$defs/runner_execution_scope"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "publication_operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "action_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "previous_update_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "tree_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation_plan"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperationPlan[]"
+        },
+        "authorization": {
+          "$ref": "#/$defs/runner_content_authorization"
+        },
+        "candidate_region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]"
+        },
+        "candidate_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation_plan"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperationPlan[]"
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "scope_active": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "input_event_id",
+        "record_id",
+        "request_id",
+        "intent_revision",
+        "view_id",
+        "base_manifest",
+        "region_ids",
+        "region_intents",
+        "dependencies",
+        "state",
+        "text",
+        "previous_update_ids"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "scope_revision"
+            ]
+          },
+          "then": {
+            "required": [
+              "authorization"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "scope_revision": {
+                      "const": 0
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "region_ids": {
+                      "maxItems": 0
+                    },
+                    "region_intents": {
+                      "maxItems": 0
+                    },
+                    "scope_active": {
+                      "const": false
+                    }
+                  },
+                  "not": {
+                    "required": [
+                      "tree_operations"
+                    ]
+                  }
+                },
+                "else": {
+                  "required": [
+                    "tree_operations",
+                    "request_order",
+                    "source"
+                  ],
+                  "properties": {
+                    "region_ids": {
+                      "minItems": 1
+                    },
+                    "region_intents": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "region_ids": {
+                "minItems": 1
+              },
+              "region_intents": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runner_chapter_replacement": {
+      "type": "object",
+      "properties": {
+        "previous_region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "string[]"
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_region"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "ChapterRegion[]"
+        }
+      },
+      "required": [
+        "previous_region_ids",
+        "chapters"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_proposal": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "replacements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_replacement"
+          },
+          "maxItems": 256,
+          "minItems": 0,
+          "tsType": "ChapterReplacement[]"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "source": {
+          "$ref": "#/$defs/runner_execution_scope"
+        },
+        "tree_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperation[]"
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "read_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]"
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "proposal_id",
+        "intent_revision",
+        "bundle_resource_id",
+        "replacements",
+        "dependencies",
+        "source"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "tree_operations"
+            ]
+          },
+          "then": {},
+          "else": {
+            "properties": {
+              "replacements": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runner_chapter_inheritance": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "region_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "region_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source_bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "source_manifest_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "artifact_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "view_id",
+        "region_id",
+        "region_revision",
+        "source_bundle_resource_id",
+        "source_manifest_revision",
+        "request_id",
+        "intent_revision",
+        "requirement_ids",
+        "dependencies",
+        "valid"
+      ],
+      "additionalProperties": false
+    },
+    "runner_chapter_publication": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "base_manifest_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "assembled_bundle_resource_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "view_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "expected_view_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_state_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request": {
+          "$ref": "#/$defs/model_request"
+        },
+        "source_bundle_resource_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "tsType": "string[]"
+        },
+        "previous_operation_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "action_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "state": {
+          "enum": [
+            "registered",
+            "prepared",
+            "dispatched",
+            "published",
+            "failure",
+            "cancelled",
+            "unknown",
+            "superseded"
+          ]
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "task_id",
+        "operation_id",
+        "update_id",
+        "proposal_id",
+        "base_manifest_revision",
+        "assembled_bundle_resource_id",
+        "view_id",
+        "expected_view_revision",
+        "expected_state_revision",
+        "request",
+        "source_bundle_resource_ids",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_node": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/runner_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "document",
+            "section",
+            "paragraph",
+            "list",
+            "list_item",
+            "table",
+            "row",
+            "cell",
+            "code",
+            "formula",
+            "image",
+            "block"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "position_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "minItems": 0,
+          "maxItems": 10000,
+          "tsType": "string[]"
+        },
+        "selector": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "end_selector": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "tag": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "span": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "additionalProperties": false
+        },
+        "inner_span": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "kind",
+        "revision",
+        "position_revision",
+        "title",
+        "children",
+        "selector",
+        "end_selector",
+        "tag",
+        "span",
+        "inner_span"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_lineage": {
+      "type": "object",
+      "properties": {
+        "previous_node_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "successor_node_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "minItems": 0,
+          "maxItems": 10000,
+          "tsType": "string[]"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "enum": [
+            "split",
+            "merge",
+            "deleted",
+            "replaced"
+          ]
+        }
+      },
+      "required": [
+        "previous_node_id",
+        "successor_node_ids",
+        "revision",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_tree": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "root_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_node"
+          },
+          "minItems": 1,
+          "maxItems": 10000,
+          "tsType": "ContentNode[]"
+        },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_lineage"
+          },
+          "maxItems": 10000,
+          "tsType": "ContentLineage[]"
+        }
+      },
+      "required": [
+        "version",
+        "revision",
+        "root_id",
+        "nodes",
+        "lineage"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "replace"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "html"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position",
+            "html",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position",
+            "html"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "delete"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_content_operation_plan": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "replace"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "node_ids"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "insert"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            },
+            "html": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "type",
+            "parent_id",
+            "position"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "delete"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 256,
+              "tsType": "string[]"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "before",
+                "after"
+              ]
+            },
+            "anchor_id": {
+              "$ref": "#/$defs/runner_id"
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position",
+            "anchor_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "move"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/runner_id"
+              },
+              "minItems": 1,
+              "maxItems": 1,
+              "tsType": "string[]"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/runner_id"
+            },
+            "position": {
+              "enum": [
+                "start",
+                "end"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "node_ids",
+            "parent_id",
+            "position"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runner_content_authorization": {
+      "type": "object",
+      "properties": {
+        "record_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "input_event_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]",
+          "minItems": 1
+        }
+      },
+      "required": [
+        "record_id",
+        "input_event_id",
+        "region_ids"
+      ],
+      "additionalProperties": false
+    },
+    "runner_content_scope_revision": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "update_id": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source": {
+          "$ref": "#/$defs/runner_execution_scope"
+        },
+        "base_manifest": {
+          "$ref": "#/$defs/runner_chapter_manifest"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_content_operation_plan"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "tsType": "ContentOperationPlan[]"
+        },
+        "read_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_id"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "tsType": "string[]"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runner_chapter_dependency"
+          },
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "task_id",
+        "update_id",
+        "revision",
+        "request_order",
+        "source",
+        "base_manifest",
+        "operations",
+        "read_refs",
+        "dependencies"
       ],
       "additionalProperties": false
     }

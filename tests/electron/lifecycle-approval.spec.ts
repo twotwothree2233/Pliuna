@@ -33,7 +33,7 @@ async function createTask(page: Page, title: string, first = true) {
 async function send(page: Page, text: string, model = 'lifecycle-main') {
   await chooseModel(page, model)
   await page.getByLabel('想从哪里开始？').fill(text)
-  await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+  await page.getByRole('button', { name: /发送消息/ }).click()
 }
 
 for (const decision of ['approve', 'deny', 'escalate', 'invalid'] as const) test('desktop independent assisted approval: ' + decision, async () => {
@@ -134,7 +134,7 @@ test('task switching, occupied configuration, stop/save/submit, restart and expl
     await page.getByRole('button', { name: /停止恢复测试/ }).click()
     await openPending(page)
     await expect(page.getByRole('button', { name: '批准本次动作', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: /发送 · 新 Run/ })).toBeDisabled()
+    await expect(page.getByRole('button', { name: /发送消息/ })).toBeDisabled()
     await page.getByRole('button', { name: '关闭弹窗', exact: true }).click()
     const occupied = await page.evaluate(async () => window.pliuna.request({ type: 'model.list' }))
     expect(occupied).toMatchObject({ ok: true, data: { models: [{ id: 'lifecycle-main', occupied: true }] } })
@@ -174,7 +174,7 @@ test('task switching, occupied configuration, stop/save/submit, restart and expl
     await page.getByRole('button', { name: '恢复任务', exact: true }).click()
     await expect(page.getByRole('button', { name: '停止任务', exact: true })).toBeVisible()
     await expect(page.getByLabel('想从哪里开始？')).toBeEnabled()
-    await expect(page.getByRole('button', { name: /发送 · 新 Run/ })).toBeDisabled()
+    await expect(page.getByRole('button', { name: /发送消息/ })).toBeDisabled()
     expect(server.exchanges).toHaveLength(stoppedRequests)
     await page.getByRole('tab', { name: /作答记录/ }).click()
     await expect(page.getByText('第 1 次提交', { exact: false })).toBeVisible()

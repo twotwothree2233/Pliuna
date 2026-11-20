@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { ChatAdapter } from '../../src/runtime/model/adapter'
 import { ModelService, type ModelLease } from '../../src/runtime/model/service'
-import { RunBudget, runAgent } from '../../src/runtime/model/agent'
+import { RunBudget, runAgent, type BudgetState } from '../../src/runtime/model/agent'
 import { compactContext } from '../../src/runtime/model/context'
 import { requestAccounting } from '../../src/runtime/model/accounting'
 import { deadline } from '../../src/runtime/model/limits'
@@ -45,15 +45,26 @@ it.each([32768, undefined])('main and summary dispatch exact configured output %
   expect(request.mock.calls[1]![6]).toBe(output)
 })
 
-it('has no hidden Run request/tool/time/token ceiling, but enforces explicit limits and unknown output conflicts', () => {
-  const budget = new RunBudget(config, Date.now() - 7200000)
+it.each(['run_model_requests', 'run_tool_requests', 'run_tokens', 'run_wall_ms'] as const)('ignores the removed %s ceiling in legacy configurations while retaining usage', field => {
+  vi.useFakeTimers()
+  const limits: NonNullable<BudgetState['limits']> = { [field]: 1 }
+  const budget = new RunBudget({ ...config, limits })
+  vi.advanceTimersByTime(7200000)
   for (let n = 0; n < 201; n++) { const reserved = budget.reserve([], undefined); budget.settle(reserved, { text: '', calls: [], finish: 'stop', usage: { prompt_tokens: 1000, completion_tokens: 500 } }); budget.tool() }
-  expect(budget.state.model_requests).toBe(201); expect(budget.state.tokens).toBe(301500)
-  const limited = new RunBudget({ ...config, limits: { run_model_requests: 1, run_tool_requests: 1, run_tokens: 50000 } }); limited.reserve([], undefined); expect(() => limited.reserve([], undefined)).toThrow('RUN_BUDGET_EXCEEDED'); limited.tool(); expect(() => limited.tool()).toThrow('RUN_BUDGET_EXCEEDED')
-  expect(() => new RunBudget({ ...config, limits: { run_wall_ms: 5 } }, Date.now() - 6).check()).toThrow('RUN_WALL_LIMIT')
+  expect(budget.state).toMatchObject({ model_requests: 201, tool_requests: 201, tokens: 301500, accounting: 'provider-usage' })
+  expect(budget.state).not.toHaveProperty('limits')
+})
+
+it('settles provider usage above legacy token caps and accounts for unknown output without rejecting it', () => {
+  const limits: NonNullable<BudgetState['limits']> = { run_tokens: 50000 }
+  const budget = new RunBudget({ ...config, limits }), reserved = budget.reserve([], undefined)
+  expect(reserved).toBe(budget.estimate([], undefined) + 32768)
+  budget.settle(reserved, { text: '', calls: [], finish: 'stop', usage: { prompt_tokens: 60000, completion_tokens: 1 } })
+  expect(budget.state).toMatchObject({ model_requests: 1, tokens: 60001, accounting: 'provider-usage' })
   const { max_output_tokens: _, ...unset } = config
-  expect(() => new RunBudget({ ...unset, limits: { run_tokens: 50000 } }).reserve([], undefined)).toThrow('OUTPUT_BUDGET_UNKNOWN')
-  const full = new RunBudget(config); expect(full.reserve([], undefined)).toBe(full.estimate([], undefined) + 32768)
+  const unbounded = new RunBudget({ ...unset, limits })
+  expect(unbounded.reserve([], undefined)).toBe(unbounded.estimate([], undefined))
+  expect(unbounded.state).toMatchObject({ model_requests: 1, unbounded_output_requests: 1 })
 })
 
 it('records v2 unknown reserve and continues accepting unchanged v1 records', () => {

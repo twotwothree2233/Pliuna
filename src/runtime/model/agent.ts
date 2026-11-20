@@ -9,6 +9,7 @@ import { modelToolRequest, modelToolResult, modelToolSuggestion } from './tool-i
 import { accountingResultLimit } from './accounting'
 import { type RequestLink } from './request-evidence'
 import { capacityPlan, serializedInput, rejectedContext, type RejectionStage } from './capacity'
+import type { WorkerProfile } from '../runner/worker-profile'
 export interface AgentHost {
   context?(messages: ChatMessage[], recovery?: ContextRecovery): Promise<ChatMessage[]>
   valid(): void
@@ -18,13 +19,27 @@ export interface AgentHost {
   tool(request: unknown, signal: AbortSignal): Promise<unknown>
 }
 export interface ContextRecovery { overflow: true; partial?: string }
-export interface BudgetState { model_requests: number; tool_requests: number; tokens: number; accounting: 'estimated' | 'mixed' | 'provider-usage'; cost: 'unknown'; template: 'agent-v0.1'; limits_version: string; unbounded_output_requests?: number; limits?: ModelLease['config']['limits'] }
+export interface WorkerResultIssue {
+  code: string
+  path: string
+  value: unknown
+  message: string
+  sources?: readonly { task_id: string; kind: 'record' | 'resource' | 'action'; id: string }[]
+  bundle_resource_ids?: readonly string[]
+}
+export interface WorkerExecution<Result> {
+  profile: WorkerProfile<Result>
+  validateResult?(result: Result): WorkerResultIssue | null
+  onResult(result: Result): void | Promise<void>
+}
+type LegacyBudgetLimits = NonNullable<ModelLease['config']['limits']> & { run_model_requests?: number; run_tool_requests?: number; run_tokens?: number; run_wall_ms?: number }
+export interface BudgetState { model_requests: number; tool_requests: number; tokens: number; accounting: 'estimated' | 'mixed' | 'provider-usage'; cost: 'unknown'; template: 'agent-v0.1'; limits_version: string; unbounded_output_requests?: number; limits?: LegacyBudgetLimits }
 export class RunBudget {
   private usageResponses = 0
   private observations = new Map<string, { input: string[]; tokens: number; tools: string }>()
   private reservations = new Map<number, { messages: ChatMessage[]; tools: ToolDefinition[] | undefined; config: ModelLease['config'] }[]>()
   readonly state: BudgetState = { model_requests: 0, tool_requests: 0, tokens: 0, accounting: 'estimated', cost: 'unknown', template: 'agent-v0.1', limits_version: defaults.version }
-  constructor(private config: ModelLease['config'], private created = Date.now()) { this.config = structuredClone(config); this.state.limits = this.config.limits }
+  constructor(private config: ModelLease['config']) { this.config = structuredClone(config) }
   fits(messages: ChatMessage[], tools: ToolDefinition[] | undefined, config = this.config): boolean {
     return this.plan(messages, tools, config).fits
   }
@@ -45,12 +60,9 @@ export class RunBudget {
   estimate(messages: ChatMessage[], tools: ToolDefinition[] | undefined): number { return serializedInput(messages, tools) }
   rejection(messages: ChatMessage[], tools: ToolDefinition[] | undefined, stage: RejectionStage, code = 'CONTEXT_BUDGET_EXCEEDED', config = this.config) { return rejectedContext(config, messages, tools, stage, code) }
   reserve(messages: ChatMessage[], tools: ToolDefinition[] | undefined, config = this.config, stage: RejectionStage = 'main-input', providerCheck = false): number {
-    this.check()
     const input = this.plan(messages, tools, config).estimated_input
     const output = config.max_output_tokens ?? 0
     if (!providerCheck && !this.plan(messages, tools, config).fits) throw this.rejection(messages, tools, stage, 'CONTEXT_BUDGET_EXCEEDED', config)
-    if (config.max_output_tokens === undefined && this.config.limits?.run_tokens !== undefined) throw new ModelError('OUTPUT_BUDGET_UNKNOWN')
-    if ((this.config.limits?.run_model_requests !== undefined && this.state.model_requests >= this.config.limits.run_model_requests) || (this.config.limits?.run_tokens !== undefined && this.state.tokens + input + output > this.config.limits.run_tokens)) throw new ModelError('RUN_BUDGET_EXCEEDED')
     this.state.model_requests++; this.state.tokens += input + output
     if (config.max_output_tokens === undefined) this.state.unbounded_output_requests = (this.state.unbounded_output_requests ?? 0) + 1
     this.state.accounting = this.usageResponses ? 'mixed' : 'estimated'
@@ -69,17 +81,24 @@ export class RunBudget {
     } else if (reserved) {
       this.observations.delete(JSON.stringify({ config: reserved.config, tools: reserved.tools }))
     }
-    if (this.config.limits?.run_tokens !== undefined && this.state.tokens > this.config.limits.run_tokens) throw new ModelError('RUN_BUDGET_EXCEEDED')
   }
   abandon(reservation: number): void {
     const entries = this.reservations.get(reservation); entries?.shift()
     if (!entries?.length) this.reservations.delete(reservation)
   }
-  tool(): void { this.check(); if (++this.state.tool_requests > (this.config.limits?.run_tool_requests ?? Infinity)) throw new ModelError('RUN_BUDGET_EXCEEDED') }
-  check(): void { if (this.config.limits?.run_wall_ms !== undefined && Date.now() - this.created >= this.config.limits.run_wall_ms) throw new ModelError('RUN_WALL_LIMIT') }
+  tool(): void { this.state.tool_requests++ }
 }
-export async function runAgent(service: ModelService, lease: ModelLease, task: string, initial: ChatMessage[], host: AgentHost, signal: AbortSignal, budget = new RunBudget(lease.config)): Promise<void> {
-  let messages: ChatMessage[] = [{ role: 'system', content: agentTemplate }, ...initial]
+export async function runAgent<Result = void>(service: ModelService, lease: ModelLease, task: string, initial: ChatMessage[], host: AgentHost, signal: AbortSignal, budget = new RunBudget(lease.config), execution?: WorkerExecution<Result>): Promise<void> {
+  const profile = execution?.profile, tools = profile ? [...profile.tools] : modelTools
+  const collator = profile?.role === 'collator'
+  // A diagnosis returns bounded metadata, so cap its per-request output allowance.
+  const requestConfig = profile?.role === 'diagnostic' ? { ...lease.config, max_output_tokens: Math.min(lease.config.max_output_tokens ?? 4096, 4096) } : lease.config
+  if (profile && (new Set(tools).size !== tools.length || tools.some(tool => !modelTools.includes(tool)))) throw new ContractError('INVALID_WORKER_PROFILE', 'Worker tools must use the existing tool definitions')
+  let messages: ChatMessage[] = [{ role: 'system', content: profile?.system ?? agentTemplate }, ...initial]
+  let rejectedInput: string | undefined
+  const rejectedResults = new Set<string>()
+  const rejectedIssues = new Set<string>()
+  let resultCorrection = '', preflightCorrection = ''
   while (true) {
     host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
     if (host.context) messages = await host.context(messages)
@@ -88,14 +107,14 @@ export async function runAgent(service: ModelService, lease: ModelLease, task: s
     let providerCheck = false
     for (let attempt = 0; !response; attempt++) {
       let reservation: number
-      try { reservation = budget.reserve(messages, modelTools, lease.config, 'main-input', providerCheck) }
+      try { reservation = budget.reserve(messages, tools, requestConfig, 'main-input', providerCheck) }
       catch (error) {
         if (error instanceof ModelError && error.code === 'CONTEXT_BUDGET_EXCEEDED' && host.context && !signal.aborted) {
-          const before = serializedInput(messages, modelTools)
+          const before = serializedInput(messages, tools)
           messages = await host.context(messages, { overflow: true })
           host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
-          if (serializedInput(messages, modelTools) >= before) throw new ModelError('CONTEXT_RECOVERY_NO_PROGRESS')
-          reservation = budget.reserve(messages, modelTools, lease.config, 'main-input', true)
+          if (serializedInput(messages, tools) >= before) throw new ModelError('CONTEXT_RECOVERY_NO_PROGRESS')
+          reservation = budget.reserve(messages, tools, requestConfig, 'main-input', true)
         } else throw error
       }
       host.budget(budget.state)
@@ -103,16 +122,16 @@ export async function runAgent(service: ModelService, lease: ModelLease, task: s
       let partial = ''
       let requestLink: RequestLink | undefined
       try {
-        response = await service.request(lease, task, messages, modelTools, signal, text => { partial = text }, lease.config.max_output_tokens, () => host.state('running', 'model_generating'), 'main', link => { requestLink = link })
+        response = await service.request(lease, task, messages, tools, signal, text => { partial = text }, requestConfig.max_output_tokens, () => host.state('running', 'model_generating'), 'main', link => { requestLink = link })
         host.valid(); try { budget.settle(reservation, response) } finally { host.budget(budget.state) }
       } catch (e) {
         budget.abandon(reservation)
         if (partial) host.record('message.assistant.partial', { text: partial, incomplete: true, ...(requestLink ? { request_link: requestLink } : {}) })
         if (e instanceof ModelError && e.code === 'MODEL_CONTEXT_LENGTH_EXCEEDED' && host.context && !signal.aborted) {
-          const before = serializedInput(messages, modelTools)
+          const before = serializedInput(messages, tools)
           messages = await host.context(messages, { overflow: true, ...(partial ? { partial } : {}) })
           host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
-          if (serializedInput(messages, modelTools) >= before) throw new ModelError('CONTEXT_RECOVERY_NO_PROGRESS')
+          if (serializedInput(messages, tools) >= before) throw new ModelError('CONTEXT_RECOVERY_NO_PROGRESS')
           providerCheck = true
           continue
         }
@@ -125,6 +144,40 @@ export async function runAgent(service: ModelService, lease: ModelLease, task: s
     messages.push(assistant)
     const association = response.request_link ? { request_link: response.request_link } : {}
     host.record('model.response', { message: assistant, finish: response.finish, ...association })
+    if (!response.calls.length && execution) {
+      let result: Result
+      try { result = workerResult(execution.profile, response) }
+      catch (error) {
+        const correction = execution.profile.resultCorrection
+        if (!correction || response.finish !== 'stop' || !(error instanceof WorkerResultError) || !error.correctable) throw error
+        const signature = resultSignature(response.text)
+        if (rejectedResults.has(signature)) throw error
+        rejectedResults.add(signature)
+        host.record('worker.result.rejected', { code: error.code, ...association })
+        resultCorrection = correction
+        messages[0] = { role: 'system', content: [execution.profile.system, resultCorrection, preflightCorrection].filter(Boolean).join('\n\n') }
+        continue
+      }
+      host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      const issue = execution.validateResult?.(result)
+      host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      if (issue) {
+        const signature = resultSignature(JSON.stringify({ code: issue.code, path: issue.path, value: issue.value }))
+        const repeated = rejectedIssues.has(signature)
+        host.record('worker.result.rejected', { ...issue, ...(repeated ? { no_progress: true } : {}), ...association })
+        if (repeated) throw new ContractError(issue.code, issue.message)
+        rejectedIssues.add(signature)
+        preflightCorrection = `The host rejected this result before acceptance. Correct the reported field and return the complete result. Reuse successful resources and tool results; do not repeat successful operations. Available sources identify existing evidence; choose the relevant source yourself. Host preflight data: ${JSON.stringify(issue)}`
+        messages[0] = { role: 'system', content: [execution.profile.system, resultCorrection, preflightCorrection].filter(Boolean).join('\n\n') }
+        continue
+      }
+      if (host.context) await host.context(messages)
+      host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      await execution.onResult(result)
+      host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      if (response.text) host.record('message.assistant', { text: response.text, ...association })
+      return
+    }
     if (response.text) host.record('message.assistant', { text: response.text, ...association })
     if (!response.calls.length) {
       if (host.context) await host.context(messages)
@@ -133,28 +186,67 @@ export async function runAgent(service: ModelService, lease: ModelLease, task: s
     let failed = false
     for (const call of response.calls) {
       host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
+      const errorCall = collator && !['list', 'read', 'write', 'call'].includes(call.function.name) ? { ...call, function: { ...call.function, name: 'unknown' } } : call
       let result: unknown
-      if (failed) result = toolError(call, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
+      let repeatedRejection = false
+      if (failed) result = toolError(errorCall, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
       else {
         budget.tool(); host.budget(budget.state)
         let raw: unknown
+        let validating = true
         try {
+          if (collator && call.function.name !== 'read') throw new ContractError('WORKER_CAPABILITY_DENIED', 'Collator can read only its frozen runner metadata')
           raw = JSON.parse(call.function.arguments)
           const request = modelToolRequest(call.function.name, raw)
+          profile?.authorize(request)
+          validating = false
+          rejectedInput = undefined
           result = modelToolResult(call.function.name, raw, await host.tool(request, signal))
           const outcome = result as { execution?: string; delivery?: string } | null
           if ((outcome?.execution && outcome.execution !== 'success') || outcome?.delivery === 'failed') failed = true
         } catch (e) {
           host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
           failed = true
-          result = toolError(call, e instanceof ContractError || e instanceof ModelError ? e.code : 'TOOL_FAILED', e instanceof ContractError ? e.message : 'Tool not executed; no automatic replay', e instanceof ContractError ? modelToolSuggestion(call.function.name, raw, e) : undefined)
+          if (validating && (e instanceof SyntaxError || e instanceof ContractError && e.code === 'INVALID_REQUEST')) {
+            // A fresh call ID cannot make unchanged, rejected input executable.
+            const signature = JSON.stringify([call.function.name, call.function.arguments])
+            repeatedRejection = rejectedInput === signature
+            rejectedInput = signature
+          }
+          const suggestion = !collator && e instanceof ContractError ? modelToolSuggestion(call.function.name, raw, e, request => {
+            if (!tools.some(tool => tool.function.name === request.type)) throw new ContractError('WORKER_CAPABILITY_DENIED', 'Suggested tool is unavailable')
+            profile?.authorize(request)
+          }) : undefined
+          result = toolError(errorCall, e instanceof ContractError || e instanceof ModelError ? e.code : 'TOOL_FAILED', collator ? 'Collator tool request was denied; only frozen runner metadata is available' : e instanceof ContractError ? e.message : 'Tool not executed; no automatic replay', suggestion)
         }
       }
       const content = JSON.stringify(result)
       if (Buffer.byteLength(content) > (call.function.name === 'read' ? accountingResultLimit(result) : defaults.read.text_bytes)) throw new ModelError('TOOL_RESULT_LIMIT')
       const message: ChatMessage = { role: 'tool', tool_call_id: call.id, content }
       host.record('model.tool_result', { message, ...association }); messages.push(message)
+      if (repeatedRejection) throw new ModelError('MODEL_TOOL_NO_PROGRESS')
     }
   }
+}
+function resultSignature(text: string): string {
+  function canonical(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(canonical)
+    if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonical(item)]))
+    return value
+  }
+  try { return JSON.stringify(canonical(JSON.parse(text))) } catch { return text.trim() }
+}
+class WorkerResultError extends ContractError {
+  constructor(readonly correctable: boolean) { super('INVALID_WORKER_RESULT', 'Worker result does not satisfy its required contract') }
+}
+function workerResult<Result>(profile: WorkerProfile<Result>, response: Completion): Result {
+  try {
+    const result = profile.parseResult(response)
+    if (result !== null && (typeof result === 'object' || typeof result === 'function') && typeof (result as { then?: unknown }).then === 'function') {
+      void Promise.resolve(result).catch(() => {})
+      throw Error()
+    }
+    return result
+  } catch (error) { throw new WorkerResultError(error instanceof ContractError && error.code === 'INVALID_WORKER_RESULT') }
 }
 function toolError(call: ToolCall, code: string, message: string, suggestion?: string): unknown { return { request_type: call.function.name, execution: 'not_executed', delivery: 'delivered', truncated: false, error: { code, message, ...(suggestion ? { suggestion } : {}) } } }

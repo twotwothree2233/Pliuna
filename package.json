@@ -11,6 +11,7 @@
   },
   "scripts": {
     "dev": "pnpm rebuild:electron && electron-vite dev",
+    "start:web": "node scripts/start-web.mjs",
     "build": "pnpm generate && pnpm typecheck && electron-vite build && node scripts/build-process-native.mjs",
     "package:desktop": "pnpm build && pnpm rebuild:electron && node scripts/package-desktop.mjs",
     "verify:desktop": "node scripts/verify-desktop.mjs",

@@ -193,14 +193,16 @@ it.each([1, 2])('reads settings v%s without writing, upgrades only on explicit s
   const fresh = new FileModelStore(root); expect(fresh.load().records).toEqual([record]); expect(readFileSync(join(root, 'settings.json'), 'utf8')).toBe(before); expect(readFileSync(join(root, 'auth.json'), 'utf8')).toBe(auth)
   fresh.save([record]); expect(JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')).version).toBe(3); expect(JSON.parse(readFileSync(join(root, 'auth.json'), 'utf8')).version).toBe(1)
 })
-it('persists omitted output and explicit optional limits in v3 and restores without inventing defaults', async () => {
+it('restores per-request limits from legacy settings without retaining cumulative ceilings or rewriting the files', async () => {
   const { root, store } = setup(), { max_output_tokens: _, ...configuration } = record.configuration
-  const next: SavedConnection = { ...record, configuration: { ...configuration, limits: { run_model_requests: 55, request_timeout_ms: 300000 } } }
+  const legacyLimits = { run_model_requests: 55, run_tool_requests: 200, run_tokens: 200000, run_wall_ms: 3600000, request_timeout_ms: 300000 }
+  const next: SavedConnection = { ...record, configuration: { ...configuration, limits: legacyLimits } }
   store.save([next]); const settings = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8'))
   expect(settings.version).toBe(3); expect(settings.connections[0].configuration).not.toHaveProperty('max_output_tokens')
   const backend = new FileModelStore(root), before = readFileSync(join(root, 'settings.json'), 'utf8')
   const service = new ModelService(undefined, undefined, { async load() { return backend.load() }, async save(values) { backend.save(values) } }, record.protocol)
-  await service.restore(); expect(service.list()).toMatchObject([{ limits: next.configuration.limits }]); expect(service.recoverySettings()[0]).not.toHaveProperty('max_output_tokens')
+  await service.restore(); expect(service.list()).toMatchObject([{ limits: { request_timeout_ms: 300000 }, roles: ['main'], revision: 1 }]); expect(service.recoverySettings()[0]).not.toHaveProperty('max_output_tokens')
+  expect(service.recoverySettings()[0]!.limits).toEqual({ request_timeout_ms: 300000 })
   expect(readFileSync(join(root, 'settings.json'), 'utf8')).toBe(before); service.close()
 })
 it('persists provenance and compaction role in v2 with no credential in settings', () => {

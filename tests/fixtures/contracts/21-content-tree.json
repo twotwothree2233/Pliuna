@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "revision": 1,
+  "root_id": "document",
+  "nodes": [
+    {
+      "node_id": "document",
+      "parent_id": null,
+      "kind": "document",
+      "revision": 1,
+      "position_revision": 1,
+      "title": "",
+      "children": [
+        "node-a",
+        "node-b"
+      ],
+      "selector": ":scope",
+      "end_selector": ":scope",
+      "tag": "",
+      "span": {
+        "start": 0,
+        "end": 16
+      },
+      "inner_span": {
+        "start": 0,
+        "end": 16
+      }
+    },
+    {
+      "node_id": "node-a",
+      "parent_id": "document",
+      "kind": "paragraph",
+      "revision": 1,
+      "position_revision": 1,
+      "title": "",
+      "children": [],
+      "selector": "#node-a",
+      "end_selector": "#node-a",
+      "tag": "p",
+      "span": {
+        "start": 0,
+        "end": 8
+      },
+      "inner_span": {
+        "start": 3,
+        "end": 4
+      }
+    },
+    {
+      "node_id": "node-b",
+      "parent_id": "document",
+      "kind": "paragraph",
+      "revision": 1,
+      "position_revision": 1,
+      "title": "",
+      "children": [],
+      "selector": "#node-b",
+      "end_selector": "#node-b",
+      "tag": "p",
+      "span": {
+        "start": 8,
+        "end": 16
+      },
+      "inner_span": {
+        "start": 11,
+        "end": 12
+      }
+    }
+  ],
+  "lineage": []
+}

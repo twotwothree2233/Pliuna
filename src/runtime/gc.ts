@@ -1,4 +1,6 @@
 import { isManagedDatabaseFile } from '../shared/branding'
+import { readBusinessSchema } from './schema-upgrade'
+import { runnerResourceReferences } from './runner/resource-references'
 import { fileFstatSync as fstatSync, fileLstatSync as lstatSync, atomicWriteFileSync, entryExistsSync as existsSync, flushDirectorySync, managedFile, managedRegularFile, openRegularFileSync, readRegularFileSync } from '../platform/files'
 import { journalFileIdentity,sameJournalFileIdentity,validJournalFileIdentity,type IdentityEncoding,type JournalFileIdentity } from '../platform/file-identity'
 import { newTestIdentityEncoding } from './file-format'
@@ -110,7 +112,7 @@ export class RestrictedGc {
     } finally { closeSync(fd) }
   }
   private formal(db: Database.Database, key: string): boolean {
-    return !!db.prepare("SELECT 1 FROM resources WHERE id=? OR storage_key=? UNION ALL SELECT 1 FROM task_resources WHERE resource_id=? UNION ALL SELECT 1 FROM object_references WHERE target_kind='resource' AND target_id=? AND protects_resource=1 UNION ALL SELECT 1 FROM views WHERE bundle_resource_id=? UNION ALL SELECT 1 FROM view_history WHERE bundle_resource_id=? UNION ALL SELECT 1 FROM recovery_resources WHERE resource_id=? LIMIT 1").get(key, key, key, key, key, key, key)
+    return !!db.prepare("SELECT 1 FROM resources WHERE id=? OR storage_key=? UNION ALL SELECT 1 FROM task_resources WHERE resource_id=? UNION ALL SELECT 1 FROM object_references WHERE target_kind='resource' AND target_id=? AND protects_resource=1 UNION ALL SELECT 1 FROM views WHERE bundle_resource_id=? UNION ALL SELECT 1 FROM view_history WHERE bundle_resource_id=? UNION ALL SELECT 1 FROM recovery_resources WHERE resource_id=? LIMIT 1").get(key, key, key, key, key, key, key) || runnerResourceReferences(db).some(reference => reference.resource_id === key)
   }
   private retainedProtection(exclude?: string): Set<string> {
     const keys = new Set<string>()
@@ -134,9 +136,11 @@ export class RestrictedGc {
       if (!lstatSync(file).isFile()) fail('GC_RETAINED_UNCERTAIN')
       const db = new Database(file, { readonly: true, fileMustExist: true })
       try {
-        if (db.pragma('quick_check', { simple: true }) !== 'ok' || JSON.stringify(db.prepare('SELECT version FROM schema_version').all()) !== '[{"version":1}]' || (db.pragma('foreign_key_check') as unknown[]).length) fail('GC_RETAINED_UNCERTAIN')
+        readBusinessSchema(db)
+        if (db.pragma('quick_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length) fail('GC_RETAINED_UNCERTAIN')
         for (const row of db.prepare('SELECT id,storage_key FROM resources').iterate() as Iterable<Row>) { keys.add(row.id); keys.add(row.storage_key) }
         for (const row of db.prepare('SELECT storage_key FROM staging').iterate() as Iterable<Row>) keys.add(row.storage_key)
+        for (const reference of runnerResourceReferences(db)) keys.add(reference.resource_id)
         for (const row of db.prepare("SELECT resource_id AS id FROM task_resources UNION SELECT target_id FROM object_references WHERE target_kind='resource' AND protects_resource=1 UNION SELECT bundle_resource_id FROM views UNION SELECT bundle_resource_id FROM view_history UNION SELECT resource_id FROM recovery_resources").iterate() as Iterable<Row>) keys.add(row.id)
         for (const row of db.prepare('SELECT references_json FROM task_data').iterate() as Iterable<Row>) this.referenceKeys(JSON.parse(row.references_json), keys)
         for (const row of db.prepare('SELECT evidence_snapshot_json FROM view_history').iterate() as Iterable<Row>) {

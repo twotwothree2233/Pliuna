@@ -1,21 +1,29 @@
 import fs from 'node:fs'
+import { dirname, join } from 'node:path'
 import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 
 const [directory, point] = process.argv.slice(2)
 if (!directory || !point || !process.send) throw new Error('Isolated crash fixture requires IPC')
 const hold = () => { process.send!({ point }); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0) }
-const write = fs.writeFileSync, rename = fs.renameSync
+const write = fs.writeFileSync, rename = fs.renameSync, open = fs.openSync, close = fs.closeSync
+const temporary = (file: unknown) => typeof file === 'string' && dirname(file) === join(directory, 'resources') && file.endsWith('.tmp')
+const resourceFiles = new Set<number>()
+fs.openSync = ((file: any, flags: any, mode: any) => {
+  const resource = temporary(file)
+  if (resource && point === 'pinned') hold()
+  const fd = open(file, flags, mode)
+  if (resource) resourceFiles.add(fd)
+  return fd
+}) as typeof fs.openSync
 fs.writeFileSync = ((file: any, data: any, options: any) => {
-  if (String(file).endsWith('.tmp')) {
-    if (point === 'pinned') hold()
-    if (point === 'partial') { write(file, Buffer.from('part'), options); hold() }
-  }
+  if (resourceFiles.has(file) && point === 'partial') { write(file, Buffer.from('part'), options); hold() }
   return write(file, data, options)
 }) as typeof fs.writeFileSync
+fs.closeSync = ((fd: number) => { resourceFiles.delete(fd); close(fd) }) as typeof fs.closeSync
 fs.renameSync = ((...args: Parameters<typeof fs.renameSync>) => {
   rename(...args)
-  if (point === 'renamed' && String(args[0]).endsWith('.tmp')) hold()
+  if (point === 'renamed' && temporary(args[0])) hold()
 })
 const prepare = Database.prototype.prepare
 Database.prototype.prepare = function (this: Database.Database, sql: string) {

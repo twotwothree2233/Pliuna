@@ -52,7 +52,7 @@ export const modelTools: ToolDefinition[] = [
     "type": "function",
     "function": {
       "name": "read",
-      "description": "读取正文、对象或契约。纯文本默认正文，契约默认指南；lines/pages 为含首尾范围，find 为字面搜索。续读只需 kind/id/cursor。示例：{\"kind\":\"resource\",\"id\":\"<资源ID>\",\"selection\":{\"lines\":[1,20]}}",
+      "description": "读取正文、对象或契约。content_tree 以 View/节点 ID 分页查询子结构，可用 find 搜索标题；content_node 返回准确 HTML 和基线。续读使用 kind/id/cursor。纯文本支持 lines/pages/find。示例：{\"kind\":\"resource\",\"id\":\"<资源ID>\"}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -110,7 +110,7 @@ export const modelTools: ToolDefinition[] = [
     "type": "function",
     "function": {
       "name": "write",
-      "description": "写入任务内容。input_json 是操作输入的 JSON 文本，按契约解码一次。示例：{\"operation\":\"resource.create\",\"input_json\":\"{\\\"display_name\\\":\\\"说明\\\",\\\"content\\\":{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"正文\\\"}}\"}",
+      "description": "写入任务内容。resource.create 优先用 input 对象，避免重复转义。其他操作用 input_json JSON 文本。二者恰一，仍按操作契约校验。示例：{\"operation\":\"resource.create\",\"input\":{\"display_name\":\"说明\",\"content\":{\"type\":\"text\",\"text\":\"正文\"}}}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -120,12 +120,15 @@ export const modelTools: ToolDefinition[] = [
           },
           "input_json": {
             "type": "string"
+          },
+          "input": {
+            "type": "object"
           }
         },
         "required": [
-          "operation",
-          "input_json"
+          "operation"
         ],
+        "anyOf": [{ "required": ["input"] }, { "required": ["input_json"] }],
         "additionalProperties": false
       }
     }

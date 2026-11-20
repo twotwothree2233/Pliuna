@@ -23,7 +23,7 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
   }
   try {
     await page.getByRole('button', { name: '创建第一个任务' }).click(); await page.getByLabel('任务名称').fill('副本隔离验收'); await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    await chooseModel(page, 'fixture'); await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await chooseModel(page, 'fixture'); await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送消息/ }).click()
     await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
     await page.getByLabel('你的想法').fill('不会丢失的草稿'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     await page.getByRole('button', { name: '提交答案', exact: true }).click(); await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')

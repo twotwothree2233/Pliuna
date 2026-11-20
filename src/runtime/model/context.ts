@@ -2,8 +2,10 @@ import template from './prompts/summary-v0.1.txt?raw'
 import { ModelError, type ChatMessage, type ToolDefinition } from './adapter'
 import type { ModelLease, ModelService } from './service'
 import { RunBudget, type ContextRecovery } from './agent'
-import { attachEvidence, messageEvidence, type RequestLink } from './request-evidence'
+import { attachEvidence, captureExecutionScope, messageEvidence, type RequestLink } from './request-evidence'
 import { serializedInput } from './capacity'
+import type { ExecutionScope } from '../../shared/contracts.generated'
+import { ContractError } from '../../shared/validation'
 
 export interface HistoryRecord { id: string; sequence: number; kind: string; payload: Record<string, any> }
 export interface HistoryGroup { messages: ChatMessage[]; records: HistoryRecord[]; through: number; current?: boolean; complete?: boolean }
@@ -18,16 +20,19 @@ export interface InstalledSummary {
   model_revision: number
   installed_at: string
   request_link?: RequestLink
+  owner?: ExecutionScope
 }
 
 export function recordedMessage(record: HistoryRecord): ChatMessage | undefined {
   const { payload, kind } = record
-  const message: ChatMessage | undefined = kind === 'message.user'
-    ? { role: 'user', content: JSON.stringify({ request: payload.text, ...(payload.materials ? { request_materials: payload.materials } : {}) }) }
-    : kind === 'model.response' || kind === 'model.tool_result' ? payload.message
+  const message: ChatMessage | undefined = kind === 'message.user' || kind === 'worker.input'
+    ? { role: 'user', content: JSON.stringify({ request: payload.text, ...(payload.materials ? { request_materials: payload.materials } : {}), ...(payload.bound === undefined ? {} : { bound: payload.bound }), ...(payload.conversation_history ? { conversation_history: payload.conversation_history } : {}) }) }
+    : kind === 'model.response' || kind === 'model.tool_result' || kind === 'worker.conversation' ? payload.message
     : kind === 'message.assistant' && payload.model_config_id === 'fixture' ? { role: 'assistant', content: payload.text } : undefined
   if (!message) return
-  return attachEvidence(message, { kind, representation: 'recorded-message', source: { kind: kind.startsWith('message.') ? 'message' : 'event', id: record.id }, recorded_sequence: record.sequence, ...(typeof payload.run_id === 'string' ? { owner_run_id: payload.run_id } : {}), ...(payload.request_link ? { response_request: payload.request_link } : {}) })
+  const owner = captureExecutionScope(payload.owner, payload.task_id)
+  if (owner && payload.run_id !== undefined && owner.run_id !== payload.run_id) throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Recorded message belongs to another Run')
+  return attachEvidence(message, { kind: kind === 'worker.input' ? 'host-state' : kind, representation: 'recorded-message', source: { kind: kind.startsWith('message.') ? 'message' : 'event', id: record.id }, recorded_sequence: record.sequence, ...(typeof payload.run_id === 'string' ? { owner_run_id: payload.run_id } : owner ? { owner_run_id: owner.run_id } : {}), ...(owner ? { owner } : {}), ...(kind === 'worker.conversation' ? { conversation_source: payload.conversation_source } : {}), ...(payload.request_link ? { response_request: payload.request_link } : {}) })
 }
 
 // One response and every result of its tool batch form an indivisible interaction.
@@ -66,14 +71,15 @@ export function historyGroups(records: HistoryRecord[], currentRun: string): His
 }
 
 export function summaryMessage(value: InstalledSummary): ChatMessage {
-  return attachEvidence({ role: 'user', content: `工作摘要：\n${value.text}` }, { kind: 'summary', representation: 'summary-only' })
+  return attachEvidence({ role: 'user', content: `工作摘要：\n${value.text}` }, { kind: 'summary', representation: 'summary-only', ...(value.owner === undefined ? {} : { owner: value.owner }) })
 }
 export function latestUser(messages: ChatMessage[]): ChatMessage | undefined {
   return [...messages].reverse().find(message => message.role === 'user' && ['message.user', 'host-state'].includes(messageEvidence(message)?.kind ?? ''))
 }
 export function retainedContext(messages: ChatMessage[], summary: InstalledSummary): ChatMessage[] {
   const user = latestUser(messages)
-  return [messages[0]!, summaryMessage(summary), ...(user ? [user] : []), ...interactions(messages).slice(-2).flat()]
+  const retained = new Set([...(user ? [user] : []), ...interactions(messages).slice(-2).flat()])
+  return [messages[0]!, summaryMessage(summary), ...messages.slice(1).filter(message => retained.has(message))]
 }
 export interface CompactionHost {
   valid(): void
@@ -84,6 +90,8 @@ export interface CompactionHost {
 export async function compactContext(service: ModelService, lease: ModelLease, task: string, budget: RunBudget, signal: AbortSignal, messages: ChatMessage[], through: number, tools: ToolDefinition[] | undefined, host: CompactionHost, recovery?: ContextRecovery): Promise<ChatMessage[]> {
   const valid = () => { host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED') }
   valid()
+  const owner = captureExecutionScope(lease.owner, task)
+  const summaryLease = owner ? { ...lease, owner: { ...owner } } : lease
   const rounds = interactions(messages).slice(-2), user = latestUser(messages)
   const ids = rounds.map(round => round.map(message => {
     const source = messageEvidence(message)?.source
@@ -98,12 +106,12 @@ export async function compactContext(service: ModelService, lease: ModelLease, t
   const reservation = budget.reserve(input, undefined, lease.config, 'summary-input', !!recovery || budget.hasUsage())
   host.budget(); host.state('context_compacting')
   let result
-  try { result = await service.request(lease, task, input, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'summary') }
+  try { result = await service.request(summaryLease, task, input, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'summary') }
   catch (error) {
     budget.abandon(reservation)
     if (!recovery && error instanceof ModelError && error.code === 'MODEL_CONTEXT_LENGTH_EXCEEDED') {
       valid()
-      return compactContext(service, lease, task, budget, signal, messages, through, tools, host, { overflow: true })
+      return compactContext(service, summaryLease, task, budget, signal, messages, through, tools, host, { overflow: true })
     }
     throw error
   }
@@ -111,7 +119,7 @@ export async function compactContext(service: ModelService, lease: ModelLease, t
   try { budget.settle(reservation, result) } finally { host.budget() }
   if (result.calls.length || !result.text.trim()) throw new ModelError('SUMMARY_INVALID_FORMAT')
   const notice = recovery ? '\n\n当前请求处理到一半，压缩后继续。最近完整交互保留在后文，已执行工具不重放。' + (recovery.partial ? '\n以下是被中断响应的未完成文字，不是已完成结果：\n' + recovery.partial : '') : ''
-  const candidate: InstalledSummary = { version: 2, text: result.text + notice, through_sequence: through, latest_user_id: latest ?? null, retained_interactions: ids, template: 'summary-v0.1', model_id: lease.id, model_revision: lease.revision, installed_at: new Date().toISOString(), ...(result.request_link ? { request_link: result.request_link } : {}) }
+  const candidate: InstalledSummary = { version: 2, text: result.text + notice, through_sequence: through, latest_user_id: latest ?? null, retained_interactions: ids, template: 'summary-v0.1', model_id: lease.id, model_revision: lease.revision, installed_at: new Date().toISOString(), ...(result.request_link ? { request_link: result.request_link } : {}), ...(owner ? { owner } : {}) }
   const next = retainedContext(messages, candidate)
   if (recovery && serializedInput(next, tools) >= serializedInput(messages, tools)) throw new ModelError('CONTEXT_RECOVERY_NO_PROGRESS')
   if (!recovery && !budget.fits(next, tools)) throw budget.rejection(next, tools, 'summary-install', 'CONTEXT_MINIMUM_TOO_LARGE')

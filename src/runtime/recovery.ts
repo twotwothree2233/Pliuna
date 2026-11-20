@@ -10,10 +10,12 @@ import type { PluginCopy } from './plugins/package'
 import { validatePluginProtection,verifyPluginProtection } from './plugins/protection'
 import { digest,resourceBody } from './resources'
 import { describeDatabase,flushFile,RestoreJournal,verifyDatabase } from './restore-journal'
+import { readBusinessSchema,upgradeCandidate,type BusinessSchema } from './schema-upgrade'
+import { validateRunnerResourceReferences } from './runner/resource-references'
 
 type Row = Record<string, any>
 type Material = { id: string; storage_key: string; sha256: string; byte_length: number }
-type Point = { id: string; created_at: string; app_version: '0.1.0'; schema_version: 1; tasks: string[]; resources: Material[]; plugins: PluginCopy[]; settings: Record<string, unknown>; database_sha256?: string }
+type Point = { id: string; created_at: string; app_version: '0.1.0'; schema_version: BusinessSchema; tasks: string[]; resources: Material[]; plugins: PluginCopy[]; settings: Record<string, unknown>; database_sha256?: string }
 type Control = { version: 2; active: Point | null; candidates: Point[]; retired: string[]; invalidated: string[] }
 const fail = (code: string, text: string): never => { throw new ContractError(code, text) }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -75,7 +77,7 @@ export class RecoveryManager {
       const expected = ['id', 'created_at', 'app_version', 'schema_version', 'tasks', 'resources', 'settings', ...(p?.database_sha256 !== undefined ? ['database_sha256'] : []), ...(value.version === 2 ? ['plugins'] : [])].sort().join(',')
       if (keys !== expected) throw new Error()
       if (value.version === 2) validatePluginProtection(p.plugins)
-      if (!p || !p.settings || typeof p.settings !== 'object' || Array.isArray(p.settings) || !uuid.test(p.id) || p.schema_version !== 1 || p.app_version !== '0.1.0' || typeof p.created_at !== 'string' || !Number.isFinite(Date.parse(p.created_at)) || !Array.isArray(p.tasks) || p.tasks.some((id: unknown) => typeof id !== 'string' || !uuid.test(id)) || !Array.isArray(p.resources)) throw new Error()
+      if (!p || !p.settings || typeof p.settings !== 'object' || Array.isArray(p.settings) || !uuid.test(p.id) || ![1,2].includes(p.schema_version) || p.app_version !== '0.1.0' || typeof p.created_at !== 'string' || !Number.isFinite(Date.parse(p.created_at)) || !Array.isArray(p.tasks) || p.tasks.some((id: unknown) => typeof id !== 'string' || !uuid.test(id)) || !Array.isArray(p.resources)) throw new Error()
       for (const r of p.resources) if (!r || typeof r.id !== 'string' || !uuid.test(r.id) || typeof r.storage_key !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(r.storage_key) || !/^[a-f0-9]{64}$/.test(r.sha256) || !Number.isSafeInteger(r.byte_length) || r.byte_length < 0) throw new Error()
     }
     if ([...value.retired, ...value.invalidated].some((id: unknown) => typeof id !== 'string' || !uuid.test(id))) throw new Error()
@@ -96,7 +98,8 @@ export class RecoveryManager {
     if (point.database_sha256 && digest(readFileSync(path)) !== point.database_sha256) fail('RECOVERY_CORRUPT', 'Recovery database checksum mismatch')
     const copy = new Database(path, { readonly: true, fileMustExist: true })
     try {
-      if (copy.pragma('quick_check', { simple: true }) !== 'ok' || (copy.pragma('foreign_key_check') as unknown[]).length || JSON.stringify(copy.prepare('SELECT version FROM schema_version').all()) !== '[{"version":1}]') throw new Error()
+      if (copy.pragma('quick_check', { simple: true }) !== 'ok' || (copy.pragma('foreign_key_check') as unknown[]).length || readBusinessSchema(copy) !== point.schema_version) throw new Error()
+      validateRunnerResourceReferences(copy)
       const tasks = (copy.prepare('SELECT id FROM tasks ORDER BY id').all() as Row[]).map(r => r.id)
       const materials = copy.prepare('SELECT id,storage_key,sha256,byte_length FROM resources ORDER BY id').all()
       if (JSON.stringify(tasks) !== JSON.stringify(point.tasks) || JSON.stringify(materials) !== JSON.stringify(point.resources)) throw new Error()
@@ -157,7 +160,8 @@ export class RecoveryManager {
   private async publish(): Promise<unknown> {
     let switched = false
     try {
-      const point: Point = { id: randomUUID(), created_at: new Date().toISOString(), app_version: '0.1.0', schema_version: 1, tasks: (this.db.prepare('SELECT id FROM tasks ORDER BY id').all() as Row[]).map(r => r.id), resources: this.db.prepare('SELECT id,storage_key,sha256,byte_length FROM resources ORDER BY id').all() as Material[], plugins: this.pluginCopies(), settings: this.settings() }
+      validateRunnerResourceReferences(this.db)
+      const point: Point = { id: randomUUID(), created_at: new Date().toISOString(), app_version: '0.1.0', schema_version: readBusinessSchema(this.db), tasks: (this.db.prepare('SELECT id FROM tasks ORDER BY id').all() as Row[]).map(r => r.id), resources: this.db.prepare('SELECT id,storage_key,sha256,byte_length FROM resources ORDER BY id').all() as Material[], plugins: this.pluginCopies(), settings: this.settings() }
       // Both the candidate and the old active point protect resources before asynchronous backup starts.
       this.write({ ...this.state, candidates: [...this.state.candidates, point] }); this.project()
       for (const r of point.resources) resourceBody(this.root, r as Parameters<typeof resourceBody>[1])
@@ -223,6 +227,7 @@ export class RecoveryManager {
     this.journal.assertRecoverySafe(this.db)
     if (!this.reservation || this.reservation.phase !== 'preparing') fail('MAINTENANCE_EXPIRED', 'A saved-input reservation is required')
     if (!this.state.active || this.state.active.id !== pointId || this.state.active.database_sha256 !== sha256) fail('RECOVERY_CHANGED', 'Refresh and personally confirm the current recovery point')
+    if (this.state.active!.schema_version > readBusinessSchema(this.db)) fail('SCHEMA_VERSION', 'Enable the required business schema before restoring this newer recovery point')
     if (this.busy()) fail('MAINTENANCE_EXECUTION_ACTIVE', 'Wait for all executions before restoration')
     this.reservation!.phase = 'restoring'; clearTimeout(this.timer)
     this.operation = this.restorePoint(token)
@@ -230,7 +235,7 @@ export class RecoveryManager {
   }
   private async restorePoint(token: string): Promise<unknown> {
     let switched = false, prepared = false
-    const point = this.state.active!
+    const point = this.state.active!, businessVersion = readBusinessSchema(this.db)
     try {
       await this.beforeRebind()
       this.verify(point)
@@ -238,7 +243,7 @@ export class RecoveryManager {
       let op: ReturnType<RestoreJournal['prepare']>
       try {
         const target = describeDatabase(source, '')
-        op = this.journal.prepare(token, point.id, { ...describeDatabase(this.db, this.journal.selected()), plugins: this.pluginCopies() }, { tasks: target.tasks, resources: target.resources, plugins: point.plugins }); prepared = true
+        op = this.journal.prepare(token, point.id, { ...describeDatabase(this.db, this.journal.selected()), plugins: this.pluginCopies() }, { schema_version: businessVersion, tasks: target.tasks, resources: target.resources, plugins: point.plugins }); prepared = true
         for (const file of [op.target.file, op.rollback.file]) { const fd = openSync(join(this.root, file), 'wx', 0o600); closeSync(fd) }
         await this.db.backup(join(this.root, op.rollback.file))
         await source.backup(join(this.root, op.target.file))
@@ -247,6 +252,7 @@ export class RecoveryManager {
       const candidate = new Database(managedRegularFile(this.root, op!.target.file), { fileMustExist: true })
       try {
         candidate.pragma('synchronous=FULL')
+        if (businessVersion === 2) upgradeCandidate(candidate)
         candidate.transaction(() => {
           candidate.prepare("UPDATE runs SET state=COALESCE(intended_terminal,'interrupted'),primary_reason=COALESCE(primary_reason,'data_restored'),commit_valid=0,ended_at=? WHERE state IN ('running','waiting')").run(new Date().toISOString())
           candidate.prepare('UPDATE runs SET commit_valid=0').run()

@@ -8,7 +8,9 @@ let stopAfterCommit = false
 const transaction = Database.prototype.transaction
 Database.prototype.transaction = function (this: Database.Database, callback: (...args: any[]) => any) {
   const run = transaction.call(this, callback)
-  const wrapped = (...args: any[]) => { const result = run(...args); if (stopAfterCommit) hold(); return result }
+  const wrap = (execute: (...args: any[]) => unknown) => (...args: any[]) => { const result = execute(...args); if (stopAfterCommit) hold(); return result }
+  const wrapped = wrap(run)
+  for (const mode of ['deferred', 'immediate', 'exclusive'] as const) Object.defineProperty(wrapped, mode, { value: wrap(run[mode]) })
   return wrapped as typeof run
 } as typeof Database.prototype.transaction
 const prepare = Database.prototype.prepare, backup = Database.prototype.backup

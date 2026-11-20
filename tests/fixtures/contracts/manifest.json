@@ -103,5 +103,110 @@
     "file": "invalid-08.json",
     "definition": "installed_summary",
     "valid": false
+  },
+  {
+    "file": "14-replica-reauthorize-preview.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "15-replica-reauthorize-confirm.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "invalid-09.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "invalid-10.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "16-chapter-manifest.json",
+    "definition": "runner_chapter_manifest",
+    "valid": true
+  },
+  {
+    "file": "17-chapter-update.json",
+    "definition": "runner_chapter_update",
+    "valid": true
+  },
+  {
+    "file": "18-chapter-proposal.json",
+    "definition": "runner_chapter_proposal",
+    "valid": true
+  },
+  {
+    "file": "19-chapter-inheritance.json",
+    "definition": "runner_chapter_inheritance",
+    "valid": true
+  },
+  {
+    "file": "20-chapter-ipc.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "invalid-11.json",
+    "definition": "runner_chapter_update",
+    "valid": false
+  },
+  {
+    "file": "invalid-12.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "invalid-13.json",
+    "definition": "ipc_request",
+    "valid": false
+  },
+  {
+    "file": "21-content-tree.json",
+    "definition": "runner_content_tree",
+    "valid": true
+  },
+  {
+    "file": "22-content-operation.json",
+    "definition": "runner_content_operation",
+    "valid": true
+  },
+  {
+    "file": "23-content-proposal.json",
+    "definition": "runner_chapter_proposal",
+    "valid": true
+  },
+  {
+    "file": "24-content-update-ipc.json",
+    "definition": "ipc_request",
+    "valid": true
+  },
+  {
+    "file": "invalid-14.json",
+    "definition": "runner_content_operation",
+    "valid": false
+  },
+  {
+    "file": "invalid-15.json",
+    "definition": "runner_chapter_proposal",
+    "valid": false
+  },
+  {
+    "file": "25-content-candidates.json",
+    "definition": "runner_chapter_update",
+    "valid": true
+  },
+  {
+    "file": "26-content-scope.json",
+    "definition": "runner_content_scope_revision",
+    "valid": true
+  },
+  {
+    "file": "invalid-16.json",
+    "definition": "runner_content_scope_revision",
+    "valid": false
   }
 ]

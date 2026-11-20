@@ -6,10 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/model-server'
-import type { Snapshot } from '../../src/shared/types'
+import type { HostRequest, HostResponse, Snapshot } from '../../src/shared/types'
 const electronPath: string = createRequire(import.meta.url)('electron')
+interface ReplacementEvidence { actionId: string | null; confirmations: number; queries: string[]; queryAllowed: boolean }
+declare global {
+  var replacementEvidence: ReplacementEvidence
+}
 
-for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-input'] as const) test('isolated View replacement: ' + scenario, async () => {
+for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-input', 'lost-response', 'query-unavailable', 'unknown-result', 'unknown-focus-moved'] as const) test('isolated View replacement: ' + scenario, async () => {
   let source: Snapshot
   const server = await modelServer(({ body, url }, res) => {
     if (url === '/v1/models') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"data":[{"id":"wire-model"}]}'); return }
@@ -37,7 +41,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     for (let n = 0; n < 2; n++) {
       await chooseModel(page, 'fixture')
       await page.getByLabel('想从哪里开始？').fill('fixture form ' + n)
-      await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+      await page.getByRole('button', { name: /发送消息/ }).click()
       await expect(page.locator('.managed')).toHaveCount(n + 1)
       await expect(page.locator('.agent-status')).toContainText('已完成')
     }
@@ -59,16 +63,46 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     })
     await chooseModel(page, 'replace-main')
     await page.getByLabel('想从哪里开始？').fill('replace the first View only')
-    await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('button', { name: /发送消息/ }).click()
     await openPending(page)
     await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
     await openPending(page)
     await expect(page.getByRole('button', { name: '保存输入并检查替换', exact: true })).toBeVisible()
-    if (scenario === 'pending-input') {
+    await app.evaluate(({ ipcMain }, scenario) => {
+      const handlers = (ipcMain as typeof ipcMain & { _invokeHandlers: Map<string, (event: unknown, input: HostRequest) => Promise<HostResponse>> })._invokeHandlers
+      const original = handlers.get('pliuna:request')
+      if (!original) throw Error('The real IPC request handler is unavailable')
+      const evidence: ReplacementEvidence = { actionId: null, confirmations: 0, queries: [], queryAllowed: false }
+      globalThis.replacementEvidence = evidence
+      handlers.set('pliuna:request', async (event, input) => {
+        if (input.type === 'surface.respond') {
+          evidence.confirmations++; evidence.actionId = input.action_id
+          const response = await original(event, input)
+          if (scenario === 'lost-response' || scenario === 'unknown-result' || scenario === 'unknown-focus-moved') return { ok: false, error: { code: 'UNKNOWN_RESULT', message: 'Synthetic lost response' } }
+          return response
+        }
+        if (input.type === 'task.query' && input.query.type === 'read' && input.query.input.target.kind === 'action' && input.query.input.target.id === evidence.actionId) {
+          evidence.queries.push(input.query.input.target.id)
+          if (!evidence.queryAllowed && scenario === 'query-unavailable') return { ok: false, error: { code: 'CONNECTION_LOST', message: 'Synthetic unavailable query' } }
+          if (!evidence.queryAllowed && (scenario === 'unknown-result' || scenario === 'unknown-focus-moved')) return { ok: true, data: { metadata: { state: 'ended', result: 'unknown' }, data: {} } }
+        }
+        return original(event, input)
+      })
+    }, scenario)
+    const pendingInput = scenario === 'pending-input' || scenario === 'query-unavailable'
+    const checksFocus = scenario === 'preserve' || scenario === 'lost-response' || scenario === 'unknown-result' || scenario === 'unknown-focus-moved'
+    const waitsForQuery = scenario === 'query-unavailable' || scenario === 'unknown-result' || scenario === 'unknown-focus-moved'
+    if (pendingInput) {
       // Same turn as the input event: do not let the debounce save hide this race.
       await page.evaluate(() => {
         const input = document.querySelector('.managed .view-boundary > div')!.shadowRoot!.querySelector<HTMLTextAreaElement>('textarea')!
         input.value = '尚未防抖保存的输入'; input.dispatchEvent(new Event('input', { bubbles: true }))
+        Array.from(document.querySelectorAll('button')).find(button => button.textContent === '保存输入并检查替换')!.click()
+      })
+    } else if (checksFocus) {
+      await page.evaluate(() => {
+        const input = document.querySelector('.managed .view-boundary > div')!.shadowRoot!.querySelector<HTMLTextAreaElement>('textarea')!
+        input.focus(); input.setSelectionRange(2, 5, 'forward')
         Array.from(document.querySelectorAll('button')).find(button => button.textContent === '保存输入并检查替换')!.click()
       })
     } else {
@@ -76,7 +110,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
       await page.getByRole('button', { name: '保存输入并检查替换', exact: true }).click()
     }
     await expect(page.getByText('REPLACEMENT_RUN_ENDED', { exact: true })).toBeVisible()
-    if (scenario === 'pending-input') {
+    if (waitsForQuery) {
       await expect(page.getByRole('button', { name: '查询原替换结果并同步', exact: true })).toBeVisible()
       expect(await first.locator('[data-view]').evaluate(node => (node as HTMLElement).inert)).toBe(true)
       expect(await page.evaluate(() => !window.dispatchEvent(new Event('beforeunload', { cancelable: true })))).toBe(true)
@@ -102,16 +136,38 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
       expect(page.isClosed()).toBe(false)
       expect(await page.evaluate(async () => (await window.pliuna.request({ type: 'host.tasks' })).ok)).toBe(true)
       const requests = server.exchanges.length
-      await page.getByRole('button', { name: '查询原替换结果并同步', exact: true }).click()
+      await app.evaluate(() => { globalThis.replacementEvidence.queryAllowed = true })
+      if (scenario === 'unknown-focus-moved') {
+        await page.getByRole('searchbox', { name: '筛选任务' }).focus()
+        await expect(page.getByRole('searchbox', { name: '筛选任务' })).toBeFocused()
+      }
+      await page.evaluate(() => { Array.from(document.querySelectorAll('button')).find(button => button.textContent === '查询原替换结果并同步')!.click() })
       await expect(page.getByRole('button', { name: '查询原替换结果并同步', exact: true })).toHaveCount(0)
       expect(await first.locator('[data-view]').evaluate(node => (node as HTMLElement).inert)).toBe(false)
       expect(server.exchanges).toHaveLength(requests)
     }
-    await expect(first.getByLabel('你的想法')).toHaveValue(scenario === 'reset-confirm' ? '新初值' : scenario === 'pending-input' ? '尚未防抖保存的输入' : '保留的旧答案')
-    await expect(first.getByRole('heading', { name: scenario === 'reset-cancel' || scenario === 'pending-input' ? '思考与记录' : '新版练习' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '查询原替换结果并同步', exact: true })).toHaveCount(0)
+    if (pendingInput) {
+      await expect(page.getByRole('alert').filter({ hasText: '替换未完成：正文或输入版本已变化（VERSION_CONFLICT）' })).toBeVisible()
+      expect(await first.locator('[data-view]').evaluate(node => (node as HTMLElement).inert)).toBe(false)
+    } else if (scenario === 'lost-response' || scenario === 'unknown-result' || scenario === 'unknown-focus-moved') {
+      await expect(page.getByRole('alert').filter({ hasText: /替换未完成|原替换结果|替换结果尚未确认/ })).toHaveCount(0)
+    }
+    const evidence = await app.evaluate(() => globalThis.replacementEvidence)
+    expect(evidence.confirmations).toBe(1)
+    expect(evidence.queries).toEqual(Array.from({ length: waitsForQuery ? 2 : pendingInput || scenario === 'lost-response' ? 1 : 0 }, () => evidence.actionId))
+    if (checksFocus) {
+      if (scenario === 'unknown-focus-moved') await expect(page.getByRole('searchbox', { name: '筛选任务' })).toBeFocused()
+      else {
+        await expect(first.getByLabel('你的想法')).toBeFocused()
+        expect(await first.getByLabel('你的想法').evaluate(node => { const input = node as HTMLTextAreaElement; return [input.selectionStart, input.selectionEnd, input.selectionDirection] })).toEqual([2, 5, 'forward'])
+      }
+    }
+    await expect(first.getByLabel('你的想法')).toHaveValue(scenario === 'reset-confirm' ? '新初值' : pendingInput ? '尚未防抖保存的输入' : '保留的旧答案')
+    await expect(first.getByRole('heading', { name: scenario === 'reset-cancel' || pendingInput ? '思考与记录' : '新版练习' })).toBeVisible()
     expect(await otherNode!.evaluate(node => node.isConnected)).toBe(true)
     await expect(other.getByLabel('你的想法')).toHaveValue('其他 View 不变')
-    if (scenario === 'preserve' || scenario === 'reset-confirm') {
+    if (scenario === 'preserve' || scenario === 'reset-confirm' || scenario === 'lost-response' || scenario === 'unknown-result' || scenario === 'unknown-focus-moved') {
       const stale = await page.evaluate(async old => window.pliuna.request({ type: 'draft.save', task_id: old.task.id, view_id: old.views[0]!.id, view_revision: old.views[0]!.revision, expected_state_revision: old.views[0]!.state_revision, fields: [{ path: '/response', value: 'stale write' }] }), source)
       expect(stale).toMatchObject({ ok: false, error: { code: 'VERSION_CONFLICT' } })
     }
@@ -121,7 +177,7 @@ for (const scenario of ['preserve', 'reset-cancel', 'reset-confirm', 'pending-in
     const requests = server.exchanges.length
     await app.close(); app = await launch(); page = await app.firstWindow()
     await page.getByRole('button', { name: /替换草稿验收/ }).click()
-    await expect(page.locator('.managed').first().getByLabel('你的想法')).toHaveValue(scenario === 'reset-confirm' ? '新初值' : scenario === 'pending-input' ? '尚未防抖保存的输入' : '保留的旧答案')
+    await expect(page.locator('.managed').first().getByLabel('你的想法')).toHaveValue(scenario === 'reset-confirm' ? '新初值' : pendingInput ? '尚未防抖保存的输入' : '保留的旧答案')
     expect(server.exchanges).toHaveLength(requests)
   } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })

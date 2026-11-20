@@ -1,0 +1,23 @@
+{
+  "type": "chapter.update",
+  "task_id": "task",
+  "input_event_id": "input",
+  "update_id": "update",
+  "source_request_id": "clarification-request",
+  "view_id": "view",
+  "view_revision": 1,
+  "state_revision": 1,
+  "region_ids": [
+    "node-a"
+  ],
+  "text": "Revise",
+  "model_config_id": "model",
+  "tree_operations": [
+    {
+      "type": "replace",
+      "node_ids": [
+        "node-a"
+      ]
+    }
+  ]
+}

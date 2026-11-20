@@ -9,6 +9,7 @@ import { applicationDirectory } from '../../src/main/application-data'
 import { saveExport } from '../../src/main/export-save'
 import { RuntimeStore } from '../../src/runtime/store'
 import { digest } from '../../src/runtime/resources'
+import { readBusinessSchema } from '../../src/runtime/schema-upgrade'
 import type { Bundle } from '../../src/shared/contracts.generated'
 
 type Row = Record<string, any>
@@ -95,13 +96,17 @@ async function legacyProfile(outcome: 'completed' | 'rolled_back' = 'completed')
     const tasks = previous.tasks()
     previous.close()
     const saved = control(root)
+    const history = database(root, selected, db => {
+      expect(readBusinessSchema(db)).toBe(1)
+      return Object.fromEntries(['requests', 'runs', 'records'].map(table => [table, db.prepare<[], Row>(`SELECT * FROM ${table} ORDER BY rowid`).all()]))
+    })
     expect(saved).toMatchObject({ selected, operations: [{ previous: 'trellis.sqlite', phase: outcome }], retirements: [{ phase: 'released' }, { file: 'trellis.sqlite', phase: 'retired', attempt: 1 }] })
     expect(saved.retirements[1].members[0].state).toBe('deleting')
     expect(fs.existsSync(join(root, 'pliuna.sqlite'))).toBe(false)
     const files = ['trellis.sqlite', `recovery/${active.id}.sqlite`, ...fs.readdirSync(join(root, 'resources')).filter(file => file !== orphan).map(file => `resources/${file}`)]
     for (const image of [saved.operations[0].target, saved.operations[0].rollback]) if (image.file !== selected) files.push(image.file)
     const protectedBytes = new Map(files.map(file => [file, fs.readFileSync(join(root, file))]))
-    return { home, root, task, newerTask, originalResource, newerResource, orphan, active, released, pending, exportId: exported.id, saved, tasks, pointTasks, protectedBytes }
+    return { home, root, task, newerTask, originalResource, newerResource, orphan, active, released, pending, exportId: exported.id, saved, history, tasks, pointTasks, protectedBytes }
   } finally { previous.close() }
 }
 type Profile = Awaited<ReturnType<typeof legacyProfile>>
@@ -115,6 +120,22 @@ function unpin(store: RuntimeStore, profile: Profile): void {
   expect(() => begin(store)).toThrow()
   expect(call(store, 'export.cancel', { task_id: profile.task, operation_id: profile.exportId })).toMatchObject({ phase: 'cancelled', pinned: false })
 }
+function upgradeOperation(profile: Profile): Row {
+  const saved = control(profile.root), upgrade = saved.operations[profile.saved.operations.length]
+  expect(saved.operations.slice(0, profile.saved.operations.length)).toEqual(profile.saved.operations)
+  expect(upgrade).toMatchObject({ kind: 'schema_upgrade', previous: profile.saved.selected, phase: 'completed', point_id: null, target: { schema_version: 2 }, rollback: { schema_version: 1 } })
+  expect(database(profile.root, saved.selected, readBusinessSchema)).toBe(2)
+  return upgrade
+}
+function originalHistory(profile: Profile): void {
+  database(profile.root, control(profile.root).selected, db => {
+    for (const [table, rows] of Object.entries(profile.history)) {
+      const expected = table === 'runs' ? rows.map(row => ({ ...row, chapter_update_id: null })) : rows
+      expect(db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(), table).toEqual(expected)
+    }
+    for (const table of ['runner_inputs', 'runner_runs', 'runner_outlines', 'runner_artifacts']) expect(db.prepare(`SELECT * FROM ${table}`).all(), table).toEqual([])
+  })
+}
 function unchanged(profile: Profile, removed: string[] = []): void {
   for (const [file, bytes] of profile.protectedBytes) {
     if (removed.includes(file)) expect(fs.existsSync(join(profile.root, file))).toBe(false)
@@ -126,29 +147,34 @@ function unchanged(profile: Profile, removed: string[] = []): void {
 
 it.each(['completed', 'rolled_back'] as const)('upgrades actual old %s restore history and released/pending replica records without replay', async outcome => {
   const profile = await legacyProfile(outcome), store = open(profile)
+  const migration = upgradeOperation(profile)
   expect(store.tasks()).toEqual(profile.tasks)
   expect(store.snapshot(profile.task).views[0]!.presentation.html).toContain('LEGACY_LESSON')
-  expect(control(profile.root).operations).toEqual(profile.saved.operations)
+  expect(control(profile.root).operations).toHaveLength(profile.saved.operations.length + 1)
+  originalHistory(profile)
   // Startup reconciles the interrupted unlink without retrying it or renewing
   // its budget. Every original protection fact and file identity stays bound.
   const before = profile.saved.retirements[1]
   expect(control(profile.root).retirements).toEqual([profile.saved.retirements[0], {
     ...before, reason: 'INTERRUPTED_RECONFIRM', members: [{ ...before.members[0], state: 'pending' }, ...before.members.slice(1)]
   }])
-  expect(call(store, 'maintenance.replica.status', { operation_id: profile.released.id })).toEqual(profile.released)
-  expect(call(store, 'maintenance.replica.status', { operation_id: profile.pending.id })).toEqual({
-    ...profile.pending, reason: 'INTERRUPTED_RECONFIRM', files: [{ ...profile.pending.files[0], state: 'pending' }, ...profile.pending.files.slice(1)]
+  expect(call(store, 'maintenance.replica.status', { operation_id: profile.released.id })).toMatchObject(profile.released)
+  expect(call(store, 'maintenance.replica.status', { operation_id: profile.pending.id })).toMatchObject({
+    ...profile.pending, reason: 'INTERRUPTED_RECONFIRM', files: [{ ...profile.pending.files[0], state: 'pending' }, ...profile.pending.files.slice(1)], reauthorization_required: true, authorization_count: 0
   })
   unpin(store, profile); unchanged(profile)
   store.close(); const restarted = open(profile)
   expect(restarted.tasks()).toEqual(profile.tasks)
-  expect(control(profile.root).selected).toBe(profile.saved.selected)
-  expect(call(restarted, 'maintenance.replica.status', { operation_id: profile.pending.id })).toMatchObject({ phase: 'retired', attempt: 1, protection_released: false })
+  expect(control(profile.root).selected).toBe(migration.target.file)
+  expect(control(profile.root).operations).toHaveLength(profile.saved.operations.length + 1)
+  expect(call(restarted, 'maintenance.replica.status', { operation_id: profile.pending.id })).toMatchObject({ phase: 'retired', attempt: 1, protection_released: false, reauthorization_required: true, authorization_count: 0 })
+  originalHistory(profile)
   unchanged(profile)
 })
 
 it('exports an old restored view to an actual HTML file while preserving legacy resources and protected replicas', async () => {
   const profile = await legacyProfile(), store = open(profile); unpin(store, profile)
+  upgradeOperation(profile)
   const preview = call(store, 'export.prepare', { task_id: profile.task, answer_ids: [] }), target = join(profile.home, 'legacy-export.html')
   const request = (type: string, fields: Row = {}): any => call(store, type, { task_id: profile.task, operation_id: preview.id, ...fields })
   const result = await saveExport(target, null, {
@@ -161,14 +187,16 @@ it('exports an old restored view to an actual HTML file while preserving legacy 
   expect(fs.readFileSync(target, 'utf8')).toBe(preview.html)
   expect(fs.readFileSync(target, 'utf8')).toContain('LEGACY_LESSON')
   unchanged(profile)
+  const operations = control(profile.root).operations
   store.close(); const restarted = open(profile)
   expect(call(restarted, 'export.status', { task_id: profile.task, operation_id: preview.id })).toMatchObject({ phase: 'saved', pinned: false })
-  expect(control(profile.root).operations).toEqual(profile.saved.operations)
+  expect(control(profile.root).operations).toEqual(operations)
   unchanged(profile)
 })
 
 it('restores an old effective point again after upgrade and retains both old and newly rolled-back data', async () => {
   const profile = await legacyProfile(), store = open(profile); unpin(store, profile)
+  const migration = upgradeOperation(profile)
   const newerTask = store.create('升级后新增任务').task.id, newerResource = resource(store, newerTask, 'NEW_ROLLBACK_RESOURCE')
   const result = await restore(store)
   expect(result).toMatchObject({ phase: 'idle', restore: { last: { phase: 'completed' } } })
@@ -176,9 +204,11 @@ it('restores an old effective point again after upgrade and retains both old and
   expect(() => store.snapshot(newerTask)).toThrow(/not found/)
   expect(fs.readFileSync(join(profile.root, 'resources', newerResource), 'utf8')).toBe('NEW_ROLLBACK_RESOURCE')
   const saved = control(profile.root)
-  expect(saved.operations).toHaveLength(2)
+  expect(saved.operations).toHaveLength(3)
   expect(saved.operations[0]).toEqual(profile.saved.operations[0])
-  expect(saved.operations[1]).toMatchObject({ previous: profile.saved.selected, phase: 'completed', rollback: { resources: expect.arrayContaining([expect.objectContaining({ id: newerResource })]) } })
+  expect(saved.operations[1]).toEqual(migration)
+  expect(saved.operations[2]).toMatchObject({ previous: migration.target.file, phase: 'completed', target: { schema_version: 2 }, rollback: { resources: expect.arrayContaining([expect.objectContaining({ id: newerResource })]) } })
+  expect(database(profile.root, saved.selected, readBusinessSchema)).toBe(2)
   unchanged(profile)
   store.close(); const restarted = open(profile)
   expect(restarted.snapshot(profile.task).views[0]!.presentation.html).toContain('LEGACY_LESSON')
@@ -191,6 +221,12 @@ it('restores an old effective point again after upgrade and retains both old and
 
 it('reclaims only an actual old failed publication and resumes the original old replica retirement after explicit confirmation', async () => {
   const profile = await legacyProfile(), store = open(profile); unpin(store, profile)
+  const migration = upgradeOperation(profile), protectedToken = begin(store)
+  const protectedPreview = call(store, 'maintenance.gc.preview', { token: protectedToken, inputs_saved: true })
+  expect(protectedPreview.items).toEqual([])
+  expect(protectedPreview.protected).toBeGreaterThan(0)
+  call(store, 'maintenance.cancel', { token: protectedToken })
+  for (const file of [migration.previous, migration.rollback.file]) expect(retire(store, file)).toMatchObject({ phase: 'released', protection_released: true })
   const token = begin(store), preview = call(store, 'maintenance.gc.preview', { token, inputs_saved: true })
   expect(preview.items).toHaveLength(1)
   expect(call(store, 'maintenance.gc.execute', { token, operation_id: preview.id, inputs_saved: true, confirm_delete_orphans: true })).toMatchObject({ phase: 'settled', files_deleted: 1, database_files_deleted: 0, business_replayed: false })
@@ -199,13 +235,22 @@ it('reclaims only an actual old failed publication and resumes the original old 
   unchanged(profile)
   const record = control(profile.root).retirements.find((row: Row) => row.id === profile.pending.id)
   vi.useFakeTimers(); vi.setSystemTime(Math.max(Date.now(), Date.parse(record.next_retry_at) + 1))
-  const result = call(store, 'maintenance.replica.retry', { token: begin(store), operation_id: profile.pending.id, inputs_saved: true, confirm_retire_replica: true })
-  expect(result).toMatchObject({ phase: 'released', attempt: 2, protection_released: true, formal_resources_deleted: 0, business_replayed: false })
+  const retryToken = begin(store)
+  expect(() => call(store, 'maintenance.replica.retry', { token: retryToken, operation_id: profile.pending.id, inputs_saved: true, confirm_retire_replica: true })).toThrow(expect.objectContaining({ code: 'REPLICA_PROTECTED' }))
+  expect(call(store, 'maintenance.replica.status', { operation_id: profile.pending.id })).toMatchObject({ phase: 'retired', attempt: 1, protection_released: false })
+  const authorizationToken = begin(store)
+  const authorization = call(store, 'maintenance.replica.reauthorize.preview', { token: authorizationToken, operation_id: profile.pending.id, inputs_saved: true })
+  expect(authorization).toMatchObject({ id: profile.pending.id, phase: 'retired', attempt: 1, protection_released: false, reauthorization: { state: 'preview' } })
+  const confirm = { token: authorizationToken, operation_id: profile.pending.id, authorization_id: authorization.reauthorization.id, inputs_saved: true, confirm_reauthorize_replica: true }
+  const result = call(store, 'maintenance.replica.reauthorize.confirm', confirm)
+  expect(result).toMatchObject({ id: profile.pending.id, phase: 'released', attempt: 2, protection_released: true, authorization_count: 1, reauthorization: { id: authorization.reauthorization.id, state: 'confirmed' }, formal_resources_deleted: 0, business_replayed: false })
+  expect(call(store, 'maintenance.replica.reauthorize.confirm', confirm)).toEqual(result)
+  expect(control(profile.root).retirements.find((row: Row) => row.id === profile.pending.id)).toMatchObject({ token: record.token, selected: record.selected, graph: record.graph, protection: record.protection, members: record.members.map((member: Row) => ({ suffix: member.suffix, identity: member.identity })) })
   vi.useRealTimers(); unchanged(profile, ['trellis.sqlite'])
   store.close(); const restarted = open(profile)
   expect(restarted.tasks()).toEqual(profile.tasks)
-  expect(control(profile.root).selected).toBe(profile.saved.selected)
-  expect(call(restarted, 'maintenance.replica.status', { operation_id: profile.pending.id })).toEqual(result)
+  expect(control(profile.root).selected).toBe(migration.target.file)
+  expect(call(restarted, 'maintenance.replica.status', { operation_id: profile.pending.id, authorization_id: authorization.reauthorization.id })).toEqual(result)
   expect(fs.readFileSync(join(profile.root, 'resources', profile.newerResource), 'utf8')).toBe('LEGACY_ROLLBACK_ONLY_RESOURCE')
   unchanged(profile, ['trellis.sqlite'])
 })

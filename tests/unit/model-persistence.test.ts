@@ -31,6 +31,37 @@ describe('remembered model configuration lifecycle', () => {
     await restored.discover('saved-main').catch(() => {})
     expect(server.exchanges.at(-1)!.authorization).toBe('Bearer secret-sentinel')
   })
+  it('loads validated legacy connections while dropping cumulative ceilings and retaining per-request limits', async () => {
+    let writes = 0
+    const limits = { run_model_requests: 1, run_tool_requests: 1, run_tokens: 1, run_wall_ms: 1, request_timeout_ms: 300000, response_bytes: 102400 }
+    const saved = { configuration: { id: 'legacy-main', base_url: 'https://example.test/v1', wire_model_id: 'wire', context_tokens: 100000, max_output_tokens: 1024, compatibility_profile: 'chat-max-tokens', limits }, key: 'legacy-secret', revision: 7, protocol: 'current', roles: ['main'] }
+    const service = new ModelService(undefined, undefined, {
+      async load() { return { available: true, backend: 'test-protected', records: [saved] } },
+      async save() { writes++ }
+    }, 'current'); cleanups.push(() => service.close())
+    await service.restore()
+    expect(service.storageStatus()).toMatchObject({ available: true, error: '' })
+    expect(service.list()).toMatchObject([{ id: 'legacy-main', revision: 7, roles: ['main'], credential_missing: false, context_tokens: 100000, max_output_tokens: 1024 }])
+    const lease = service.acquire('legacy-main', 'main')
+    expect(lease.config.limits).toEqual({ request_timeout_ms: 300000, response_bytes: 102400 })
+    lease.release()
+    expect(saved.configuration.limits).toEqual(limits)
+    expect(writes).toBe(0)
+  })
+  it.each(['run_model_requests', 'run_tool_requests', 'run_tokens', 'run_wall_ms'])('rejects the retired %s field in new model configurations', field => {
+    const service = new ModelService(); cleanups.push(() => service.close())
+    expect(() => service.configure({ type: 'model.configure', configuration: { id: 'new-main', base_url: 'https://example.test/v1', wire_model_id: 'wire', context_tokens: 100000, compatibility_profile: 'chat-max-tokens', limits: { [field]: 1 } }, api_key: 'secret', confirm_memory_only: true })).toThrow()
+    expect(service.list()).toEqual([])
+  })
+  it('continues rejecting unknown limit fields in remembered connections', async () => {
+    const service = new ModelService(undefined, undefined, {
+      async load() { return { available: true, backend: 'test-protected', records: [{ configuration: { id: 'legacy-main', base_url: 'https://example.test/v1', wire_model_id: 'wire', context_tokens: 100000, compatibility_profile: 'chat-max-tokens', limits: { run_tokens: 1, unrecognized_limit: 1 } }, key: 'secret', revision: 1, protocol: 'current', roles: ['main'] }] } },
+      async save() { throw new Error('Restore must not save') }
+    }, 'current'); cleanups.push(() => service.close())
+    await service.restore()
+    expect(service.list()).toEqual([])
+    expect(service.storageStatus()).toMatchObject({ error: 'SECURE_STORAGE_READ_FAILED' })
+  })
   it('invalidates validation on protocol change without forgetting connection or key', async () => {
     const { create, input, server } = await setup(), service = await create()
     await service.configureConnection(input); await service.test('saved-main', 'main')

@@ -2,6 +2,8 @@ import { expect, it, vi } from 'vitest'
 import { ModelService, type ModelLease } from '../../src/runtime/model/service'
 import { ChatAdapter, ModelError } from '../../src/runtime/model/adapter'
 import { requestAccounting, type RequestAccounting } from '../../src/runtime/model/accounting'
+import { accountingFacts } from '../../src/runtime/model/accounting-query'
+import type { ExecutionScope } from '../../src/shared/types'
 const config = { id:'accounting',base_url:'https://example.invalid/v1',wire_model_id:'synthetic',context_tokens:1000000,max_output_tokens:1024,compatibility_profile:'chat-max-tokens' as const }
 function setup() {
  const adapter = new ChatAdapter(), service = new ModelService(adapter), events: RequestAccounting[]=[]
@@ -14,6 +16,19 @@ it('records each reserved/dispatched/completed request with actual usage and num
  const s=setup();await s.run();expect(s.events.map(e=>e.phase)).toEqual(['reserved','dispatched','completed']);expect(new Set(s.events.map(e=>e.request_id)).size).toBe(1)
  expect(s.events[2]?.usage).toEqual({prompt_tokens:123,completion_tokens:7});expect(JSON.stringify(s.events)).not.toContain('synthetic')
  expect(Object.values(s.events[0]!.components).reduce((a,b)=>a+b,0)).toBe(s.events[0]!.input_bytes)
+})
+it('reads persisted worker accounting without mixing execution ownership into the strict usage contract', async () => {
+ const s=setup();await s.run()
+ const owner:ExecutionScope={purpose:'production',role:'producer',task_id:'task',request_id:'goal',intent_revision:1,run_id:'run',work_id:'work',attempt_id:'attempt'}
+ const rows=s.events.map((event,index)=>({id:`accounting-${index}`,payload_json:JSON.stringify({...event,run_id:owner.run_id,owner})})),before=rows.map(row=>row.payload_json)
+ expect(accountingFacts(rows).requests).toMatchObject([{phase:'completed',dispatched:true,usage:{prompt_tokens:123,completion_tokens:7}}])
+ expect(rows.map(row=>row.payload_json)).toEqual(before)
+ const changed=rows.map((row,index)=>index===1?{...row,payload_json:JSON.stringify({...JSON.parse(row.payload_json),owner:{...owner,attempt_id:'other-attempt'}})}:row)
+ expect(()=>accountingFacts(changed)).toThrow('Accounting owner changed')
+ const foreign=rows.map(row=>({...row,payload_json:JSON.stringify({...JSON.parse(row.payload_json),owner:{...owner,run_id:'other-run'}})}))
+ expect(()=>accountingFacts(foreign)).toThrow('Accounting owner belongs to another Run')
+ const invalid=rows.map((row,index)=>index===1?{...row,payload_json:JSON.stringify({...JSON.parse(row.payload_json),unexpected:true})}:row)
+ expect(()=>accountingFacts(invalid)).toThrow()
 })
 it('fails closed before HTTP when either reservation or dispatch persistence fails',async()=>{
  for(const phase of ['reserved','dispatched']){const s=setup();s.lease.accounting=e=>{if(e.phase===phase)throw Error('disk failure')};await expect(s.run()).rejects.toThrow('disk failure');expect(s.complete).not.toHaveBeenCalled()}

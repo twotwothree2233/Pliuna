@@ -12,11 +12,11 @@ export interface ModelState { models: ModelOption[]; channels?: ChannelOption[];
 export async function hostRequest<T>(input: HostRequest): Promise<T> {
   if (!window.pliuna) throw new Error('桌面桥接不可用：请通过 pnpm dev 启动 Electron 使用本地数据。')
   const response = await window.pliuna.request(input)
-  if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+  if (!response.ok) throw Object.assign(new Error(`${response.error.code}: ${response.error.message}`), { code: response.error.code })
   return response.data as T
 }
 const roleName = { main: '主模型', approval: '审批模型', compaction: '压缩模型' }
-const limitLabels = [['request_timeout_ms','单请求超时（毫秒）'],['response_bytes','单请求响应流累计字节'],['run_tokens','Run 累计输入输出 token'],['run_model_requests','Run 模型请求次数'],['run_tool_requests','Run 工具次数'],['run_wall_ms','Run 总时间（毫秒）']] as const
+const limitLabels = [['request_timeout_ms','单请求超时（毫秒）'],['response_bytes','单请求响应流累计字节']] as const
 export function ModelSettings({ state, reload, section = 'models', onBusy }: { state: ModelState; reload(): Promise<void>; section?: 'models' | 'approval'; onBusy?(busy: boolean): void }) {
   const [busy, setBusy] = useState(false), active = useRef<string | null>(null), [status, setStatus] = useState('')
   const [channel, setChannel] = useState<{ id: string; name: string; base_url: string; compatibility_profile: ModelChannel['compatibility_profile']; key: string; reuse: boolean; remember: boolean; existing: boolean } | null>(null)

@@ -1,0 +1,150 @@
+{
+  "task_id": "task",
+  "update_id": "update",
+  "revision": 0,
+  "request_order": 2,
+  "source": {
+    "task_id": "task",
+    "run_id": "run",
+    "work_id": "work",
+    "attempt_id": "attempt",
+    "role": "producer",
+    "purpose": "production",
+    "request_id": "goal",
+    "intent_revision": 1,
+    "update_id": "update"
+  },
+  "base_manifest": {
+    "task_id": "task",
+    "view_id": "view",
+    "view_revision": 1,
+    "state_revision": 1,
+    "bundle_resource_id": "original",
+    "manifest_revision": 1,
+    "shared_revision": 1,
+    "request_id": "goal",
+    "intent_revision": 1,
+    "chapters": [
+      {
+        "region_id": "a",
+        "revision": 1,
+        "title": "A",
+        "title_selector": "#a-title",
+        "body_selector": "#a-body",
+        "dependencies": [],
+        "ownership": {
+          "form_ids": [],
+          "behavior_ids": [],
+          "reference_ids": [],
+          "export_ids": [],
+          "css_selectors": []
+        }
+      },
+      {
+        "region_id": "b",
+        "revision": 1,
+        "title": "B",
+        "title_selector": "#b-title",
+        "body_selector": "#b-body",
+        "dependencies": [],
+        "ownership": {
+          "form_ids": [],
+          "behavior_ids": [],
+          "reference_ids": [],
+          "export_ids": [],
+          "css_selectors": []
+        }
+      }
+    ],
+    "content_tree": {
+      "version": 1,
+      "revision": 1,
+      "root_id": "document",
+      "nodes": [
+        {
+          "node_id": "document",
+          "parent_id": null,
+          "kind": "document",
+          "revision": 1,
+          "position_revision": 1,
+          "title": "",
+          "children": [
+            "node-a",
+            "node-b"
+          ],
+          "selector": ":scope",
+          "end_selector": ":scope",
+          "tag": "",
+          "span": {
+            "start": 0,
+            "end": 16
+          },
+          "inner_span": {
+            "start": 0,
+            "end": 16
+          }
+        },
+        {
+          "node_id": "node-a",
+          "parent_id": "document",
+          "kind": "paragraph",
+          "revision": 1,
+          "position_revision": 1,
+          "title": "",
+          "children": [],
+          "selector": "#node-a",
+          "end_selector": "#node-a",
+          "tag": "p",
+          "span": {
+            "start": 0,
+            "end": 8
+          },
+          "inner_span": {
+            "start": 3,
+            "end": 4
+          }
+        },
+        {
+          "node_id": "node-b",
+          "parent_id": "document",
+          "kind": "paragraph",
+          "revision": 1,
+          "position_revision": 1,
+          "title": "",
+          "children": [],
+          "selector": "#node-b",
+          "end_selector": "#node-b",
+          "tag": "p",
+          "span": {
+            "start": 8,
+            "end": 16
+          },
+          "inner_span": {
+            "start": 11,
+            "end": 12
+          }
+        }
+      ],
+      "lineage": []
+    }
+  },
+  "operations": [
+    {
+      "type": "replace",
+      "node_ids": [
+        "node-a"
+      ]
+    }
+  ],
+  "read_refs": [
+    "read-1"
+  ],
+  "dependencies": [
+    {
+      "kind": "chapter",
+      "task_id": "task",
+      "view_id": "view",
+      "revision": 1
+    }
+  ]
+}

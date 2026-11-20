@@ -14,6 +14,7 @@
   "tool": {
     "preview_bytes": 8192,
     "execution_ms": 120000,
+    "operation_timeout_ms": 3600000,
     "declared_max_execution_ms": 600000,
     "nested_max_depth": 4,
     "output_resource_bytes": 268435456
@@ -40,12 +41,6 @@
     "task_pending": 20,
     "model_pending_app": 100,
     "plugin_top_level_pending": 20
-  },
-  "run": {
-    "wall_ms": 3600000,
-    "model_requests": 40,
-    "tool_requests": 200,
-    "tokens": 200000
   },
   "approval": {
     "ttl_ms": 900000

@@ -42,7 +42,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     async function send(text: string, decision?: '批准' | '拒绝') {
       await page.getByLabel('想从哪里开始？').fill(text)
-      await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+      await page.getByRole('button', { name: /发送消息/ }).click()
       if (decision) {
         await expect(page.getByRole('button', { name: decision + '本次动作', exact: true })).toBeVisible()
         await expect(page.locator('.approval-card pre').first()).toContainText(text === '解除引用' ? source : target)

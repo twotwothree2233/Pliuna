@@ -45,7 +45,7 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
   let app = await launch()
   const errors: string[] = []
   async function send(page: Page, text: string) {
-    await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByLabel('想从哪里开始？').fill(text); await page.getByRole('button', { name: /发送消息/ }).click()
   }
   async function full(region: ReturnType<Page['getByRole']>) {
     await expect(region.locator('pre').first()).not.toHaveText('')

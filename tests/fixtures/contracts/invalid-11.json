@@ -1,0 +1,73 @@
+{
+  "task_id": "task",
+  "update_id": "update",
+  "input_event_id": "input",
+  "record_id": "record",
+  "request_id": "goal",
+  "intent_revision": 1,
+  "view_id": "view",
+  "base_manifest": {
+    "task_id": "task",
+    "view_id": "view",
+    "view_revision": 1,
+    "state_revision": 1,
+    "bundle_resource_id": "original",
+    "manifest_revision": 1,
+    "shared_revision": 1,
+    "request_id": "goal",
+    "intent_revision": 1,
+    "chapters": [
+      {
+        "region_id": "a",
+        "revision": 1,
+        "title": "A",
+        "title_selector": "#a-title",
+        "body_selector": "#a-body",
+        "dependencies": [],
+        "ownership": {
+          "form_ids": [],
+          "behavior_ids": [],
+          "reference_ids": [],
+          "export_ids": [],
+          "css_selectors": []
+        }
+      },
+      {
+        "region_id": "b",
+        "revision": 1,
+        "title": "B",
+        "title_selector": "#b-title",
+        "body_selector": "#b-body",
+        "dependencies": [],
+        "ownership": {
+          "form_ids": [],
+          "behavior_ids": [],
+          "reference_ids": [],
+          "export_ids": [],
+          "css_selectors": []
+        }
+      }
+    ]
+  },
+  "region_ids": [
+    "a"
+  ],
+  "region_intents": [
+    {
+      "region_id": "a",
+      "intent_revision": 1
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "chapter",
+      "task_id": "task",
+      "view_id": "view",
+      "revision": 1
+    }
+  ],
+  "state": "queued",
+  "text": "Revise the selected chapter",
+  "previous_update_ids": [],
+  "scope": "all"
+}

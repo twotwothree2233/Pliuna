@@ -99,7 +99,7 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await page.getByRole('button', { name: /^返回工作区/ }).click()
     await chooseModel(page, 'fixture')
     await page.getByLabel('想从哪里开始？').fill('请解释事务中的持久性')
-    await page.getByRole('button', { name: /发送 · 新 Run/ }).click()
+    await page.getByRole('button', { name: /发送消息/ }).click()
     await expect(page.getByRole('heading', { name: '思考与记录' })).toBeVisible()
     await page.screenshot({ path: join(tmpdir(), 'pliuna-workspace-graphite.png') })
     await chooseTheme(page, 'paper')

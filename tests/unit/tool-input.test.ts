@@ -31,6 +31,44 @@ it('maps minimal wire into unchanged strict execution contracts', () => {
   for (const args of [null, true, 2, 'text', '{"code":"literal"}', [1, 2], { code: 'result = 1' }]) expect(modelToolRequest('call', { capability: 'builtin:monty:v1', input_json: JSON.stringify(args) }).input).toEqual({ capability: 'builtin:monty:v1', arguments: args, references: [] })
 })
 
+it('preserves structured resource HTML and CSS through one wire encoding and keeps legacy input compatible', () => {
+  const value = {
+    profile: 'managed-v1',
+    html: '<section id="lesson" data-note=\'"quoted"\'>中😀\n<code>{"path":"C:\\\\notes"}</code></section>',
+    css: '#lesson::after { content: "\\\\ quoted \\\"text\\\""; }\n@media (width > 600px) { #lesson { color: red; } }',
+    nested: { literal: '{"keep":"a JSON string"}', enabled: true, values: [null, 3.5] }
+  }
+  const input = { display_name: '讲义 "一"', content: { type: 'json', value } }
+  const wire = JSON.parse(JSON.stringify({ operation: 'resource.create', input }))
+  expect(modelToolRequest('write', wire)).toEqual({ type: 'write', input: { type: 'resource.create', ...input } })
+  expect(modelToolRequest('write', { operation: 'resource.create', input_json: JSON.stringify(input) })).toEqual(modelToolRequest('write', wire))
+  expect(wire.input.content.value).toEqual(value)
+  expect(value.nested.literal).toBe('{"keep":"a JSON string"}')
+})
+
+it('rejects ambiguous or invalid structured resource inputs before execution', () => {
+  const input = { display_name: 'Output', content: { type: 'text', text: 'body' } }
+  for (const raw of [
+    { operation: 'resource.create' },
+    { operation: 'resource.create', input, input_json: JSON.stringify(input) },
+    { operation: 'resource.create', input, input_json: '{' },
+    { operation: 'resource.create', input_json: input },
+    { operation: 'resource.create', input: null },
+    { operation: 'resource.create', input: [] },
+    { operation: 'resource.create', input: JSON.stringify(input) },
+    { operation: 'resource.create', input, unexpected: true },
+    { operation: 'resource.create', input: { ...input, type: 'resource.create' } },
+    { operation: 'resource.create', input: { ...input, type: 'task_data.remove' } },
+    { operation: 'resource.create', input: { ...input, extra: true } },
+    { operation: 'resource.create', input: { ...input, content: { type: 'text', text: 3 } } },
+    { operation: 'resource.create', input: { ...input, content: { type: 'text', text: 'body', extra: true } } },
+    { operation: 'task_data.remove', input: { id: 'd', expected_revision: 1 } },
+    { operation: 'task_data.replace', input: { id: 'd', expected_revision: 1, value: {}, references: [] } },
+    { operation: 'surface.update', input: { surface_id: 's', expected_revision: 1, operations: [] } }
+  ]) expect(() => modelToolRequest('write', raw)).toThrow()
+  expect(() => modelToolRequest('write', { operation: 'resource.create', input: { ...input, content: { type: 'text', text: 3 } } })).toThrow('/content/text must be string')
+})
+
 it('rejects invalid encoding, overrides and selections before dispatch', () => {
   for (const raw of [null, [], 1, 'text', '{"value":1}']) expect(() => modelToolRequest('write', { operation: 'task_data.replace', input_json: JSON.stringify(raw) })).toThrow()
   for (const [name, raw] of [

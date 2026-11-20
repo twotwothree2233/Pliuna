@@ -47,7 +47,8 @@ export function operationContract(id: string): Record<string, unknown> | undefin
   const branch = core.$defs.write.oneOf.find(value => value.properties.type.const === id)
   if (branch) {
     const { type: _route, ...properties } = branch.properties
-    return { id, operation: id, description: descriptions[id], input_schema: scopedSchema({ ...branch, properties, required: branch.required.filter(key => key !== 'type') }), example: { operation: id, input_json: JSON.stringify(examples[id]) } }
+    const example = id === 'resource.create' ? { operation: id, input: examples[id] } : { operation: id, input_json: JSON.stringify(examples[id]) }
+    return { id, operation: id, description: descriptions[id], input_schema: scopedSchema({ ...branch, properties, required: branch.required.filter(key => key !== 'type') }), example }
   }
   const tool = modelTools.find(tool => 'tool.' + tool.function.name === id)
   if (tool) return { id, description: descriptions[id], input_schema: tool.function.parameters, example: JSON.parse(tool.function.description.split('示例：')[1]!), ...(id === 'tool.list' ? { directories: core.$defs.list.properties.kind.enum, filters: core.$defs.list.properties.filters } : {}), ...(id === 'tool.read' ? { rules: ['max_chars limits representation code points, default 4000, maximum 32000.', 'Plain UTF-8 resources default to text; metadata selects metadata, object selects the public object. Other originals are not parsed implicitly.', 'lines/pages are one-based inclusive; pages require a saved page index. find is a case-sensitive literal on one text resource; search scan is not body delivery.', 'Cursor continuation needs only kind/id/cursor; repeated selection or max_chars must exactly match. Restart invalidates cursors.', 'guide/schema/example and section apply only to contracts; object preserves the complete public object.'] } : {}) }
@@ -70,10 +71,13 @@ export function contractRepresentation(contract: Record<string, any>, selection:
   sections.set('example', example)
   for (const [key, value] of Object.entries(contract)) if (!['id', 'kind', 'description', 'input_schema', 'example', 'capability'].includes(key)) sections.set(key, value)
   if (contract.capability) for (const [key, value] of Object.entries(contract.capability)) if (!['id', 'description', 'input_schema'].includes(key)) sections.set(key, value)
+  if (contract.id === 'surface.update' || contract.id === 'resource.create') {
+    const bundle = core.$defs.bundle
+    sections.set('bundle', scopedSchema(bundle))
+    for (const [key, schema] of Object.entries(bundle.properties)) sections.set('bundle.' + key, scopedSchema(schema))
+  }
   if (contract.id === 'surface.update') {
     for (const [key, schema] of Object.entries(contract.input_schema?.$defs ?? {})) sections.set(key, scopedSchema(schema as Record<string, any>))
-    const bundle = (core.$defs as any).bundle
-    for (const [key, schema] of Object.entries(bundle.properties)) sections.set('bundle.' + key, scopedSchema(schema as Record<string, any>))
     for (const branch of (core.$defs as any).view_op.oneOf) {
       const type = branch.properties.type.const
       sections.set(type, scopedSchema(branch))

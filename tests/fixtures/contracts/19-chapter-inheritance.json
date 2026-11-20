@@ -1,0 +1,16 @@
+{
+  "task_id": "task",
+  "update_id": "update",
+  "view_id": "view",
+  "region_id": "b",
+  "region_revision": 1,
+  "source_bundle_resource_id": "original",
+  "source_manifest_revision": 1,
+  "request_id": "goal",
+  "intent_revision": 1,
+  "requirement_ids": [
+    "content"
+  ],
+  "dependencies": [],
+  "valid": true
+}

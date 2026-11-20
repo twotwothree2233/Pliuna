@@ -9,6 +9,7 @@ import type { RestrictedGc } from './gc'
 import type { RecoveryManager } from './recovery'
 import { digest } from './resources'
 import type { RestoreJournal } from './restore-journal'
+import { runnerResourceReferences } from './runner/resource-references'
 
 type Row = Record<string, any>
 type Identity = JournalFileIdentity
@@ -61,6 +62,7 @@ export class ResourceCleanupManager {
     if (db.prepare('SELECT 1 FROM views WHERE bundle_resource_id=? UNION ALL SELECT 1 FROM view_history WHERE bundle_resource_id=? UNION ALL SELECT 1 FROM recovery_resources WHERE resource_id=? LIMIT 1').get(material.id, material.id, material.id)) return 'VIEW_HISTORY_OR_RECOVERY'
     try {
       // Registered references are a projection; frozen history is independently authoritative.
+      if (runnerResourceReferences(db).some(reference => ids.has(reference.resource_id) || reference.resource_id === material.storage_key)) return 'RUNNER_HISTORY_REFERENCE'
       for (const data of db.prepare('SELECT references_json FROM task_data').iterate() as Iterable<Row>) {
         const refs = JSON.parse(data.references_json)
         if (!Array.isArray(refs) || refs.some((ref: Row) => !ref?.target || !['resource', 'task_data'].includes(ref.target.kind) || typeof ref.target.id !== 'string')) return 'REFERENCE_FACTS_UNCERTAIN'

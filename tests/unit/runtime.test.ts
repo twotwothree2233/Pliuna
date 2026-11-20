@@ -39,7 +39,7 @@ describe('runtime persistence and transaction invariants', () => {
   it('enforces one unfinished Run and cancellation revokes old write permission', () => {
     vi.useFakeTimers(); const { store } = open(), t = task(store)
     const run = store.start(t.task.id, 'question', 'fixture', [])
-    expect(() => store.start(t.task.id, 'question', 'fixture', [])).toThrow('unfinished Run')
+    expect(() => store.start(t.task.id, 'question', 'fixture', [])).toThrow(expect.objectContaining({ code: 'RUN_BUSY' }))
     store.handle({ type: 'run.cancel', task_id: t.task.id, run_id: run })
     expect(() => store.modelTool(t.task.id, run, { type: 'read', input: { target: { kind: 'surface', id: t.surface.id } } })).toThrow('commit permission')
     expect(store.snapshot(t.task.id).views).toHaveLength(0)

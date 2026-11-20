@@ -24,7 +24,7 @@ export class PluginUploads {
     if (this.grants.size >= 100 || [...this.grants.values()].filter(g => g.identity.instance_id === identity.instance_id).length >= 20) fail('PLUGIN_UPLOAD_LIMIT')
     const action = randomUUID()
     this.db.prepare("INSERT INTO actions (id,task_id,kind,state,source_json,request_json,authorization_json,commit_valid,created_at) VALUES (?,?,'mutation','registered',?,?,?,1,?)").run(action,task,JSON.stringify({ type: 'plugin_result', instance_id: identity.instance_id, package_digest: identity.digest, epoch: this.epoch }),JSON.stringify({ type:'plugin.result.upload',...declaration }),JSON.stringify({basis:'default_new_resource'}),now())
-    const timer = setTimeout(() => this.cancelGrant(action),defaults.run.wall_ms);timer.unref?.()
+    const timer = setTimeout(() => this.cancelGrant(action),defaults.tool.operation_timeout_ms);timer.unref?.()
     this.grants.set(action,{identity,task,declaration:declarationKey(declaration),timer})
     return { action_id: action, status:'registered', upload_owner_id:action }
   }

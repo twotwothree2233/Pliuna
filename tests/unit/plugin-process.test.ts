@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PluginControl } from '../../src/runtime/plugins/control'
-import { pluginCapabilities, PluginProcesses, type PluginExecution } from '../../src/runtime/plugins/process'
+import { pluginCapabilities, PluginProcesses, type PluginExecution, type PluginInstanceEvent } from '../../src/runtime/plugins/process'
 import type { PluginCopy } from '../../src/runtime/plugins/package'
 let root: string, control: PluginControl, processes: PluginProcesses | undefined, copy: PluginCopy
 const task = '00000000-0000-4000-8000-000000000001'
@@ -32,14 +32,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
  }
 });
 `
-async function setup(options: { timeout?: number; badHandshake?: boolean; global?: boolean; pdf?: boolean; appRuntime?: boolean; hostRuntime?: string; reverseRead?: () => Promise<unknown> } = {}): Promise<void> {
+async function setup(options: { timeout?: number; badHandshake?: boolean; global?: boolean; pdf?: boolean; appRuntime?: boolean; hostRuntime?: string; reverseRead?: () => Promise<unknown>; onInstanceEvent?: (event: PluginInstanceEvent) => void } = {}): Promise<void> {
   const source = join(root, 'source'); await mkdir(source)
   const script = backend.replaceAll('MARKER_PATH', JSON.stringify(join(root, 'started')))
   await writeFile(join(source, 'backend.cjs'), options.badHandshake ? script.replace("protocol_version:'0.1'", "protocol_version:'future'") : script)
   await writeFile(join(source, 'echo.json'), JSON.stringify({ id: 'echo', description: 'fixture', when_to_use: 'testing', input_schema: { type: 'object' }, output_schema: { type: 'object', properties: { value: {} }, required: ['value'], additionalProperties: false }, effect: 'read', timeout_ms: options.timeout ?? 2000, errors: [], examples: [] }))
   await writeFile(join(source, 'manifest.json'), JSON.stringify({ manifest_version: '0.1', protocol_version: '0.1', id: options.pdf ? 'pliuna.pdf-text' : 'fixture.process', version: '1.0.0', access_level: options.global ? 'global' : 'task', contributes: [{ id: 'echo', kind: 'tool', entry: 'echo.json', description: 'fixture' }], backend: options.appRuntime ? { runtime: 'app-node', entry: 'backend.cjs' } : { command: process.execPath, args: ['backend.cjs'], entry: 'backend.cjs' } }))
   copy = await control.install(source); await control.grant(copy.digest, { local_code: true, cross_task: options.global ?? false })
-  processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return options.reverseRead ? options.reverseRead() : { value: 'reverse result' } }, () => {}, options.hostRuntime)
+  processes = new PluginProcesses(root, async item => { await control.executable(item.digest) }, async (_identity, method) => { expect(method).toBe('objects.read'); return options.reverseRead ? options.reverseRead() : { value: 'reverse result' } }, () => {}, options.hostRuntime, options.onInstanceEvent)
 }
 function request(args: Record<string, unknown> = {}, options: Partial<PluginExecution> = {}): PluginExecution {
   return { call_id: crypto.randomUUID(), capability: 'echo', arguments: args, references: [], signal: new AbortController().signal, dispatch() {}, valid() {}, ...options }
@@ -181,6 +181,67 @@ it('coalesces synchronous RPC-close reentry into one tree termination request', 
 function childInstance(): { process: ChildProcess; tree: ManagedProcessTree; exited: Promise<void> } {
   return [...(processes as any).children][0]
 }
+it('records every call sharing an interrupted resource key and keeps independent keys running', async () => {
+  const events: PluginInstanceEvent[] = []
+  await setup({ onInstanceEvent: event => { events.push(event) } })
+  const controller = new AbortController(), firstRequest = request({ value: 'first', delay: 5000 }, { signal: controller.signal })
+  const first = processes!.execute(copy, task, firstRequest)
+  const firstOutcome = Promise.allSettled([first])
+  await expect.poll(() => processes!.status(task, copy.digest)).toMatchObject([{ call_id: firstRequest.call_id }])
+  const instanceId = (processes!.status(task, copy.digest)[0] as { instance_id: string }).instance_id
+  const instance = childInstance(), terminate = instance.tree.terminate.bind(instance.tree)
+  const termination = vi.spyOn(instance.tree, 'terminate').mockReturnValue(false)
+  const secondDispatch = vi.fn(), secondRequest = request({ value: 'queued' }, { dispatch: secondDispatch })
+  const second = processes!.execute(copy, task, secondRequest)
+  const secondOutcome = Promise.allSettled([second])
+  try {
+    await expect.poll(() => processes!.status(task, copy.digest)).toMatchObject([{ pending: 2 }])
+    controller.abort()
+    processes!.retryCleanup()
+    processes!.retryCleanup()
+    expect(events.filter(event => event.instance_id === instanceId)).toEqual([
+      { kind: 'interrupted', instance_id: instanceId, instance_key: copy.digest + ':' + task, call_ids: [firstRequest.call_id, secondRequest.call_id], reason: 'PLUGIN_CALL_CANCELLED' },
+      { kind: 'cleanup_failed', instance_id: instanceId, instance_key: copy.digest + ':' + task, call_ids: [firstRequest.call_id, secondRequest.call_id], reason: 'PLUGIN_TERMINATION_UNCONFIRMED' }
+    ])
+    const otherTask = '00000000-0000-4000-8000-000000000002'
+    await expect(processes!.execute(copy, otherTask, request({ value: 'independent' }))).resolves.toEqual({ value: 'independent' })
+    expect(processes!.cleaning(task)).toBe(true)
+    expect(processes!.cleaning(otherTask)).toBe(false)
+    expect(secondDispatch).not.toHaveBeenCalled()
+  } finally {
+    termination.mockRestore()
+    terminate()
+    await Promise.all([firstOutcome, secondOutcome])
+  }
+  const interrupted = events.filter(event => event.instance_id === instanceId)
+  expect(interrupted.map(event => event.kind)).toEqual(['interrupted', 'cleanup_failed', 'cleanup_confirmed'])
+  expect(interrupted.every(event => event.instance_key === copy.digest + ':' + task && JSON.stringify(event.call_ids) === JSON.stringify([firstRequest.call_id, secondRequest.call_id]))).toBe(true)
+  expect(secondDispatch).not.toHaveBeenCalled()
+})
+
+it('keeps global interruption metadata accurate across tasks and never replays queued work', async () => {
+  const events: PluginInstanceEvent[] = []
+  await setup({ global: true, onInstanceEvent: event => { events.push(event) } })
+  const firstDispatch = vi.fn(), secondDispatch = vi.fn()
+  const firstRequest = request({ value: 'first', delay: 5000 }, { dispatch: firstDispatch })
+  const first = processes!.execute(copy, task, firstRequest)
+  const firstOutcome = Promise.allSettled([first])
+  await expect.poll(() => processes!.status(task, copy.digest)).toMatchObject([{ call_id: firstRequest.call_id }])
+  const secondRequest = request({ value: 'queued' }, { dispatch: secondDispatch })
+  const second = processes!.execute(copy, '00000000-0000-4000-8000-000000000002', secondRequest)
+  const secondOutcome = Promise.allSettled([second])
+  await expect.poll(() => processes!.status(task, copy.digest)).toMatchObject([{ pending: 2 }])
+  processes!.revoke(copy.digest)
+  await Promise.all([firstOutcome, secondOutcome])
+  expect(events.filter(event => event.kind !== 'cleanup_failed').map(event => event.kind)).toEqual(['interrupted', 'cleanup_confirmed'])
+  expect(events.filter(event => event.kind === 'cleanup_failed').length).toBeLessThanOrEqual(1)
+  expect(events[0]).toMatchObject({ instance_key: copy.digest + ':global', call_ids: [firstRequest.call_id, secondRequest.call_id], reason: 'PLUGIN_PROCESS_REVOKED' })
+  for (const event of events) expect(event).toMatchObject({ instance_id: events[0]!.instance_id, instance_key: copy.digest + ':global', call_ids: [firstRequest.call_id, secondRequest.call_id] })
+  expect(firstDispatch).toHaveBeenCalledOnce()
+  expect(firstDispatch).toHaveBeenCalledWith('sent')
+  expect(secondDispatch).not.toHaveBeenCalled()
+})
+
 it('holds ordinary cancelled work and its instance slot until confirmed exit', async () => {
   await setup()
   const controller = new AbortController()

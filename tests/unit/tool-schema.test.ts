@@ -24,11 +24,27 @@ it('serves only the requested operation with complete reachable host validation 
     const contract = operationContract(id) as any
     expect(contract.operation).toBe(id)
     const validate = new Ajv2020({ strict: false }).compile(contract.input_schema)
-    expect(validate(JSON.parse(contract.example.input_json)), JSON.stringify(validate.errors)).toBe(true)
+    expect(validate(contract.example.input ?? JSON.parse(contract.example.input_json)), JSON.stringify(validate.errors)).toBe(true)
     expect(() => modelToolRequest('write', contract.example)).not.toThrow()
     if (id !== 'surface.update') expect(JSON.stringify(contract)).not.toMatch(/view_op|layout|behaviors|forms/)
   }
   expect(operationContract('future')).toBeUndefined()
+})
+
+it('discovers structured resource input without exposing the full operation schema to every request', () => {
+  const write = modelTools.find(tool => tool.function.name === 'write')!
+  const schema = write.function.parameters as any
+  const validate = new Ajv2020({ strict: false }).compile(schema)
+  const example = operationContract('resource.create')!.example as any
+  expect(example).toEqual({ operation: 'resource.create', input: { display_name: '说明', content: { type: 'text', text: '正文' } } })
+  expect(schema.required).toEqual(['operation'])
+  expect(schema.properties.input).toEqual({ type: 'object' })
+  expect(schema.properties.input_json).toEqual({ type: 'string' })
+  expect(validate(example)).toBe(true)
+  expect(validate({ operation: 'resource.create', input_json: JSON.stringify(example.input) })).toBe(true)
+  expect(modelToolRequest('write', example)).toEqual(modelToolRequest('write', { operation: 'resource.create', input_json: JSON.stringify(example.input) }))
+  expect(() => modelToolRequest('write', { ...example, input_json: JSON.stringify(example.input) })).toThrow()
+  expect(() => modelToolRequest('write', { operation: 'resource.create' })).toThrow()
 })
 
 it('keeps detailed tool contracts in the new wire and leaves business call discovery intact', () => {

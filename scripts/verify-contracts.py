@@ -59,7 +59,35 @@ except sqlite3.IntegrityError:
     pass
 else:
     raise AssertionError('Multiple valid recovery points accepted')
+con.commit()
+# v2 preserves legacy attribution and limits active production by request.
+con.executescript((BASE / '002-runner.sql').read_text(encoding='utf-8'))
+assert not con.execute('SELECT * FROM runner_goal_revisions').fetchall()
+assert not con.execute('SELECT * FROM runner_runs').fetchall()
+for number in (1, 2):
+    con.execute('INSERT INTO requests VALUES (?,?,?,?,?,?)',
+                (f'request_{number}', 'task_1', 'started', '{}', '{}', 'now'))
+    con.execute("INSERT INTO runs (id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running','epoch_1','{}','{}','now')",
+                (f'production_{number}', 'task_1', f'request_{number}'))
+try:
+    con.execute("INSERT INTO runs (id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES ('duplicate','task_1','request_1','waiting','epoch_1','{}','{}','now')")
+except sqlite3.IntegrityError:
+    pass
+else:
+    raise AssertionError('Multiple active production runs for one request accepted')
+con.execute("UPDATE runs SET state='completed',commit_valid=0 WHERE id='production_1'")
+con.execute("INSERT INTO runs (id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES ('continuation','task_1','request_1','running','epoch_1','{}','{}','now')")
+assert not con.execute('PRAGMA foreign_key_check').fetchall()
+con.executescript((BASE / '003-chapters.sql').read_text(encoding='utf-8'))
+assert not con.execute('SELECT * FROM runner_chapter_updates').fetchall()
+assert not con.execute('SELECT * FROM runner_chapter_assemblies').fetchall()
+assert not con.execute('PRAGMA foreign_key_check').fetchall()
+for _ in range(2):
+    con.executescript((BASE / '004-content-tree.sql').read_text(encoding='utf-8'))
+assert not con.execute('SELECT * FROM runner_content_trees').fetchall()
+assert not con.execute('SELECT * FROM runner_content_intent_relations').fetchall()
+assert not con.execute('PRAGMA foreign_key_check').fetchall()
 con.close()
 
-print(f'PASS: {len(fixtures)} schema fixtures; in-memory SQL, unfinished-run/recovery uniqueness, independent submissions and rollback')
+print(f'PASS: {len(fixtures)} schema fixtures; v1/v2/chapter/content-tree SQL, request/recovery uniqueness, independent submissions and rollback')
 print('Not tested: documentation, runtime behavior, DOM/CSS safety, model quality, native packaging or crash durability.')
