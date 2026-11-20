@@ -253,7 +253,7 @@ it('reclaims only an actual old failed publication and resumes the original old 
   expect(call(restarted, 'maintenance.replica.status', { operation_id: profile.pending.id, authorization_id: authorization.reauthorization.id })).toEqual(result)
   expect(fs.readFileSync(join(profile.root, 'resources', profile.newerResource), 'utf8')).toBe('LEGACY_ROLLBACK_ONLY_RESOURCE')
   unchanged(profile, ['trellis.sqlite'])
-}, 15_000)
+})
 
 it('fails closed when a real old profile also contains the new base name, without rewriting either base file', async () => {
   const profile = await legacyProfile(), bytes = fs.readFileSync(join(profile.root, 'trellis.sqlite'))
