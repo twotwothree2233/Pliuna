@@ -59,9 +59,9 @@ function contentScopesOverlap(tree: ContentTree, a: ContentOperationScope, b: Co
   return crosses(a.node_ids, b.gaps) || crosses(b.node_ids, a.gaps, !historicalLeft) || a.gaps.some(x => b.gaps.some(y => x.parent_id === y.parent_id && x.before_id === y.before_id && x.after_id === y.after_id))
 }
 
-/** Published history follows retired identities without locking unrelated branches. */
+/** Settled history follows retired identities without locking unrelated branches. */
 export function completedContentUpdatesOverlap(left: ChapterUpdate, right: ChapterUpdate): boolean {
-  if (left.state !== 'succeeded') return contentUpdatesOverlap(left, right)
+  if (!['succeeded', 'failed', 'cancelled', 'interrupted', 'superseded'].includes(left.state)) return contentUpdatesOverlap(left, right)
   const baseline = left.base_manifest.content_tree, tree = right.base_manifest.content_tree
   if (!baseline || !tree) return contentUpdatesOverlap(left, right)
   const current = new Map(tree.nodes.map(node => [node.node_id, node]))

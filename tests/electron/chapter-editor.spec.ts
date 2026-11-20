@@ -12,13 +12,14 @@ interface Harness {
   events: string[]
   requests: Record<string, any>[]
   mode: 'success' | 'save-wait' | 'unknown'
+  statusError?: { code: string; message: string }
   release?(): void
   scope?: ChapterSourceRequest
 }
 declare global {
   interface Window {
     chapterEditorHarness: Harness
-    mountChapterEditor(view: View, source: ChapterSourceRequest): void
+    mountChapterEditor(view: View, source?: ChapterSourceRequest): void
     mountChapterQueue(source: ChapterSourceRequest): void
   }
 }
@@ -48,7 +49,7 @@ test.beforeAll(async () => {
     let root;
     function setup(){root?.unmount();document.body.innerHTML='<main></main>';const h=window.chapterEditorHarness={events:[],requests:[],mode:'success'};root=createRoot(document.querySelector('main'));return h}
     window.mountChapterEditor=(view,source)=>{const h=setup();let revision=view.state_revision;
-      window.pliuna={platform:'linux',request:async request=>{h.requests.push(request);h.events.push(request.type);if(request.type==='chapter.update'&&h.mode==='unknown')return {ok:false,error:{code:'OFFLINE',message:'OFFLINE'}};return {ok:true,data:{}}}};
+      window.pliuna={platform:'linux',request:async request=>{h.requests.push(request);h.events.push(request.type);if(request.type==='chapter.update'&&h.mode==='unknown')return {ok:false,error:{code:'OFFLINE',message:'OFFLINE'}};if(request.type==='chapter.status'&&h.statusError)return {ok:false,error:h.statusError};return {ok:true,data:{}}}};
       root.render(<ChapterEditor taskId="task" view={view} modelId="newly-selected-model" enabled={true} sourceRequest={source} save={async()=>{h.events.push('save');if(h.mode==='save-wait')await new Promise(resolve=>{h.release=resolve});revision=5}} stateRevision={()=>revision} refresh={async()=>{h.events.push('refresh')}} onDirty={()=>{}} onSourceResolved={()=>{h.events.push('resolved')}}/>);
     };
     window.mountChapterQueue=source=>{const h=setup();
@@ -98,4 +99,59 @@ test('an uncertain scope submission queries the original update without replayin
   await page.getByRole('button', { name: '查询原更新', exact: true }).click()
   expect(await page.evaluate(() => window.chapterEditorHarness.requests)).toEqual([original, { type: 'chapter.status', task_id: 'task', update_id: original.update_id }])
   expect((await page.evaluate(() => window.chapterEditorHarness.events)).filter(event => event === 'resolved')).toHaveLength(1)
+})
+
+for (const originalSource of [false, true]) {
+  test(`a confirmed unreceived ${originalSource ? 'source request' : 'manual edit'} restores editing without losing the instruction`, async () => {
+    await page.evaluate(({ view, source }) => window.mountChapterEditor(view, source), { view, source: originalSource ? sourceRequest : undefined })
+    if (!originalSource) {
+      await page.getByText('修改正文', { exact: true }).click()
+      await page.getByLabel('修改要求', { exact: true }).fill('保留这条修改要求')
+    }
+    await page.getByRole('checkbox', { name: 'Alpha', exact: true }).check()
+    await page.evaluate(() => { window.chapterEditorHarness.mode = 'unknown' })
+    await page.getByRole('button', { name: '更新所选章节', exact: true }).click()
+    await expect(page.getByRole('button', { name: '查询原更新', exact: true })).toBeVisible()
+    const original = (await page.evaluate(() => window.chapterEditorHarness.requests))[0]!
+    await page.evaluate(() => { const h = window.chapterEditorHarness; h.mode = 'success'; h.statusError = { code: 'NOT_FOUND', message: 'Chapter update is unavailable' } })
+    await page.getByRole('button', { name: '查询原更新', exact: true }).click()
+    await expect(page.getByRole('button', { name: '查询原更新', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '更新所选章节', exact: true })).toBeEnabled()
+    await expect(page.getByRole('checkbox', { name: 'Alpha', exact: true })).toBeEnabled()
+    await expect(page.getByRole('checkbox', { name: 'Alpha', exact: true })).toBeChecked()
+    expect(await page.evaluate(() => window.chapterEditorHarness.requests)).toEqual([original, { type: 'chapter.status', task_id: 'task', update_id: original.update_id }])
+    expect(await page.evaluate(() => window.chapterEditorHarness.events)).not.toContain('resolved')
+    if (originalSource) await expect(page.getByText(sourceRequest.text + '…', { exact: true })).toBeVisible()
+    else {
+      await expect(page.getByLabel('修改要求', { exact: true })).toBeEnabled()
+      await expect(page.getByLabel('修改要求', { exact: true })).toHaveValue('保留这条修改要求')
+      await expect(page.getByRole('button', { name: '清除要求', exact: true })).toBeVisible()
+      await page.getByLabel('修改要求', { exact: true }).fill('编辑后重新提交')
+    }
+    await page.getByRole('button', { name: '更新所选章节', exact: true }).click()
+    const requests = await page.evaluate(() => window.chapterEditorHarness.requests)
+    expect(requests).toHaveLength(3)
+    expect(requests[2]).toMatchObject({ type: 'chapter.update', region_ids: ['alpha'], text: originalSource ? sourceRequest.text : '编辑后重新提交', model_config_id: originalSource ? sourceRequest.model_config_id : 'newly-selected-model', ...(originalSource ? { source_request_id: sourceRequest.request_id } : {}) })
+    expect(requests[2]!.update_id).not.toBe(original.update_id)
+    expect(requests[2]!.input_event_id).not.toBe(original.input_event_id)
+  })
+}
+
+test('query errors keep an uncertain update locked and never infer absence from message text', async () => {
+  await page.evaluate(({ view, source }) => window.mountChapterEditor(view, source), { view, source: sourceRequest })
+  await page.getByRole('checkbox', { name: 'Alpha', exact: true }).check()
+  await page.evaluate(() => { window.chapterEditorHarness.mode = 'unknown' })
+  await page.getByRole('button', { name: '更新所选章节', exact: true }).click()
+  await expect(page.getByRole('button', { name: '查询原更新', exact: true })).toBeVisible()
+  const original = (await page.evaluate(() => window.chapterEditorHarness.requests))[0]!
+  for (const code of ['OFFLINE', 'UNKNOWN_RESULT']) {
+    await page.evaluate(code => { window.chapterEditorHarness.statusError = { code, message: 'NOT_FOUND: unconfirmed transport response' } }, code)
+    await page.getByRole('button', { name: '查询原更新', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText(code)
+    await expect(page.getByRole('button', { name: '更新所选章节', exact: true })).toBeDisabled()
+    await expect(page.getByRole('checkbox', { name: 'Alpha', exact: true })).toBeDisabled()
+    expect(await page.evaluate(() => window.chapterEditorHarness.events)).not.toContain('resolved')
+  }
+  const requests = await page.evaluate(() => window.chapterEditorHarness.requests)
+  expect(requests).toEqual([original, ...Array.from({ length: 2 }, () => ({ type: 'chapter.status', task_id: 'task', update_id: original.update_id }))])
 })

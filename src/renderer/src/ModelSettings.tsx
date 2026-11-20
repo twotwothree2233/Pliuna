@@ -12,7 +12,7 @@ export interface ModelState { models: ModelOption[]; channels?: ChannelOption[];
 export async function hostRequest<T>(input: HostRequest): Promise<T> {
   if (!window.pliuna) throw new Error('桌面桥接不可用：请通过 pnpm dev 启动 Electron 使用本地数据。')
   const response = await window.pliuna.request(input)
-  if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+  if (!response.ok) throw Object.assign(new Error(`${response.error.code}: ${response.error.message}`), { code: response.error.code })
   return response.data as T
 }
 const roleName = { main: '主模型', approval: '审批模型', compaction: '压缩模型' }

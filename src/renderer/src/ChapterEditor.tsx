@@ -66,8 +66,13 @@ export function ChapterEditor({ taskId, view, modelId, enabled, save, stateRevis
     if (!unknown) return
     setBusy(true); setError('')
     try {
-      await hostRequest<ChapterUpdate>({ type: 'chapter.status', task_id: taskId, update_id: unknown.update_id })
-      pending.current = null; setUnknown(null); if (!sourceRequest) setText(''); else onSourceResolved?.(); await refresh()
+      const update = await hostRequest<ChapterUpdate>({ type: 'chapter.status', task_id: taskId, update_id: unknown.update_id }).catch(error => {
+        if (error instanceof Error && 'code' in error && error.code === 'NOT_FOUND') return null
+        throw error
+      })
+      pending.current = null; setUnknown(null)
+      if (update === null) { setError('宿主未接收这次更新，修改要求已保留。可编辑后重新提交。'); return }
+      if (!sourceRequest) setText(''); else onSourceResolved?.(); await refresh()
     } catch (error) { setError(String(error).replace(/^Error:\s*/, '')) } finally { setBusy(false) }
   }
   async function submit() {

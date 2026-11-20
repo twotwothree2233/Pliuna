@@ -97,6 +97,32 @@ describe('revisable content eligibility', () => {
     expect(() => revise(refreshed, [protectedScope])).toThrow(expect.objectContaining({ code: 'CONTENT_INTENT_CONFLICT' }))
     expect(state.update('task', old.update_id)?.scope_revision).toBe(2)
   })
+  describe.each(['failed', 'cancelled', 'interrupted'] as const)('settled %s history', terminal => {
+    it.each(['split', 'delete'] as const)('does not block an independent update after its target is retired by a later %s', type => {
+      const { db, state, start, revise, proposal, tree, manifest, paragraphs } = setup()
+      const independent = paragraphs[2]!.node_id, target = paragraphs[0]!.node_id
+      const old = revise(start('old'), [{ type: 'replace', node_ids: [independent] }])
+      const newer = revise(start('newer'), [{ type: 'replace', node_ids: [target] }])
+      state.stage('task', newer.update_id, terminal)
+      expect(() => revise(old, [{ type: 'replace', node_ids: [target] }])).toThrow(expect.objectContaining({ code: 'CONTENT_INTENT_CONFLICT' }))
+      const operation: ContentOperation = type === 'split'
+        ? { type: 'replace', node_ids: [target], html: '<p>One</p><p>Two</p>' }
+        : { type: 'delete', node_ids: [target] }
+      const latest = revise(start('latest'), [{ type: operation.type, node_ids: [target] }])
+      const applied = applyContentOperations({ html: '<h2>A</h2><p>A1</p><p>A2</p><h2>B</h2><p>B1</p>', tree, operations: [operation] })
+      const next: ChapterManifest = { ...manifest, manifest_revision: 2, view_revision: 2, bundle_resource_id: 'published', content_tree: applied.tree, chapters: treeChapters(applied.tree) }
+      db.exec("UPDATE views SET revision=2,bundle_resource_id='published' WHERE id='view'"); state.installManifest(next, 1)
+      state.stage('task', latest.update_id, 'succeeded')
+      expect(state.assertLive('task', old.update_id).scope_revision).toBe(1)
+      expect(state.assertCurrent('task', old.update_id).region_ids).toEqual([independent])
+      const refreshed = revise(old, old.tree_operations!)
+      expect(refreshed.scope_revision).toBe(2)
+      expect(state.assertCurrent('task', old.update_id).region_ids).toEqual([independent])
+      const candidate = { ...proposal(refreshed), tree_operations: [{ type: 'replace' as const, node_ids: [independent], html: '<p>Independent update</p>' }] }
+      expect(state.recordProposal(candidate)).toEqual(candidate)
+      expect(state.update('task', newer.update_id)?.state).toBe(terminal)
+    })
+  })
   it('installs takeover and its old revision revocation atomically', () => {
     const { db, state, start, revise, paragraphs } = setup(), old = start('old'), newer = start('new')
     revise(old, [{ type: 'replace', node_ids: [paragraphs[0]!.node_id] }])
