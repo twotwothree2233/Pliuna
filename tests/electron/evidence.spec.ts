@@ -1,4 +1,5 @@
-import { openPending } from '../helpers/agent-ui'
+import { openTaskRecords } from '../helpers/workspace-ui'
+import { pendingApprovals } from '../helpers/agent-ui'
 import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { modelInputFromHost } from '../helpers/model-server'
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
@@ -74,10 +75,10 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
     await page.getByLabel('证据作答').fill('原版作答'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     await page.getByRole('button', { name: '提交依据答案', exact: true }).click(); await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
     for (const request of ['更新源', '移除源']) {
-      await send(page, request); await openPending(page); await page.getByRole('button', { name: '批准本次动作', exact: true }).click()
+      await send(page, request); await pendingApprovals(page); await page.getByRole('button', { name: '批准', exact: true }).click()
       await expect(page.getByText(request === '更新源' ? '源更新完成' : '源移除完成', { exact: true })).toBeVisible()
     }
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await page.locator('.execution-category > summary').filter({ hasText: /^界面历史依据$/ }).click()
     const history = page.getByRole('region', { name: '界面历史依据分页浏览' })
     await history.getByRole('button', { name: '刷新界面历史依据', exact: true }).click(); await history.locator('.object-list button').first().click()
@@ -87,7 +88,7 @@ test('immutable evidence: real desktop publication, answer, source removal, cont
     expect(await page.evaluate(() => (globalThis as any).EVIDENCE_EXECUTED)).toBeUndefined()
     const requests = server.exchanges.length
     await app.close(); app = await launch(); page = await app.firstWindow(); page.on('pageerror', error => errors.push(error.message))
-    await page.getByRole('button', { name: /不可变证据验收/ }).click(); await page.getByRole('tab', { name: /作答/ }).click()
+    await page.getByRole('button', { name: /不可变证据验收/ }).click(); await openTaskRecords(page, '作答记录')
     const answers = page.getByRole('region', { name: '全部作答分页浏览' })
     await answers.getByRole('button', { name: '刷新全部作答', exact: true }).click(); await answers.locator('.object-list button').first().click()
     const answer = await full(answers); expect(answer.value).toEqual({ text: '原版作答' }); expect(answer.view_history.id).toBe(saved.id)

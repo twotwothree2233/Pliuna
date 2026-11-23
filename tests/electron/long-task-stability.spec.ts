@@ -1,4 +1,4 @@
-import { openPending } from '../helpers/agent-ui'
+import { pendingApprovals } from '../helpers/agent-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -30,21 +30,18 @@ test('cross-page background export and long-approval original result navigation'
   const submit=async(text:string)=>call({type:'task.submit',task_id:task.id,text,model_config_id:'long',attachments:[]})
   await submit('Publish twenty-two synthetic lessons');await expect(page.getByText('LONG_DONE_views',{exact:true})).toBeVisible()
   const count=server.exchanges.length
-  await page.getByRole('button',{name:'导出',exact:true}).click();await page.getByRole('button',{name:'下一页导出内容',exact:true}).click();await page.getByLabel('内容 22 · 版本 1',{exact:true}).check();await page.getByRole('button',{name:'上一页导出内容',exact:true}).click();await expect(page.getByLabel('内容 1 · 版本 1',{exact:true})).toBeChecked()
+  await page.getByRole('button',{name:'导出内容',exact:true}).click();await page.getByRole('button',{name:'下一页导出内容',exact:true}).click();await page.getByLabel('内容 22 · 版本 1',{exact:true}).check();await page.getByRole('button',{name:'上一页导出内容',exact:true}).click();await expect(page.getByLabel('内容 1 · 版本 1',{exact:true})).toBeChecked()
   await page.getByRole('button',{name:'固定快照并预览',exact:true}).click();await page.getByRole('button',{name:'关闭导出',exact:true}).click()
   const job=(await call({type:'export.list',task_id:task.id}))[0]
   await expect.poll(async()=>(await call({type:'export.status',task_id:task.id,operation_id:job.id})).phase).toBe('preview')
-  await page.getByRole('button',{name:'导出',exact:true}).click();await page.getByText('原导出作业（最近 20 项）',{exact:true}).click();await page.getByRole('button',{name:'查看此原作业',exact:true}).click()
+  await page.getByRole('button',{name:'导出内容',exact:true}).click();await page.getByText('原导出作业（最近 20 项）',{exact:true}).click();await page.getByRole('button',{name:'查看此原作业',exact:true}).click()
   const frame=page.frameLocator('iframe[title="固定快照离线预览"]');await expect(frame.getByText('LONG_LESSON_21',{exact:true})).toBeVisible();await expect(frame.getByText('LONG_LESSON_0',{exact:true})).toBeVisible();await expect(frame.getByText('LONG_LESSON_10',{exact:true})).toHaveCount(0)
   await page.getByRole('button',{name:'取消并释放本次快照',exact:true}).click();await page.getByRole('button',{name:'关闭导出',exact:true}).click();expect(server.exchanges).toHaveLength(count)
   mode='data';await submit('Create a data object');await expect(page.getByText('LONG_DONE_data',{exact:true})).toBeVisible();dataId=(await call({type:'task.snapshot',task_id:task.id})).task_data.items[0].id
-  mode='replace';await submit('Replace with long parameters');await openPending(page);const approve=page.getByRole('button',{name:'批准本次动作',exact:true});await expect(approve).toBeDisabled()
-  const original=page.getByRole('region',{name:'本次审批原动作分页浏览'});await expect(original.getByRole('button',{name:'继续读取全文',exact:true})).toBeVisible()
-  while(await original.getByRole('button',{name:'继续读取全文',exact:true}).count()){
-   await original.getByRole('button',{name:'继续读取全文',exact:true}).click()
-   await page.waitForFunction(()=>{const region=document.querySelector('[aria-label="本次审批原动作分页浏览"]');const button=[...(region?.querySelectorAll('button')??[])].find(button=>button.textContent==='继续读取全文');return !button||!button.disabled})
-  }
-  await expect(approve).toBeEnabled();await approve.click();await expect(page.getByText('LONG_DONE_replace',{exact:true})).toBeVisible();await expect.poll(async()=>(await call({type:'task.snapshot',task_id:task.id})).task_data.items[0].revision).toBe(2)
+  mode='replace';await submit('Replace with long parameters');const approval=await pendingApprovals(page)
+  await expect(approval).toContainText(`更新任务数据：${dataId}`)
+  await expect(approval.locator('pre,details')).toHaveCount(0)
+  await approval.getByRole('button',{name:'批准',exact:true}).click();await expect(page.getByText('LONG_DONE_replace',{exact:true})).toBeVisible();await expect.poll(async()=>(await call({type:'task.snapshot',task_id:task.id})).task_data.items[0].revision).toBe(2)
   const latest=(await call({type:'task.snapshot',task_id:task.id})).runs[0];const results=await call({type:'host.run.results',task_id:task.id,run_id:latest.id,offset:0});expect(results.items).toHaveLength(1);expect(results.items[0].result).toBe('success')
   await page.getByRole('button',{name:'更多 Agent 操作',exact:true}).click();await page.getByRole('menuitem',{name:'本次请求详情',exact:true}).click();await page.getByRole('button',{name:'查看本 Run 原操作结果',exact:true}).click();await expect(page.getByText('原操作 1 项；每页最多 50 项。',{exact:false})).toBeVisible()
   const beforeRestart=server.exchanges.length;await app.close();app=await launch();page=await app.firstWindow();await page.getByRole('button',{name:/Long task acceptance/}).click();expect((await call({type:'task.snapshot',task_id:task.id})).task_data.items[0].revision).toBe(2);expect(server.exchanges).toHaveLength(beforeRestart);expect(errors).toEqual([])

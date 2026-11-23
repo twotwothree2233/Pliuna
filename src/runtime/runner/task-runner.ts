@@ -1,5 +1,5 @@
 import { types } from 'node:util'
-import type { ExecutionScope, GoalRevision, InputEvent } from '../../shared/contracts.generated'
+import type { ExecutionScope, ContentPlan, InputEvent } from '../../shared/contracts.generated'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { assertIndexBytes, assertRunnerId, RUNNER_LIMITS } from './limits'
@@ -26,15 +26,15 @@ export interface TaskRunnerInstallation extends TaskRunnerEffect {
   task_id: string
   state: 'installed' | 'clarification'
   route: TaskRunnerRoute
-  goal?: Pick<GoalRevision, 'request_id' | 'intent_revision' | 'state'>
+  goal?: Pick<ContentPlan, 'request_id' | 'intent_revision' | 'state'>
 }
 export interface TaskRunnerStatusQuery { task_id: string; request_id?: string; cursor?: string; limit?: number }
 export interface TaskRunnerStatusItem { ref: TaskRunnerReference; state: string; refs: TaskRunnerReference[]; waits: TaskRunnerWait[] }
 export interface TaskRunnerStatusPage { task_id: string; items: TaskRunnerStatusItem[]; next_cursor: string | null }
 export interface TaskRunnerHost {
-  goal(input: InputEvent, current: GoalRevision | null): GoalRevision
+  goal(input: InputEvent, current: ContentPlan | null): ContentPlan
   // Persist only. Abort, queue dispatch and external I/O follow advance's return.
-  install(input: InputEvent, route: TaskRunnerRoute, goal?: GoalRevision): TaskRunnerEffect
+  install(input: InputEvent, route: TaskRunnerRoute, goal?: ContentPlan): TaskRunnerEffect
   operationOwner(input: InputEvent): { operation_id: string; owner: ExecutionScope } | null
   status(query: TaskRunnerStatusQuery): TaskRunnerStatusPage
 }
@@ -97,11 +97,11 @@ export class TaskRunner {
         refs: [{ task_id: input.task_id, kind: 'record' as const, id: input.record_id }],
         waits: [{ reason: route.reason, ref: { task_id: input.task_id, kind: 'input' as const, id: inputId } }]
       }
-      let goal: GoalRevision | undefined
+      let goal: ContentPlan | undefined
       if (route.kind === 'request' || route.kind === 'correction' || route.kind === 'withdraw_goal') {
-        let current: GoalRevision | null = null
+        let current: ContentPlan | null = null
         try { current = this.work.goal(route.request_id) } catch (error) { if (!(error instanceof ContractError) || error.code !== 'RUNNER_NOT_FOUND') throw error }
-        const proposed = validateRunnerContract('runner_goal_revision', synchronous(this.host.goal, this.host, copy(input), copy(current)))
+        const proposed = validateRunnerContract('runner_content_plan', synchronous(this.host.goal, this.host, copy(input), copy(current)))
         if (proposed.task_id !== input.task_id || proposed.request_id !== route.request_id || proposed.input_event_id !== inputId) ownership()
         goal = this.work.installGoal(proposed, current?.intent_revision ?? null)
       }

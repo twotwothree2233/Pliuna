@@ -1,4 +1,4 @@
-import type { ArtifactCandidate, Bundle, ExecutionScope, GoalRevision, LogicalWork, Outline, OutlineSection } from '../../shared/contracts.generated'
+import type { ArtifactCandidate, Bundle, ExecutionScope, ContentPlan, LogicalWork, Outline, OutlineSection } from '../../shared/contracts.generated'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { sameDependencies, validateRunnerContract } from '../../shared/runner-validation'
 import { assertContract, ContractError, validateBundle, validateModel } from '../../shared/validation'
@@ -12,7 +12,7 @@ type RequirementRef = ArtifactCandidate['unresolved'][number]
 export interface ProductionResultBinding {
   owner: ExecutionScope
   work: LogicalWork
-  goal: GoalRevision
+  goal: ContentPlan
   sections: readonly OutlineSection[]
 }
 export interface ProducerProfileInput extends ProductionResultBinding {
@@ -58,7 +58,7 @@ function boundedCopy<T>(value: T, limit = defaults.transport.rpc_message_bytes):
   if (Buffer.byteLength(json) > limit) return invalid()
   return JSON.parse(json) as T
 }
-function sameGoal(left: Pick<GoalRevision, 'task_id' | 'request_id' | 'intent_revision'>, right: Pick<GoalRevision, 'task_id' | 'request_id' | 'intent_revision'>): boolean {
+function sameGoal(left: Pick<ContentPlan, 'task_id' | 'request_id' | 'intent_revision'>, right: Pick<ContentPlan, 'task_id' | 'request_id' | 'intent_revision'>): boolean {
   return left.task_id === right.task_id && left.request_id === right.request_id && left.intent_revision === right.intent_revision
 }
 function sameSection(left: OutlineSection, right: OutlineSection): boolean {
@@ -67,9 +67,9 @@ function sameSection(left: OutlineSection, right: OutlineSection): boolean {
 function binding(raw: ProductionResultBinding, roles: readonly LogicalWork['role'][]): ProductionResultBinding {
   const owner = boundedCopy(validateRunnerContract('runner_execution_scope', raw.owner))
   const work = boundedCopy(validateRunnerContract('runner_logical_work', raw.work))
-  const goal = boundedCopy(validateRunnerContract('runner_goal_revision', raw.goal))
+  const goal = boundedCopy(validateRunnerContract('runner_content_plan', raw.goal))
   const sections = raw.sections.map(section => boundedCopy(validateRunnerContract('runner_outline_section', section)))
-  if (owner.purpose !== 'production' || work.purpose !== 'production' || !roles.includes(work.role) || owner.role !== work.role || !sameGoal(owner, goal) || !sameGoal(work, goal) || owner.run_id !== work.run_id || owner.work_id !== work.work_id || work.current_attempt_id !== undefined && work.current_attempt_id !== owner.attempt_id || goal.state !== 'active') invalid()
+  if (owner.purpose !== 'production' || work.purpose !== 'production' || !roles.includes(work.role) || owner.role !== work.role || !sameGoal(owner, goal) || !sameGoal(work, goal) || owner.run_id !== work.run_id || owner.work_id !== work.work_id || owner.message_id !== work.message_id || work.current_attempt_id !== undefined && work.current_attempt_id !== owner.attempt_id || goal.state !== 'active') invalid()
   if (work.requirement_ids.some(id => !goal.requirements.some(requirement => requirement.requirement_id === id))) invalid()
   distinct(sections.map(section => section.section_id))
   return { owner, work, goal, sections }
@@ -218,7 +218,9 @@ For artifact construction, discover the write wrapper, resource input and manage
 {"name":"read","arguments":{"kind":"object_type","id":"surface.update","selection":{"view":"schema","section":"state-and-references"}}}
 The last example contains a Surface operation in input_json. Parse input_json and use only operations[0].bundle.bundle as the bundle; never execute the Surface operation.
 For artifacts, first call resource.create for each complete managed-v1 JSON bundle. Pass operation as "resource.create" and use the write tool's structured input object with display_name and content. Set content.type to "json" and content.value to the actual complete bundle object, never a JSON string. Do not use input_json for resource.create; the structured input avoids an extra JSON encoding layer around HTML and CSS. Text, Markdown and HTML-only resources are not managed-v1 bundles and cannot be an artifact's bundle_resource_id.
-State initial values use raw control representations: number/integer fields must be strings such as "0", even for a numeric field without an input behavior. Their schema remains number/integer. Resource creation validates the complete bundle; if rejected, correct the reported issue and create a valid resource before returning its candidate.
+State initial values use raw control representations: number/integer fields must be strings such as "0", even without an input behavior. control:"number" binds to <input type="text">; keep the numeric schema. For a blank select placeholder, put "" in both the schema enum and the HTML option values.
+On a validation error, change only the reported field and any coupled declaration. Keep correct HTML, state and bindings; do not probe by deleting controls or creating unrelated drafts. Retry the complete corrected bundle, then return its resource ID.
+In bundle export entries, ordinary exercises, self-tests and worked examples are learning. Use answer, feedback or mixed_personal only for actual personal content tied to a saved same-task answer and its exact original question history. Never invent those IDs.
 One bundle is at most ${defaults.surface.inline_bundle_bytes} UTF-8 JSON bytes. Split larger output into independent fragments. Resource references do not enlarge the limit.
 Then return exactly one strict JSON object without a code fence or surrounding prose: {"version":1,"complete":true,"answer":a string or null,"artifacts":an array of artifact drafts,"requirement_ids":an array of strings,"unresolved":an array of objects with task_id,request_id,intent_revision,requirement_id}.
 With artifacts, answer is a brief completion notice, not a copy or summary of their content; never claim publication. Otherwise answer the learner directly. Keep resource IDs and internal protocol details outside answer.
@@ -262,8 +264,8 @@ Bound data: ${snapshot(source)}`
   })
 }
 
-export function ruleRouterOutline(rawGoal: GoalRevision, rawCurrent: Outline | null, options: RuleOutlineOptions = {}): Outline {
-  const goal = boundedCopy(validateRunnerContract('runner_goal_revision', rawGoal))
+export function ruleRouterOutline(rawGoal: ContentPlan, rawCurrent: Outline | null, options: RuleOutlineOptions = {}): Outline {
+  const goal = boundedCopy(validateRunnerContract('runner_content_plan', rawGoal))
   const current = rawCurrent === null ? null : boundedCopy(validateRunnerContract('runner_outline', rawCurrent))
   if (goal.state !== 'active' || current && current.task_id !== goal.task_id || !object(options, ['order_key', 'title'])) invalid()
   if (options.order_key !== undefined) assertRunnerId(options.order_key, 'order_key')

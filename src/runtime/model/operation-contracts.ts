@@ -92,6 +92,8 @@ export function contractRepresentation(contract: Record<string, any>, selection:
     })
     sections.set('state-and-references', {
       draft: 'State initial values and saved drafts use raw control representations: number/integer fields are strings such as "12.5", not JSON numbers. control:"number" uses input type="text" to retain raw text; range uses type="range". Formal answers convert validated raw strings to numbers; their schema remains number/integer.',
+      selection: 'For select, the string schema enum, explicit HTML option values, and initial value must agree. A blank placeholder is an explicit option: enum:["","first"], initial:"", and <option value="">Choose</option>. Radio can omit its initial field to start unselected. Multiselect uses a string items.enum and an initial array of distinct declared values.',
+      repair: 'An error rooted at state.initial identifies the raw value; change that value or its options before changing HTML controls. A behaviors[index] error refers to that binding and its HTML target. Keep valid controls, forms, and content unchanged.',
       empty: 'A noninteractive View may use state {schema:{type:"object",properties:{},additionalProperties:false},initial:{},compatibility_version:"v1"}, forms:[], behaviors:[].',
       preserve: 'view.replace preserve requires the exact current state revision, unchanged state schema and matching compatibility_version. Read the current View; do not guess versions.',
       references: 'bundle.references names immutable same-task resources. snapshot_sources binds same-task task_data with exact expected_revision. Neither loads contents into state or the model context.',

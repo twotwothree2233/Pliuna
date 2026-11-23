@@ -30,6 +30,10 @@ function request(store: RuntimeStore, task: Snapshot, reset = false) {
   const snapshot = store.snapshot(task.task.id), view = snapshot.views[0]!, next = bundle('新版题目', reset ? 'exercise-2' : 'exercise-1', '新初值')
   return { type: 'write', input: { type: 'surface.update', surface_id: snapshot.surface.id, expected_revision: snapshot.surface.revision, operations: [{ type: 'view.replace', view_id: view.id, expected_view_revision: view.revision, bundle: { type: 'inline', bundle: next }, state_transition: reset ? { type: 'reset', expected_state_revision: view.state_revision, initial: next.state.initial } : { type: 'preserve', expected_state_revision: view.state_revision, compatibility_version: 'exercise-1' } }] } }
 }
+function removeRequest(store: RuntimeStore, task: Snapshot) {
+  const current = store.snapshot(task.task.id), view = current.views[0]!
+  return { type: 'write', input: { type: 'surface.update', surface_id: current.surface.id, expected_revision: current.surface.revision, operations: [{ type: 'view.remove', view_id: view.id, expected_view_revision: view.revision, expected_state_revision: view.state_revision }] } }
+}
 function invoke(store: RuntimeStore, task: Snapshot, run: string, input: unknown = request(store, task)) {
   // Capture rejection immediately so failure-path assertions never leave unhandled promises.
   return store.agentTool(task.task.id, run, input, new AbortController().signal).then(value => ({ value, error: undefined }), error => ({ value: undefined, error }))
@@ -63,25 +67,35 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const db = new Database(join(path, 'pliuna.sqlite'))
     expect(db.prepare('SELECT view_revision FROM view_history ORDER BY view_revision').all()).toEqual([{ view_revision: 1 }, { view_revision: 2 }]); db.close()
   })
-  it('preserves saved user draft rather than new initial after explicit permission', async () => {
+  it('commits a static replacement without waiting for any renderer', async () => {
+    const { store, task, run } = setup(), current = store.snapshot(task.task.id)
+    const staticBundle = { ...bundle(), html: '<h2>Original</h2>', forms: [], behaviors: [] }
+    store.modelTool(task.task.id, run, { type: 'write', input: { type: 'surface.update', surface_id: current.surface.id, expected_revision: current.surface.revision, operations: [{ type: 'view.create', client_ref: 'static', slot_id: 'main', bundle: { type: 'inline', bundle: staticBundle } }] } })
+    const updated = store.snapshot(task.task.id), target = updated.views.find(view => view.bundle.behaviors.length === 0)!
+    const input = request(store, task)
+    Object.assign(input.input.operations[0]!, { view_id: target.id, bundle: { type: 'inline', bundle: { ...staticBundle, html: '<h2>Replacement</h2>' } } })
+    expect((await invoke(store, task, run, input)).error).toBeUndefined()
+    expect(store.snapshot(task.task.id)).toMatchObject({ approvals: [], surface_updates: [], views: expect.arrayContaining([expect.objectContaining({ id: target.id, revision: 2 })]) })
+  })
+  it('preserves a saved draft with an automatic host check and no approval', async () => {
     const { store, task, run } = setup(); save(store, task, '我的已保存答案')
     const result = invoke(store, task, run); await tick()
-    expect(store.snapshot(task.task.id).surface_updates).toHaveLength(0)
-    approve(store, task); await tick(); await respond(store, task)
+    expect(store.snapshot(task.task.id).approvals).toHaveLength(0)
+    await respond(store, task)
     expect((await result).error).toBeUndefined()
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '我的已保存答案' })
   })
-  it('requires permission for a View created in an earlier Run', async () => {
+  it('replaces a View created in an earlier Run without approval', async () => {
     const { store, task, run } = setup()
     store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run })
     const nextRun = store.start(task.task.id, 'replace explicitly', 'fixture', []), result = invoke(store, task, nextRun)
-    await tick(); expect(store.snapshot(task.task.id).approvals).toHaveLength(1)
-    approve(store, task); await tick(); await respond(store, task)
+    await tick(); expect(store.snapshot(task.task.id).approvals).toHaveLength(0)
+    await respond(store, task)
     expect((await result).error).toBeUndefined()
   })
-  it('reset permission is not input-discard confirmation and cancellation keeps old draft', async () => {
+  it('requires only discard confirmation for reset and cancellation keeps the draft', async () => {
     const { store, task, run } = setup(); save(store, task, '不能自动清除')
-    const result = invoke(store, task, run, request(store, task, true)); await tick(); approve(store, task); await tick()
+    const result = invoke(store, task, run, request(store, task, true)); await tick()
     await expect(respond(store, task, true, false)).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '不能自动清除' })
     await respond(store, task, false)
@@ -93,7 +107,7 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const view = store.snapshot(task.task.id).views[0]!
     const submit = { type: 'answer.submit', task_id: task.task.id, view_id: view.id, view_revision: 1, expected_state_revision: view.state_revision, form_id: 'form' }
     store.handle(submit); store.handle(submit)
-    const result = invoke(store, task, run, request(store, task, true)); await tick(); approve(store, task); await tick(); await respond(store, task, true, true)
+    const result = invoke(store, task, run, request(store, task, true)); await tick(); await respond(store, task, true, true)
     expect((await result).error).toBeUndefined()
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '新初值' })
     expect(store.snapshot(task.task.id).answers.map(a => a.value)).toEqual([{ answer: '旧题作答' }, { answer: '旧题作答' }])
@@ -112,13 +126,6 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const previous = bundle(); previous.state.schema.properties!.answer = { type: 'number' }
     const next = structuredClone(previous)
     expect(replacementDraft(previous, next, { answer: '-' }, { type: 'preserve', compatibility_version: 'exercise-1' })).toEqual({ answer: '-' })
-  })
-  it('keeps input edits during permission wait and rejects the stale replacement', async () => {
-    const { store, task, run } = setup(); save(store, task, 'before')
-    const result = invoke(store, task, run); await tick(); save(store, task, 'during approval'); approve(store, task)
-    expect((await result).error).toMatchObject({ code: 'VERSION_CONFLICT' })
-    expect(store.snapshot(task.task.id).views[0]!).toMatchObject({ revision: 1, draft: { answer: 'during approval' } })
-    expect(store.snapshot(task.task.id).surface_updates).toHaveLength(0)
   })
   it('ends a host-check conflict rather than leaving a reusable confirmation', async () => {
     const { store, task, run } = setup(), result = invoke(store, task, run); await tick()
@@ -145,9 +152,9 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const otherRun = store.start(other.task.id, 'cross task', 'fixture', [])
     expect((await invoke(store, other, otherRun, request(store, task))).error).toMatchObject({ code: 'NOT_FOUND' })
   })
-  it('denial ends the action and cannot be reopened for that View in the same Run', async () => {
+  it('denied removal cannot be reopened for that View in the same Run', async () => {
     const { store, task, run } = setup(); save(store, task, 'draft')
-    const input = request(store, task), result = invoke(store, task, run, input); await tick()
+    const input = removeRequest(store, task), result = invoke(store, task, run, input); await tick()
     const approval = store.snapshot(task.task.id).approvals[0]!
     store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: approval.id, decision: 'deny' })
     expect((await result).error).toMatchObject({ code: 'APPROVAL_INVALID' })
@@ -158,7 +165,7 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const { store, task, run } = setup(); save(store, task, 'draft')
     // Cancel the fixture timer while keeping this deterministic source Run active.
     vi.clearAllTimers()
-    const result = invoke(store, task, run); await tick(); approve(store, task); await tick()
+    const result = invoke(store, task, run, removeRequest(store, task)); await tick(); approve(store, task); await tick()
     vi.setSystemTime(Date.now() + 900001)
     await expect(respond(store, task)).rejects.toMatchObject({ code: 'SOURCE_INVALID' })
     expect((await result).error).toBeDefined()
@@ -198,10 +205,6 @@ describe('View replacement (written while behavioral testing is paused)', () => 
 })
 
 describe('Surface removal and layout', () => {
-  const removeRequest = (store: RuntimeStore, task: Snapshot) => {
-    const current = store.snapshot(task.task.id), view = current.views[0]!
-    return { type: 'write', input: { type: 'surface.update', surface_id: current.surface.id, expected_revision: current.surface.revision, operations: [{ type: 'view.remove', view_id: view.id, expected_view_revision: view.revision, expected_state_revision: view.state_revision }] } }
-  }
   it('requires independent approval and discard confirmation; retains answers and history', async () => {
     const { store, task, run, path } = setup(); save(store, task, 'retained answer')
     let view = store.snapshot(task.task.id).views[0]!
@@ -258,6 +261,10 @@ describe('Surface removal and layout', () => {
 
 
 describe('resource-backed bundle approval', () => {
+  function withLayout(input: any) {
+    input.input.operations.push({ type: 'layout.set', layout: { slots: [{ slot_id: 'main', groups: [{ id: 'g', mode: 'column', gap: 'medium', align: 'stretch', views: [{ type: 'existing', view_id: input.input.operations[0].view_id }] }] }] } })
+    return input
+  }
   function source(store: RuntimeStore, task: Snapshot, run: string, next = bundle('Resource question')) {
     const result = store.modelTool(task.task.id, run, { type: 'write', input: { type: 'resource.create', display_name: 'synthetic-bundle.json', content: { type: 'json', value: next } } }) as any
     return { type: 'resource', resource: { kind: 'resource', id: result.data.id } }
@@ -285,7 +292,7 @@ describe('resource-backed bundle approval', () => {
     expect(store.snapshot(task.task.id).views[1]!.presentation.html).toContain('Resource question'); db.close()
   })
   it('preserves original request and binds resolved content and source fingerprint to approval', async () => {
-    const { store, task, run, path } = setup(), input: any = request(store, task)
+    const { store, task, run, path } = setup(), input = withLayout(request(store, task))
     input.input.operations[0].bundle = source(store, task, run)
     save(store, task, 'saved')
     // The draft mutation requires fresh state preconditions.
@@ -293,14 +300,14 @@ describe('resource-backed bundle approval', () => {
     const result = invoke(store, task, run, input); await tick()
     const db = new Database(join(path, 'pliuna.sqlite')), approval = db.prepare('SELECT binding_json,action_id FROM approvals').get() as any, binding = JSON.parse(approval.binding_json)
     expect(JSON.parse((db.prepare('SELECT request_json FROM actions WHERE id=?').get(approval.action_id) as any).request_json)).toEqual(input.input)
-    expect(binding).toMatchObject({ version: 2, resolved: { version: 1, sources: [{ id: input.input.operations[0].bundle.resource.id }], effective_request: { operations: [{ bundle: { type: 'inline', bundle: { html: expect.stringContaining('Resource question') } } }] } } })
+    expect(binding).toMatchObject({ version: 2, resolved: { version: 1, sources: [{ id: input.input.operations[0].bundle.resource.id }], effective_request: { operations: expect.arrayContaining([expect.objectContaining({ bundle: { type: 'inline', bundle: expect.objectContaining({ html: expect.stringContaining('Resource question') }) } })]) } } })
     expect(store.snapshot(task.task.id).approvals[0]!.request).toEqual(binding.resolved)
     approve(store, task); await tick(); await respond(store, task)
     expect((await result).error).toBeUndefined(); expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: 'saved' }); db.close()
   })
   it.each(['source', 'binding'] as const)('refuses altered %s after inspection without changing the View', async change => {
     const { store, task, run, path } = setup(); save(store, task, 'keep')
-    const input: any = request(store, task); input.input.operations[0].bundle = source(store, task, run)
+    const input = withLayout(request(store, task)); input.input.operations[0].bundle = source(store, task, run)
     const result = invoke(store, task, run, input); await tick()
     const db = new Database(join(path, 'pliuna.sqlite'))
     if (change === 'source') writeFileSync(join(path, 'resources', input.input.operations[0].bundle.resource.id), 'corrupt')

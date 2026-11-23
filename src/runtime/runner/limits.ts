@@ -12,10 +12,11 @@ export const RUNNER_LIMITS = Object.freeze({
   }),
   composition: Object.freeze({ batch_fragments: 16, merge_ms: 200, merge_max_ms: 1000, rebuilds: 3 }),
   index: Object.freeze({ id_bytes: 128, title_bytes: 256, item_bytes: 4096, page_items: 32, page_bytes: 65536 }),
+  progress_query_result_bytes: 1048576,
   progress: Object.freeze({
     window_ms: 60000,
     repeated_failure_threshold: 3,
-    stalled_success_threshold: 8,
+    stalled_repeat_threshold: 8,
     diagnosis_interval_ms: 60000,
     diagnosis_per_window: 1,
     evidence_max_calls: 64
@@ -111,7 +112,7 @@ export function admissionWaitReason(counts: AdmissionCounts, kind: AdmissionKind
 export interface ProgressObservationConfig {
   window_ms: number
   repeated_failure_threshold: number
-  stalled_success_threshold: number
+  stalled_repeat_threshold: number
   diagnosis_interval_ms: number
   diagnosis_per_window: number
   evidence_max_calls: number
@@ -122,7 +123,7 @@ export interface ProgressObservationConfig {
 export const PROGRESS_OBSERVATION_BOUNDS: Readonly<{ [K in keyof ProgressObservationConfig]: readonly [number, number] }> = Object.freeze({
   window_ms: Object.freeze([1000, 300000] as const),
   repeated_failure_threshold: Object.freeze([2, 256] as const),
-  stalled_success_threshold: Object.freeze([2, 256] as const),
+  stalled_repeat_threshold: Object.freeze([2, 255] as const),
   diagnosis_interval_ms: Object.freeze([10000, 3600000] as const),
   diagnosis_per_window: Object.freeze([1, 8] as const),
   evidence_max_calls: Object.freeze([8, 256] as const)
@@ -135,6 +136,6 @@ export function progressObservationConfig(overrides: Partial<ProgressObservation
     const [minimum, maximum] = PROGRESS_OBSERVATION_BOUNDS[key], value = config[key]
     if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new ContractError('INVALID_REQUEST', `Progress setting ${key} must be an integer from ${minimum} to ${maximum}`)
   }
-  if (config.repeated_failure_threshold > config.evidence_max_calls || config.stalled_success_threshold > config.evidence_max_calls) throw new ContractError('INVALID_REQUEST', 'Progress thresholds exceed the evidence window')
+  if (config.repeated_failure_threshold > config.evidence_max_calls || config.stalled_repeat_threshold >= config.evidence_max_calls) throw new ContractError('INVALID_REQUEST', 'Progress thresholds exceed the evidence window')
   return Object.freeze(config)
 }

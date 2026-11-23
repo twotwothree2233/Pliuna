@@ -1,4 +1,4 @@
-import { openPending } from '../helpers/agent-ui'
+import { pendingApprovals } from '../helpers/agent-ui'
 import { openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -47,12 +47,12 @@ for (const scenario of ['echo-restart', 'independent-data', 'surface-preserve-re
   expect((await call({type:'plugin.list',task_id:task})).items[0].instances).toEqual([])
   if(scenario==='mobile'){
    expect(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true)
-   await panel.getByRole('button',{name:/^返回工作区/}).click();expect(errors).toEqual([]);return
+   await panel.getByRole('button',{name:/^返回工作台/}).click();expect(errors).toEqual([]);return
   }
-  await panel.getByRole('button',{name:/^返回工作区/}).click()
+  await panel.getByRole('button',{name:/^返回工作台/}).click()
   const submit=async(text:string)=>call({type:'request.submit',task_id:task,text,model_config_id:'fixture-main',resource_ids:[],import_ids:[]})
   const waitRun=async(id:string)=>expect.poll(async()=>(await call({type:'request.status',task_id:task,request_id:id})).run_state).toBe('completed')
-  const approve=async()=>{await openPending(page);const card=page.locator('.approval-card').filter({has:page.getByRole('button',{name:'批准本次动作',exact:true})}).last();await expect(card).toBeVisible();await card.getByRole('button',{name:'批准本次动作',exact:true}).click()}
+  const approve=async()=>{await pendingApprovals(page);const card=page.locator('.approval-card').filter({has:page.getByRole('button',{name:'批准',exact:true})}).last();await expect(card).toBeVisible();await card.getByRole('button',{name:'批准',exact:true}).click()}
   if(scenario==='echo-restart'){
    const run=await submit('echo');await waitRun(run.request_id)
    const calls=await call({type:'task.query',task_id:task,query:{type:'list',input:{kind:'call'}}});expect(calls.items).toHaveLength(1)
@@ -69,10 +69,10 @@ for (const scenario of ['echo-restart', 'independent-data', 'surface-preserve-re
   }else if(scenario==='surface-preserve-reset'){
    let run=await submit('propose:create_view');await approve();await waitRun(run.request_id);await expect(page.getByLabel('Plugin answer',{exact:true})).toBeVisible()
    await page.getByLabel('Plugin answer',{exact:true}).fill('PRESERVED_INPUT');await expect(page.getByRole('status').filter({hasText:/^已保存$/})).toBeVisible()
-   run=await submit('propose:preserve');await approve();await waitRun(run.request_id);await approve();await openPending(page);await page.getByRole('button',{name:'保存输入并检查替换'}).click();await expect(page.getByLabel('Plugin answer',{exact:true})).toHaveValue('PRESERVED_INPUT')
+   run=await submit('propose:preserve');await approve();await waitRun(run.request_id);await expect.poll(async()=>(await call({type:'task.snapshot',task_id:task})).views[0].revision).toBe(2);await expect(page.getByLabel('Plugin answer',{exact:true})).toHaveValue('PRESERVED_INPUT')
    await expect.poll(async()=>(await call({type:'task.snapshot',task_id:task})).surface_updates.length).toBe(0)
-   await expect(page.getByRole('dialog',{name:'待处理事项',exact:true})).toHaveCount(0)
-   run=await submit('propose:reset');await approve();await waitRun(run.request_id);await approve();await openPending(page);await page.getByRole('button',{name:'取消本次替换'}).click();await expect(page.getByLabel('Plugin answer',{exact:true})).toHaveValue('PRESERVED_INPUT')
+   await expect(page.getByRole('region',{name:'待审批操作',exact:true})).toHaveCount(0)
+   run=await submit('propose:reset');await approve();await waitRun(run.request_id);await (await pendingApprovals(page)).getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByLabel('Plugin answer',{exact:true})).toHaveValue('PRESERVED_INPUT')
   }else if(scenario==='revoke-idle'){
    const run=await submit('echo');await waitRun(run.request_id)
    await openSettings(page, '插件与主流程');panel=page.getByRole('dialog',{name:'应用设置',exact:true})

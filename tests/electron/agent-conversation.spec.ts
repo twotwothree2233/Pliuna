@@ -3,10 +3,86 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
-import { configureModel, chooseTheme } from '../helpers/settings-ui'
+import { configureModel, chooseModel, chooseTheme } from '../helpers/settings-ui'
 import { hostToolStream, modelServer, synthetic, textStream } from '../helpers/model-server'
+import type { HostRequest, RunActivity, TaskMessagePage } from '../../src/shared/types'
 
 const executablePath: string = createRequire(import.meta.url)('electron')
+
+test('loading earlier messages and receiving a late reply preserve the reading position', async () => {
+  test.setTimeout(90000)
+  const first = '先发的请求', late = '先发请求的迟到回复'
+  let pending: Parameters<typeof textStream>[0] | undefined
+  const server = await modelServer(({ body }, response) => {
+    if (synthetic(body, response)) return
+    const request = JSON.parse(body.messages.findLast((message: { role: string }) => message.role === 'user').content).request
+    if (request === first) { pending = response; return }
+    textStream(response, JSON.stringify({ kind: 'reply', text: `答复：${request}。` + '用于保留稳定阅读位置的对话正文。'.repeat(12) }))
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-history-scroll-')), env = { ...process.env }
+  delete env.PLIUNA_TEST_RUNNER; delete env.TRELLIS_TEST_RUNNER
+  const app = await electron.launch({ executablePath, args: ['.'], env: { ...env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
+  try {
+    const page = await app.firstWindow()
+    await page.setViewportSize({ width: 1440, height: 800 })
+    const call = async <T,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
+      const response = await window.pliuna.request(request)
+      if (!response.ok) throw Error(response.error.code)
+      return response.data as T
+    }, request)
+    await configureModel(page, { id: 'history-main', url: server.url, key: 'isolated-history-key', model: 'history-wire', context: 100000, output: 4096 })
+    await chooseModel(page, 'history-main')
+    const title = '历史阅读定位'
+    await page.getByRole('button', { name: '创建第一个任务' }).click()
+    await page.getByLabel('任务名称').fill(title)
+    await page.getByRole('button', { name: '创建任务', exact: true }).click()
+    const task = (await call<{ id: string }[]>({ type: 'host.tasks' }))[0]!.id
+    const send = (text: string) => call<{ request_id: string }>({ type: 'request.submit', task_id: task, model_config_id: 'history-main', text, resource_ids: [], import_ids: [] })
+    const status = (request_id: string) => call<{ run_id: string; run_state: string }>({ type: 'request.status', task_id: task, request_id })
+    const original = await send(first)
+    await expect.poll(() => !!pending).toBe(true)
+    for (let i = 1; i <= 13; i++) {
+      const queued = await send(`独立追问 ${i}`)
+      await expect.poll(async () => (await status(queued.request_id)).run_state).toBe('completed')
+    }
+    await page.reload()
+    await page.getByRole('button', { name: new RegExp(title) }).click()
+    const chat = page.getByRole('region', { name: '任务对话', exact: true }), scroll = page.locator('[data-agent-view=chat]')
+    const older = chat.getByRole('button', { name: '加载更早消息' })
+    await expect(older).toBeVisible()
+    const firstRow = chat.getByRole('article', { name: '你的消息' }).filter({ hasText: first })
+    await expect(firstRow).toHaveCount(0)
+    await scroll.evaluate(element => { element.scrollTop = 0 })
+    const anchor = chat.locator('article').filter({ has: page.getByText('独立追问 3', { exact: true }) })
+    const before = (await anchor.boundingBox())!.y
+    await older.click()
+    await expect(firstRow).toHaveCount(1)
+    await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - before)).toBeLessThan(2)
+    const position = await scroll.evaluate(element => element.scrollTop)
+    textStream(pending!, JSON.stringify({ kind: 'reply', text: late })); pending = undefined
+    await expect(chat).toContainText(late)
+    expect(Math.abs(await scroll.evaluate(element => element.scrollTop) - position)).toBeLessThan(2)
+    const pageData = await call<TaskMessagePage>({ type: 'host.messages.page', task_id: task })
+    const run = (await status(original.request_id)).run_id
+    expect(pageData.items.at(-1)).toMatchObject({ text: late, run_id: run })
+    const activity = await call<RunActivity>({ type: 'host.run.activity', task_id: task, run_id: run })
+    expect(activity.request).toBe(first)
+    expect(activity.items.at(-1)).toMatchObject({ id: pageData.items.at(-1)?.id, type: 'reply' })
+    await chat.getByRole('button', { name: `回复：${first}`, exact: true }).click()
+    await expect(firstRow).toBeFocused()
+    await firstRow.getByRole('button', { name: '执行详情' }).click()
+    const details = page.getByRole('dialog', { name: '本次请求详情' })
+    await details.getByRole('button', { name: '用量', exact: true }).click()
+    await details.getByRole('button', { name: '查询单次请求用量' }).click()
+    await expect(details.getByRole('status')).toContainText('快照截至记录序号')
+    await expect(details.getByText('请求 1 · 主模型 · 请求完成')).toBeVisible()
+    await details.getByRole('button', { name: '过程与结果', exact: true }).click()
+    await details.getByRole('button', { name: '查看此执行流程' }).click()
+    await expect(page.getByRole('region', { name: '执行流程', exact: true }).getByLabel('执行', { exact: true })).toHaveValue(run)
+    await expect(page.locator('.composer-usage')).toHaveAttribute('title', new RegExp(run))
+    await expect(chat).toContainText(late)
+  } finally { pending?.destroy(); await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
+})
 test('Agent sidebar keeps replies on the right and input fixed at the bottom', async () => {
   test.setTimeout(90000)
   const pendingResponse: { current: Parameters<typeof textStream>[0] | null } = { current: null }
@@ -24,7 +100,7 @@ test('Agent sidebar keeps replies on the right and input fixed at the bottom', a
     page.on('pageerror', error => errors.push(error.message))
     await page.setViewportSize({ width: 1440, height: 960 })
     const agent = page.locator('#pane-right'), center = page.getByRole('main')
-    const reply = agent.getByRole('region', { name: '任务回复', exact: true })
+    const reply = agent.getByRole('region', { name: '任务对话', exact: true })
     const call = async (request: any): Promise<any> => page.evaluate(async request => { const response = await window.pliuna.request(request); if (!response.ok) throw Error(response.error.code); return response.data }, request)
     await configureModel(page, { id: 'conversation-main', url: server.url, key: 'isolated-agent-key', model: 'wire-model', context: 100000, output: 2048 })
     await call({ type: 'model.test', model_id: 'conversation-main', role: 'main', confirm_cost: true })
@@ -33,7 +109,7 @@ test('Agent sidebar keeps replies on the right and input fixed at the bottom', a
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     const task = (await call({ type: 'host.tasks' }))[0].id
     const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送消息', exact: true })
-    await expect(page.locator('.agent-ready')).toContainText('准备就绪')
+    await expect(page.locator('.agent-ready')).toContainText('发送你的第一个请求')
     await expect(page.locator('.agent-state-scroll .run-outcome')).toHaveCount(0)
     await expect(page.getByRole('region', { name: '请求队列', exact: true })).toHaveCount(0)
     await input.fill('中文组合输入')
@@ -45,19 +121,24 @@ test('Agent sidebar keeps replies on the right and input fixed at the bottom', a
     await input.press('Control+Enter')
     await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
     await expect(reply).toContainText('中文回复：原子性')
+    await expect(reply.getByRole('article', { name: '你的消息' })).toContainText('中文组合输入')
+    await agent.getByRole('button', { name: '执行记录', exact: true }).click()
+    await expect(agent.getByRole('button', { name: '查看执行流程' })).toBeVisible()
+    await agent.getByRole('button', { name: '对话', exact: true }).click()
+    await expect(reply.getByRole('article', { name: 'Agent的消息' })).toBeVisible()
     await expect(center).not.toContainText('中文回复：原子性')
     await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
     await expect(center.getByRole('heading', { name: '尚无已发布内容', exact: true })).toBeVisible()
     await expect(center.locator('.managed')).toHaveCount(0)
     expect(await page.locator('.agent .message,.agent pre,.agent code').count()).toBe(0)
     const geometry = await page.evaluate(() => {
-      const status = document.querySelector('.agent-status')!, heading = document.querySelector('.agent-heading')!, composer = document.querySelector('.agent-composer')!, agent = document.querySelector('.agent')!
+      const status = document.querySelector('.agent-status')!, heading = document.querySelector('.agent-activity-strip')!, composer = document.querySelector('.agent-composer')!, agent = document.querySelector('.agent')!
       return { sameRow: status.parentElement === heading, headingHeight: heading.getBoundingClientRect().height, composerBottom: composer.getBoundingClientRect().bottom, agentBottom: agent.getBoundingClientRect().bottom, agentWidth: agent.getBoundingClientRect().width }
     })
     expect(geometry.sameRow).toBe(true)
     expect(geometry.composerBottom).toBeCloseTo(geometry.agentBottom, 0)
-    expect(geometry.agentWidth).toBeCloseTo(300, 0)
-    expect(await page.locator('.agent-state-scroll').innerText()).not.toContain('本次执行已完成')
+    expect(geometry.agentWidth).toBeCloseTo(278, 0)
+    expect(await page.locator('.agent-state-scroll:not([hidden])').innerText()).not.toContain('本次执行已完成')
     await input.fill('打开工具后保留的中文草稿')
     const beforeTools = server.exchanges.length
     await page.getByRole('button', { name: '更多 Agent 操作' }).click();await page.getByRole('menuitem', { name: '本次请求详情', exact: true }).click()
@@ -83,17 +164,52 @@ test('Agent sidebar keeps replies on the right and input fixed at the bottom', a
     await page.getByRole('button', { name: '完成选择', exact: true }).click()
     await expect(page.locator('.composer-materials')).toContainText('中文材料.txt')
     await input.evaluate(el => el.setAttribute('data-agent-editor', 'retained'))
-    await page.getByRole('button', { name: '关闭Agent 栏', exact: true }).click()
+    await page.locator('#toggle-right').click()
     await page.locator('#toggle-right').click()
     await expect(input).toHaveAttribute('data-agent-editor', 'retained')
     await expect(input).toHaveValue('打开工具后保留的中文草稿')
     await expect(page.locator('.composer-materials')).toContainText('中文材料.txt')
     await expect(reply).toContainText('中文回复：原子性')
+    const compactHeight = (await input.boundingBox())!.height
+    const longDraft = Array.from({ length: 60 }, (_, i) => `草稿第 ${i + 1} 段`).join('\n') + '\n' + '字'.repeat(500)
+    await input.fill(longDraft)
+    await expect.poll(async () => (await input.boundingBox())!.height).toBeGreaterThan(compactHeight)
+    await app.evaluate(({ ipcMain }) => {
+      const handlers = (ipcMain as any)._invokeHandlers, original = handlers.get('pliuna:request')
+      const failures = ['INVALID_INPUT', 'UNKNOWN_RESULT']
+      handlers.set('pliuna:request', (event: unknown, request: { type: string }) => {
+        if (request.type === 'request.submit' && failures.length) return { ok: false, error: { code: failures.shift(), message: '隔离测试的发送结果' } }
+        return original(event, request)
+      })
+    })
+    const feedback = page.locator('.composer-feedback')
     await send.click()
+    await expect(feedback).toContainText('INVALID_INPUT')
+    await expect(send).toBeEnabled()
+    await expect(input).toHaveValue(longDraft)
+    await send.click()
+    await expect(feedback).toContainText('提交结果未知，输入和材料保留')
+    await expect(send).toBeDisabled()
+    await expect(input).toHaveValue(longDraft)
+    await expect(page.locator('.composer-materials')).toContainText('中文材料.txt')
+    expect((await call({ type: 'request.list', task_id: task })).items).toHaveLength(1)
+    await feedback.getByRole('button', { name: '已核对原结果' }).click()
+    await page.getByRole('button', { name: '确认已核对', exact: true }).click()
+    await send.click()
+    await expect(input).toHaveValue('')
+    await expect.poll(async () => (await input.boundingBox())!.height).toBeCloseTo(compactHeight, 0)
     await expect(page.locator('.composer-materials')).toHaveCount(0)
     await expect(page.locator('.agent-status')).toHaveText('本次执行已完成')
     await input.fill('读取长回复');await send.click()
-    await expect(reply.locator('.task-reply-text').last()).toContainText('长回复末尾')
+    const longReply = reply.getByRole('article', { name: 'Agent的消息' }).last()
+    await expect(longReply.getByRole('button', { name: '展开原文' })).toBeVisible()
+    await longReply.getByRole('button', { name: '展开原文' }).click()
+    await longReply.getByRole('button', { name: '继续读取' }).click()
+    await longReply.getByRole('button', { name: '继续读取' }).click()
+    await expect(longReply).toContainText('长回复末尾')
+    await expect(reply.getByRole('article', { name: '你的消息' })).toHaveCount(3)
+    await expect(reply.getByRole('article', { name: 'Agent的消息' })).toHaveCount(3)
+    await expect(reply).toContainText('中文组合输入')
     expect((await call({ type: 'task.snapshot', task_id: task })).records.findLast((record: any) => record.kind === 'message.assistant').payload.truncated).toBe(true)
     expect(await page.evaluate(() => (window as any).AGENT_EXECUTED)).toBeUndefined()
     await expect(reply).toContainText('中文解释')
@@ -106,7 +222,7 @@ test('Agent sidebar keeps replies on the right and input fixed at the bottom', a
       for (const width of [1440, 720, 390]) {
         await page.setViewportSize({ width, height: 850 })
         await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
-        if (await page.locator('#pane-right').isHidden()) await page.locator('#toggle-right').click()
+        if (await page.locator('#pane-right').isHidden()) await page.getByRole('navigation', { name: '工作区视图' }).getByRole('button', { name: 'Agent', exact: true }).click()
         await expect(page.locator('#pane-right')).toBeVisible()
         await expect(reply).toContainText('长回复末尾')
         await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
@@ -175,6 +291,7 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
     await page.getByLabel('任务名称').fill('学习计划')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送消息', exact: true })
+    await page.locator('.agent-tabs').getByRole('button', { name: '执行记录', exact: true }).click()
     const dynamic = page.getByRole('region', { name: '本次执行动态' })
     for (const [request, operation, result] of [['创建学习进度', '创建任务数据', '已完成'], ['读取学习进度', '读取任务数据', '已完成'], ['读取不存在的进度', '读取任务数据', '未执行']]) {
       await input.fill(request!); await send.click()
@@ -196,15 +313,15 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
     await expect(dynamic).not.toContainText('创建任务数据')
     for (const width of [1440, 720, 390]) {
       await page.setViewportSize({ width, height: 850 })
-      if (await page.locator('#pane-right').isHidden()) await page.locator('#toggle-right').click()
+      if (await page.locator('#pane-right').isHidden()) await page.getByRole('navigation', { name: '工作区视图' }).getByRole('button', { name: 'Agent', exact: true }).click()
       expect(await page.locator('.agent').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     }
     await page.setViewportSize({ width: 1440, height: 960 })
     await page.screenshot({ path: test.info().outputPath('pliuna-agent-dynamic-activity.png') })
-    await page.getByRole('button', { name: '＋ 新建', exact: true }).click()
+    await page.getByRole('button', { name: '＋ 新建任务', exact: true }).click()
     await page.getByLabel('任务名称').fill('另一个任务')
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    await expect(page.locator('.agent-ready')).toContainText('准备就绪')
+    await expect(page.locator('.agent-ready')).toContainText('发送你的第一个请求')
     await expect(dynamic).toHaveCount(0)
     expect(errors).toEqual([])
   } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }

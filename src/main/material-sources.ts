@@ -1,6 +1,7 @@
 import { fileLstatSync, fileFstatSync, type FileStat, openRegularFileSync, regularFile } from '../platform/files'
 import fs from 'node:fs'
-import { basename,extname } from 'node:path'
+import { basename } from 'node:path'
+import { isTextMaterialName } from '../shared/material-formats'
 import { setImmediate } from 'node:timers/promises'
 import defaults from '../shared/contracts/development-defaults.json'
 type Row=Record<string,any>
@@ -34,7 +35,7 @@ export class MaterialSources {
           fd=openRegularFileSync(source.path)
           const opened=fileFstatSync(fd);if(opened.ino!==initial.ino||opened.dev!==initial.dev)throw Error('IMPORT_SOURCE_CHANGED')
         }else{body=Buffer.from(source.text!,'utf8');size=body.length;if(size>defaults.resource.inline_bytes)throw Error('IMPORT_TOO_LARGE')}
-        const textual=!source.path||['.txt','.md','.csv','.tsv','.json','.log','.html','.htm','.svg','.xml','.css','.js','.ts'].includes(extname(source.name).toLowerCase())
+        const textual=!source.path||isTextMaterialName(source.name)
         await call('material.internal.begin',{byte_length:size,media_type:textual?'text/plain; charset=utf-8':'application/octet-stream'})
         const buffer=Buffer.alloc(defaults.transport.upload_chunk_bytes);let offset=0
         while(offset<size){

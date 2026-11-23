@@ -7,14 +7,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { frame, modelInputFromHost, modelServer, synthetic } from '../helpers/model-server'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, GoalRevision, HostRequest, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
 import type { PublicationOperation } from '../../src/runtime/runner/publication-state'
 
 const require = createRequire(import.meta.url), executablePath: string = require('electron')
 const poll = { timeout: 30000, intervals: [100, 200, 500] }
 
 interface WireBody { messages: { role: string; content: string; tool_call_id?: string }[] }
-interface ProducerBinding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: GoalRevision; requirement_ids: string[]; sections: OutlineSection[] }
+interface ProducerBinding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: ContentPlan; requirement_ids: string[]; sections: OutlineSection[] }
 interface CollatorInput { batch: CompositionBatch; outline: Outline; indexes: ArtifactIndex[] }
 interface PublicationInspection {
   operation: PublicationOperation | null
@@ -344,7 +344,7 @@ test('a waiting Composition rebuilds after an independent publication and reconc
     expect(final.surface).toMatchObject({ id: initial.surface.id, revision: publishedB.surface.revision + 1 })
     expect(final.views.find(view => view.id === betaView.id)).toEqual(savedB)
     expect(final.surface.layout?.slots.flatMap(slot => slot.groups.flatMap(group => group.views)).sort()).toEqual(final.views.map(view => view.id).sort())
-    expect(final.runner?.scope).toMatchObject({ state: 'complete', required_goal_count: 2, published_count: 2, unresolved_count: 0 })
+    expect(final.runner?.scope).toMatchObject({ state: 'complete', required_content_count: 2, published_count: 2, unresolved_count: 0 })
     expect((await readPublication(bIds.operation_id)).operation).toEqual(committedB.operation)
     const reconciled = await readPublication(rebuiltIds.operation_id)
     expect(reconciled).toMatchObject({ mapping_count: 2, surface_history_count: 2, view_history_count: 2 })
@@ -449,7 +449,7 @@ test('a correction fences an explicitly released old HTTP production result whil
     const final = await snapshot(), currentAlpha = final.runner!.goals.find(goal => goal.request_id === alpha.request_id)!, currentBeta = final.runner!.goals.find(goal => goal.request_id === beta.request_id)!
     expect(currentAlpha).toMatchObject({ intent_revision: 2, run: { state: 'completed' }, reply: { request_id: alpha.request_id, intent_revision: 2 } })
     expect(currentBeta).toMatchObject({ intent_revision: 1, run: { id: originalBeta.run!.id, state: 'completed' }, reply: { request_id: beta.request_id, intent_revision: 1 } })
-    expect(final.runner?.scope).toMatchObject({ state: 'complete', required_goal_count: 2, published_count: 2, unresolved_count: 0 })
+    expect(final.runner?.scope).toMatchObject({ state: 'complete', required_content_count: 2, published_count: 2, unresolved_count: 0 })
     await expect(page.getByRole('heading', { name: 'CURRENT_ALPHA_PUBLISHED', exact: true })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'INDEPENDENT_BETA_PUBLISHED', exact: true })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'STALE_ALPHA_PUBLISHED', exact: true })).toHaveCount(0)

@@ -7,12 +7,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { frame, modelInputFromHost, modelServer, synthetic } from '../helpers/model-server'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, DeliveryRecord, ExecutionScope, GoalRevision, HostRequest, Outline, OutlineSection, PublicationEntry, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, DeliveryRecord, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, PublicationEntry, Snapshot, WorkDependency } from '../../src/shared/types'
 import type { PublicationOperation } from '../../src/runtime/runner/publication-state'
 
 const require = createRequire(import.meta.url), executablePath: string = require('electron')
 type RunnerLimits = typeof import('../../src/runtime/runner/limits').RUNNER_LIMITS
-interface Binding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: GoalRevision; requirement_ids: string[]; sections: OutlineSection[] }
+interface Binding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: ContentPlan; requirement_ids: string[]; sections: OutlineSection[] }
 interface CollatorInput { batch: CompositionBatch; outline: Outline; indexes: ArtifactIndex[] }
 interface FixedBatchRead {
   batch: CompositionBatch | null
@@ -176,7 +176,7 @@ test('a fixed first batch publishes while unrelated indexes continue arriving', 
     const early = await snapshot()
     expect(last).toBeDefined()
     expect(early.runner!.scope!.state).not.toBe('complete')
-    expect(early.runner!.scope!.required_goal_count).toBe(total)
+    expect(early.runner!.scope!.required_content_count).toBe(total)
     expect(early.runner!.scope!.unresolved_count).toBeGreaterThan(0)
     const published = await inspectFixed()
     expect(published.batch).toEqual({ ...fixed, state: published.batch!.state })

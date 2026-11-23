@@ -137,6 +137,25 @@ it('restoration invalidates pre-restore query cursors', async () => {
   await point(); await restore()
   expect(() => store.handle({ type: 'host.tasks.page', input: { kind: 'task', limit: 1, cursor: before.next_cursor } })).toThrow(/Cursor expired/)
 })
+it('restores and restarts with the saved task organization and removes it with the task', async () => {
+  const task_id = task.task.id
+  const organize = (field: 'pinned' | 'archived', value: boolean) => store.handle({ type: 'host.task.organize', task_id, field, value })
+  organize('pinned', true); organize('archived', true)
+  const saved = (await point()).active
+  const token = begin()
+  expect(() => organize('pinned', false)).toThrow(/Maintenance/)
+  store.handle({ type: 'maintenance.cancel', token })
+  organize('pinned', false); organize('archived', false)
+  await restore(saved); restart()
+  const db = current()
+  try {
+    expect(db.prepare('SELECT archived,pin_order FROM task_organization WHERE task_id=?').get(task_id)).toEqual({ archived: 1, pin_order: 1 })
+    expect(organize('archived', false)).toEqual({ task_id, archived: false, pinned: true })
+    store.handle({ type: 'task.delete', task_id, invalidate_recovery_id: saved.id })
+    expect(db.prepare('SELECT * FROM task_organization WHERE task_id=?').get(task_id)).toBeUndefined()
+    expect(() => organize('pinned', true)).toThrow(/not found/)
+  } finally { db.close() }
+})
 it('does not create an operation or extend a token when approval for recovery expires', async () => {
   const p = (await point()).active; vi.useFakeTimers(); const token = begin(); vi.advanceTimersByTime(60001)
   expect(() => restore(p, token)).toThrow(/expired/); expect(journal().operations).toEqual([])

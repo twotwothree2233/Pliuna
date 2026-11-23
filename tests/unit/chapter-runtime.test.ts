@@ -26,14 +26,14 @@ function deferred<T>() { let resolve!: (value: T) => void; return { promise: new
 function bundle(): Bundle {
   return { profile: 'managed-v1', html: '<section><h2 id="a-title">Alpha</h2><div id="a-body"><p>Alpha original</p><label for="a-input">Alpha input</label><input id="a-input"></div></section><section><h2 id="b-title">Beta</h2><div id="b-body"><p>Beta original</p><label for="b-input">Beta input</label><input id="b-input"></div></section>', css: '', state: { schema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, required: ['a', 'b'], additionalProperties: false }, initial: { a: '', b: '' }, compatibility_version: 'chapter-v1' }, forms: [], behaviors: [{ type: 'input', element_id: 'a-input', field: '/a', control: 'text' }, { type: 'input', element_id: 'b-input', field: '/b', control: 'text' }], references: [], export: [] }
 }
-function setup() {
+function setup(conversationRouting = false) {
   const directory = mkdtempSync(join(tmpdir(), 'pliuna-chapter-runtime-')), adapter = new ChatAdapter(), models = new ModelService(adapter)
   const config: ModelConfiguration = { id: 'chapter-model', base_url: 'https://example.invalid/v1', wire_model_id: 'fixture', context_tokens: 100000, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }
   models.configure({ type: 'model.configure', configuration: config, api_key: 'fixture-key', confirm_memory_only: true })
   vi.spyOn(models, 'acquire').mockImplementation((): ModelLease => ({ id: config.id, revision: 1, config, release: vi.fn() }))
   vi.spyOn(models, 'acquireCompaction').mockReturnValue(undefined)
   vi.spyOn(models, 'list').mockReturnValue([{ ...config, revision: 1, roles: ['main'], credential_missing: false }])
-  let store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule' } })
+  let store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting } })
   cleanups.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
   const internal = () => store as unknown as { db: Database.Database; epoch: string; features: { viewReplacement: boolean } }
   const task = store.create('Chapter runtime').task.id, complete = vi.spyOn(adapter, 'complete')
@@ -41,29 +41,30 @@ function setup() {
   const snapshot = () => store.snapshot(task)
   const status = (update_id: string) => store.handle({ type: 'chapter.status', task_id: task, update_id }) as ChapterUpdate
   const records = (kind: string) => (internal().db.prepare('SELECT payload_json FROM records WHERE task_id=? AND kind=? ORDER BY sequence').all(task, kind) as { payload_json: string }[]).map(row => JSON.parse(row.payload_json))
-  const restart = () => { store.close(); store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule' } }); return store }
-  return { get store() { return store }, internal, directory, task, complete, state, snapshot, status, records, restart }
+  const restart = () => { store.close(); store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting } }); return store }
+  return { get store() { return store }, internal, directory, task, complete, state, snapshot, status, records, restart, conversationRouting }
 }
 type Fixture = ReturnType<typeof setup>
 
-async function approval(s: Fixture, actionId?: string) {
-  await vi.waitFor(() => expect(s.snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))).toBeDefined())
-  return s.snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))!
-}
-async function approve(s: Fixture, actionId?: string) {
-  const pending = await approval(s, actionId)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'approve' })
-  await vi.waitFor(() => expect(s.snapshot().surface_updates.find(item => item.action_id === pending.action_id)).toBeDefined())
-  return pending.action_id
+async function awaitHostCheck(s: Fixture, actionId?: string) {
+  const snapshot = () => s.snapshot()
+  const approval = () => snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))
+  const update = () => snapshot().surface_updates.find(item => !actionId || item.action_id === actionId)
+  await vi.waitFor(() => expect(approval() ?? update()).toBeDefined())
+  const pending = approval()
+  if (pending) await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'approve' })
+  await vi.waitFor(() => expect(update()).toBeDefined())
+  return update()!.action_id
 }
 async function publish(s: Fixture, actionId?: string) {
-  const action = await approve(s, actionId)
+  const action = await awaitHostCheck(s, actionId)
   try { await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false }) }
   catch (error) { throw new Error(String(error) + ': ' + JSON.stringify(s.internal().db.prepare('SELECT state,result,result_json FROM actions WHERE id=?').get(action)), { cause: error }) }
   return action
 }
 
 async function publishOriginal(s: Fixture, content = bundle()) {
+  if (s.conversationRouting) s.complete.mockResolvedValueOnce(answer({ kind: 'new' }))
   s.complete.mockResolvedValueOnce(create(content))
   s.complete.mockImplementationOnce(async (_config, _key, messages) => {
     const result = JSON.parse(messages.at(-1)!.content!)
@@ -74,7 +75,17 @@ async function publishOriginal(s: Fixture, content = bundle()) {
     const candidate: ArtifactCandidate = { candidate_id: 'original-candidate', task_id: s.task, request_id: producer.request_id, intent_revision: producer.intent_revision, run_id: producer.run_id, work_id: producer.work_id, attempt_id: producer.current_attempt_id!, artifact_id: 'original-artifact', base_artifact_revision: 0, plan_revision: producer.plan_revision, bundle_resource_id: result.data.id, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: { task_id: s.task, kind: 'record', id: s.state().input(goal.input_event_id).record_id }, requirement_ids: producer.requirement_ids, unresolved: [], dependencies: producer.dependencies }
     return answer({ version: 1, complete: true, answer: '正文已完成。', artifacts: [artifactDraft(candidate)], requirement_ids: producer.requirement_ids, unresolved: [] })
   })
-  const run = s.store.start(s.task, 'Create two independently editable chapters', 'chapter-model', [])
+  const text = 'Create two independently editable chapters'
+  let run: string
+  if (s.conversationRouting) {
+    const { request_id } = s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+    const status = () => s.store.handle({ type: 'request.status', task_id: s.task, request_id }) as { state: string; run_id: string }
+    await vi.waitFor(() => expect(status()).toMatchObject({ state: 'started', run_id: expect.any(String) }))
+    run = status().run_id
+    const message = s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='message.user' AND json_extract(payload_json,'$.request_id')=?").get(s.task, request_id) as { id: string }
+    expect(s.state().run(run)).toMatchObject({ message_id: message.id })
+    expect(s.state().consumption(`request:${request_id}`, 'installed')?.result).toMatchObject({ refs: [{ kind: 'run', id: run }] })
+  } else run = s.store.start(s.task, text, 'chapter-model', [])
   await vi.waitFor(() => expect(s.state().run(run).state).toBe('completed'))
   await publish(s)
   await vi.waitFor(() => expect(s.snapshot().views).toHaveLength(1))
@@ -84,6 +95,60 @@ async function original(s: Fixture): Promise<ChapterManifest> {
   const view = await publishOriginal(s)
   return s.store.handle({ type: 'chapters.map', task_id: s.task, view_id: view.id, expected_view_revision: view.revision }) as ChapterManifest
 }
+
+test('a question about a published chapter leaves the production scope and View unchanged', async () => {
+  const s = setup(true), manifest = await original(s)
+  const snapshot = s.snapshot(), goals = s.store.runnerGoals({ task_id: s.task }).goals
+  const node = manifest.content_tree!.nodes.find(node => node.kind === 'paragraph')!
+  s.complete.mockResolvedValueOnce(answer({ kind: 'query', view_id: manifest.view_id, region_ids: [node.node_id] }))
+    .mockResolvedValueOnce({ text: '', finish: 'tool_calls', calls: [{ id: 'read-chapter', type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'content_node', id: node.node_id }) } }] })
+    .mockImplementationOnce(async (_config, _key, messages, tools) => {
+      expect(tools?.map(tool => tool.function.name)).toEqual(['list', 'read'])
+      expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'assistant', content: '正文已完成。' })]))
+      expect(messages.at(-1)?.content).toContain('Alpha original')
+      return { text: 'Alpha is the first section.', calls: [], finish: 'stop', usage: { prompt_tokens: 20, completion_tokens: 10 } }
+    })
+  const submitted = s.store.handle({ type: 'request.submit', task_id: s.task, text: 'Explain the first paragraph.', model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: submitted.request_id })).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.records('conversation.reply')).toEqual([expect.objectContaining({ request_id: submitted.request_id, text: 'Alpha is the first section.' })])
+  expect(s.store.runnerGoals({ task_id: s.task }).goals).toEqual(goals)
+  expect(s.snapshot().runner?.scope).toEqual(snapshot.runner?.scope)
+  expect(s.snapshot().views).toEqual(snapshot.views)
+})
+
+test('stopping preserves a missing requirement; removing it creates a scope without changing published content', async () => {
+  const s = setup(true), view = await publishOriginal(s)
+  const send = (text: string) => s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  const status = ({ request_id }: { request_id: string }) => s.store.handle({ type: 'request.status', task_id: s.task, request_id }) as { run_id: string; run_state: string; code: string }
+  const message = (request: string) => (s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='message.user' AND json_extract(payload_json,'$.request_id')=?").get(s.task, request) as { id: string }).id
+  const hold = deferred<Completion>(), calls = s.complete.mock.calls.length
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => hold.promise)
+  const appendix = send('Create a separate appendix.')
+  await vi.waitFor(() => expect(s.complete.mock.calls.length).toBe(calls + 2))
+  const before = s.snapshot().runner!.scope!
+  expect(before).toMatchObject({ required_content_count: 2, unresolved_count: 1 })
+  s.store.handle({ type: 'run.cancel', task_id: s.task, run_id: status(appendix).run_id })
+  hold.resolve(answer({ version: 1, complete: true, answer: 'late answer', artifacts: [], requirement_ids: ['content'], unresolved: [] }))
+  await vi.waitFor(() => expect(status(appendix).run_state).toBe('cancelled'))
+  expect(s.snapshot().runner?.scope).toEqual(before)
+  expect(s.snapshot().views[0]).toEqual(view)
+  expect(s.records('runner.answer').some(record => record.text === 'late answer')).toBe(false)
+
+  s.complete.mockResolvedValueOnce(answer({ kind: 'remove_pending', message_id: message(appendix.request_id) }))
+  const removal = send('Drop the undelivered appendix.')
+  await vi.waitFor(() => expect(status(removal).run_state).toBe('completed'))
+  const after = s.snapshot().runner!.scope!
+  expect(after).toMatchObject({ composition_version: before.composition_version + 1, state: 'complete', required_content_count: 1, unresolved_count: 0 })
+  expect(s.snapshot().views[0]).toEqual(view)
+  expect(s.records('content.requirement.removed')).toEqual([expect.objectContaining({
+    message_id: message(removal.request_id), source_message_id: message(appendix.request_id), previous_version: before.composition_version, composition_version: after.composition_version
+  })])
+  s.complete.mockResolvedValueOnce(answer({ kind: 'remove_pending', message_id: message(view.chapter_manifest!.request_id) }))
+  const attempted = send('Drop the published document without editing it.')
+  await vi.waitFor(() => expect(status(attempted).code).toBe('CONTENT_ALREADY_PUBLISHED'))
+  expect(s.snapshot().runner!.scope).toEqual(after)
+  expect(s.snapshot().views[0]).toEqual(view)
+})
 function chapterModel(s: Fixture) {
   const pending = new Map<string, ReturnType<typeof deferred<Completion>>>()
   const ready = new Set<string>()
@@ -265,7 +330,7 @@ test('a tree installation failure rolls back the whole content publication', asy
   const update = start(s, mapped, 'Alpha', 'tree-install-failure')
   await model.release(update.update_id, [['Alpha original', 'Must roll back']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   vi.spyOn(ContentTreeState.prototype, 'install').mockImplementationOnce(() => { throw new Error('Injected tree installation failure') })
   await Promise.resolve(s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false })).catch(() => {})
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('failed'))
@@ -312,7 +377,7 @@ test('real chapter execution publishes only its selected body and preserves the 
   expect(begun.request_id).toBe(mapped.request_id)
   await model.release(begun.update_id, [['Alpha original', 'Alpha revised'], ['Beta original', 'Unrequested Beta replacement']])
   await vi.waitFor(() => expect(s.status(begun.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(begun.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(begun.update_id).action_id)
   const before = s.snapshot().views[0]!
   const saved = s.store.handle({ type: 'draft.save', task_id: s.task, view_id: before.id, view_revision: before.revision, expected_state_revision: before.state_revision, fields: [{ path: '/b', value: 'latest Beta draft' }] }) as { state_revision: number }
   await Promise.resolve(s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false })).catch(error => expect(error).toHaveProperty('code'))
@@ -331,7 +396,7 @@ test('real chapter execution publishes only its selected body and preserves the 
   expect(after.draft).toEqual({ a: '', b: 'latest Beta draft' })
   expect(after.state_revision).toBeGreaterThan(saved.state_revision)
   expect(s.records('runner.answer').filter(record => record.update_id === begun.update_id).map(record => record.text)).toEqual(['更新已完成。'])
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
 test.each(['boundaries', 'body container', 'shared CSS'])('a legacy candidate with invalid %s is corrected before accepting or publishing the chapter', async reason => {
@@ -379,8 +444,6 @@ test('independent content updates publish in reverse order using an immutable su
   const originalRequest = s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(alphaAction)
   await publish(s, s.status(beta.update_id).action_id)
   await vi.waitFor(() => expect(s.status(beta.update_id).state).toBe('succeeded'))
-  const oldApproval = await approval(s, alphaAction)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: oldApproval.id, decision: 'approve' })
   await vi.waitFor(() => expect(s.snapshot().surface_updates.some(item => item.action_id === alphaAction) || s.status(alpha.update_id).action_id !== alphaAction).toBe(true))
   if (s.snapshot().surface_updates.some(item => item.action_id === alphaAction)) await Promise.resolve(s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: alphaAction, proceed: true, confirm_discard: false })).catch(error => expect(error).toHaveProperty('code'))
   await vi.waitFor(() => expect(s.status(alpha.update_id).action_id).not.toBe(alphaAction))
@@ -467,7 +530,7 @@ test('a gap takeover publishes before the retained neighboring nodes resume', as
   await model.release(parent.update_id, [['Alpha original', 'Late whole-document content']])
   await model.release(insertion.update_id, [], [{ ...plan, html: '<p>Inserted between chapters</p>' }])
   await vi.waitFor(() => expect(s.status(insertion.update_id).action_id).toBeDefined())
-  expect(s.status(insertion.update_id).state).toBe('waiting_approval')
+  expect(s.status(insertion.update_id).state).toBe('waiting_input')
   expect(readRelation().continuation_update_id).toBeUndefined()
   await publish(s, s.status(insertion.update_id).action_id)
   await vi.waitFor(() => expect(s.status(insertion.update_id).state).toBe('succeeded'))
@@ -682,7 +745,7 @@ test('restart settles the original pending publication without replaying or chan
   const update = start(s, mapped, 'Alpha', 'interrupted-publication')
   await model.release(update.update_id, [['Alpha original', 'Unconfirmed result']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   const pending = s.status(update.update_id), before = s.snapshot().views[0]!, calls = s.complete.mock.calls.length
   s.restart()
   const recovered = s.status(update.update_id)
@@ -695,8 +758,8 @@ test('restart settles the original pending publication without replaying or chan
   expect(s.internal().db.prepare('SELECT state,result FROM actions WHERE id=?').get(action)).toEqual({ state: 'ended', result: 'not_executed' })
 })
 
-test('semantic update routing keeps the original user record and business goal', async () => {
-  const s = setup(), mapped = await original(s), model = chapterModel(s)
+test('a continuous conversation edits the same published View under the new message', async () => {
+  const s = setup(true), mapped = await original(s), model = chapterModel(s)
   s.complete.mockResolvedValueOnce(answer({ kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] }))
   const routerIndex = s.complete.mock.calls.length
   const request = s.store.handle({ type: 'request.submit', task_id: s.task, text: 'Rewrite the first section using the earlier context.', model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
@@ -710,10 +773,19 @@ test('semantic update routing keeps the original user record and business goal',
   expect(accepted.source_record_id).toBe(userRecords[0]!.id)
   expect(update.request_id).toBe(mapped.request_id)
   expect(update.source?.run_id).toBe(status().run_id)
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.state().run(status().run_id)).toMatchObject({ message_id: userRecords[0]!.id })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
   const routeCall = s.complete.mock.calls[routerIndex]!
   expect(routeCall[3]!.map(tool => tool.function.name)).toEqual(['list', 'read'])
   expect(routeCall[2].some(message => message.role === 'tool')).toBe(false)
+  await model.release(update.update_id, [['Alpha original', 'Alpha revised from the conversation']])
+  await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
+  await publish(s, s.status(update.update_id).action_id)
+  await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
+  expect(s.snapshot().views).toHaveLength(1)
+  expect(s.snapshot().views[0]).toMatchObject({ id: mapped.view_id, revision: mapped.view_revision + 1 })
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha revised from the conversation')
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
 })
 
 test('view-only routing lets the worker read before registering its precise target', async () => {
@@ -765,7 +837,7 @@ test('the first modification of a structured legacy View installs a reliable cha
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
   expect(s.snapshot().views[0]!.bundle.html).toContain('Legacy Alpha revised')
   expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
 test('generic content receives a tree while ambiguous routing preserves the published content', async () => {
@@ -789,7 +861,7 @@ test('generic content receives a tree while ambiguous routing preserves the publ
   expect(s.snapshot().runs).toHaveLength(runs)
   expect(s.complete).toHaveBeenCalledTimes(calls + 1)
   expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_chapter_updates WHERE task_id=?').get(s.task)).toEqual({ n: 0 })
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
 test('ambiguous routing preserves the complete request, selection, materials and conversation for explicit scope', async () => {
@@ -819,7 +891,33 @@ test('ambiguous routing preserves the complete request, selection, materials and
   const conversation = loadConversation(s.internal().db, s.task, originalInput.conversation)
   expect(workerInput.conversation_history.refs).toEqual(conversation.refs)
   expect(s.records('worker.conversation').filter(record => record.owner.update_id === chosen.update_id).map(record => ({ source: record.conversation_source, message: record.message }))).toEqual(conversation.messages)
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+})
+
+test('a clarification in the same composer resumes only the request whose question was selected', async () => {
+  const s = setup(true), mapped = await original(s), model = chapterModel(s)
+  const send = (text: string) => s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  const status = (request: { request_id: string }) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })
+  s.complete.mockResolvedValueOnce(answer({ kind: 'ambiguous' })).mockResolvedValueOnce(answer({ kind: 'ambiguous' }))
+  const originalRequest = send('Please revise the introduction.'), other = send('Please expand the comparison.')
+  await vi.waitFor(() => expect(status(originalRequest)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' }))
+  await vi.waitFor(() => expect(status(other)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' }))
+  const reply = s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='chapter.route.clarification' AND json_extract(payload_json,'$.request_id')=?").get(s.task, originalRequest.request_id) as { id: string }
+  s.complete.mockResolvedValueOnce(answer({ kind: 'clarify', message_id: reply.id, update: { kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] } }))
+  const clarified = send('For the introduction request, revise only the Alpha section.')
+  const updateId = 'chapter-update:' + clarified.request_id
+  await vi.waitFor(() => expect(model.pending.has(updateId)).toBe(true))
+  expect(s.status(updateId).text).toContain('Please revise the introduction.')
+  expect(s.status(updateId).text).toContain('revise only the Alpha section')
+  expect(status(originalRequest)).toMatchObject({ state: 'started' })
+  expect(status(other)).toMatchObject({ state: 'confirmation_required' })
+  expect(s.records('chapter.input.received')).toHaveLength(1)
+  expect(s.internal().db.prepare("SELECT json_extract(input_json,'$.conversation_reference') AS reference FROM requests WHERE id=?").get(clarified.request_id)).toEqual({ reference: reply.id })
+  await model.release(updateId, [['Alpha original', 'Alpha revised after clarification']])
+  await vi.waitFor(() => expect(s.status(updateId).action_id).toBeDefined())
+  await publish(s, s.status(updateId).action_id)
+  await vi.waitFor(() => expect(s.status(updateId).state).toBe('succeeded'))
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha revised after clarification')
 })
 
 test('scoped explanation reads exact content without hiding or updating it', async () => {
@@ -862,19 +960,20 @@ test('cancelling a pending semantic route prevents a late response from starting
   expect(s.records('chapter.route.resolved').some(record => record.request_id === request.request_id)).toBe(false)
 })
 
-test('a denied publication retains the original chapter and never creates a successor action', async () => {
+test('a cancelled host check retains the original chapter and never creates a successor action', async () => {
   const s = setup(), mapped = await original(s), model = chapterModel(s)
   const update = start(s, mapped, 'Alpha', 'denied-publication')
   await model.release(update.update_id, [['Alpha original', 'Denied replacement']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const before = s.status(update.update_id), pending = await approval(s, before.action_id)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'deny' })
+  const before = s.status(update.update_id), action = await awaitHostCheck(s, before.action_id)
+  expect(s.snapshot().approvals.filter(item => item.action_id === action)).toHaveLength(0)
+  await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: false, confirm_discard: false })
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('failed'))
   expect(s.status(update.update_id)).toMatchObject({ action_id: before.action_id, publication_operation_id: before.publication_operation_id })
   expect(s.snapshot().views[0]!.bundle.html).toBe(bundle().html)
   expect(s.snapshot().surface_updates).toEqual([])
   expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_chapter_publications WHERE update_id=?').get(update.update_id)).toEqual({ n: 1 })
-  expect(s.snapshot().approvals.filter(item => item.action_id === before.action_id)).toHaveLength(1)
+  expect(s.snapshot().approvals.filter(item => item.action_id === before.action_id)).toHaveLength(0)
   expect(s.records('chapter.publication.rebased').some(record => record.update_id === update.update_id)).toBe(false)
 })
 
@@ -887,7 +986,7 @@ test.each(['replace', 'move', 'delete'] as const)('an uncertain %s action remain
   const update = kind === 'replace' ? start(s, mapped, 'Alpha', 'unknown-publication') : startNodes(s, mapped, [tree.root_id], 'unknown-' + kind, [operation])
   await model.release(update.update_id, [['Alpha original', 'Uncertain replacement']], kind === 'replace' ? undefined : [operation])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   const pending = s.status(update.update_id), calls = s.complete.mock.calls.length
   const request = s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(action)
   const actionCount = s.internal().db.prepare('SELECT COUNT(*) n FROM actions WHERE task_id=?').get(s.task)

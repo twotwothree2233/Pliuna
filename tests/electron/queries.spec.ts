@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -44,7 +45,7 @@ test('bounded desktop queries: pagination, Unicode continuation, original result
     await expect(page.locator('.task-row')).toHaveCount(1)
     await page.getByLabel('筛选任务').fill('')
     await expect(page.locator('.task-row')).toHaveCount(50)
-    await page.getByRole('tab', { name: /任务数据/ }).click()
+    await openTaskRecords(page, '任务数据')
     const data = page.getByRole('region', { name: '全部任务数据分页浏览' })
     await data.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     for (let i = 0; i < 4; i++) await data.getByRole('button', { name: '加载更多全部任务数据', exact: true }).click()
@@ -63,7 +64,7 @@ test('bounded desktop queries: pagination, Unicode continuation, original result
     await expect(data.getByRole('article')).toContainText('全文读取完成')
     const text = await data.locator('pre').textContent()
     expect(JSON.parse(text!).value).toBe('中文😀'.repeat(16000) + '全文末尾标记')
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     const actions = page.getByRole('region', { name: '原动作分页浏览' })
     await actions.getByRole('button', { name: '刷新原动作', exact: true }).click()
@@ -92,7 +93,7 @@ test('bounded desktop queries: pagination, Unicode continuation, original result
     expect(counts).toBe(2)
     await app.close(); app = await launch(); page = await app.firstWindow()
     await page.getByRole('button', { name: /分页续读验收/ }).click()
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     const restored = page.getByRole('region', { name: '原动作分页浏览' })
     await restored.getByRole('button', { name: '刷新原动作', exact: true }).click()

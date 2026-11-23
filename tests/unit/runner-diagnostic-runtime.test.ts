@@ -68,7 +68,7 @@ function setup(options: { diagnostics?: boolean; modelRequests?: number; tokens?
   if (options.dispatched !== false) record('worker.input', { owner, plan_revision: 1, text: secret })
   record('context.summary.installed', { text: secret, through_sequence: 1 })
   const records = (kind: string) => runtime.records(task, kind)
-  const calls = (execution = 'success', count = 8) => Array.from({ length: count }, (_, index) => record('model.tool_result', { owner, run_id: run, message: { role: 'tool', tool_call_id: `read-${index}`, content: JSON.stringify({ request_type: 'read', execution, delivery: 'delivered', data: secret, ...(execution === 'failure' ? { error: { code: 'SOURCE_BUSY', message: secret } } : {}) }) } }))
+  const calls = (execution = 'success', count = 9) => Array.from({ length: count }, (_, index) => record('model.tool_result', { owner, run_id: run, ...(execution === 'success' ? { query_result_id: 1 } : {}), message: { role: 'tool', tool_call_id: `read-${index}`, content: JSON.stringify({ request_type: 'read', execution, delivery: 'delivered', data: secret, ...(execution === 'failure' ? { error: { code: 'SOURCE_BUSY', message: secret } } : {}) }) } }))
   const observe = () => internal.observeRunnerGoal(owner, true)
   const waitForResult = () => vi.waitFor(() => { expect(records('runner.progress.diagnostic.result')).toHaveLength(1) })
   return { ...runtime, task, run, owner, record, records, calls, observe, waitForResult }
@@ -246,17 +246,17 @@ it('revokes active diagnosis on required completion and settles a late provider 
   expect(s.complete).toHaveBeenCalledTimes(1)
 })
 
-it('triggers from real tool-result advancement without a timer or a status query', async () => {
+it('triggers on repeated delivered query results without a timer or a status query', async () => {
   const s = setup({ dispatched: false }), diagnosticFinished = deferred<void>(), finishProducer = deferred<Completion>()
   let producerRequests = 0
   s.complete.mockImplementation(async (_config, _key, messages) => {
     if (messages[0]!.content!.startsWith('You diagnose')) {
       const response = suggestion(JSON.parse(messages[1]!.content!)); diagnosticFinished.resolve(); return response
     }
-    if (++producerRequests === 1) return { text: '', finish: 'tool_calls', usage: { prompt_tokens: 25, completion_tokens: 5 }, calls: Array.from({ length: 8 }, (_, index) => ({ id: `read-${index}`, type: 'function' as const, function: { name: 'read', arguments: JSON.stringify({ kind: 'task', id: s.task }) } })) }
+    if (++producerRequests === 1) return { text: '', finish: 'tool_calls', usage: { prompt_tokens: 25, completion_tokens: 5 }, calls: Array.from({ length: 9 }, (_, index) => ({ id: `list-${index}`, type: 'function' as const, function: { name: 'list', arguments: JSON.stringify({ kind: 'task_data' }) } })) }
     return finishProducer.promise
   })
-  const profile = createWorkerProfile({ id: 'producer-test', role: 'producer', system: 'Produce the requested answer', grants: [{ type: 'read', kind: 'task', ids: [s.task] }], parseResult: response => ({ answer: response.text }) })
+  const profile = createWorkerProfile({ id: 'producer-test', role: 'producer', system: 'Produce the requested answer', grants: [{ type: 'list', kind: 'task_data' }], parseResult: response => ({ answer: response.text }) })
   const producer = s.store.executeWorker(s.owner.attempt_id, profile, { text: secret })
   await diagnosticFinished.promise; await s.waitForResult()
   expect(s.records('runner.progress.diagnosis')[0]!.payload.reason).toBe('suspected_stall')
@@ -267,6 +267,43 @@ it('triggers from real tool-result advancement without a timer or a status query
   const diagnosticRequest = s.complete.mock.calls.find(call => call[2][0]!.content!.startsWith('You diagnose'))!
   expect(JSON.stringify(diagnosticRequest[2])).not.toContain(secret)
   expect(s.records('runner.progress.diagnostic.result')[0]!.payload.owner.role).toBe('diagnostic')
+})
+
+it('finishes a batch before diagnosing and treats new pages and result corrections as production work', async () => {
+  const s = setup({ dispatched: false })
+  let turn = 0
+  const list = (index: number, args: object) => ({ id: `list-${index}`, type: 'function' as const, function: { name: 'list', arguments: JSON.stringify(args) } })
+  const tools = (calls: Completion['calls']): Completion => ({ ...completion(''), finish: 'tool_calls', calls })
+  s.complete.mockImplementation(async (_config, _key, messages) => {
+    if (messages[0]!.content!.startsWith('You diagnose')) return suggestion(JSON.parse(messages[1]!.content!))
+    if (++turn === 1) return tools([...Array.from({ length: 9 }, (_, index) => list(index, { kind: 'task_data' })), list(9, { kind: 'object_type', limit: 1 })])
+    if (turn <= 9) {
+      const previous = JSON.parse(messages.at(-1)!.content!)
+      return tools([list(turn + 8, previous.data.next_call.arguments)])
+    }
+    return completion(turn === 10 ? 'draft' : 'done')
+  })
+  const profile = createWorkerProfile({ id: 'producer-test', role: 'producer', system: 'Produce the requested answer', grants: [{ type: 'list', kind: 'task_data' }, { type: 'list', kind: 'object_type' }], parseResult: response => ({ answer: response.text }) })
+  await expect(s.store.executeWorker(s.owner.attempt_id, profile, { text: secret }, undefined, undefined, undefined, value => value.answer === 'draft' ? { code: 'DRAFT_INVALID', path: 'answer', value: 'draft', message: 'Finish the answer' } : null)).resolves.toEqual({ answer: 'done' })
+  const results = s.records('model.tool_result').map(record => record.payload.query_result_id)
+  expect(new Set(results.slice(0, 9)).size).toBe(1)
+  expect(new Set(results).size).toBe(10)
+  expect(s.records('worker.result.rejected')).toHaveLength(1)
+  expect(s.records('runner.progress.diagnosis')).toEqual([])
+})
+
+it('treats a changed response to the same query as new evidence', async () => {
+  const s = setup({ dispatched: false })
+  let turn = 0
+  s.complete.mockImplementation(async () => {
+    if (++turn === 3) return completion('done')
+    if (turn === 2) s.store.modelTool(s.task, s.run, { type: 'write', input: { type: 'resource.create', display_name: 'New source', content: { type: 'text', text: 'new data' } } })
+    return { ...completion(''), finish: 'tool_calls', calls: Array.from({ length: turn === 1 ? 8 : 2 }, (_, index) => ({ id: `list-${turn}-${index}`, type: 'function' as const, function: { name: 'list', arguments: '{"kind":"resource"}' } })) }
+  })
+  const profile = createWorkerProfile({ id: 'producer-test', role: 'producer', system: 'Produce the requested answer', grants: [{ type: 'list', kind: 'resource' }], parseResult: response => ({ answer: response.text }) })
+  await expect(s.store.executeWorker(s.owner.attempt_id, profile, { text: secret })).resolves.toEqual({ answer: 'done' })
+  expect(s.records('model.tool_result').map(record => record.payload.query_result_id)).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 2, 2])
+  expect(s.records('runner.progress.diagnosis')).toEqual([])
 })
 
 it('does not recursively include diagnostic history in further observation', async () => {

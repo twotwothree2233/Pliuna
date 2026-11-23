@@ -93,22 +93,17 @@ it('binds answers to original View history, not current sources or replacement',
   const id = await data(); publish([source(id)]); change(id)
   const view = store.snapshot(task.task.id).views[0]!
   const answer: any = store.handle({ type: 'answer.submit', task_id: task.task.id, view_id: view.id, view_revision: 1, expected_state_revision: 1, form_id: 'f' })
-  const pending = replace([source(id, 2)]); await tick(); approve(); await tick(); await respond(); expect((await pending).error).toBeUndefined()
+  const pending = replace([source(id, 2)]); await tick(); await respond(); expect((await pending).error).toBeUndefined()
   expect(query('answer', answer.answer_id).data.view_history.evidence.sources[0]).toMatchObject({ revision: 1, value: { text: '原始依据' } })
   const second = query('view_history').items[1]; expect(query('view_history', second.id).data.evidence.sources[0].revision).toBe(2)
 })
-it.each(['approval', 'host', 'deleted', 'same_revision'])('rejects evidence races during %s without changing View history', async phase => {
+it.each(['host', 'deleted', 'same_revision'])('rejects evidence races during %s without changing View history', async phase => {
   const id = await data(); publish()
-  if (phase === 'approval') {
-    const v = store.snapshot(task.task.id).views[0]!
-    store.handle({ type: 'draft.save', task_id: task.task.id, view_id: v.id, view_revision: 1, expected_state_revision: 1, fields: [{ path: '/text', value: 'saved' }] })
-  }
   const pending = replace([source(id)]); await tick()
   if (phase === 'deleted') db.prepare('DELETE FROM task_data WHERE id=?').run(id)
   else if (phase === 'same_revision') db.prepare('UPDATE task_data SET value_json=? WHERE id=?').run('{"text":"tampered"}', id)
   else change(id)
-  if (phase === 'approval') approve()
-  else await expect(respond()).rejects.toBeDefined()
+  await expect(respond()).rejects.toBeDefined()
   expect((await pending).error).toBeDefined(); expect(query('view_history').items).toHaveLength(1)
   expect(store.snapshot(task.task.id).views[0]!.revision).toBe(1)
 })
@@ -157,15 +152,10 @@ it('rechecks frozen values inside replacement commit without reading files in th
   expect((await pending).error).toMatchObject({ code: 'VERSION_CONFLICT' })
   expect(query('view_history').items).toHaveLength(1)
 })
-it.each(['deny', 'host_cancel', 'run_cancel'])('keeps existing evidence on %s', async mode => {
+it.each(['host_cancel', 'run_cancel'])('keeps existing evidence on %s', async mode => {
   const id = await data(); publish([source(id)]); const before = history()
-  if (mode === 'deny') {
-    const view = store.snapshot(task.task.id).views[0]!
-    store.handle({ type: 'draft.save', task_id: task.task.id, view_id: view.id, view_revision: 1, expected_state_revision: 1, fields: [{ path: '/text', value: 'saved' }] })
-  }
   const pending = replace([source(id)]); await tick()
-  if (mode === 'deny') store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: store.snapshot(task.task.id).approvals.at(-1)!.id, decision: 'deny' })
-  else if (mode === 'host_cancel') await respond(false)
+  if (mode === 'host_cancel') await respond(false)
   else store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run })
   expect((await pending).error).toBeDefined(); expect(history()).toEqual(before)
   expect(query('view_history').items).toHaveLength(1)

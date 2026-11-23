@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it } from 'vitest'
-import type { ExecutionScope, GoalRevision, LogicalWork } from '../../src/shared/contracts.generated'
+import type { ExecutionScope, ContentPlan, LogicalWork } from '../../src/shared/contracts.generated'
 import type { Completion } from '../../src/runtime/model/adapter'
 import { upgradeCandidate, purgeRunnerTask, hasV2Writes } from '../../src/runtime/schema-upgrade'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
@@ -26,7 +26,7 @@ function setup(path = ':memory:') {
 function seed(db: Database.Database, task = 'task', workId = 'work'): ProductionResultBinding {
   const state = new RunnerWorkState(db, 'epoch'), artifacts = new RunnerArtifactState(db, state)
   const request = `goal-${task}`, run = `run-${task}`, section = `section-${task}`
-  let goal: GoalRevision
+  let goal: ContentPlan
   if (!db.prepare('SELECT 1 FROM tasks WHERE id=?').get(task)) {
     db.prepare("INSERT INTO tasks(id,title,state,revision) VALUES (?,?,'active',1)").run(task, task)
     db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,?,'started','{}','{}','time')").run(request, task)
@@ -44,7 +44,7 @@ function seed(db: Database.Database, task = 'task', workId = 'work'): Production
   state.installPlan([work])
   return attempt(db, workId, `attempt-${workId}`, goal)
 }
-function attempt(db: Database.Database, workId: string, attemptId: string, goal: GoalRevision, previous?: string): ProductionResultBinding {
+function attempt(db: Database.Database, workId: string, attemptId: string, goal: ContentPlan, previous?: string): ProductionResultBinding {
   const state = new RunnerWorkState(db, 'epoch'), work = state.work(workId)
   state.createAttempt({ attempt_id: attemptId, task_id: work.task_id, run_id: work.run_id, work_id: workId, runtime_epoch: 'epoch', attempt_number: previous ? 2 : 1, ...(previous ? { previous_attempt_id: previous } : {}), profile_id: 'producer-output-v1', model_config_id: 'model', model_config_revision: 1, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: goal.request_id, intent_revision: 1 })
   state.updateAttempt({ ...state.attempt(attemptId), state: 'dispatched', dispatch_state: 'dispatched', operation_id: `operation-${attemptId}` })

@@ -7,9 +7,15 @@ import { createRequire } from 'node:module'
 import { modelServer, synthetic } from '../helpers/model-server'
 const electronPath: string = createRequire(import.meta.url)('electron')
 
-for (const scenario of ['connection-confirmation', 'service-metadata', 'saved-connection-discovery', 'visible-role-confirmation'] as const) test(`model onboarding: ${scenario}`, async () => {
+for (const scenario of ['connection-confirmation', 'service-metadata', 'saved-connection-discovery', 'optional-connection-test'] as const) test(`model onboarding: ${scenario}`, async () => {
   const server = await modelServer(({ body, url }, response) => {
-    if (url === '/v1/models') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ data: [{ id: 'onboarding-wire', context_length: 240000, max_output_tokens: 8192 }] })); return }
+    if (url === '/v1/models') {
+      const otherModels = scenario === 'saved-connection-discovery' ? Array.from({ length: 20 }, (_, i) => ({ id: `catalogue-fixture-${i + 1}` })) : []
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ data: [...otherModels, { id: 'onboarding-wire', context_length: 240000, max_output_tokens: 8192 }] }))
+      return
+    }
+    if (body?.stream === false) { response.writeHead(200, { 'content-type': 'application/json' }); response.end('{"choices":[{"message":{"content":"any text"}}]}'); return }
     if (synthetic(body, response)) return
     response.writeHead(500); response.end()
   })
@@ -38,6 +44,19 @@ for (const scenario of ['connection-confirmation', 'service-metadata', 'saved-co
     await expect(catalogue).toContainText('onboarding-wire')
     expect(server.exchanges).toHaveLength(1)
     expect(server.exchanges[0]!.authorization).toBe('Bearer synthetic-key')
+    if (scenario === 'saved-connection-discovery') {
+      const search = catalogue.getByRole('searchbox', { name: '搜索模型标识' })
+      await expect(search).toBeFocused()
+      await page.setViewportSize({ width: 390, height: 540 })
+      const results = catalogue.getByRole('region', { name: '模型列表' })
+      expect(await results.evaluate(el => el.scrollHeight > el.clientHeight && el.scrollWidth === el.clientWidth)).toBe(true)
+      await search.fill('no-matching-model')
+      await expect(results).toContainText('未找到匹配模型')
+      await search.fill(' ONBOARDING-WIRE ')
+      await expect(results.getByRole('listitem')).toHaveCount(1)
+      await expect(catalogue.getByRole('status')).toHaveText('1 / 21 个模型')
+      expect(server.exchanges).toHaveLength(1)
+    }
     await catalogue.getByRole('button',{name:'添加此模型',exact:true}).click()
     await expect(page.getByLabel('已知上下文容量')).toHaveValue('240000')
     await expect(page.getByLabel('输出上限（留空由服务决定）')).toHaveValue('8192')
@@ -60,22 +79,35 @@ for (const scenario of ['connection-confirmation', 'service-metadata', 'saved-co
       await expect(page.getByRole('dialog',{name:'渠道设置',exact:true})).toHaveCount(0)
       page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'发现模型',exact:true}).click()
       await expect(catalogue).toContainText('onboarding-wire')
+      const search = catalogue.getByRole('searchbox', { name: '搜索模型标识' })
+      await expect(search).toHaveValue('')
+      await search.fill('onboarding-wire')
+      const row = catalogue.getByRole('listitem')
+      await expect(row).toContainText('已添加')
+      await expect(row.getByRole('button')).toHaveCount(0)
+      await search.press('Escape')
+      await expect(catalogue).toHaveCount(0)
+      await expect(page.getByRole('dialog', { name: '应用设置' })).toBeVisible()
       expect(server.exchanges).toHaveLength(2)
       expect(server.exchanges.at(-1)?.authorization).toBe('Bearer synthetic-key')
       return
     }
+    await expect(page.getByLabel('本次模型').locator('option:checked')).toHaveText('Onboarding / onboarding-wire')
     const count=server.exchanges.length
-    const testMain=page.getByRole('button',{name:'测试并启用主模型',exact:true})
+    const testMain=page.getByRole('button',{name:'测试连接',exact:true})
     await testMain.click()
-    const confirmation=page.getByRole('dialog',{name:'确认模型角色测试',exact:true})
-    await expect(confirmation).toContainText('最多两轮')
+    const confirmation=page.getByRole('dialog',{name:'测试模型连接',exact:true})
+    await expect(confirmation).toContainText('一条简短请求')
     expect(server.exchanges).toHaveLength(count)
     await confirmation.getByRole('button',{name:'取消',exact:true}).click()
     await expect(confirmation).toHaveCount(0)
     expect(server.exchanges).toHaveLength(count)
-    await testMain.click();await confirmation.getByRole('button',{name:'确认费用并开始测试',exact:true}).click()
-    await expect(page.locator('.channel-model .badge')).toContainText('主模型')
-    expect(server.exchanges.filter(e=>e.body)).toHaveLength(2)
+    await testMain.click();await confirmation.getByRole('button',{name:'开始测试',exact:true}).click()
+    await expect(page.locator('.model-connection-state')).toHaveText('已连通')
+    const requests = server.exchanges.filter(e => e.body)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.body).toMatchObject({ model: 'onboarding-wire', stream: false, max_tokens: 16 })
+    expect(requests[0]!.body).not.toHaveProperty('tools')
   } finally { await app.close(); await server.close(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -91,7 +123,7 @@ test('offline channel settings save makes no request and restart restores withou
     await app.close();app=await launch();page=await app.firstWindow()
     await openSettings(page)
     await expect(page.locator('.channel-model')).toContainText('Offline model')
-    await expect(page.locator('.channel-model .badge')).toContainText('未验证')
+    await expect(page.locator('.model-connection-state')).toContainText('未测试')
     await page.getByRole('button',{name:'渠道设置',exact:true}).click()
     await expect(page.getByLabel('API Key',{exact:true})).toHaveValue('')
     await expect(page.getByLabel('服务 Base URL')).toHaveValue('https://example.invalid/v1')

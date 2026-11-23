@@ -39,7 +39,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await page.getByLabel('想从哪里开始？').fill('调整字号后保留的请求草稿')
     await page.getByLabel('想从哪里开始？').evaluate(el => el.setAttribute('data-retained-editor', 'yes'))
     const initial = await metrics(page)
-    expect(initial).toMatchObject({ left: 220, right: 300, task: 11, heading: 22 })
+    expect(initial).toMatchObject({ left: 214, right: 278, task: 12, heading: 22 })
     await openSettings(page, '外观')
     await expect(page.getByRole('radio', { name: '100%（默认）', exact: true })).toBeChecked()
     for (const size of [90, 100, 110, 125, 140]) {
@@ -65,6 +65,9 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await openSettings(page, '外观')
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(390, 850))
     await expect(page.getByRole('radio', { name: '140%', exact: true })).toBeChecked()
+    const categories = page.getByRole('navigation', { name: '设置分类' })
+    await expect(categories.getByRole('button')).toHaveCount(7)
+    expect(await categories.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     expect(await page.locator('.settings-content').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.getByRole('radio', { name: '140%', exact: true }).scrollIntoViewIfNeeded()
@@ -75,7 +78,7 @@ test('text size scales UI and managed text without remounting drafts, then persi
     await app.close(); app = await launch(); page = await app.firstWindow()
     await openSettings(page, '外观')
     await expect(page.getByRole('radio', { name: '140%', exact: true })).toBeChecked()
-    expect(await page.locator('.settings-page h1').evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(24 * 1.4, 1)
+    expect(await page.locator('.settings-page h1').evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(27 * 1.4, 1)
     // Invalid persisted values must fall back to the original baseline.
     await page.evaluate(() => localStorage.setItem('pliuna-text-size', '999'))
     await page.reload()

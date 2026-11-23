@@ -1,12 +1,11 @@
 import { applicationEnvironment } from '../shared/branding'
-// Compatibility launches retain single-production admission.
-// Admission, budgets and resource checks remain mandatory in either mode.
+// Isolated tool and admission fixtures can opt into single-production runs.
 export const productionRunsPerTask = 1
-export function runtimeFeatures(env: NodeJS.ProcessEnv): { viewReplacement: boolean; monty: boolean; runner?: { productionRuns: 1 | 2; collator: 'rule' | 'model' } } {
+export function runtimeFeatures(env: NodeJS.ProcessEnv): { viewReplacement: boolean; monty: boolean; runner?: { productionRuns: 1 | 2; collator: 'rule' | 'model'; conversationRouting?: boolean } } {
   // Release features still pass the original authorization and asset gates.
   const testRunner = applicationEnvironment(env, 'TEST_RUNNER')
   const runner = testRunner === undefined
-    ? { productionRuns: 2 as const, collator: 'rule' as const }
+    ? { productionRuns: 2 as const, collator: 'rule' as const, conversationRouting: true }
     : ['single', 'dual'].includes(testRunner)
       ? { productionRuns: testRunner === 'dual' ? 2 as const : 1 as const, collator: applicationEnvironment(env, 'TEST_RUNNER_COLLATOR') === 'model' ? 'model' as const : 'rule' as const }
       : undefined

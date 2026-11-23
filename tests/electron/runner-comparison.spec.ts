@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, GoalRevision, HostRequest, Outline, OutlineSection, RunnerGoalProjection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, RunnerGoalProjection, Snapshot, WorkDependency } from '../../src/shared/types'
 import type { RequestAccounting } from '../../src/runtime/model/accounting'
 import { frame, modelInputFromHost, modelServer, synthetic } from '../helpers/model-server'
 
@@ -18,7 +18,7 @@ const requests = {
   BETA: 'COMPARE_BETA：读取相同材料，计算 BETA 仓库的图书数。保存独立章节和最终答案。'
 }
 type GoalName = keyof typeof requests
-interface ProducerBinding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: GoalRevision; requirement_ids: string[]; sections: OutlineSection[] }
+interface ProducerBinding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: ContentPlan; requirement_ids: string[]; sections: OutlineSection[] }
 interface CollatorInput { batch: CompositionBatch; outline: Outline; indexes: ArtifactIndex[] }
 interface Milestones { submitted: number; received: number; effective: number | null; first_readable: number | null; complete: number | null }
 interface EventMetadata { id: string; kind: string }
@@ -147,7 +147,7 @@ async function compareMode(mode: 'single' | 'dual') {
     expect(maximumProducerRequests).toBe(mode === 'dual' ? 2 : 1)
     expect(maximumActiveProduction).toBe(mode === 'dual' ? 2 : 1)
     const final = await call<Snapshot>({ type: 'task.snapshot', task_id: task })
-    expect(final.runner?.scope).toMatchObject({ state: 'complete', required_goal_count: 2, unresolved_count: 0, pending_update_count: 0, published_count: 2 })
+    expect(final.runner?.scope).toMatchObject({ state: 'complete', required_content_count: 2, unresolved_count: 0, pending_update_count: 0, published_count: 2 })
     const facts = JSON.parse(readMaterial.data.text) as { warehouses: Record<GoalName, { boxes: number; books_per_box: number }> }
     const quality: { goal: GoalName; expected_books: number; answer: string; rendered_text: string }[] = []
     for (const [name, value] of goals) {

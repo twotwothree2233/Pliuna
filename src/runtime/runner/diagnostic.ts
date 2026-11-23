@@ -29,6 +29,8 @@ Return one JSON object with version:1, assessment, evidence_record_ids, recommen
 automatic_replay:false, execution_permission:false, recovery_permission:false.
 assessment is the observed reason or inconclusive. recommendation is review_goal,
 review_dependency, review_configuration, wait_for_external_result, or none.
+suspected_stall means the worker repeatedly received unchanged read or list results.
+Treat this as loop evidence, not proof of the cause or of an unmet goal.
 Cite only supplied record IDs. You have no tools, content access, replay or recovery
 permission. Your result is an internal suggestion and cannot execute an action.`
 function invalid(): never { throw new ContractError('INVALID_RUNNER_DIAGNOSIS', 'Diagnosis requires bounded metadata, exact evidence and no execution permission') }

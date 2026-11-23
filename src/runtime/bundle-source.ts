@@ -22,14 +22,17 @@ export function loadBundleSource(db: Database.Database, root: string, task: stri
   return { bundle, source }
 }
 
+const exportRules = JSON.stringify({ name: 'read', arguments: { kind: 'object_type', id: 'surface.update', selection: { view: 'guide', section: 'export-rules' } } })
+
 export function checkPersonalBindings(db: Database.Database, task: string, bundle: Bundle, publishing = false): void {
-  for (const fragment of bundle.export) {
+  for (const [index, fragment] of bundle.export.entries()) {
     const personal = ['answer', 'feedback', 'mixed_personal'].includes(fragment.category), binding = fragment.personal_binding
-    if (binding && !personal) throw new ContractError('PERSONAL_BINDING_INVALID', 'Only personal fragments may bind an answer')
+    const field = `export[${index}].personal_binding`
+    if (binding && !personal) throw new ContractError('PERSONAL_BINDING_INVALID', `${field}: only personal fragments may bind a saved answer`, exportRules)
     if (!binding) {
-      if (publishing && personal) throw new ContractError('PERSONAL_BINDING_REQUIRED', 'New personal fragments require an exact answer and original question history')
+      if (publishing && personal) throw new ContractError('PERSONAL_BINDING_REQUIRED', `${field}: personal content requires a saved answer and its exact original question history. Classify ordinary practice questions and generic examples as learning. Never invent a binding for personal content.`, exportRules)
       continue
     }
-    if (!db.prepare('SELECT 1 FROM answers a JOIN view_history h ON h.id=a.view_history_id AND h.task_id=a.task_id WHERE a.task_id=? AND a.id=? AND h.id=?').get(task, binding.answer_id, binding.view_history_id)) throw new ContractError('PERSONAL_BINDING_INVALID', 'Answer and original question history do not match within this task')
+    if (!db.prepare('SELECT 1 FROM answers a JOIN view_history h ON h.id=a.view_history_id AND h.task_id=a.task_id WHERE a.task_id=? AND a.id=? AND h.id=?').get(task, binding.answer_id, binding.view_history_id)) throw new ContractError('PERSONAL_BINDING_INVALID', `${field}: use an existing same-task answer and its exact original question history`, exportRules)
   }
 }

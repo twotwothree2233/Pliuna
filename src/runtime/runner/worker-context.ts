@@ -10,7 +10,7 @@ import { attachEvidence, captureExecutionScope, messageEvidence } from '../model
 const recordBytes = 1024 * 1024, contextBytes = 8 * recordBytes, recordCount = 4096
 const navigationBytes = 64 * 1024
 const historyKinds = "'worker.input','worker.conversation','model.response','model.tool_result'"
-const scopeFields = ['task_id', 'run_id', 'work_id', 'attempt_id', 'role', 'purpose', 'request_id', 'intent_revision', 'update_id', 'batch_id', 'composition_version', 'trigger_request_id'] as const
+const scopeFields = ['task_id', 'run_id', 'work_id', 'attempt_id', 'role', 'purpose', 'request_id', 'intent_revision', 'message_id', 'update_id', 'batch_id', 'composition_version', 'trigger_request_id'] as const
 // Guard json_extract independently: unrelated legacy records can contain invalid JSON.
 const scopeWhere = `task_id=? AND ${scopeFields.map(field => `json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.owner.${field}') IS ?`).join(' AND ')}`
 const selectedRecord = `id,sequence,kind,length(CAST(payload_json AS BLOB)) AS bytes,CASE WHEN length(CAST(payload_json AS BLOB))<=${recordBytes} THEN payload_json END AS payload_json`
@@ -24,6 +24,7 @@ const sequence = (value: number): boolean => Number.isSafeInteger(value) && valu
 function scopeValues(owner: ExecutionScope): (string | number | null)[] {
   return [owner.task_id, owner.run_id, owner.work_id, owner.attempt_id, owner.role, owner.purpose,
     owner.purpose === 'production' ? owner.request_id : null, owner.purpose === 'production' ? owner.intent_revision : null,
+    owner.purpose === 'production' ? owner.message_id ?? null : null,
     owner.purpose === 'production' ? owner.update_id ?? null : null,
     owner.purpose === 'composition' ? owner.batch_id : null, owner.purpose === 'composition' ? owner.composition_version : null, owner.purpose === 'composition' ? owner.trigger_request_id : null]
 }
@@ -35,7 +36,7 @@ function sameOwner(raw: unknown, expected: ExecutionScope): boolean {
 }
 function sourceOwner(source: ExecutionAttempt | LogicalWork, role: ExecutionScope['role'], attempt_id: string): ExecutionScope {
   return { task_id: source.task_id, run_id: source.run_id, work_id: source.work_id, attempt_id, role,
-    ...(source.purpose === 'production' ? { purpose: source.purpose, request_id: source.request_id, intent_revision: source.intent_revision, ...(source.update_id ? { update_id: source.update_id } : {}) } : { purpose: source.purpose, batch_id: source.batch_id, composition_version: source.composition_version, trigger_request_id: source.trigger_request_id }) }
+    ...(source.purpose === 'production' ? { purpose: source.purpose, request_id: source.request_id, intent_revision: source.intent_revision, ...(source.message_id ? { message_id: source.message_id } : {}), ...(source.update_id ? { update_id: source.update_id } : {}) } : { purpose: source.purpose, batch_id: source.batch_id, composition_version: source.composition_version, trigger_request_id: source.trigger_request_id }) }
 }
 function validMessage(record: HistoryRecord, owner: ExecutionScope): ChatMessage {
   if (!sameOwner(record.payload.owner, owner) || record.payload.task_id !== undefined && record.payload.task_id !== owner.task_id || record.payload.run_id !== undefined && record.payload.run_id !== owner.run_id) invalid()
@@ -49,7 +50,7 @@ function validMessage(record: HistoryRecord, owner: ExecutionScope): ChatMessage
     const source = record.payload.conversation_source
     if (!source || typeof source !== 'object' || Array.isArray(source) || Object.keys(source).some(key => !['task_id', 'id', 'sequence', 'kind'].includes(key))
       || source.task_id !== owner.task_id || typeof source.id !== 'string' || !source.id || !sequence(source.sequence) || source.sequence < 1 || source.sequence >= record.sequence
-      || (message.role === 'user' ? !['message.user', 'runner.input.received'].includes(source.kind) : message.role === 'assistant' ? !['runner.answer', 'message.assistant', 'model.response'].includes(source.kind) : true)
+      || (message.role === 'user' ? !['message.user', 'runner.input.received'].includes(source.kind) : message.role === 'assistant' ? !['runner.answer', 'message.assistant', 'model.response', 'conversation.reply'].includes(source.kind) : true)
       || typeof message.content !== 'string' || message.tool_calls !== undefined || message.tool_call_id !== undefined) invalid()
   } else if (record.kind === 'model.response') {
     if (message.role !== 'assistant' || message.content !== null && typeof message.content !== 'string' || message.tool_call_id !== undefined) invalid()

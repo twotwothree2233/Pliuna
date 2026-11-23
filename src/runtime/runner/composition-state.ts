@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, CompositionScope, ContributionInventory, ExecutionAttempt, GoalRevision, LogicalWork, RunnerRun, WorkDependency, WorkOutputDeclaration } from '../../shared/contracts.generated'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, CompositionScope, ContributionInventory, ExecutionAttempt, ContentPlan, LogicalWork, RunnerRun, WorkDependency, WorkOutputDeclaration } from '../../shared/contracts.generated'
 import { sameDependencies, validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { RunnerArtifactState, type ArtifactOwner } from './artifact-state'
@@ -23,7 +23,7 @@ export interface IntegrationInputs {
   resources: string[]
 }
 type PayloadRow = { payload_json: string }
-type GoalIdentity = Pick<GoalRevision, 'task_id' | 'request_id' | 'intent_revision'>
+type GoalIdentity = Pick<ContentPlan, 'task_id' | 'request_id' | 'intent_revision'>
 function fail(code: string, message: string): never { throw new ContractError(code, message) }
 function revision(value: unknown): void {
   if (!Number.isSafeInteger(value) || (value as number) < 1) fail('INVALID_RUNNER_CONTRACT', 'Composition revisions must be positive safe integers')
@@ -59,12 +59,12 @@ export class RunnerCompositionState {
   private activeTask(taskId: string): void {
     if (!this.db.prepare("SELECT id FROM tasks WHERE id=? AND state='active'").get(taskId)) fail('RUNNER_OWNERSHIP_INVALID', 'Task is not active')
   }
-  private currentGoal(identity: GoalIdentity): GoalRevision {
+  private currentGoal(identity: GoalIdentity): ContentPlan {
     const goal = this.work.goal(identity.request_id)
     if (!sameGoal(goal, identity) || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Contribution goal revision is no longer current')
     return goal
   }
-  private requirements(goal: GoalRevision, ids: string[]): void {
+  private requirements(goal: ContentPlan, ids: string[]): void {
     if (ids.some(id => !goal.requirements.some(requirement => requirement.requirement_id === id))) fail('RUNNER_OWNERSHIP_INVALID', 'Contribution requirements do not belong to this goal')
   }
   private resultReference(taskId: string, reference: WorkOutputDeclaration['result_ref']): void {
@@ -118,7 +118,7 @@ export class RunnerCompositionState {
     return row ? validateRunnerContract('runner_work_output_declaration', JSON.parse(row.payload_json)) : null
   }
 
-  private finalWork(output: WorkOutputDeclaration): { work: LogicalWork; attempt: ExecutionAttempt; goal: GoalRevision } {
+  private finalWork(output: WorkOutputDeclaration): { work: LogicalWork; attempt: ExecutionAttempt; goal: ContentPlan } {
     const goal = this.currentGoal(output), work = this.work.work(output.work_id), attempt = this.work.attempt(output.attempt_id), run = this.work.run(output.run_id)
     if (work.purpose !== 'production' || attempt.purpose !== 'production' || run.purpose !== 'production' || !sameGoal(output, work) || !sameGoal(output, attempt) || !sameGoal(output, run) || work.run_id !== output.run_id || attempt.run_id !== output.run_id || attempt.work_id !== output.work_id || work.current_attempt_id !== output.attempt_id || work.plan_revision !== output.plan_revision || work.result_revision !== output.result_revision || work.state !== 'succeeded' || attempt.state !== 'succeeded' || attempt.dispatch_state !== 'dispatched' || attempt.result_ref === undefined || !equivalent(attempt.result_ref, output.result_ref) || !sameDependencies(work.dependencies, attempt.input_versions) || !this.resultRunCurrent(run, work, attempt)) fail('RUNNER_OWNERSHIP_INVALID', 'Output declaration must match the exact successful final work and attempt')
     this.requirements(goal, [...output.requirement_ids, ...output.unresolved.map(item => item.requirement_id)])

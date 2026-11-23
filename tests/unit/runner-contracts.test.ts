@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ContributionInventory, ContributionInventoryRef, DeliveryRecord, ExecutionAttempt, ExecutionScope, GoalRevision, LogicalWork, OutlineSection, PresentationPlan, RunnerRun, WorkOutputDeclaration } from '../../src/shared/contracts.generated'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ContributionInventory, ContributionInventoryRef, DeliveryRecord, ExecutionAttempt, ExecutionScope, ContentPlan, LogicalWork, OutlineSection, PresentationPlan, RunnerRun, WorkOutputDeclaration } from '../../src/shared/contracts.generated'
 import { queryDeliveries, validateArtifactCandidate, validatePresentationPlan, validateRunnerContract, type ArtifactAcceptanceContext } from '../../src/shared/runner-validation'
 import { assertContract } from '../../src/shared/validation'
 import { attachEvidence, requestEvidence } from '../../src/runtime/model/request-evidence'
 
-const goal: GoalRevision = { task_id: 'task', request_id: 'request', intent_revision: 2, previous_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: true }] }
+const goal: ContentPlan = { task_id: 'task', request_id: 'request', intent_revision: 2, previous_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: true }] }
 const run: RunnerRun = { task_id: 'task', run_id: 'run', purpose: 'production', request_id: 'request', intent_revision: 2, previous_run_id: 'old-run', runtime_epoch: 'epoch', state: 'running', commit_valid: true, budget_id: 'budget' }
 const work: LogicalWork = { task_id: 'task', run_id: 'run', purpose: 'production', request_id: 'request', intent_revision: 2, work_id: 'work', plan_revision: 3, role: 'producer', required: true, requirement_ids: ['content'], dependencies: [{ kind: 'goal', task_id: 'task', request_id: 'upstream', intent_revision: 4 }], state: 'running', current_attempt_id: 'attempt', max_attempts: 2 }
 const attempt: ExecutionAttempt = { task_id: 'task', run_id: 'run', purpose: 'production', request_id: 'request', intent_revision: 2, work_id: 'work', attempt_id: 'attempt', runtime_epoch: 'epoch', attempt_number: 2, previous_attempt_id: 'old-attempt', profile_id: 'producer', model_config_id: 'config', model_config_revision: 1, input_versions: work.dependencies, state: 'running', dispatch_state: 'dispatched', operation_id: 'operation', usage_refs: ['usage'] }
@@ -21,7 +21,7 @@ const inventoryRef: ContributionInventoryRef = { task_id: 'task', request_id: 'r
 
 describe('runner identity contracts', () => {
   it('retains distinct goal, logical work and resumed execution identities', () => {
-    expect(validateRunnerContract('runner_goal_revision', goal)).toEqual(goal)
+    expect(validateRunnerContract('runner_content_plan', goal)).toEqual(goal)
     expect(validateRunnerContract('runner_run', run)).toMatchObject({ request_id: 'request', previous_run_id: 'old-run', budget_id: 'budget' })
     expect(validateRunnerContract('runner_logical_work', work)).toMatchObject({ work_id: 'work', current_attempt_id: 'attempt' })
     expect(validateRunnerContract('runner_execution_attempt', attempt)).toMatchObject({ work_id: 'work', previous_attempt_id: 'old-attempt', usage_refs: ['usage'] })

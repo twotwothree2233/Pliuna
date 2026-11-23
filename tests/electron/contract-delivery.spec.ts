@@ -32,7 +32,7 @@ test('discovers, receives full contract pages, publishes and exports the returne
     expect(Buffer.byteLength(scene.pages[0]!.content)).toBeGreaterThan(4000)
     expect(scene.contract.example.operation).toBe('surface.update')
     await expect(page.locator('.managed').getByText('内容', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '导出', exact: true }).click()
+    await page.getByRole('button', { name: '导出内容', exact: true }).click()
     await page.getByRole('button', { name: '固定快照并预览', exact: true }).click()
     await expect(page.frameLocator('iframe[title="固定快照离线预览"]').getByText('内容', { exact: true })).toBeVisible()
     await app.evaluate(({ dialog }, target) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: target }) }, target)

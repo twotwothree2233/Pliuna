@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { readFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { ExecutionScope, GoalRevision, InputEvent, LogicalWork } from '../../src/shared/contracts.generated'
+import type { ExecutionScope, ContentPlan, InputEvent, LogicalWork } from '../../src/shared/contracts.generated'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RUNNER_LIMITS } from '../../src/runtime/runner/limits'
 import { TaskRunner, type TaskRunnerEffect, type TaskRunnerHost, type TaskRunnerReference, type TaskRunnerRoute, type TaskRunnerStatusPage } from '../../src/runtime/runner/task-runner'
@@ -25,8 +25,8 @@ function setup() {
   }
   const original = (id: string) => JSON.parse((db.prepare('SELECT payload_json FROM records WHERE id=?').get(id) as { payload_json: string }).payload_json)
   const state = new RunnerWorkState(db, 'epoch', () => 1000)
-  const goal = vi.fn((input: InputEvent, current: GoalRevision | null): GoalRevision => ({ task_id: input.task_id, request_id: input.request_id!, intent_revision: (current?.intent_revision ?? 0) + 1, input_event_id: input.input_event_id, state: input.kind === 'withdraw_goal' ? 'withdrawn' : 'active', requirements: current?.requirements ?? [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }], ...(current ? { previous_revision: current.intent_revision } : {}) }))
-  const install = vi.fn((input: InputEvent, _route: TaskRunnerRoute, _goal?: GoalRevision): TaskRunnerEffect => {
+  const goal = vi.fn((input: InputEvent, current: ContentPlan | null): ContentPlan => ({ task_id: input.task_id, request_id: input.request_id!, intent_revision: (current?.intent_revision ?? 0) + 1, input_event_id: input.input_event_id, state: input.kind === 'withdraw_goal' ? 'withdrawn' : 'active', requirements: current?.requirements ?? [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }], ...(current ? { previous_revision: current.intent_revision } : {}) }))
+  const install = vi.fn((input: InputEvent, _route: TaskRunnerRoute, _goal?: ContentPlan): TaskRunnerEffect => {
     expect(db.inTransaction).toBe(true)
     record('runner.test.installed', input.input_event_id)
     return { refs: [{ task_id: input.task_id, kind: 'record', id: input.record_id }], waits: [] }

@@ -13,7 +13,8 @@ import type { ModelPersistence, SavedConnection } from './persistence'
 import { captureExecutionScope, requestEvidence, type RequestEvidence, type RequestLink } from './request-evidence'
 import { capacityPlan } from './capacity'
 
-interface Configuration { config: ModelConfiguration; key: string; channel: string; roles: Set<'main' | 'approval' | 'compaction'>; locks: number; revision: number; remembered?: boolean; credentialMissing?: boolean }
+export type ConnectionTest = { status: 'connected' } | { status: 'failed'; code: string }
+interface Configuration { config: ModelConfiguration; key: string; channel: string; roles: Set<'main' | 'approval' | 'compaction'>; locks: number; revision: number; remembered?: boolean; credentialMissing?: boolean; connectionTest?: ConnectionTest }
 interface Job { task: string; channel: string; signal: AbortSignal; run: () => Promise<unknown>; resolve: (v: any) => void; reject: (e: unknown) => void; abort: () => void }
 export class ModelScheduler {
   private active = 0
@@ -131,7 +132,7 @@ export class ModelService {
     const changed = !old || old.base_url !== raw.channel.base_url || old.compatibility_profile !== raw.channel.compatibility_profile || old.key !== key
     const channel: ChannelEntry = { ...raw.channel, key, remembered: !!raw.remember_connection, revision: (old?.revision ?? 0) + 1 }
     const channels = new Map(this.channelConfigurations).set(channel.id, channel), next = new Map(this.configurations)
-    for (const entry of affected) next.set(entry.config.id, { ...entry, config: { ...entry.config, base_url: channel.base_url, compatibility_profile: channel.compatibility_profile }, key, credentialMissing: false, channel: new URL(channel.base_url).origin, remembered: channel.remembered, roles: changed ? new Set() : new Set(entry.roles), revision: entry.revision + (changed ? 1 : 0) })
+    for (const entry of affected) next.set(entry.config.id, { ...entry, config: { ...entry.config, base_url: channel.base_url, compatibility_profile: channel.compatibility_profile }, key, credentialMissing: false, channel: new URL(channel.base_url).origin, remembered: channel.remembered, roles: changed ? new Set() : new Set(entry.roles), connectionTest: changed ? undefined : entry.connectionTest, revision: entry.revision + (changed ? 1 : 0) })
     if (channel.remembered || old?.remembered || affected.some(e => e.remembered)) await this.persist(next, channels)
     this.channelConfigurations = channels; this.configurations = next
     return this.channelList()
@@ -186,7 +187,7 @@ export class ModelService {
       if (sharedChanged) throw new ContractError(entry.locks ? 'CONFIGURATION_BUSY' : 'CHANNEL_CONFIGURATION_CONFLICT', 'Shared channel address, profile and credential must remain consistent')
     }
     const same = previous && JSON.stringify(previous.config) === JSON.stringify(config) && previous.key === input.api_key && !previous.credentialMissing
-    return { config: structuredClone(config), key: input.api_key, roles: same ? new Set(previous.roles) : new Set(), locks: 0, revision: same ? previous.revision : (previous?.revision ?? 0) + 1, channel }
+    return { config: structuredClone(config), key: input.api_key, roles: same ? new Set(previous.roles) : new Set(), connectionTest: same ? previous.connectionTest : undefined, locks: 0, revision: same ? previous.revision : (previous?.revision ?? 0) + 1, channel }
   }
   configure(input: unknown): unknown {
     const entry = this.prepare(input)
@@ -228,7 +229,7 @@ export class ModelService {
     const previous = this.configurations.get(raw.configuration.id), target = raw.configuration.compaction_model_id
     if (target && target !== raw.configuration.id) {
       const compact = this.entry(target)
-      if (!compact.roles.has('compaction') || compact.credentialMissing) throw new ContractError('MODEL_NOT_VALIDATED', 'Select an explicitly validated compaction role')
+      this.assertCredential(compact)
       const binding = { id: target, revision: compact.revision, base_url: compact.config.base_url }
       if (!raw.confirm_history_processing && JSON.stringify(previous?.config.compaction_target) !== JSON.stringify(binding)) throw new ContractError('CONFIRMATION_REQUIRED', 'Explicitly confirm task history processing by the selected compaction service')
       input = { ...input, configuration: { ...input.configuration, compaction_target: binding } }
@@ -263,7 +264,7 @@ export class ModelService {
     const affected = [...this.configurations].filter(([, other]) => entry.config.channel_id && other.config.channel_id ? other.config.channel_id === entry.config.channel_id : other.channel === entry.channel)
     if (affected.some(([, other]) => other.locks)) throw new ContractError('CONFIGURATION_BUSY', 'Related channel is occupied')
     const next = new Map(this.configurations)
-    for (const [modelId, other] of affected) next.set(modelId, { ...other, key: '', credentialMissing: true, roles: new Set(), revision: other.revision + 1 })
+    for (const [modelId, other] of affected) next.set(modelId, { ...other, key: '', credentialMissing: true, roles: new Set(), connectionTest: undefined, revision: other.revision + 1 })
     const channels = new Map(this.channelConfigurations)
     for (const [, other] of affected) { const c = channels.get(other.config.channel_id!); if (c) channels.set(c.id, { ...c, key: null, revision: c.revision + 1 }) }
     if (affected.some(([, other]) => other.remembered)) await this.persist(next, channels)
@@ -276,8 +277,9 @@ export class ModelService {
     if (entry.remembered) await this.persist(next)
     this.configurations = next
   }
-  list(): unknown { return [...this.configurations].map(([id, e]) => ({ ...e.config, id, revision: e.revision, roles: [...e.roles], occupied: e.locks > 0 || this.saving, credential_storage: e.remembered ? (this.storage.backend === 'plain-file' ? 'plain-file' : 'system-secure') : 'memory-only', credential_missing: !!e.credentialMissing, metadata: { ...(e.config.metadata ?? legacyMetadata()), capabilities: { ...unknownCapabilities(), ...(e.roles.has('main') ? { tools: 'supported', streaming: 'supported' } : {}), ...(e.roles.has('approval') ? { structured_output: 'supported' } : {}) } } })) }
-  private entry(id: string): Configuration { const entry = this.configurations.get(id); if (!entry) throw new ContractError('MODEL_NOT_CONFIGURED', 'Model configuration is absent; configure and explicitly test it'); return entry }
+  list(): unknown { return [...this.configurations].map(([id, e]) => ({ ...e.config, id, revision: e.revision, roles: [...e.roles], occupied: e.locks > 0 || this.saving, credential_storage: e.remembered ? (this.storage.backend === 'plain-file' ? 'plain-file' : 'system-secure') : 'memory-only', credential_missing: !!e.credentialMissing, ...(e.connectionTest ? { connection_test: { ...e.connectionTest } } : {}), metadata: { ...(e.config.metadata ?? legacyMetadata()), capabilities: { ...unknownCapabilities(), ...(e.roles.has('main') ? { tools: 'supported', streaming: 'supported' } : {}), ...(e.roles.has('approval') ? { structured_output: 'supported' } : {}) } } })) }
+  private entry(id: string): Configuration { const entry = this.configurations.get(id); if (!entry) throw new ContractError('MODEL_NOT_CONFIGURED', 'Model configuration is absent'); return entry }
+  private assertCredential(entry: Configuration): void { if (entry.credentialMissing) throw new ContractError('CREDENTIAL_REQUIRED', 'Credential was deleted; enter a new credential') }
   private checkKey(key: string): void {
     if (/[^\x21-\x7e]/.test(key)) throw new ContractError('INVALID_CREDENTIAL', 'Credential must contain visible ASCII only; remove whitespace')
   }
@@ -317,10 +319,10 @@ export class ModelService {
     if (entry.locks) throw new ContractError('CONFIGURATION_BUSY', 'Related channel is occupied')
     entry.key = ''; this.configurations.delete(id)
   }
-  acquire(id: string, role: 'main' | 'approval' | 'compaction'): ModelLease {
+  acquire(id: string, _role: 'main' | 'approval' | 'compaction'): ModelLease {
     this.idle()
     const entry = this.entry(id)
-    if (!entry.roles.has(role)) throw new ContractError('MODEL_NOT_VALIDATED', 'Role must pass an explicit synthetic test before use')
+    this.assertCredential(entry)
     entry.locks++
     let released = false
     return { id, revision: entry.revision, config: structuredClone(entry.config), release: () => { if (!released) { released = true; entry.locks-- } } }
@@ -378,6 +380,21 @@ export class ModelService {
     try { return await this.operation(operationId, signal => this.send<unknown>(entry, 'configuration:' + id, signal, inner => metadata ? this.adapter.catalogue(entry.config, entry.key, inner) : this.adapter.discover(entry.config, entry.key, inner))) }
     finally { entry.locks-- }
   }
+  async testConnection(id: string, operationId?: string): Promise<ConnectionTest> {
+    this.idle()
+    const entry = this.entry(id)
+    this.assertCredential(entry)
+    if (entry.locks) throw new ContractError('CONFIGURATION_BUSY', 'Model configuration is occupied')
+    entry.locks++
+    try {
+      await this.operation(operationId, testSignal => this.send(entry, 'configuration:' + id, testSignal, signal => this.adapter.testConnection(entry.config, entry.key, signal)))
+      return entry.connectionTest = { status: 'connected' }
+    } catch (error) {
+      if (error instanceof ModelError && error.code !== 'MODEL_CANCELLED') entry.connectionTest = { status: 'failed', code: error.code }
+      throw error
+    } finally { entry.locks-- }
+  }
+  // Compatibility for callers that explicitly request the legacy capability sample.
   async test(id: string, role: 'main' | 'approval' | 'compaction', operationId?: string): Promise<unknown> {
     this.idle()
     const entry = this.entry(id)

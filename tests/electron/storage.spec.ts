@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { chooseModel, openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -41,7 +42,7 @@ test('storage inspection: failed publication, retained files, recheck, damaged f
     await expect(panel.getByRole('button', { name: '刷新存储登记', exact: true })).toBeEnabled()
     expect((await database('query')).actions).toEqual(failed.actions)
     expect(await readdir(join(directory, 'resources'))).toEqual(originalFiles)
-    await panel.getByRole('button', { name: /^返回工作区/ }).click()
+    await panel.getByRole('button', { name: /^返回工作台/ }).click()
     await page.getByLabel('想从哪里开始？').fill('正常发布'); await page.getByRole('button', { name: /发送消息/ }).click()
     await expect(page.locator('.managed')).toHaveCount(1); await expect(page.locator('.agent-status')).toContainText('已完成')
     await page.getByLabel('你的想法').fill('保持保存草稿'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
@@ -58,10 +59,10 @@ test('storage inspection: failed publication, retained files, recheck, damaged f
     await writeFile(join(directory, 'resources', key), original)
     await review.getByRole('button', { name: '重新核对此项', exact: true }).click()
     await expect(panel.getByRole('heading', { name: '正式提交已核对', exact: true })).toBeVisible()
-    await panel.getByRole('button', { name: /^返回工作区/ }).click()
+    await panel.getByRole('button', { name: /^返回工作台/ }).click()
     await page.getByRole('button', { name: /存储登记验收/ }).click()
     await expect(page.getByLabel('你的想法')).toHaveValue('保持保存草稿')
-    await page.getByRole('tab', { name: /作答记录/ }).click(); await expect(page.getByText('第 1 次提交')).toBeVisible()
+    await openTaskRecords(page, '作答记录'); await expect(page.getByText('第 1 次提交')).toBeVisible()
     expect((await database('query')).actions).toEqual(before.actions)
     expect((await database('query')).schema).toEqual([{ version: 1 }])
     expect((await readdir(join(directory, 'resources'))).length).toBe(2)

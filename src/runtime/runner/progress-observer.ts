@@ -1,4 +1,4 @@
-import type { ExecutionScope, GoalRevision, LogicalWork } from '../../shared/contracts.generated'
+import type { ExecutionScope, ContentPlan, LogicalWork } from '../../shared/contracts.generated'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { assertRunnerId, progressObservationConfig, PROGRESS_OBSERVATION_BOUNDS, RUNNER_LIMITS, type ProgressObservationConfig } from './limits'
@@ -15,6 +15,7 @@ export interface ProgressCallFact extends ProgressRecordRef {
   pattern: string
   outcome: 'success' | 'failure' | 'unknown' | 'not_executed'
   error_source?: string
+  query_result_id?: number
 }
 export interface EffectiveProgressFact extends ProgressRecordRef {
   kind: 'requirement_covered' | 'work_advanced' | 'artifact_accepted' | 'input_consumed'
@@ -30,7 +31,7 @@ export interface ProgressBackgroundFact extends ProgressRecordRef {
 }
 export interface RunnerProgressInput {
   now: number
-  goal: GoalRevision
+  goal: ContentPlan
   works: LogicalWork[]
   calls: ProgressCallFact[]
   progress: EffectiveProgressFact[]
@@ -139,20 +140,40 @@ function checkpoint(raw: RunnerProgressCheckpoint | undefined, input: RunnerProg
   return structuredClone(raw)
 }
 
+function repeatedQueries(calls: ProgressCallFact[], attemptId: string | undefined, threshold: number): ProgressCallFact[] {
+  const seen = new Map<string, ProgressCallFact>()
+  const evidence = new Set<ProgressCallFact>()
+  let repeats = 0
+  for (const call of calls) {
+    if (call.owner.attempt_id !== attemptId) continue
+    const key = call.query_result_id === undefined ? undefined : `${call.pattern}:${call.query_result_id}`
+    const original = key === undefined ? undefined : seen.get(key)
+    if (original) {
+      repeats++; evidence.add(original); evidence.add(call)
+    } else {
+      // Novel reads (including continuations) or opaque tool results break the streak.
+      repeats = 0; evidence.clear()
+      if (key !== undefined) seen.set(key, call)
+    }
+  }
+  return repeats >= threshold ? calls.filter(call => evidence.has(call)) : []
+}
+
 // The host supplies facts confirmed against persistent operations and current
 // goal requirements. This function never reads content or executes a suggestion.
 // Persist its returned checkpoint together with the diagnosis reservation.
 export function observeRunnerProgress(input: RunnerProgressInput, previous?: RunnerProgressCheckpoint, overrides: Partial<ProgressObservationConfig> = {}): RunnerProgressObservation {
   const config = progressObservationConfig(overrides)
   if (!object(input, ['now', 'goal', 'works', 'calls', 'progress', 'waits', 'background', 'diagnosis']) || !integer(input.now) || !Array.isArray(input.works) || input.works.length > config.evidence_max_calls || !object(input.diagnosis, ['capability_allowed']) || typeof input.diagnosis.capability_allowed !== 'boolean') invalid()
-  const goal = validateRunnerContract('runner_goal_revision', input.goal)
+  const goal = validateRunnerContract('runner_content_plan', input.goal)
   const works = input.works.map(work => validateRunnerContract('runner_logical_work', work))
   if (new Set(works.map(work => work.work_id)).size !== works.length || works.some(work => work.task_id !== goal.task_id || work.purpose !== 'production' || work.request_id !== goal.request_id || work.intent_revision !== goal.intent_revision || work.requirement_ids.some(id => !goal.requirements.some(requirement => requirement.requirement_id === id)))) invalid()
-  const calls = records(input.calls, ['call_id', 'pattern', 'outcome', 'error_source'], input, config.evidence_max_calls, fact => {
+  const calls = records(input.calls, ['call_id', 'pattern', 'outcome', 'error_source', 'query_result_id'], input, config.evidence_max_calls, fact => {
     assertRunnerId(fact.call_id, 'call_id'); code(fact.pattern)
     if (!['success', 'failure', 'unknown', 'not_executed'].includes(fact.outcome)) invalid()
     if (fact.error_source !== undefined) code(fact.error_source)
     if (fact.outcome === 'failure' && !fact.error_source) invalid()
+    if (fact.query_result_id !== undefined && (!integer(fact.query_result_id, 1) || fact.outcome !== 'success' || !['read', 'list'].includes(fact.pattern))) invalid()
   })
   const progress = records(input.progress, ['kind', 'requirement_ids'], input, config.evidence_max_calls, fact => {
     if (!['requirement_covered', 'work_advanced', 'artifact_accepted', 'input_consumed'].includes(fact.kind) || !Array.isArray(fact.requirement_ids) || fact.requirement_ids.length === 0 || fact.requirement_ids.length > config.evidence_max_calls || new Set(fact.requirement_ids).size !== fact.requirement_ids.length) invalid()
@@ -201,10 +222,10 @@ export function observeRunnerProgress(input: RunnerProgressInput, previous?: Run
     }
     for (const [key, group] of groups) if (group.calls.length < config.repeated_failure_threshold) groups.delete(key)
     if (!workProgress.length && ['running', 'waiting'].includes(work.state)) {
-      const successes = workCalls.filter(call => call.outcome === 'success')
-      if (successes.length >= config.stalled_success_threshold) {
-        const patterns = new Set(successes.map(call => call.pattern))
-        groups.set('stall', { reason: 'suspected_stall', pattern: patterns.size === 1 ? successes[0]!.pattern : 'mixed_operations', calls: successes })
+      const repeated = repeatedQueries(workCalls, work.current_attempt_id, config.stalled_repeat_threshold)
+      if (repeated.length) {
+        const patterns = new Set(repeated.map(call => call.pattern))
+        groups.set('stall', { reason: 'suspected_stall', pattern: patterns.size === 1 ? repeated[0]!.pattern : 'mixed_operations', calls: repeated })
       }
     }
     report.disposition = groups.size ? [...groups.values()].some(group => group.reason === 'repeated_failure') ? 'repeated_failure' : 'suspected_stall' : workProgress.length ? 'progressing' : 'active'

@@ -1,11 +1,16 @@
 import type Database from 'better-sqlite3'
 import type { RunActivity } from '../shared/types'
+import { runConversationReply, runMessage } from './runner/conversation-query'
 
 type Item = RunActivity['items'][number] & { sequence: number; position: number; created_at: string }
 
 // Project only status metadata. Tool arguments, results and reply bodies stay in their original records.
 export function runActivity(db: Database.Database, task: string, run: string): RunActivity {
-  const request = db.prepare("SELECT substr(json_extract(payload_json,'$.text'),1,121) text FROM records WHERE task_id=? AND kind='message.user' AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1").get(task, run) as { text: string } | undefined
+  const request = db.prepare(`SELECT substr(json_extract(r.payload_json,'$.text'),1,121) text FROM runs c
+    JOIN records r ON r.task_id=c.task_id AND r.id=COALESCE(${runMessage('c')},
+      (SELECT u.id FROM records u WHERE u.task_id=c.task_id AND u.kind='message.user'
+        AND json_extract(u.payload_json,'$.run_id')=c.id ORDER BY u.sequence LIMIT 1))
+    WHERE c.task_id=? AND c.id=?`).get(task, run) as { text: string } | undefined
   const items = db.prepare(`
     WITH requests AS MATERIALIZED (
       SELECT r.id,r.sequence,r.created_at,CAST(c.key AS INTEGER) position,
@@ -47,7 +52,7 @@ export function runActivity(db: Database.Database, task: string, run: string): R
       FROM actions WHERE task_id=? AND run_id=? ORDER BY rowid DESC LIMIT 3
     `).all(task, run) as Item[])
   }
-  const reply = db.prepare("SELECT id,sequence,created_at,kind FROM records WHERE task_id=? AND kind IN ('message.assistant','message.assistant.partial') AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1").get(task, run) as { id: string; sequence: number; created_at: string; kind: string } | undefined
+  const reply = runConversationReply(db, task, run)
   if (reply) items.push({ id: reply.id, sequence: reply.sequence, created_at: reply.created_at, position: 0, type: 'reply', name: 'reply', operation: null, target_kind: null, target_id: null, label: null, execution: reply.kind === 'message.assistant.partial' ? 'partial' : 'success', delivery: null, error: null })
   const recent = items.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.sequence - b.sequence || a.position - b.position).slice(-3)
   const text = request?.text

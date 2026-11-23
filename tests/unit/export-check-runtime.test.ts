@@ -33,7 +33,7 @@ const counts = () => Object.fromEntries(['records', 'actions', 'approvals', 'res
 it('rejects cancelled diagnosis before reading or converting any View', () => {
   const view = publish(), before = counts(), controller = new AbortController(); controller.abort()
   const queries = new ObjectQueries(db, () => { throw Error('must not read') }, () => undefined, () => ({}), () => ({}))
-  expect(() => queries.query(task, run, modelToolRequest('read', { kind: 'view', id: view.id, selection: { view: 'export_check' } }) as any, false, controller.signal)).toThrow(expect.objectContaining({ code: 'MODEL_CANCELLED' }))
+  expect(() => queries.query(task, run, modelToolRequest('read', { kind: 'view', id: view.id, selection: { view: 'export_check' } }) as any, controller.signal)).toThrow(expect.objectContaining({ code: 'MODEL_CANCELLED' }))
   expect(counts()).toEqual(before)
 })
 

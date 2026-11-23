@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { ExecutionAttempt, ExecutionScope, GoalRevision, InputEvent, LogicalWork, PublicationEntry, RunnerRun } from '../../src/shared/contracts.generated'
+import type { ExecutionAttempt, ExecutionScope, ContentPlan, InputEvent, LogicalWork, PublicationEntry, RunnerRun } from '../../src/shared/contracts.generated'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerHostRecovery, type RunnerResumeHost, type RunnerResumeInput } from '../../src/runtime/runner/host-recovery'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
@@ -11,7 +11,7 @@ const runnerSql = readFileSync(new URL('../../src/shared/contracts/002-runner.sq
 const databases: Database.Database[] = []
 afterEach(() => { for (const db of databases.splice(0)) db.close() })
 const input: InputEvent = { input_event_id: 'input', task_id: 'task', kind: 'request', record_id: 'input-record', request_id: 'goal', stage: 'received' }
-const goal: GoalRevision = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
+const goal: ContentPlan = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
 const work = (id = 'work'): LogicalWork => ({ work_id: id, task_id: 'task', run_id: 'old-run', plan_revision: 1, role: 'producer', required: true, requirement_ids: ['answer'], dependencies: [{ kind: 'goal', task_id: 'task', request_id: 'goal', intent_revision: 1 }], state: 'queued', max_attempts: 3, purpose: 'production', request_id: 'goal', intent_revision: 1 })
 const attempt = (id = 'old-attempt', workId = 'work'): ExecutionAttempt => ({ attempt_id: id, task_id: 'task', run_id: 'old-run', work_id: workId, runtime_epoch: 'old-epoch', attempt_number: 1, profile_id: 'producer-output-v1', model_config_id: 'model', model_config_revision: 1, input_versions: work().dependencies, state: 'queued', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: 'goal', intent_revision: 1 })
 function executionOwner(value = attempt()): ExecutionScope {

@@ -42,6 +42,7 @@ it('preserves structured resource HTML and CSS through one wire encoding and kee
   const wire = JSON.parse(JSON.stringify({ operation: 'resource.create', input }))
   expect(modelToolRequest('write', wire)).toEqual({ type: 'write', input: { type: 'resource.create', ...input } })
   expect(modelToolRequest('write', { operation: 'resource.create', input_json: JSON.stringify(input) })).toEqual(modelToolRequest('write', wire))
+  expect(modelToolRequest('write', { operation: 'resource.create', input: JSON.stringify(input) })).toEqual(modelToolRequest('write', wire))
   expect(wire.input.content.value).toEqual(value)
   expect(value.nested.literal).toBe('{"keep":"a JSON string"}')
 })
@@ -55,7 +56,9 @@ it('rejects ambiguous or invalid structured resource inputs before execution', (
     { operation: 'resource.create', input_json: input },
     { operation: 'resource.create', input: null },
     { operation: 'resource.create', input: [] },
-    { operation: 'resource.create', input: JSON.stringify(input) },
+    { operation: 'resource.create', input: JSON.stringify(JSON.stringify(input)) },
+    { operation: 'resource.create', input: JSON.stringify(input), input_json: JSON.stringify(input) },
+    { operation: 'resource.create', input: JSON.stringify({ ...input, type: 'task_data.remove' }) },
     { operation: 'resource.create', input, unexpected: true },
     { operation: 'resource.create', input: { ...input, type: 'resource.create' } },
     { operation: 'resource.create', input: { ...input, type: 'task_data.remove' } },

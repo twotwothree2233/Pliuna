@@ -8,6 +8,7 @@ import { ModelService, type ModelLease } from '../../src/runtime/model/service'
 import { modelToolRequest } from '../../src/runtime/model/tool-input'
 import { RuntimeStore } from '../../src/runtime/store'
 import type { ModelConfiguration } from '../../src/shared/contracts.generated'
+import type { TaskMessagePage } from '../../src/shared/types'
 
 type Row = Record<string, any>
 const stores: RuntimeStore[] = []
@@ -18,7 +19,7 @@ function deferred<T>() {
   let resolve!: (value: T) => void
   return { promise: new Promise<T>(done => { resolve = done }), resolve: (value: T) => resolve(value) }
 }
-function setup(options: { directory?: string; task?: string; productionRuns?: 1 | 2; contextTokens?: number } = {}) {
+function setup(options: { directory?: string; task?: string; productionRuns?: 1 | 2; contextTokens?: number; conversationRouting?: boolean } = {}) {
   const adapter = new ChatAdapter(), models = new ModelService(adapter)
   const config: ModelConfiguration = { id: 'conversation', base_url: 'https://example.invalid/v1', wire_model_id: 'synthetic', context_tokens: options.contextTokens ?? 100000, max_output_tokens: 4096, compatibility_profile: 'chat-max-tokens' }
   models.configure({ type: 'model.configure', configuration: config, api_key: 'synthetic', confirm_memory_only: true })
@@ -29,21 +30,23 @@ function setup(options: { directory?: string; task?: string; productionRuns?: 1 
   const sent: ChatMessage[][] = [], request = models.request.bind(models)
   vi.spyOn(models, 'request').mockImplementation((...args) => { sent.push(structuredClone(args[2])); return request(...args) })
   const directory = options.directory ?? mkdtempSync(join(tmpdir(), 'pliuna-conversation-runtime-'))
-  const store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: options.productionRuns ?? 2, collator: 'rule', diagnostics: false } })
+  const store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: options.productionRuns ?? 2, collator: 'rule', diagnostics: false, conversationRouting: options.conversationRouting } })
   stores.push(store)
   const internal = store as unknown as {
     db: Database.Database
     record(task: string, kind: string, payload: Row): string
+    recordRunnerAnswer(task: string, payload: Row): string
     requests: { invalidateConfiguration(): void }
   }
   const db = internal.db, task = options.task ?? store.create('Continuous conversation').task.id
   const submit = (text: string) => store.handle({ type: 'request.submit', task_id: task, text, model_config_id: config.id, resource_ids: [], import_ids: [] }) as Row
   const requestInput = (request: string) => JSON.parse((db.prepare('SELECT input_json FROM requests WHERE task_id=? AND id=?').get(task, request) as Row).input_json) as Row
   const record = (kind: string, payload: Row) => internal.record(task, kind, payload)
+  const messages = () => (store.handle({ type: 'host.messages.page', task_id: task }) as TaskMessagePage).items
   const records = (kind: string) => (db.prepare('SELECT id,sequence,payload_json FROM records WHERE task_id=? AND kind=? ORDER BY sequence').all(task, kind) as { id: string; sequence: number; payload_json: string }[]).map(row => ({ ...row, payload: JSON.parse(row.payload_json) }))
   const waitRun = async (run: string) => vi.waitFor(() => expect((db.prepare('SELECT state FROM runs WHERE task_id=? AND id=?').get(task, run) as Row).state).toBe('completed'))
   const close = () => { stores.splice(stores.indexOf(store), 1); store.close() }
-  return { store, internal, db, task, config, directory, complete, sent, submit, requestInput, record, records, waitRun, close }
+  return { store, internal, db, task, config, directory, complete, sent, submit, requestInput, record, records, messages, waitRun, close }
 }
 const body = (messages: readonly ChatMessage[]) => messages.map(message => message.content ?? '').join('\n')
 function importText(store: RuntimeStore, task: string, name: string, text: string): Row {
@@ -77,6 +80,111 @@ it('continues ordinary sends with the real preceding user and accepted assistant
     s.records('runner.answer')[0]!.id
   ])
   expect(s.store.runnerGoals({ task_id: s.task }).goals.every(goal => goal.intent_revision === 1)).toBe(true)
+})
+
+it('answers ordinary questions in one model call and reports actual progress without creating content requirements', async () => {
+  const s = setup({ conversationRouting: true })
+  const route = (value: Row) => answer(JSON.stringify(value))
+  s.complete.mockResolvedValueOnce(route({ kind: 'reply', text: 'Use Cedar as the codename.' }))
+    .mockResolvedValueOnce(route({ kind: 'reply', text: 'The codename was Cedar.' }))
+    .mockResolvedValueOnce(route({ kind: 'progress' }))
+  async function send(text: string) {
+    const request = s.submit(text)
+    const status = () => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id }) as Row
+    await vi.waitFor(() => expect(status()).toMatchObject({ state: 'started', run_state: 'completed' }))
+    return request.request_id
+  }
+  await send('Pick a codename for this conversation.')
+  await send('What was the codename?')
+  await send('How much is complete?')
+  expect(s.sent).toHaveLength(3)
+  expect(s.sent[1]).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'assistant', content: 'Use Cedar as the codename.' })]))
+  expect(s.messages().filter(message => message.role === 'assistant').map(message => message.text)).toEqual(['Use Cedar as the codename.', 'The codename was Cedar.', '已完成：2 次'])
+  expect(s.store.runnerGoals({ task_id: s.task }).goals).toEqual([])
+  expect(s.store.snapshot(s.task).views).toEqual([])
+})
+
+it('stops all open dialogue Runs and keeps earlier replies visible', async () => {
+  const s = setup({ conversationRouting: true })
+  const earlier = 'Earlier completed reply'
+  s.complete.mockResolvedValueOnce(answer(JSON.stringify({ kind: 'reply', text: earlier })))
+  const first = s.submit('Complete this round')
+  const status = (request: Row) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id }) as Row
+  await vi.waitFor(() => expect(status(first).run_state).toBe('completed'))
+  const a = deferred<Completion>(), b = deferred<Completion>()
+  s.complete.mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise)
+  const left = s.submit('Open A'), right = s.submit('Open B')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(3))
+  s.store.handle({ type: 'task.stop', task_id: s.task })
+  const late = answer(JSON.stringify({ kind: 'reply', text: 'A delayed result' }))
+  a.resolve(late); b.resolve(late)
+  await vi.waitFor(() => {
+    expect(status(left).run_state).toBe('cancelled')
+    expect(status(right).run_state).toBe('cancelled')
+  })
+  expect(s.messages().filter(message => message.role === 'assistant').map(message => message.text)).toEqual([earlier])
+})
+
+it.each([false, true])('only admits the bound preceding result while independent work proceeds (cancelled=%s)', async cancelled => {
+  const s = setup({ conversationRouting: true }), source = deferred<Completion>()
+  const routed = (value: Row) => answer(JSON.stringify(value))
+  const status = (request: Row) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id }) as Row
+  s.complete.mockImplementationOnce(() => source.promise)
+  const parent = s.submit('Source question, keep running.')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(1))
+  const sourceMessage = s.messages().at(-1)!.id
+  s.complete.mockResolvedValueOnce(routed({ kind: 'depends', message_id: sourceMessage }))
+  const follow = s.submit('Expand the result once it arrives.')
+  await vi.waitFor(() => expect(status(follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' }))
+  s.complete.mockResolvedValueOnce(routed({ kind: 'reply', text: 'INDEPENDENT LATE REPLY' }))
+  const independent = s.submit('Independent question.')
+  await vi.waitFor(() => expect(status(independent)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(status(follow).state).toBe('queued')
+  if (cancelled) {
+    s.store.handle({ type: 'request.cancel', task_id: s.task, request_id: parent.request_id })
+    source.resolve(routed({ kind: 'reply', text: 'REVOKED' }))
+    await vi.waitFor(() => expect(status(follow)).toMatchObject({ state: 'rejected', code: 'CONVERSATION_DEPENDENCY_UNAVAILABLE' }))
+    expect(s.complete).toHaveBeenCalledTimes(3)
+  } else {
+    s.complete.mockResolvedValueOnce(routed({ kind: 'reply', text: 'The expanded result.' }))
+    source.resolve(routed({ kind: 'reply', text: 'BOUND PARENT REPLY' }))
+    await vi.waitFor(() => expect(status(follow)).toMatchObject({ state: 'started', run_state: 'completed' }))
+    expect(s.sent).toHaveLength(4)
+    expect(body(s.sent[3]!)).toContain('BOUND PARENT REPLY')
+    expect(body(s.sent[3]!)).not.toContain('INDEPENDENT LATE REPLY')
+    expect(s.requestInput(follow.request_id).conversation_dependency).toMatchObject({ message_id: sourceMessage, result_id: expect.any(String) })
+  }
+})
+
+it('keeps reverse completions linked to the original inputs and confirms each result only once', async () => {
+  const s = setup(), late = deferred<Completion>()
+  s.complete.mockImplementationOnce(() => late.promise).mockResolvedValueOnce(answer('Answer B'))
+  const first = s.submit('Question A')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(1))
+  const second = s.submit('Question B')
+  await s.waitRun(second.run_id)
+  late.resolve(answer('Answer A'))
+  await s.waitRun(first.run_id)
+  const [a, b, replyB, replyA] = s.messages()
+  expect(s.messages().map(message => message.text)).toEqual(['Question A', 'Question B', 'Answer B', 'Answer A'])
+  expect(replyA).toMatchObject({ reply_to: a!.id, run_id: first.run_id })
+  expect(replyB).toMatchObject({ reply_to: b!.id, run_id: second.run_id })
+  const accepted = s.records('runner.answer').at(-1)!
+  expect(s.internal.recordRunnerAnswer(s.task, accepted.payload)).toBe(accepted.id)
+  expect(s.records('runner.answer')).toHaveLength(2)
+})
+
+it('never projects a late result from a revoked Run as a conversation reply', async () => {
+  const s = setup(), late = deferred<Completion>()
+  s.complete.mockImplementationOnce(() => late.promise).mockResolvedValueOnce(answer('Independent answer'))
+  const cancelled = s.submit('Cancel this run')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(1))
+  const retained = s.submit('Keep this run')
+  s.store.handle({ type: 'host.runner.input', task_id: s.task, input_event_id: 'stop-only-first', kind: 'cancel_run', run_id: cancelled.run_id })
+  late.resolve(answer('Revoked reply'))
+  await s.waitRun(retained.run_id)
+  await vi.waitFor(() => expect((s.db.prepare('SELECT state FROM runs WHERE id=?').get(cancelled.run_id) as Row).state).toBe('cancelled'))
+  expect(s.messages().map(message => message.text)).toEqual(['Cancel this run', 'Keep this run', 'Independent answer'])
 })
 
 it('continues within a small context and authorizes paged reads of a large original answer', async () => {
@@ -179,6 +287,28 @@ it('restores continuous dialogue from persistent accepted records after reopenin
   expect(reopened.requestInput(continuation.request_id).conversation.reply_to_request_id).toBe(original.request_id)
 })
 
+it('continues from a current recovery point without replaying prior requests', async () => {
+  const s = setup({ conversationRouting: true })
+  const reply = (text: string) => answer(JSON.stringify({ kind: 'reply', text }))
+  const runState = (request: Row) => (s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id }) as Row).run_state
+  const completed = (request: Row) => vi.waitFor(() => expect(runState(request)).toBe('completed'))
+  const begin = () => (s.store.handle({ type: 'maintenance.begin' }) as Row).reservation.token
+  s.complete.mockResolvedValueOnce(reply('Saved answer: northern route.'))
+  await completed(s.submit('Choose a route.'))
+  const saved = (await s.store.handle({ type: 'maintenance.create', token: begin(), inputs_saved: true, replace_id: null }) as Row).active
+  s.complete.mockResolvedValueOnce(reply('Newer answer that will be rolled back.'))
+  await completed(s.submit('Choose a route again.'))
+
+  await s.store.handle({ type: 'maintenance.restore', token: begin(), point_id: saved.id, database_sha256: saved.database_sha256, inputs_saved: true, confirm_replace_newer_data: true })
+  expect(s.messages().map(message => message.text)).toEqual(['Choose a route.', 'Saved answer: northern route.'])
+  expect(s.complete).toHaveBeenCalledTimes(2)
+  s.complete.mockResolvedValueOnce(reply('The northern route.'))
+  await completed(s.submit('Which route did we choose?'))
+  expect(s.complete).toHaveBeenCalledTimes(3)
+  expect(body(s.sent[2]!)).toContain('Saved answer: northern route.')
+  expect(body(s.sent[2]!)).not.toContain('Newer answer that will be rolled back.')
+})
+
 it('excludes private worker, tool, diagnostic and other-Task history from the next dialogue turn', async () => {
   const s = setup()
   s.complete.mockResolvedValueOnce(answer('PUBLIC ACCEPTED REPLY')).mockResolvedValueOnce(answer('Public follow-up reply'))
@@ -204,13 +334,15 @@ it('excludes private worker, tool, diagnostic and other-Task history from the ne
   expect(messages.every(message => message.role !== 'tool')).toBe(true)
 })
 
-it('carries the prior accepted answer into a corrected goal without changing an unrelated goal', async () => {
+it('keeps accepted replies and the original correction readable after withdrawal', async () => {
   const s = setup()
   s.complete.mockResolvedValueOnce(answer('The first draft uses a blue cover.')).mockResolvedValueOnce(answer('Unrelated result.')).mockResolvedValueOnce(answer('The corrected draft uses a green cover.'))
   const first = s.submit('Create the first draft with a blue cover.')
   await s.waitRun(first.run_id)
   const unrelated = s.submit('Answer an unrelated question.')
   await s.waitRun(unrelated.run_id)
+  const orphan = s.record('message.assistant', { text: 'Imported historical reply without a recorded parent.' })
+  s.record('model.tool_result', { text: 'PRIVATE TOOL EVENT', run_id: unrelated.run_id })
   const receipt = s.store.handle({ type: 'host.runner.input', task_id: s.task, input_event_id: 'make-cover-green', kind: 'correction', request_id: first.request_id, text: 'Change the cover you just proposed to green.' }) as Row
   expect(receipt.state).toBe('installed')
   await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(3))
@@ -222,6 +354,16 @@ it('carries the prior accepted answer into a corrected goal without changing an 
   const goals = s.store.runnerGoals({ task_id: s.task }).goals
   expect(goals.find(goal => goal.request_id === first.request_id)?.intent_revision).toBe(2)
   expect(goals.find(goal => goal.request_id === unrelated.request_id)?.intent_revision).toBe(1)
+  s.store.handle({ type: 'host.runner.input', task_id: s.task, input_event_id: 'withdraw-first', kind: 'withdraw_goal', request_id: first.request_id })
+  const history = s.messages()
+  expect(history.map(message => message.text)).toEqual([
+    'Create the first draft with a blue cover.', 'The first draft uses a blue cover.',
+    'Answer an unrelated question.', 'Unrelated result.', 'Imported historical reply without a recorded parent.',
+    'Change the cover you just proposed to green.', 'The corrected draft uses a green cover.'
+  ])
+  expect(history[1]).toMatchObject({ reply_to: history[0]!.id })
+  expect(history.find(message => message.id === orphan)?.reply_to).toBeNull()
+  expect(history.at(-1)?.reply_to).toBe(history.at(-2)?.id)
 })
 
 it('discovers imported material by name and reads its original through an ordinary send', async () => {

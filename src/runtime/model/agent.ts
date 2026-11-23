@@ -10,6 +10,7 @@ import { accountingResultLimit } from './accounting'
 import { type RequestLink } from './request-evidence'
 import { capacityPlan, serializedInput, rejectedContext, type RejectionStage } from './capacity'
 import type { WorkerProfile } from '../runner/worker-profile'
+import { RUNNER_LIMITS } from '../runner/limits'
 export interface AgentHost {
   context?(messages: ChatMessage[], recovery?: ContextRecovery): Promise<ChatMessage[]>
   valid(): void
@@ -17,6 +18,7 @@ export interface AgentHost {
   budget(value: BudgetState): void
   record(kind: string, payload: Record<string, unknown>): void
   tool(request: unknown, signal: AbortSignal): Promise<unknown>
+  toolsSettled?(): void
 }
 export interface ContextRecovery { overflow: true; partial?: string }
 export interface WorkerResultIssue {
@@ -98,6 +100,7 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
   let rejectedInput: string | undefined
   const rejectedResults = new Set<string>()
   const rejectedIssues = new Set<string>()
+  const queryResults = host.toolsSettled && profile && !collator && profile.role !== 'diagnostic' ? new QueryResults() : undefined
   let resultCorrection = '', preflightCorrection = ''
   while (true) {
     host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
@@ -188,6 +191,7 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
       host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
       const errorCall = collator && !['list', 'read', 'write', 'call'].includes(call.function.name) ? { ...call, function: { ...call.function, name: 'unknown' } } : call
       let result: unknown
+      let queryResultId: number | undefined
       let repeatedRejection = false
       if (failed) result = toolError(errorCall, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
       else {
@@ -201,7 +205,9 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
           profile?.authorize(request)
           validating = false
           rejectedInput = undefined
-          result = modelToolResult(call.function.name, raw, await host.tool(request, signal))
+          const delivered = await host.tool(request, signal)
+          if (request.type === 'list' || request.type === 'read') queryResultId = queryResults?.identify(call, delivered)
+          result = modelToolResult(call.function.name, raw, delivered)
           const outcome = result as { execution?: string; delivery?: string } | null
           if ((outcome?.execution && outcome.execution !== 'success') || outcome?.delivery === 'failed') failed = true
         } catch (e) {
@@ -223,11 +229,39 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
       const content = JSON.stringify(result)
       if (Buffer.byteLength(content) > (call.function.name === 'read' ? accountingResultLimit(result) : defaults.read.text_bytes)) throw new ModelError('TOOL_RESULT_LIMIT')
       const message: ChatMessage = { role: 'tool', tool_call_id: call.id, content }
-      host.record('model.tool_result', { message, ...association }); messages.push(message)
+      host.record('model.tool_result', { message, ...association, ...(queryResultId === undefined ? {} : { query_result_id: queryResultId }) }); messages.push(message)
       if (repeatedRejection) throw new ModelError('MODEL_TOOL_NO_PROGRESS')
     }
+    host.toolsSettled?.()
   }
 }
+
+// Compare delivered query data within one attempt. Only the opaque local ID is
+// recorded as progress metadata; the observer never receives arguments or data.
+class QueryResults {
+  private readonly entries = new Map<string, { id: number; data: string; bytes: number }>()
+  private bytes = 0
+  private nextId = 0
+
+  identify(call: ToolCall, value: unknown): number | undefined {
+    const result = value as { execution?: string; delivery?: string; data?: unknown } | null
+    if (result?.execution !== 'success' || result.delivery !== 'delivered' || result.data === undefined) return
+    const key = JSON.stringify([call.function.name, resultSignature(call.function.arguments)])
+    const data = JSON.stringify(result.data)
+    const bytes = Buffer.byteLength(key) + Buffer.byteLength(data), maxBytes = RUNNER_LIMITS.progress_query_result_bytes
+    const previous = this.entries.get(key)
+    if (previous) { this.entries.delete(key); this.bytes -= previous.bytes }
+    if (bytes > maxBytes) return
+    while (this.bytes + bytes > maxBytes || this.entries.size >= RUNNER_LIMITS.progress.evidence_max_calls) {
+      const oldest = this.entries.keys().next().value!
+      this.bytes -= this.entries.get(oldest)!.bytes; this.entries.delete(oldest)
+    }
+    const id = previous?.data === data ? previous.id : ++this.nextId
+    this.entries.set(key, { id, data, bytes }); this.bytes += bytes
+    return id
+  }
+}
+
 function resultSignature(text: string): string {
   function canonical(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(canonical)

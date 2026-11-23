@@ -6,9 +6,11 @@ import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
-import { readPluginResource } from './plugins/resource-reader'
+import { readPluginResource, verifiedResource, type Resource } from './plugins/resource-reader'
+import { binaryPreviewChunk, binaryPreviewLimit, binaryPreviewType } from '../shared/material-formats'
 import type { RestoreJournal } from './restore-journal'
 import type { StorageLifecycle } from './storage-lifecycle'
+import { isMaterialRemoved } from './material-removals'
 
 type Row = Record<string, any>
 type Transfer = { fd: number; key: string; stage: string; received: number; expected: number; hash: ReturnType<typeof createHash>; text: TextDecoder | null; media: string }
@@ -30,7 +32,16 @@ export class MaterialImports {
   private public(row:Row):Row {
     const request=JSON.parse(row.request_json),result=row.result_json?JSON.parse(row.result_json):null
     const stage=this.db.prepare("SELECT received_bytes,expected_bytes FROM staging WHERE owner_id=? AND owner_kind='action'").get(row.id) as Row|undefined
-    return {operation_id:row.id,batch_id:request.batch_id,display_name:request.display_name,source:request.source,retry_of:request.retry_of??null,state:row.state==='ended'?(row.result==='success'?'success':row.result==='cancelled'?'cancelled':'failed'):row.state==='registered'?'waiting':'importing',code:result?.code??(row.state==='ended'&&row.result!=='success'?'IMPORT_INTERRUPTED':null),resource:result?.resource??null,received_bytes:stage?.received_bytes??0,expected_bytes:stage?.expected_bytes??null,created_at:row.created_at,ended_at:row.ended_at}
+    const resource = result?.resource ?? null
+    const removed = resource !== null && isMaterialRemoved(this.db, row.task_id, resource.id)
+    return {operation_id:row.id,batch_id:request.batch_id,display_name:request.display_name,source:request.source,retry_of:request.retry_of??null,state:row.state==='ended'?(row.result==='success'?'success':row.result==='cancelled'?'cancelled':'failed'):row.state==='registered'?'waiting':'importing',code:result?.code??(row.state==='ended'&&row.result!=='success'?'IMPORT_INTERRUPTED':null),resource,removed,received_bytes:stage?.received_bytes??0,expected_bytes:stage?.expected_bytes??null,created_at:row.created_at,ended_at:row.ended_at}
+  }
+  private remove(task: string, resource: string) {
+    return this.db.transaction(() => {
+      if (!this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(task, resource)) fail('IMPORT_NOT_FOUND')
+      if (!isMaterialRemoved(this.db, task, resource)) this.record(task, 'material.removed', { resource_id: resource })
+      return { resource_id: resource, removed: true }
+    })()
   }
   handle(r:Row):unknown {
     if(r.type==='material.list'){
@@ -38,9 +49,10 @@ export class MaterialImports {
       return {items:rows.slice(0,20).map(row=>this.public(row)),next_before:rows.length>20?rows[19]!.ordinal:null}
     }
     if(r.type==='material.status')return this.public(this.row(r.task_id,r.operation_id))
+    if(r.type==='material.delete')return this.remove(r.task_id,r.resource_id)
     if(r.type==='material.cancel')return this.end(r.task_id,r.operation_id,'cancelled','IMPORT_CANCELLED')
     if(r.type==='material.internal.fail')return this.end(r.task_id,r.operation_id,'failure',r.code)
-    if(r.type==='material.read')return this.read(r.task_id,r.resource_id,r.offset??0)
+    if(r.type==='material.read')return r.representation === 'preview' ? this.preview(r.task_id, r.resource_id, r.offset ?? 0) : this.read(r.task_id,r.resource_id,r.offset??0)
     if(r.type==='material.internal.register'){
       const task=this.db.prepare('SELECT state FROM tasks WHERE id=?').get(r.task_id) as Row|undefined
       if(task?.state!=='active')fail('IMPORT_TASK_INACTIVE')
@@ -108,6 +120,36 @@ export class MaterialImports {
   }
   cancelTask(task:string):void {for(const r of this.db.prepare("SELECT id FROM actions WHERE task_id=? AND state!='ended' AND json_extract(request_json,'$.type')='material.import'").all(task) as Row[])this.end(task,r.id,'cancelled','IMPORT_TASK_STOPPED')}
   close():void {this.closed=true;for(const t of this.transfers.values())if(t.fd>=0)fs.closeSync(t.fd);this.transfers.clear()}
+  private async preview(task: string, id: string, offset: number) {
+    const resource = () => this.db.prepare("SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id JOIN tasks task ON task.id=t.task_id WHERE t.task_id=? AND r.id=? AND task.state!='deleting'").get(task, id) as (Resource & { display_name: string; media_type: string }) | undefined
+    const r = resource()
+    if (!r) throw new ContractError('IMPORT_NOT_FOUND', 'Material is not available in this task')
+    const mime = binaryPreviewType(r.display_name, r.media_type)
+    if (!mime) throw new ContractError('UNSUPPORTED_REPRESENTATION', 'Material does not support binary preview')
+    if (r.byte_length > binaryPreviewLimit) throw new ContractError('PREVIEW_TOO_LARGE', 'Preview is limited to 8 MiB')
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset % binaryPreviewChunk !== 0 || offset >= r.byte_length) throw new ContractError('RESOURCE_RANGE_INVALID', 'Preview requires a bounded chunk offset')
+    const original = JSON.stringify(r)
+    const valid = () => {
+      if (this.closed || !this.db.open || JSON.stringify(resource()) !== original) throw new ContractError('RESOURCE_CORRUPT', 'Material changed during preview')
+      this.journal.assertResource(r)
+    }
+    valid()
+    const bytes = await verifiedResource(this.root, r, async file => {
+      const header = Buffer.alloc(Math.min(12, r.byte_length))
+      const result = await file.read(header, 0, header.length, 0)
+      if (!hasPreviewSignature(mime, header.subarray(0, result.bytesRead))) throw new ContractError('UNSUPPORTED_REPRESENTATION', 'Material bytes do not match the preview format')
+      const chunk = Buffer.alloc(Math.min(binaryPreviewChunk, r.byte_length - offset))
+      for (let read = 0; read < chunk.length;) {
+        const { bytesRead } = await file.read(chunk, read, chunk.length - read, offset + read)
+        if (!bytesRead) throw new ContractError('RESOURCE_CORRUPT', 'Material preview is incomplete')
+        read += bytesRead
+      }
+      return chunk
+    })
+    valid()
+    const end = offset + bytes.length
+    return { base64: bytes.toString('base64'), mime, offset, byte_length: r.byte_length, content_version: r.sha256, next_offset: end < r.byte_length ? end : null }
+  }
   private read(task:string,id:string,offset:number):unknown {
     const r=this.db.prepare('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?').get(task,id) as Row|undefined
     if(!r)fail('IMPORT_NOT_FOUND');this.journal.assertResource(r!)
@@ -144,5 +186,17 @@ export class MaterialImports {
       if([final,current].some(s=>s.ino!==initial.ino||s.dev!==initial.dev||s.size!==initial.size||s.mtimeMs!==initial.mtimeMs||s.ctimeMs!==initial.ctimeMs))fail('RESOURCE_CORRUPT')
       return {id,sha256:r!.sha256,text,offset,next_offset:offset+stop<r!.byte_length?offset+stop:null,content_available:true,truncated:offset+stop<r!.byte_length}
     }finally{fs.closeSync(fd)}
+  }
+}
+
+function hasPreviewSignature(mime: string, bytes: Buffer): boolean {
+  const ascii = (start: number, end: number) => bytes.toString('latin1', start, end)
+  switch (mime) {
+    case 'application/pdf': return bytes.indexOf('%PDF-') === 0
+    case 'image/png': return bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    case 'image/jpeg': return bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+    case 'image/gif': return ['GIF87a', 'GIF89a'].includes(ascii(0, 6))
+    case 'image/webp': return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP'
+    default: return false
   }
 }

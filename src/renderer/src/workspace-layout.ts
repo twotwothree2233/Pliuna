@@ -1,8 +1,8 @@
 export type PaneSide = 'left' | 'right'
-export const paneMinimum = { left: 180, center: 360, right: 280 } as const
+export const paneMinimum = { left: 200, center: 360, right: 260 } as const
 export const separatorWidth = 6
 export interface WorkspacePreferences { left: number; right: number; leftOpen: boolean; rightOpen: boolean }
-export const defaultWorkspace: WorkspacePreferences = { left: 220, right: 300, leftOpen: true, rightOpen: true }
+export const defaultWorkspace: WorkspacePreferences = { left: 214, right: 278, leftOpen: true, rightOpen: true }
 export interface WorkspaceGeometry {
   width: number; left: number; center: number; right: number
   leftDock: boolean; rightDock: boolean; leftGap: number; rightGap: number; centerMin: number

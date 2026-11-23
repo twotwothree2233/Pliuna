@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ExecutionAttempt, ExecutionScope, LogicalWork, ModelConfiguration } from '../../src/shared/contracts.generated'
+import type { TaskMessagePage } from '../../src/shared/types'
 import { ContractError } from '../../src/shared/validation'
 import { ChatAdapter, ModelError, type ChatMessage, type Completion, type ToolCall } from '../../src/runtime/model/adapter'
 import { messageEvidence } from '../../src/runtime/model/request-evidence'
@@ -53,21 +54,22 @@ function setup(names = ['alpha', 'beta'], configuration: Partial<ModelConfigurat
   }
   const { db, epoch } = internal, task = store.create('Worker isolation').task.id
   const goal = 'goal', run = 'run', state = new RunnerWorkState(db, epoch)
-  db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,?,'started','{}',?,'time')").run(goal, task, JSON.stringify({ text: 'Outer goal' }))
-  const input = internal.record(task, 'message.user', { text: 'Outer goal' })
+  const input = internal.record(task, 'message.user', { text: 'Outer goal', request_id: goal })
+  db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,?,'started','{}',?,'time')").run(goal, task, JSON.stringify({ text: 'Outer goal', user_record_id: input }))
   state.receive({ input_event_id: 'input', task_id: task, kind: 'request', record_id: input, request_id: goal, stage: 'received' })
   state.installGoal({ task_id: task, request_id: goal, intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] })
   new RunnerBudgetLedger(db).create({ budget_id: 'budget', task_id: task, purpose: 'production', request_id: goal })
   db.prepare("UPDATE runner_budgets SET limits_json=? WHERE budget_id='budget'").run(JSON.stringify({ model_requests: 50, tool_requests: 50, tokens: 1000000, wall_ms: 60000, ...budgetLimits }))
   db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,'{}','{}','time')").run(run, task, goal, epoch)
-  state.registerRun({ run_id: run, task_id: task, runtime_epoch: epoch, state: 'running', commit_valid: true, budget_id: 'budget', purpose: 'production', request_id: goal, intent_revision: 1 })
-  const works: LogicalWork[] = names.map(name => ({ work_id: name, task_id: task, run_id: run, plan_revision: 1, role: 'producer', required: !optional.includes(name), requirement_ids: ['answer'], dependencies: [{ kind: 'goal', task_id: task, request_id: goal, intent_revision: 1 }], state: 'planned', max_attempts: 1, purpose: 'production', request_id: goal, intent_revision: 1 }))
+  const source = { purpose: 'production' as const, request_id: goal, intent_revision: 1, message_id: input }
+  state.registerRun({ ...source, run_id: run, task_id: task, runtime_epoch: epoch, state: 'running', commit_valid: true, budget_id: 'budget' })
+  const works: LogicalWork[] = names.map(name => ({ ...source, work_id: name, task_id: task, run_id: run, plan_revision: 1, role: 'producer', required: !optional.includes(name), requirement_ids: ['answer'], dependencies: [], state: 'planned', max_attempts: 1 }))
   state.installPlan(works)
   for (const work of works) {
-    const attempt: ExecutionAttempt = { attempt_id: `attempt-${work.work_id}`, work_id: work.work_id, task_id: task, run_id: run, runtime_epoch: epoch, attempt_number: 1, profile_id: `profile-${work.work_id}`, model_config_id: config.id, model_config_revision: 1, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: goal, intent_revision: 1 }
+    const attempt: ExecutionAttempt = { ...source, attempt_id: `attempt-${work.work_id}`, work_id: work.work_id, task_id: task, run_id: run, runtime_epoch: epoch, attempt_number: 1, profile_id: `profile-${work.work_id}`, model_config_id: config.id, model_config_revision: 1, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }
     state.createAttempt(attempt)
   }
-  const owner = (name: string): ExecutionScope => ({ task_id: task, run_id: run, work_id: name, attempt_id: `attempt-${name}`, role: 'producer', purpose: 'production', request_id: goal, intent_revision: 1 })
+  const owner = (name: string): ExecutionScope => ({ ...source, task_id: task, run_id: run, work_id: name, attempt_id: `attempt-${name}`, role: 'producer' })
   const records = (kind: string) => (db.prepare('SELECT id,sequence,payload_json FROM records WHERE task_id=? AND kind=? ORDER BY sequence').all(task, kind) as { id: string; sequence: number; payload_json: string }[]).map(row => ({ ...row, payload: JSON.parse(row.payload_json) }))
   const resource = (text: string) => (store.modelTool(task, run, { type: 'write', input: { type: 'resource.create', display_name: 'Worker material', content: { type: 'text', text } } }) as { data: { id: string } }).data.id
   return { store, service, scheduler, complete, request, acquire, release, internal, db, task, run, state, owner, records, resource }
@@ -379,7 +381,8 @@ it.each([null, 'required_work_settled'])('persists a required worker failure ove
   expect(s.db.prepare('SELECT state,primary_reason FROM runs WHERE id=?').get(s.run)).toEqual({ state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' })
   const snapshot = s.store.snapshot(s.task)
   expect(snapshot.runs[0]).toMatchObject({ state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' })
-  expect(snapshot.runner?.goals[0]).toMatchObject({ run: { state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' }, delivery: 'incomplete' })
+  const messages = s.store.handle({ type: 'host.messages.page', task_id: s.task }) as TaskMessagePage
+  expect(messages.items[0]).toMatchObject({ role: 'user', execution: { id: s.run, state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' } })
 })
 
 it('keeps an existing specific primary reason when a required worker fails', async () => {
@@ -399,7 +402,8 @@ it.each([null, 'required_work_settled'])('projects historical failed Run reasons
   const before = s.db.prepare('SELECT state,primary_reason,wait_reason,intended_terminal FROM runs WHERE id=?').get(s.run)
   const snapshot = s.store.snapshot(s.task)
   expect(snapshot.runs[0]).toMatchObject({ state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' })
-  expect(snapshot.runner?.goals[0]).toMatchObject({ run: { state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' }, delivery: 'incomplete' })
+  const messages = s.store.handle({ type: 'host.messages.page', task_id: s.task }) as TaskMessagePage
+  expect(messages.items[0]).toMatchObject({ role: 'user', execution: { id: s.run, state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' } })
   expect(s.internal.query(s.task, { type: 'read', input: { target: { kind: 'run', id: s.run } } })).toMatchObject({ data: { state: 'failed', primary_reason: 'INVALID_WORKER_RESULT' } })
   expect(s.db.prepare('SELECT state,primary_reason,wait_reason,intended_terminal FROM runs WHERE id=?').get(s.run)).toEqual(before)
 })

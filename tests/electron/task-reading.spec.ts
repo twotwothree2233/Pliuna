@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -30,7 +31,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     await page.getByRole('button', { name: '提交答案', exact: true }).click()
     await expect(page.locator('.managed').getByRole('status')).toContainText('提交成功')
-    await page.getByRole('tab', { name: /作答记录/ }).click()
+    await openTaskRecords(page, '作答记录')
     const answers = page.getByRole('region', { name: '全部作答分页浏览', exact: true })
     await expect(answers.locator('.record-row')).toHaveCount(2)
     await answers.locator('.record-row').last().click()
@@ -51,7 +52,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     const ids = await page.locator('.managed').evaluateAll(nodes => nodes.map(node => node.id.replace('content-', '')))
     await page.getByLabel('本页内容').selectOption(ids[1]!)
     await expect(page.locator('.managed').last()).toBeInViewport()
-    await page.getByRole('tab', { name: /任务数据/ }).click()
+    await openTaskRecords(page, '任务数据')
     await expect(page.getByText('存在未保存或冲突输入，请等待保存完成或明确处理冲突后再切换任务。', { exact: true })).toHaveCount(0)
     const data = page.getByRole('region', { name: '全部任务数据分页浏览', exact: true })
     await expect(data.locator('.record-row')).toHaveCount(0)
@@ -70,7 +71,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     await expect(data.locator('pre')).toContainText('properties')
     await data.getByRole('button', { name: '收起详情', exact: true }).click()
     await expect(data.locator('.record-detail')).toHaveCount(0)
-    await page.getByRole('tab', { name: '资源', exact: true }).click()
+    await page.getByRole('tab', { name: '材料', exact: true }).click()
     await page.getByRole('button', { name: '粘贴文本', exact: true }).click()
     await page.getByLabel('材料名称').fill('中文材料')
     const activeText = '<script>window.RECORD_EXECUTED=true</script> 安全原文'
@@ -88,7 +89,7 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     await resources.getByLabel('搜索全部资源已加载记录').fill('没有的资源')
     await expect(resources.getByRole('status').filter({ hasText: '没有匹配项' })).toBeVisible()
     await resources.getByLabel('搜索全部资源已加载记录').fill('')
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await expect(page.locator('.execution-category[open]')).toHaveCount(0)
     const runs = page.getByRole('region', { name: '全部运行分页浏览', exact: true })
     await runs.locator('.record-row').first().click()
@@ -104,8 +105,9 @@ test('continuous task reading: inline records, saved drafts, history and safe re
     }
     await page.setViewportSize({ width: 1440, height: 960 })
     await chooseTheme(page, 'graphite')
-    for (const [id, name] of [['surface', '内容'], ['data', '任务数据'], ['resources', '资源'], ['answers', '作答记录'], ['execution', '执行记录']] as const) {
-      await page.getByRole('tab', { name: new RegExp('^' + name) }).click()
+    for (const [id, name] of [['surface', '内容'], ['data', '任务数据'], ['resources', '材料'], ['answers', '作答记录'], ['execution', '执行记录']] as const) {
+      if (name === '内容' || name === '材料') await page.getByRole('tab', { name: new RegExp('^' + name) }).click()
+      else await openTaskRecords(page, name)
       if (id === 'data') await page.getByRole('region', { name: '全部任务数据分页浏览', exact: true }).locator('.record-row').first().click()
       if (id === 'answers') await page.getByRole('region', { name: '全部作答分页浏览', exact: true }).locator('.record-row').last().click()
       if (id === 'resources') await page.getByRole('region', { name: '全部资源分页浏览', exact: true }).getByRole('button', { name: /中文材料/ }).click()
@@ -159,7 +161,7 @@ test('windowed answer actions use the selected answer independently of segmented
     }
     const taskId = (await call({ type: 'host.tasks' }))[0].id
     const snapshot = await call({ type: 'task.snapshot', task_id: taskId }), selectedId = snapshot.answers[0].id, latestId = snapshot.answers[1].id
-    await page.getByRole('tab', { name: /作答记录/ }).click()
+    await openTaskRecords(page, '作答记录')
     const answers = page.getByRole('region', { name: '全部作答分页浏览', exact: true })
     await expect(answers.locator('.record-row')).toHaveCount(2)
     await answers.locator('.record-row').first().click()
@@ -191,7 +193,7 @@ test('windowed answer actions use the selected answer independently of segmented
     await page.screenshot({ path: test.info().outputPath('pliuna-windowed-answer-actions.png') })
     await returnToContent.click()
     await expect(page.getByLabel('长作答内容', { exact: true })).toHaveValue('最新的短作答')
-    await page.getByRole('tab', { name: /作答记录/ }).click()
+    await openTaskRecords(page, '作答记录')
     await answers.locator('.record-row').first().click()
     await expect(detail).toContainText('当前为 JSON 文本片段')
     await expect(continueAnswer).toBeEnabled()

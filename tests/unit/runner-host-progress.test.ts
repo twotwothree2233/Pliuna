@@ -54,15 +54,15 @@ function setup(path = ':memory:') {
     const event = record('plugin.call.ended', { call_id: id, execution, owner: source }, at)
     return { ...event, call_id: id }
   }
-  function successes(source = owner, count = 3) { return Array.from({ length: count }, () => call(source)) }
-  function model(source = owner, execution = 'success', operation?: string) {
-    return record('model.tool_result', { owner: source, message: { role: 'tool', tool_call_id: 'reused-model-call-id', content: JSON.stringify({ request_type: 'read', execution, delivery: 'delivered', ...(operation ? { operation_id: operation } : {}), data: secret }) } }, time - 10)
+  function successes(source = owner, count = 4) { return Array.from({ length: count }, () => model(source, 'success', undefined, 1)) }
+  function model(source = owner, execution = 'success', operation?: string, query_result_id?: number) {
+    return record('model.tool_result', { owner: source, query_result_id, message: { role: 'tool', tool_call_id: 'reused-model-call-id', content: JSON.stringify({ request_type: 'read', execution, delivery: 'delivered', ...(operation ? { operation_id: operation } : {}), data: secret }) } }, time - 10)
   }
   function waiting(reason: string) {
     state.updateAttempt({ ...state.attempt(owner.attempt_id), state: 'waiting' })
     return record('worker.state', { owner, state: 'waiting', reason })
   }
-  function observe(allowed = true, request = 'goal') { return host.observe('task', request, { capability_allowed: allowed }, { stalled_success_threshold: 3 }) }
+  function observe(allowed = true, request = 'goal') { return host.observe('task', request, { capability_allowed: allowed }, { stalled_repeat_threshold: 3 }) }
   function records(kind: string) { return (db.prepare("SELECT id,sequence,payload_json FROM records WHERE task_id='task' AND kind=? ORDER BY sequence").all(kind) as { id: string; sequence: number; payload_json: string }[]).map(row => ({ ...row, payload: JSON.parse(row.payload_json) })) }
   function artifact() {
     const artifacts = new RunnerArtifactState(db, state), provenance = record('worker.content.produced', { owner, value: secret })
@@ -92,7 +92,7 @@ function setup(path = ':memory:') {
   return { db, epoch, clock, state, ledger, host, owner, addGoal, record, call, successes, model, waiting, observe, records, artifact, activeCall, completeOutput, advance: (amount: number) => { time += amount } }
 }
 
-it('records successful activity without goal progress as bounded metadata diagnosis', () => {
+it('records unchanged query results as a bounded metadata diagnosis', () => {
   const s = setup(), events = s.successes(), result = s.observe()
   expect(result.works[0]?.disposition).toBe('suspected_stall')
   expect(result.diagnoses[0]).toMatchObject({ task_id: 'task', request_id: 'goal', intent_revision: 1, work_id: s.owner.work_id, plan_revision: 1, reason: 'suspected_stall', model_diagnosis: 'eligible', required_role: 'diagnostic', automatic_replay: false, execution_permission: false, recovery_permission: false })
@@ -110,12 +110,20 @@ it('does not attribute another chapter update to matching run and attempt fields
   expect(s.observe().diagnoses).toEqual([])
 })
 
-it('counts distinct metadata-only read results even when model call IDs repeat', () => {
-  const s = setup(), events = Array.from({ length: 3 }, () => s.model())
+it('counts separate query records with the same result identity even when model call IDs repeat', () => {
+  const s = setup(), events = s.successes()
   const result = s.observe()
   expect(result.diagnoses[0]?.model_diagnosis).toBe('eligible')
   expect(result.diagnoses[0]?.calls.map(call => call.call_id)).toEqual(events.map(event => event.id))
   expect(JSON.stringify(result)).not.toContain(secret)
+})
+
+it('does not infer repeated results from legacy reads or successful plugin calls', () => {
+  const s = setup()
+  for (let i = 0; i < 4; i++) { s.model(); s.call() }
+  const result = s.observe()
+  expect(result.works[0]?.evidence.calls).toHaveLength(8)
+  expect(result.diagnoses).toEqual([])
 })
 
 it('does not count a plugin completion again through its model tool result', () => {
@@ -126,7 +134,7 @@ it('does not count a plugin completion again through its model tool result', () 
 })
 
 it('excludes actual calls whose complete persisted owner differs from the event', () => {
-  const s = setup(); s.successes()
+  const s = setup(); s.call()
   s.db.prepare("UPDATE calls SET limits_json=json_set(limits_json,'$.owner.role','router')").run()
   const result = s.observe()
   expect(result.works[0]?.evidence.calls).toEqual([])
@@ -166,7 +174,7 @@ it('reuses evidence reservations after closing and reopening real SQLite', () =>
   s.successes(); expect(s.observe().diagnoses[0]?.model_diagnosis).toBe('eligible')
   s.db.close()
   const db = new Database(path); databases.push(db)
-  const result = new RunnerHostProgress(db, s.epoch, s.clock).observe('task', 'goal', { capability_allowed: true }, { stalled_success_threshold: 3 })
+  const result = new RunnerHostProgress(db, s.epoch, s.clock).observe('task', 'goal', { capability_allowed: true }, { stalled_repeat_threshold: 3 })
   expect(result.diagnoses[0]?.model_diagnosis).toBe('same_evidence')
   expect((db.prepare("SELECT COUNT(*) n FROM records WHERE kind='runner.progress.diagnosis'").get() as { n: number }).n).toBe(1)
 })
@@ -310,7 +318,7 @@ it('excludes calls from a previous plan and retains their original attribution',
 
 it('does not diagnose execution facts from a revoked runtime epoch', () => {
   const s = setup(); s.successes()
-  const result = new RunnerHostProgress(s.db, 'new-epoch', s.clock).observe('task', 'goal', { capability_allowed: true }, { stalled_success_threshold: 3 })
+  const result = new RunnerHostProgress(s.db, 'new-epoch', s.clock).observe('task', 'goal', { capability_allowed: true }, { stalled_repeat_threshold: 3 })
   expect(result.works[0]?.disposition).toBe('inactive')
   expect(result.diagnoses).toEqual([])
 })

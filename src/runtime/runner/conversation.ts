@@ -48,7 +48,7 @@ const tailBytes = 256 * 1024, tailCount = 64, navigationBytes = 64 * 1024
 interface ConversationRow { id: string; sequence: number; kind: string; bytes: number; payload_json: string | null; request_id: string | null }
 const safePayload = (alias: string) => `CASE WHEN json_valid(${alias}.payload_json) THEN ${alias}.payload_json ELSE '{}' END`
 const payload = safePayload('r')
-const originalKinds = `
+export const conversationRecordKinds = `
   (r.kind='message.user' AND json_type(${payload},'$.text')='text')
   OR (r.kind='runner.answer' AND json_extract(${payload},'$.purpose')='final_answer'
       AND json_extract(${payload},'$.owner.purpose')='production'
@@ -64,15 +64,27 @@ const originalKinds = `
           AND json_extract(${safePayload('installed')},'$.input_event_id')=i.input_event_id
           AND json_extract(${safePayload('installed')},'$.route.route')='direct'
           AND json_extract(${safePayload('installed')},'$.route.kind')='correction'))
-  OR (r.kind='message.assistant' AND json_extract(${payload},'$.model_config_id')='fixture'
-      AND json_type(${payload},'$.text')='text' AND json_type(${payload},'$.owner') IS NULL)
+  OR (r.kind='message.assistant' AND json_type(${payload},'$.text')='text'
+      AND json_type(${payload},'$.owner') IS NULL AND json_type(${payload},'$.routing_operation_id') IS NULL
+      AND (json_extract(${payload},'$.model_config_id')='fixture' OR
+        (json_type(${payload},'$.run_id') IS NULL AND json_type(${payload},'$.request_link') IS NULL) OR
+        EXISTS (SELECT 1 FROM runs legacy WHERE legacy.task_id=r.task_id AND legacy.id=json_extract(${payload},'$.run_id')
+          AND legacy.state='completed' AND NOT EXISTS (SELECT 1 FROM runner_runs managed WHERE managed.run_id=legacy.id)
+          AND NOT EXISTS (SELECT 1 FROM records trace WHERE trace.task_id=r.task_id AND trace.sequence<=@through
+            AND trace.kind='model.response' AND json_extract(${safePayload('trace')},'$.run_id')=legacy.id))))
   OR (r.kind='model.response' AND json_type(${payload},'$.owner') IS NULL
+      AND json_type(${payload},'$.routing_operation_id') IS NULL
       AND json_extract(${payload},'$.finish')='stop'
       AND json_extract(${payload},'$.message.role')='assistant'
       AND json_type(${payload},'$.message.content')='text'
       AND COALESCE(json_array_length(${payload},'$.message.tool_calls'),0)=0
       AND EXISTS (SELECT 1 FROM runs legacy WHERE legacy.task_id=r.task_id AND legacy.id=json_extract(${payload},'$.run_id')
-        AND NOT EXISTS (SELECT 1 FROM runner_runs managed WHERE managed.run_id=legacy.id)))`
+        AND NOT EXISTS (SELECT 1 FROM runner_runs managed WHERE managed.run_id=legacy.id)))
+  OR (r.kind='conversation.reply' AND json_type(${payload},'$.text')='text'
+      AND EXISTS (SELECT 1 FROM requests q JOIN runs run ON run.task_id=q.task_id AND run.request_id=q.id
+        WHERE q.task_id=r.task_id AND q.id=json_extract(${payload},'$.request_id') AND run.id=json_extract(${payload},'$.run_id')
+          AND json_extract(q.input_json,'$.conversation_run_id')=run.id AND run.state='completed'
+          AND json_extract(q.input_json,'$.user_record_id')=json_extract(${payload},'$.reply_to')))`
 
 function invalid(): never { throw new ContractError('CONVERSATION_INVALID', 'Conversation binding is invalid; original records are retained') }
 function validSequence(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0 }
@@ -87,7 +99,7 @@ function rows(db: Database.Database, task: string, through: number): Conversatio
     CASE WHEN length(CAST(r.payload_json AS BLOB))<=${recordBytes} THEN r.payload_json END AS payload_json,
     COALESCE(json_extract(${payload},'$.request_id'),json_extract(${payload},'$.runner_input.request_id'),
       (SELECT request_id FROM runs WHERE task_id=r.task_id AND id=json_extract(${payload},'$.run_id'))) AS request_id
-    FROM records r WHERE r.task_id=@task AND r.sequence<=@through AND (${originalKinds})
+    FROM records r WHERE r.task_id=@task AND r.sequence<=@through AND (${conversationRecordKinds})
     ORDER BY r.sequence DESC LIMIT ${recordCount + 1}`).all({ task, through }) as ConversationRow[]
 }
 function originalMessage(row: ConversationRow, task: string): ChatMessage | null {
@@ -101,7 +113,7 @@ function originalMessage(row: ConversationRow, task: string): ChatMessage | null
     return { role: 'assistant', content: value.text }
   }
   if (row.kind === 'model.response') return containsProducerResult(value.message.content) ? null : { role: 'assistant', content: value.message.content }
-  if (row.kind === 'message.assistant') return containsProducerResult(value.text) ? null : { role: 'assistant', content: value.text }
+  if (row.kind === 'message.assistant' || row.kind === 'conversation.reply') return containsProducerResult(value.text) ? null : { role: 'assistant', content: value.text }
   return { role: 'user', content: JSON.stringify({ request: value.text, ...(value.materials ? { request_materials: value.materials } : {}),
     ...(value.resource_ids?.length ? { resource_ids: value.resource_ids } : {}), ...(value.import_ids?.length ? { import_ids: value.import_ids } : {}) }) }
 }

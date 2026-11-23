@@ -1,11 +1,11 @@
-import type { ModelConfiguration } from '../../shared/contracts.generated'
+import type { ModelConfiguration, ProviderTokenUsage } from '../../shared/contracts.generated'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { jsonDiagnostic } from './json-diagnostic'
 
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
 export interface ChatMessage { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string }
 export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: unknown } }
-export interface Completion { request_link?: import('./request-evidence').RequestLink; text: string; calls: ToolCall[]; finish: 'stop' | 'tool_calls'; usage?: { prompt_tokens: number; completion_tokens: number } }
+export interface Completion { request_link?: import('./request-evidence').RequestLink; text: string; calls: ToolCall[]; finish: 'stop' | 'tool_calls'; usage?: ProviderTokenUsage }
 export interface ModelCandidate { id: string; context_tokens?: number; max_output_tokens?: number; conflicts: string[] }
 export interface ModelCatalogue { models: ModelCandidate[]; source: 'service'; fetched_at: string }
 export class ModelError extends Error {
@@ -63,6 +63,26 @@ export class ChatAdapter {
     if (status === 429 || status >= 500) return new ModelError('MODEL_TEMPORARY_ERROR', false, true)
     return new ModelError('MODEL_INVALID_REQUEST')
   }
+  async testConnection(config: ModelConfiguration, key: string, signal: AbortSignal): Promise<void> {
+    try {
+      const response = await this.transport(endpoint(config.base_url, 'chat/completions'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) }, redirect: 'error', signal,
+        body: JSON.stringify({ model: config.wire_model_id, messages: [{ role: 'user', content: 'Hi' }], stream: false,
+          [config.compatibility_profile === 'chat-max-tokens' ? 'max_tokens' : 'max_completion_tokens']: Math.min(config.max_output_tokens ?? 16, 16) })
+      })
+      if (!response.ok) { await response.body?.cancel(); throw this.httpError(response.status) }
+      // Check that the service accepted the request, without grading the model's reply.
+      const text = await boundedText(response, signal)
+      let data: unknown
+      try { data = JSON.parse(text) }
+      catch { throw new ModelError('INCOMPATIBLE_RESPONSE') }
+      if (!object(data)) throw new ModelError('INCOMPATIBLE_RESPONSE')
+      if (data.error) throw new ModelError('MODEL_PROVIDER_ERROR')
+    } catch (error) {
+      if (error instanceof ModelError) throw error
+      throw new ModelError(signal.aborted ? 'MODEL_CANCELLED' : 'MODEL_NETWORK_ERROR')
+    }
+  }
   async complete(config: ModelConfiguration, key: string, messages: ChatMessage[], tools: ToolDefinition[] | undefined, signal: AbortSignal, onText?: (text: string) => void, outputLimit = config.max_output_tokens): Promise<Completion> {
     let partial = false, usage: Completion['usage'], upstream: ModelError | undefined
     try {
@@ -94,7 +114,9 @@ export class ChatAdapter {
         if (chunk.usage != null) {
           const u = chunk.usage
           if (!object(u) || ![u.prompt_tokens, u.completion_tokens].every(n => Number.isSafeInteger(n) && n >= 0)) throw new ModelError('INVALID_USAGE', partial)
-          usage = { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens }
+          const cached = object(u.prompt_tokens_details) ? u.prompt_tokens_details.cached_tokens : undefined
+          usage = { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens,
+            ...(Number.isSafeInteger(cached) && cached >= 0 && cached <= u.prompt_tokens ? { cached_prompt_tokens: cached } : {}) }
         }
         if (chunk.error) {
           if (contextOverflow(chunk.error)) throw new ModelError('MODEL_CONTEXT_LENGTH_EXCEEDED', partial, false, usage)

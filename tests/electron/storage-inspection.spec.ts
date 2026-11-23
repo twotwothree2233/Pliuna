@@ -35,6 +35,6 @@ for(const scenario of ['growth','damaged-resource','cancel','blocked-control','p
       else {await region.getByRole('button',{name:'检查控制清单增长'}).click();await expect(region).toContainText(scenario==='blocked-control'?'未完成，不能推断健康或无保护':'独立控制记录（只增不裁剪）');if(scenario==='blocked-control')await expect(region).toContainText('INSPECT_UNAVAILABLE');else await expect(region).toContainText('控制格式 5')}
     }
     expect(await readFile(join(directory,'restore-control.sqlite'))).toEqual(controlBefore);if(before)expect(await inspect()).toBe(before)
-    await panel.getByRole('button',{name:/^返回工作区/}).click();if(scenario!=='blocked-control')await expect(page.getByLabel('你的想法')).toHaveValue('诊断不能改动的草稿');expect(errors).toEqual([])
+    await panel.getByRole('button',{name:/^返回工作台/}).click();if(scenario!=='blocked-control')await expect(page.getByLabel('你的想法')).toHaveValue('诊断不能改动的草稿');expect(errors).toEqual([])
   }finally{await test.step('Close isolated inspection application',async()=>{await app.evaluate(({BrowserWindow})=>{for(const w of BrowserWindow.getAllWindows())w.destroy()}).catch(()=>{});await app.close();await rm(directory,{recursive:true,force:true})})}
 })

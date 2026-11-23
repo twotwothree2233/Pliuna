@@ -91,6 +91,21 @@ async function approveAndConfirm(s: ReturnType<typeof setup>, actionId?: string)
   catch { throw Error((s.db.prepare('SELECT result_json FROM actions WHERE id=?').get(pending.action_id) as { result_json: string }).result_json) }
 }
 
+it('attributes one shared approval only to the messages that contributed to its batch', async () => {
+  const s = setup(), first = s.source('alpha'), second = s.source('beta')
+  s.source('trigger')
+  const prepared = s.store.prepareRunnerComposition(s.task, 'trigger', { artifact_ids: [first.artifactId, second.artifactId] })
+  const publishing = s.store.publishRunnerComposition(s.task, prepared.batch.batch_id, prepared.collator.rulePlan())
+  await tick()
+  const pending = s.store.snapshot(s.task).approvals.filter(item => item.decision === 'pending')
+  const originals = ['alpha', 'beta'].map(request => s.state.input(`input-${request}`).record_id)
+  expect(pending).toEqual([expect.objectContaining({ action_id: prepared.batch.action_id, run_id: prepared.run_id, message_ids: originals })])
+  await approveAndConfirm(s, prepared.batch.action_id)
+  expect((await publishing).state).toBe('published')
+  expect(() => s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending[0]!.id, decision: 'approve' })).toThrow(expect.objectContaining({ code: 'APPROVAL_INVALID' }))
+  expect(s.records('approval.decided')).toHaveLength(1)
+})
+
 it('publishes after production ended through an independent rule Run and returns the original operation', async () => {
   const s = setup(), source = s.source(), prepared = s.store.prepareRunnerComposition(s.task, 'goal')
   expect(s.state.run(source.run)).toMatchObject({ state: 'completed', commit_valid: false })

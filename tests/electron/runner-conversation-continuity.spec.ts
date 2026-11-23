@@ -30,7 +30,7 @@ test('default Runner continues the user conversation across messages and app res
       if (!reply) throw Error('Unexpected conversation input')
       captured.push(structuredClone(messages))
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.end(frame({ role: 'assistant', content: reply }) + `data: ${JSON.stringify({
+      response.end(frame({ role: 'assistant', content: JSON.stringify({ kind: 'reply', text: reply }) }) + `data: ${JSON.stringify({
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
         usage: { prompt_tokens: 80, completion_tokens: 20 }
       })}\n\n` + 'data: [DONE]\n\n')
@@ -81,7 +81,7 @@ test('default Runner continues the user conversation across messages and app res
     const send = async (text: string, reply: string, count: number) => {
       await page.getByLabel('想从哪里开始？').fill(text)
       await page.getByRole('button', { name: '发送消息', exact: true }).click()
-      await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText(reply)
+      await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText(reply)
       await expect.poll(async () => (await snapshot()).runs.filter(run => run.state === 'completed').length).toBe(count)
       await expect(page.getByRole('main')).not.toContainText(reply)
       await expect(page.getByRole('main').getByRole('heading', { name: '尚无已发布内容', exact: true })).toBeVisible()
@@ -96,10 +96,10 @@ test('default Runner continues the user conversation across messages and app res
       { role: 'assistant', text: firstReply },
       { role: 'user', text: followup }
     ])
-    expect((await snapshot()).runner).toBeDefined()
+    expect((await snapshot()).runner?.goals).toHaveLength(0)
     await app.close(); app = await launch(); await observePage()
     await page.getByRole('button', { name: /连续对话验收/ }).click()
-    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText(secondReply)
+    await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText(secondReply)
     expect(captured).toHaveLength(2)
     await enableModel()
     await send(restoredInput, finalReply, 3)

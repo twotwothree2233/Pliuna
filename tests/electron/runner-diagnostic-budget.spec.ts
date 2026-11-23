@@ -64,6 +64,8 @@ test('production exceeds the former request and token limits alongside a bounded
     producer = undefined
     await expect.poll(async () => (await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals[0]?.run?.state).toBe('completed')
     await expect(agent.getByRole('region', { name: '任务回复' })).toContainText('BUDGET_REGRESSION_FINAL')
+    await agent.getByRole('navigation', { name: 'Agent 视图' }).getByRole('button', { name: '执行记录', exact: true }).click()
+    await expect(agent.getByRole('region', { name: '各目标状态' })).toBeVisible()
     await expect(agent.getByRole('region', { name: '各目标状态' })).not.toContainText('正在结束执行')
     await expect(center).not.toContainText('BUDGET_REGRESSION_FINAL')
     await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)

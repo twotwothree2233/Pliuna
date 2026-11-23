@@ -8,18 +8,18 @@ describe('workspace geometry', () => {
     expect(fitWorkspace(1200, preferences)).toMatchObject({ left: 310, right: 390, center: 488 })
   })
   it('folds Agent first, adapts the center below 360px and restores saved widths on growth', () => {
-    expect(fitWorkspace(832, defaultWorkspace)).toMatchObject({ leftDock: true, rightDock: true, left: 180, right: 280, center: 360 })
+    expect(fitWorkspace(832, defaultWorkspace)).toMatchObject({ leftDock: true, rightDock: true, left: 200, right: 260, center: 360 })
     expect(fitWorkspace(831, defaultWorkspace)).toMatchObject({ leftDock: true, rightDock: false })
-    expect(fitWorkspace(546, defaultWorkspace)).toMatchObject({ left: 180, center: 360 })
-    expect(fitWorkspace(545, defaultWorkspace)).toMatchObject({ leftDock: false, rightDock: false, center: 545 })
+    expect(fitWorkspace(566, defaultWorkspace)).toMatchObject({ left: 200, center: 360 })
+    expect(fitWorkspace(565, defaultWorkspace)).toMatchObject({ leftDock: false, rightDock: false, center: 565 })
     expect(fitWorkspace(320, defaultWorkspace)).toMatchObject({ center: 320, centerMin: 320 })
-    expect(fitWorkspace(1200, defaultWorkspace)).toMatchObject({ left: 220, right: 300 })
+    expect(fitWorkspace(1200, defaultWorkspace)).toMatchObject({ left: 214, right: 278 })
   })
   it('clamps side resizing while retaining the other pane and content minimum', () => {
     const geometry = fitWorkspace(1200, defaultWorkspace)
     const left = resizeWorkspace(defaultWorkspace, geometry, 'left', 99999)
-    expect(fitWorkspace(1200, left)).toMatchObject({ left: 528, center: 360, right: 300 })
-    expect(resizeWorkspace(defaultWorkspace, geometry, 'right', -50).right).toBe(280)
+    expect(fitWorkspace(1200, left)).toMatchObject({ left: 550, center: 360, right: 278 })
+    expect(resizeWorkspace(defaultWorkspace, geometry, 'right', -50).right).toBe(260)
     expect(resizeWorkspace(defaultWorkspace, geometry, 'left', NaN)).toBe(defaultWorkspace)
   })
   it('distributes direct center resizing within both side minimums', () => {
@@ -27,8 +27,8 @@ describe('workspace geometry', () => {
     for (const target of [-1, 470, 99999]) {
       const next = fitWorkspace(1200, resizeWorkspace(defaultWorkspace, geometry, 'center', target))
       expect(next.center).toBeCloseTo(Math.max(360, Math.min(728, target)))
-      expect(next.left).toBeGreaterThanOrEqual(180)
-      expect(next.right).toBeGreaterThanOrEqual(280)
+      expect(next.left).toBeGreaterThanOrEqual(200)
+      expect(next.right).toBeGreaterThanOrEqual(260)
     }
   })
   it('never exceeds available width or pane minimums across viewport and open-state combinations', () => {

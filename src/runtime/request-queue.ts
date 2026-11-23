@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
+import { isMaterialRemoved, materialRemoved } from './material-removals'
 type Row=Record<string,any>
 const pending="state IN ('queued','confirmation_required')"
 const fail=(code:string):never=>{throw new ContractError(code,'Request not started. Query the original request and explicitly resolve its state; no automatic replay.')}
@@ -24,7 +25,7 @@ export class RequestQueue {
   if(input.resource_ids?.length||input.import_ids?.length)return {resourceIds:input.resource_ids??[],importIds:input.import_ids??[]}
   // Freeze imported materials at acceptance, before a queued request can wait.
   // Generated resources and unsuccessful imports are not default attachments.
-  const resources=this.db.prepare("SELECT DISTINCT t.resource_id FROM actions a JOIN task_resources t ON t.task_id=a.task_id AND t.resource_id=json_extract(a.result_json,'$.resource.id') WHERE a.task_id=? AND json_extract(a.request_json,'$.type')='material.import' AND a.state='ended' AND a.result='success' ORDER BY a.rowid LIMIT 51").all(input.task_id) as Row[]
+  const resources=this.db.prepare(`SELECT DISTINCT t.resource_id FROM actions a JOIN task_resources t ON t.task_id=a.task_id AND t.resource_id=json_extract(a.result_json,'$.resource.id') WHERE a.task_id=? AND json_extract(a.request_json,'$.type')='material.import' AND a.state='ended' AND a.result='success' AND NOT ${materialRemoved('t.task_id', 't.resource_id')} ORDER BY a.rowid LIMIT 51`).all(input.task_id) as Row[]
   const imports=this.db.prepare("SELECT id FROM actions WHERE task_id=? AND json_extract(request_json,'$.type')='material.import' AND state!='ended' ORDER BY rowid LIMIT 51").all(input.task_id) as Row[]
   return {resourceIds:resources.map(row=>row.resource_id),importIds:imports.map(row=>row.id)}
  }
@@ -43,8 +44,8 @@ export class RequestQueue {
    this.db.transaction(()=>{
     const {resourceIds,importIds}=this.materialBinding(r);if(resourceIds.length+importIds.length>50||new Set(resourceIds).size!==resourceIds.length||new Set(importIds).size!==importIds.length)fail('REQUEST_MATERIAL_LIMIT')
     const count=this.db.prepare(`SELECT count(*) n FROM requests WHERE task_id=? AND ${pending}`).get(r.task_id) as Row;if(count.n>=defaults.queues.task_pending)fail('REQUEST_QUEUE_FULL')
-    for(const id of resourceIds)this.validateResource(r.task_id,id)
-    for(const id of importIds)this.action(r.task_id,id)
+    for(const id of resourceIds){if(isMaterialRemoved(this.db,r.task_id,id))fail('REQUEST_MATERIAL_REMOVED');this.validateResource(r.task_id,id)}
+    for(const id of importIds){const a=this.action(r.task_id,id),resource=a.result==='success'&&JSON.parse(a.result_json)?.resource?.id;if(resource&&isMaterialRemoved(this.db,r.task_id,resource))fail('REQUEST_MATERIAL_REMOVED')}
     const input={binding_version:1,epoch:this.epoch,text:r.text,resource_ids:resourceIds,import_ids:importIds,code:null}
     const received={...input,...this.receive?.(r.task_id,id,input)}
     this.db.prepare("INSERT INTO requests VALUES (?,?,'queued',?,?,?)").run(id,r.task_id,JSON.stringify(config),JSON.stringify(received),new Date().toISOString())

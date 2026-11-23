@@ -32,7 +32,9 @@ let closing = false
 let quitReady = false
 let shutdownRequest: string | undefined
 let restartTimes: number[] = []
-const webMode = applicationEnvironment(process.env, 'WEB') === '1'
+const webSetting = applicationEnvironment(process.env, 'WEB')
+const webOnly = webSetting === '1'
+const webEnabled = webOnly || webSetting === 'desktop'
 let webServer: Awaited<ReturnType<typeof startLocalWebServer>> | undefined
 let webStartupFailed = false
 const pending = new Map<string, { resolve: (value: HostResponse) => void; timer?: ReturnType<typeof setTimeout> }>()
@@ -76,7 +78,7 @@ app.whenReady().then(() => {
   ]))
   const window = new BrowserWindow({ title: 'Pliuna', width: 1320, height: 860, minWidth: 390, minHeight: 600, show: false,
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 16 } } : {}),
-    webPreferences: { ...(!webMode ? { preload: join(__dirname, '../preload/index.cjs') } : {}), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } })
+    webPreferences: { ...(!webOnly ? { preload: join(__dirname, '../preload/index.cjs') } : {}), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())
   const materials = new MaterialSources(runtimeRequest, async () => { const selected=await dialog.showOpenDialog(window,{title:'添加任务材料',properties:['openFile','multiSelections']});return selected.canceled?[]:selected.filePaths })
@@ -171,18 +173,21 @@ app.whenReady().then(() => {
     if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) return { ok: false, error: { code: 'FORBIDDEN', message: 'Untrusted frame' } }
     return hostRequest(request)
   })
-  if (webMode) {
+  if (webEnabled) {
     const port = Number(applicationEnvironment(process.env, 'WEB_PORT') ?? 4173)
     void startLocalWebServer({ root: join(__dirname, '../renderer'), port, platform: process.platform, request: hostRequest }).then(server => {
       webServer = server
       console.info(`Pliuna Web: ${server.url}`)
-      return window.loadURL(server.url)
+      if (webOnly) return window.loadURL(server.url)
     }).catch(() => { webStartupFailed = true; console.error('WEB_START_FAILED: Local Web service could not start'); app.quit() })
-  } else if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) window.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else window.loadFile(join(__dirname, '../renderer/index.html'))
-  if (!webMode) window.once('ready-to-show', () => window.show())
+  }
+  if (!webOnly) {
+    window.once('ready-to-show', () => window.show())
+    if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) window.loadURL(process.env.ELECTRON_RENDERER_URL)
+    else window.loadFile(join(__dirname, '../renderer/index.html'))
+  }
 })
-if (webMode) for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => app.quit())
+if (webEnabled) for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => app.quit())
 // A renderer may still veto quitting to retain unsaved input or an unknown result.
 app.on('will-quit', event => {
   if (quitReady) { runtime?.kill(); if (webStartupFailed) app.exit(1); return }

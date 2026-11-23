@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { ArtifactCandidate, ExecutionAttempt, GoalRevision, LogicalWork, Outline, WorkDependency } from '../../src/shared/contracts.generated'
+import type { ArtifactCandidate, ExecutionAttempt, ContentPlan, LogicalWork, Outline, WorkDependency } from '../../src/shared/contracts.generated'
 import { RunnerArtifactState, type ArtifactAssignment } from '../../src/runtime/runner/artifact-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
@@ -12,11 +12,11 @@ const runnerSql = readFileSync(new URL('../../src/shared/contracts/002-runner.sq
 const databases: Database.Database[] = []
 afterEach(() => { for (const db of databases.splice(0)) db.close() })
 
-const goal: GoalRevision = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
+const goal: ContentPlan = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
 const outline: Outline = { task_id: 'task', outline_revision: 1, base_outline_revision: 0, sections: [{ section_id: 'section', request_id: 'goal', intent_revision: 1, order_key: 'a', position_revision: 1, title: 'Original' }] }
 const assignment: ArtifactAssignment = { task_id: 'task', artifact_id: 'artifact', work_id: 'work', plan_revision: 1, section_id: 'section', base_artifact_revision: 0 }
 
-function addGoal(db: Database.Database, work: RunnerWorkState, requestId: string): GoalRevision {
+function addGoal(db: Database.Database, work: RunnerWorkState, requestId: string): ContentPlan {
   db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,'task','started','{}','{}','time')").run(requestId)
   const sequence = (db.prepare('SELECT COALESCE(MAX(sequence),0)+1 value FROM records WHERE task_id=?').get('task') as { value: number }).value
   db.prepare("INSERT INTO records(id,task_id,sequence,kind,payload_json,created_at) VALUES (?,'task',?,'message.user','{}','time')").run(`record-${requestId}`, sequence)

@@ -35,7 +35,7 @@ test('delivers paged export diagnosis, repairs classification and preserves full
     const before = await call({ type: 'task.snapshot', task_id: task })
     expect(before.views[0].revision).toBe(2)
     expect(await call({ type: 'export.list', task_id: task })).toEqual([])
-    await page.getByRole('button', { name: '导出', exact: true }).click()
+    await page.getByRole('button', { name: '导出内容', exact: true }).click()
     await page.getByRole('button', { name: '检查当前导出选择', exact: true }).click()
     await expect(page.getByRole('status').filter({ hasText: '完整性检查通过' })).toBeVisible()
     expect(await call({ type: 'export.list', task_id: task })).toEqual([])

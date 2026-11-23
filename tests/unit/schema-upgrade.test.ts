@@ -10,6 +10,7 @@ import { ownDirectory, RecoveryManager } from '../../src/runtime/recovery'
 import { RestoreJournal } from '../../src/runtime/restore-journal'
 import { hasV2Writes, openBusinessDatabase, prepareBusinessDatabase, purgeRunnerTask, readBusinessSchema, upgradeCandidate } from '../../src/runtime/schema-upgrade'
 import { RuntimeStore } from '../../src/runtime/store'
+import { runtimeFeatures } from '../../src/runtime/features'
 import { validateRunnerContract } from '../../src/shared/runner-validation'
 import { chapterManifest, chapterUpdate as makeChapterUpdate } from '../helpers/chapters'
 import { contentTree } from '../helpers/content-tree'
@@ -60,6 +61,32 @@ function currentDatabase(root: string): Database.Database {
   db.pragma('foreign_keys=ON')
   return db
 }
+it('adds task organization to a previous schema v2 profile without tagging existing tasks', () => {
+  const root = runtimeRoot(), old = runtime(root), task = old.create('Existing task').task
+  old.close()
+  const db = currentDatabase(root)
+  db.exec('DROP TABLE task_organization') // Profile from before extension 006.
+  db.close()
+  const upgraded = runtime(root)
+  expect(upgraded.snapshot(task.id).task).toEqual(task)
+  expect(upgraded.handle({ type: 'host.task.organize', task_id: task.id, field: 'archived', value: false })).toEqual({ task_id: task.id, archived: false, pinned: false })
+  const reopened = currentDatabase(root)
+  expect(reopened.prepare('SELECT * FROM task_organization').all()).toEqual([])
+})
+it('preserves existing archived and pinned Tasks when adding archive dates', () => {
+  const root = runtimeRoot(), old = runtime(root), task = old.create('Archived').task
+  old.handle({ type: 'host.task.organize', task_id: task.id, field: 'pinned', value: true })
+  old.handle({ type: 'host.task.organize', task_id: task.id, field: 'archived', value: true })
+  old.close()
+  const db = currentDatabase(root)
+  db.exec('ALTER TABLE task_organization DROP COLUMN archived_at')
+  db.close()
+  const upgraded = runtime(root)
+  const archived = upgraded.handle({ type: 'host.tasks.page', archived: true, input: { kind: 'task' } })
+  expect(archived).toMatchObject({ items: [{ id: task.id, archived: true, pinned: true, archived_at: null }] })
+  upgraded.handle({ type: 'host.task.organize', task_id: task.id, field: 'archived', value: false })
+  expect(upgraded.handle({ type: 'host.tasks.page', input: { kind: 'task' } })).toMatchObject({ items: [{ id: task.id, archived: false, pinned: true, archived_at: null }] })
+})
 function runnerHistory(db: Database.Database, task: string): { read: string } {
   const request = randomUUID(), run = randomUUID(), record = randomUUID(), input = randomUUID()
   const budget = randomUUID(), reservation = randomUUID(), work = randomUUID(), attempt = randomUUID()
@@ -67,7 +94,7 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
   const batch = randomUUID(), operation = randomUUID(), action = randomUUID(), now = new Date().toISOString()
   const chapterUpdate = randomUUID(), chapterProposal = randomUUID(), chapterOperation = randomUUID(), view = randomUUID()
   const insert = (sql: string, ...values: (string | number | null)[]) => db.prepare(sql).run(...values)
-  const goal = validateRunnerContract('runner_goal_revision', { task_id: task, request_id: request, intent_revision: 1, input_event_id: input, state: 'active', requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: false }] })
+  const goal = validateRunnerContract('runner_content_plan', { task_id: task, request_id: request, intent_revision: 1, input_event_id: input, state: 'active', requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: false }] })
   const runner = validateRunnerContract('runner_run', { task_id: task, request_id: request, intent_revision: 1, run_id: run, runtime_epoch: 'fixture', state: 'completed', commit_valid: false, budget_id: budget, purpose: 'production' })
   const unresolved = [{ task_id: task, request_id: request, intent_revision: 1, requirement_id: 'content' }]
   const inventory = validateRunnerContract('runner_contribution_inventory', { task_id: task, request_id: request, intent_revision: 1, inventory_revision: 1, required_works: [], requirement_ids: [], unresolved, sealed_by: { work_id: work, plan_revision: 1, run_id: run, attempt_id: attempt, role: 'producer' } })
@@ -82,8 +109,8 @@ function runnerHistory(db: Database.Database, task: string): { read: string } {
     insert("INSERT INTO actions(id,task_id,run_id,kind,state,result,source_json,request_json,commit_valid,created_at) VALUES (?,?,?,'mutation','ended','success','{}','{}',0,?)", action, task, run, now)
     insert("INSERT INTO runner_inputs VALUES (?,?,?,'request.created','{}',?)", input, task, record, now)
     insert("INSERT INTO runner_consumptions VALUES (?,?,'installed','{}',?)", input, task, now)
-    insert('INSERT INTO runner_goal_revisions VALUES (?,?,1,?,?)', task, request, input, JSON.stringify(goal))
-    insert('INSERT INTO runner_goal_heads VALUES (?,?,1)', task, request)
+    insert('INSERT INTO runner_content_plans VALUES (?,?,1,?,?)', task, request, input, JSON.stringify(goal))
+    insert('INSERT INTO runner_content_removals VALUES (?,?,1,?)', task, request, record)
     insert("INSERT INTO runner_budgets VALUES (?,?,'production',?,'{}',?)", budget, task, request, now)
     insert("INSERT INTO runner_budget_reservations VALUES (?,?,?,?,?,'settled','{}','{}',?,?,?)", reservation, task, budget, attempt, operation, now, now, now)
     insert("INSERT INTO runner_runs VALUES (?,?,'production',?,1,NULL,NULL,?,?)", run, task, request, budget, JSON.stringify(runner))
@@ -136,7 +163,7 @@ it('creates complete v2 databases atomically and reopens without changing identi
   expect(readBusinessSchema(db)).toBe(2)
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name='one_active_request_run'").get()).toBeTruthy()
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name='one_unfinished_run'").get()).toBeUndefined()
-  expect(db.prepare('SELECT * FROM runner_goal_heads').all()).toEqual([])
+  expect(db.prepare('SELECT * FROM runner_current_content_plans').all()).toEqual([])
   expect(db.prepare('SELECT * FROM runner_artifacts').all()).toEqual([])
   expect(db.prepare('SELECT * FROM runner_chapter_assemblies').all()).toEqual([])
   expect(hasV2Writes(db)).toBe(false)
@@ -249,6 +276,13 @@ it('keeps v1 recovery points immutable and upgrades only their restored candidat
   const original = readFileSync(join(root, 'recovery', point.id + '.sqlite'))
   manager.close(); db.close()
   db = prepareBusinessDatabase(root, journal); connections.push(db)
+  const rebind = vi.fn(() => db)
+  const current = new RecoveryManager(db, root, () => false, () => {}, () => ({}), journal, rebind, undefined, undefined, true); managers.push(current)
+  const selected = journal.selected(), restoreToken = (current.begin() as any).reservation.token
+  expect(() => current.restore(restoreToken, point.id, point.database_sha256)).toThrow(/pre-release format/)
+  expect(rebind).not.toHaveBeenCalled()
+  expect(journal.selected()).toBe(selected)
+  current.cancel(restoreToken); current.close()
   manager = new RecoveryManager(db, root, () => false, () => {}, () => ({}), journal, file => { db = openBusinessDatabase(root, file); connections.push(db); return db }); managers.push(manager)
   const restored = await manager.restore((manager.begin() as any).reservation.token, point.id, point.database_sha256) as any
   expect(restored.last.outcome).toBe('restored')
@@ -298,7 +332,7 @@ it('creates schema v2 through RuntimeStore and reopens the same task without ano
   const db = currentDatabase(root), selected = control(root).selected
   expect(readBusinessSchema(db)).toBe(2)
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name='one_active_request_run'").get()).toBeTruthy()
-  expect(db.prepare('SELECT * FROM runner_goal_heads').all()).toEqual([])
+  expect(db.prepare('SELECT * FROM runner_current_content_plans').all()).toEqual([])
   expect(control(root).operations).toEqual([])
   db.close(); store.close()
   const reopened = runtime(root), current = currentDatabase(root)
@@ -309,6 +343,16 @@ it('creates schema v2 through RuntimeStore and reopens the same task without ano
   const { runtime_epoch: afterEpoch, ...after } = reopened.snapshot(created.task.id)
   expect(afterEpoch).not.toBe(beforeEpoch)
   expect(after).toEqual(before)
+})
+
+it('rejects a pre-release workspace in the default runtime without upgrading it', () => {
+  const root = runtimeRoot(), prior = legacy(root, 'pliuna.sqlite')
+  prior.db.close()
+  expect(() => new RuntimeStore(root, undefined, runtimeFeatures({}))).toThrow(/pre-release format/)
+  const db = currentDatabase(root)
+  expect(readBusinessSchema(db)).toBe(1)
+  expect(db.prepare('SELECT * FROM records').all()).toEqual([prior.record])
+  expect(control(root).operations).toEqual([])
 })
 
 it('migrates v1 history through RuntimeStore once without inventing runner attribution', () => {

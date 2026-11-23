@@ -40,6 +40,9 @@ function checkCss(text: string, scope: string, declarations = false): string {
 const badKeys = new Set(['__proto__', 'prototype', 'constructor'])
 const ajv = new Ajv2020({ allErrors: true, strict: false })
 function reject(message: string): never { throw new ContractError('UNSUPPORTED_BUNDLE', message) }
+const stateGuide = JSON.stringify({ name: 'read', arguments: { kind: 'object_type', id: 'surface.update', selection: { view: 'guide', section: 'state-and-references' } } })
+function rejectState(message: string): never { throw new ContractError('UNSUPPORTED_BUNDLE', message, stateGuide) }
+const pointerKey = (key: string): string => key.replace(/~/g, '~0').replace(/\//g, '~1')
 export function schemaCheck(s: LocalSchema, depth = 0): void {
   if (depth > defaults.data.local_schema_depth) reject('State schema exceeds depth limit')
   if (s.type === 'object') {
@@ -87,26 +90,35 @@ export function setField(value: Record<string, unknown>, path: string, next: unk
   }
   current[keys.at(-1)!] = next
 }
-export function checkDraft(bundle: Bundle, value: Record<string, unknown>): void {
-  const check = (s: LocalSchema, v: unknown): boolean => {
-    if (s.type === 'object') return !!v && typeof v === 'object' && !Array.isArray(v) &&
-      Object.keys(v).every(k => Object.hasOwn(s.properties ?? {}, k) && check(s.properties![k]!, (v as Record<string, unknown>)[k]))
-    if (s.type === 'number' || s.type === 'integer') return typeof v === 'string'
-    if (s.type === 'string') return typeof v === 'string'
-    if (s.type === 'boolean') return typeof v === 'boolean'
-    if (s.type === 'null') return v === null
-    return ajv.validate({ ...s, minItems: undefined }, v) as boolean
+export function checkDraft(bundle: Bundle, value: Record<string, unknown>, root = 'draft'): void {
+  const check = (s: LocalSchema, v: unknown, path: string): void => {
+    const invalid = (expected: string): never => rejectState(`Invalid raw draft types at ${path}: ${expected}`)
+    if (s.type === 'object') {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return invalid('expected an object')
+      for (const [key, child] of Object.entries(v)) {
+        const childPath = `${path}/${pointerKey(key)}`
+        if (!Object.hasOwn(s.properties ?? {}, key)) rejectState(`Invalid raw draft types at ${childPath}: this field is not declared in the state schema`)
+        check(s.properties![key]!, child, childPath)
+      }
+    } else if (s.type === 'number' || s.type === 'integer') {
+      if (typeof v !== 'string') invalid('use a raw string such as "0" and keep the numeric schema type')
+    } else if (s.type === 'array') {
+      if (!ajv.validate({ ...s, minItems: undefined }, v)) invalid('expected an array matching the declared items and bounds')
+    } else if (s.type === 'null' ? v !== null : typeof v !== s.type) invalid(`expected ${s.type}`)
   }
-  if (!check(bundle.state.schema, value)) reject('Invalid raw draft types')
-  for (const b of bundle.behaviors) {
+  check(bundle.state.schema, value, root)
+  for (const [index, b] of bundle.behaviors.entries()) {
     if (b.type !== 'input') continue
     const v = getField(value, b.field), s = fieldSchema(bundle.state.schema, b.field)
     if (v === undefined) continue
-    if (b.control === 'select' || b.control === 'radio') {
-      if (!s.enum?.includes(v)) reject('Selection outside declared options')
+    if (b.control === 'select' && !s.enum?.includes(v)) {
+      rejectState(`Selection outside declared options at ${root}${b.field} (behaviors[${index}].field): use a value in the field schema enum. An empty placeholder requires both "" in the enum and <option value=""> in the select.`)
     }
-    if (b.control === 'multiselect') {
-      if (!Array.isArray(v) || new Set(v).size !== v.length || v.some(item => !s.items?.enum?.includes(item))) reject('Selection outside declared options')
+    if (b.control === 'radio' && !s.enum?.includes(v)) {
+      rejectState(`Selection outside declared options at ${root}${b.field} (behaviors[${index}].field): use a declared radio option or omit the initial field for no selection.`)
+    }
+    if (b.control === 'multiselect' && (!Array.isArray(v) || new Set(v).size !== v.length || v.some(item => !s.items?.enum?.includes(item)))) {
+      rejectState(`Selection outside declared options at ${root}${b.field} (behaviors[${index}].field): use an array of distinct values from the field schema items.enum, or [] for no selection.`)
     }
   }
 }
@@ -143,7 +155,7 @@ export function checkBundle(input: unknown, scope: string, resolve?: (name: stri
   if (!/^[a-zA-Z0-9_-]+$/.test(scope)) reject('Invalid host scope')
   schemaCheck(bundle.state.schema)
   if (!bundle.state.initial || typeof bundle.state.initial !== 'object' || Array.isArray(bundle.state.initial)) reject('State initial must be an object')
-  checkDraft(bundle, bundle.state.initial as Record<string, unknown>)
+  checkDraft(bundle, bundle.state.initial as Record<string, unknown>, 'state.initial')
   const ids = new Map<string, Element>()
   const elements: Element[] = []
   const fragment = presentationFragment(bundle.html)
@@ -206,14 +218,15 @@ export function checkBundle(input: unknown, scope: string, resolve?: (name: stri
   }
   const writers = new Set<string>()
   const radioValues = new Map<string, Set<string>>()
-  for (const b of bundle.behaviors) {
+  for (const [index, b] of bundle.behaviors.entries()) {
+    const invalidBinding = (message: string): never => rejectState(`behaviors[${index}] (element_id=${JSON.stringify(b.element_id)}): ${message}`)
     const element = ids.get(b.element_id)
-    if (!element) reject('Missing behavior target')
+    if (!element) return invalidBinding('Missing behavior target; add the matching HTML id or correct element_id')
     const property = b.type === 'input' || b.type === 'text' ? 'value' : b.type === 'class_toggle' ? 'class:' + b.class_name : b.type === 'submit' || b.type === 'toggle' ? 'click' : b.type
     const key = b.element_id + ':' + property
     if (writers.has(key)) reject('Duplicate behavior writer')
     writers.add(key)
-    if (b.type === 'submit') { if (!forms.has(b.form_id) || element.tagName !== 'button') reject('Invalid submit binding'); continue }
+    if (b.type === 'submit') { if (!forms.has(b.form_id) || element.tagName !== 'button') invalidBinding('Invalid submit binding; use a button and a form_id declared in bundle.forms'); continue }
     const s = fieldSchema(bundle.state.schema, b.field)
     if (b.type === 'visible' || b.type === 'toggle' || b.type === 'class_toggle') {
       if (s.type !== 'boolean') reject('Boolean behavior requires a boolean field')
@@ -226,10 +239,12 @@ export function checkBundle(input: unknown, scope: string, resolve?: (name: stri
     }
     if (b.type === 'input') {
       const controlTags: Record<string, string> = { text: 'input', number: 'input', textarea: 'textarea', checkbox: 'input', radio: 'input', range: 'input', select: 'select', multiselect: 'select' }
-      if (controlTags[b.control] !== element.tagName) reject('Control not enabled or mismatched')
+      if (controlTags[b.control] !== element.tagName) invalidBinding(`control ${b.control} requires <${controlTags[b.control]}>`)
       const type = element.attrs.find(a => a.name === 'type')?.value ?? 'text'
-      if (element.tagName === 'input' && type !== (['checkbox', 'radio', 'range'].includes(b.control) ? b.control : 'text')) reject('Input type mismatch')
-      if ((['number', 'range'].includes(b.control) && !['number', 'integer'].includes(s.type)) || (b.control === 'checkbox' && s.type !== 'boolean') || (['text', 'textarea', 'radio', 'select'].includes(b.control) && s.type !== 'string')) reject('Field/control mismatch')
+      const inputType = ['checkbox', 'radio', 'range'].includes(b.control) ? b.control : 'text'
+      if (element.tagName === 'input' && type !== inputType) invalidBinding(`Input type mismatch; control ${b.control} requires <input type="${inputType}">`)
+      const fieldTypes = ['number', 'range'].includes(b.control) ? ['number', 'integer'] : b.control === 'checkbox' ? ['boolean'] : b.control === 'multiselect' ? ['array'] : ['string']
+      if (!fieldTypes.includes(s.type)) invalidBinding(`Field/control mismatch; field ${b.field} requires schema type ${fieldTypes.join(' or ')}`)
       if (b.control !== 'radio' && Object.hasOwn(b, 'option_value')) reject('option_value is only valid on radio controls')
       if (b.control === 'radio') {
         if (typeof b.option_value !== 'string' || !s.enum?.includes(b.option_value)) reject('Radio requires a declared string option')
@@ -238,20 +253,20 @@ export function checkBundle(input: unknown, scope: string, resolve?: (name: stri
         options.add(b.option_value); radioValues.set(b.field, options)
       }
       if (b.control === 'select' || b.control === 'multiselect') {
-        if (element.attrs.some(a => a.name === 'multiple') !== (b.control === 'multiselect')) reject('Select multiple mismatch')
+        if (element.attrs.some(a => a.name === 'multiple') !== (b.control === 'multiselect')) invalidBinding(`Select multiple mismatch; use <select${b.control === 'multiselect' ? ' multiple' : ''}>`)
         const enumValues = b.control === 'multiselect' ? s.items?.enum : s.enum
         if ((b.control === 'multiselect' && (s.type !== 'array' || s.items?.type !== 'string')) || !enumValues?.length || enumValues.some(v => typeof v !== 'string') || new Set(enumValues).size !== enumValues.length) reject('Selection requires unique declared string options')
         const values: string[] = []
         const options = (node: Node): void => {
           if ('tagName' in node && node.tagName === 'option') {
             const value = node.attrs.find(a => a.name === 'value')?.value
-            if (value === undefined || !enumValues.includes(value) || values.includes(value)) reject('Invalid or duplicate select option')
+            if (value === undefined || !enumValues.includes(value) || values.includes(value)) return invalidBinding(`Invalid or duplicate select option at HTML option ${values.length + 1}; each option needs a unique explicit value from the enum for ${b.field}`)
             values.push(value)
           }
           if ('childNodes' in node) node.childNodes.forEach(options)
         }
         options(element)
-        if (values.length !== enumValues.length) reject('Select must declare all schema options')
+        if (values.length !== enumValues.length) invalidBinding(`Select must declare all schema options for ${b.field}; add an HTML option for every enum value`)
       }
       if (b.control === 'range') {
         const numeric = (name: string, fallback: number): number => {

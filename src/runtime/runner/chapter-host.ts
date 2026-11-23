@@ -91,7 +91,7 @@ export class ChapterHost {
     return tree
   }
 
-  start(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[]; inherited_requirements?: Row[]; content_authority?: { region_ids: string[] } }): ChapterUpdate {
+  start(input: Extract<IpcRequest, { type: 'chapter.update' }>, received?: { record_id: string; conversation: unknown; material_resource_ids: string[]; inherited_requirements?: Row[]; content_authority?: { region_ids: string[] }; conversation_dependency?: { message_id: string; request_id: string; result_id: string } }): ChapterUpdate {
     return this.db.transaction(() => {
       const existing = this.state.update(input.task_id, input.update_id)
       if (existing) {
@@ -107,7 +107,7 @@ export class ChapterHost {
       const selected = manifest.chapters.filter(chapter => input.region_ids.includes(chapter.region_id))
       const shared = { kind: 'chapter' as const, task_id: input.task_id, view_id: input.view_id, revision: manifest.shared_revision }
       const dependencies = [...new Map([shared, ...selected.flatMap(chapter => chapter.dependencies)].map(dependency => [JSON.stringify(dependency), dependency])).values()]
-      const record = this.record(input.task_id, received ? 'chapter.input.received' : 'message.user', { text: input.text, request_id: manifest.request_id, purpose: 'control_input', chapter_input: input, conversation: received?.conversation ?? captureConversation(this.db, input.task_id), ...(received ? { source_record_id: received.record_id, material_resource_ids: received.material_resource_ids, ...(received.inherited_requirements ? { inherited_requirements: received.inherited_requirements } : {}) } : {}) })
+      const record = this.record(input.task_id, received ? 'chapter.input.received' : 'message.user', { text: input.text, request_id: manifest.request_id, purpose: 'control_input', chapter_input: input, conversation: received?.conversation ?? captureConversation(this.db, input.task_id), ...(received ? { source_record_id: received.record_id, material_resource_ids: received.material_resource_ids, ...(received.inherited_requirements ? { inherited_requirements: received.inherited_requirements } : {}), ...(received.conversation_dependency ? { conversation_dependency: received.conversation_dependency } : {}) } : {}) })
       const scope = manifest.content_tree
         ? { region_ids: [], region_intents: [], scope_revision: 0, scope_active: false, authorization: { record_id: received?.record_id ?? record, input_event_id: input.input_event_id, region_ids: treeTargetIds(manifest, received?.content_authority?.region_ids ?? input.region_ids) }, candidate_region_ids: region_ids, ...(input.tree_operations ? { candidate_operations: input.tree_operations } : {}) }
         : { region_ids, region_intents: region_ids.map(region_id => ({ region_id, intent_revision: 1 })), ...(input.tree_operations ? { tree_operations: input.tree_operations } : {}) }
