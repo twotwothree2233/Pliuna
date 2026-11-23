@@ -15,25 +15,27 @@ import { capacityPlan } from './capacity'
 
 export type ConnectionTest = { status: 'connected' } | { status: 'failed'; code: string }
 interface Configuration { config: ModelConfiguration; key: string; channel: string; roles: Set<'main' | 'approval' | 'compaction'>; locks: number; revision: number; remembered?: boolean; credentialMissing?: boolean; connectionTest?: ConnectionTest }
-interface Job { task: string; channel: string; signal: AbortSignal; run: () => Promise<unknown>; resolve: (v: any) => void; reject: (e: unknown) => void; abort: () => void }
+interface Job { task: string; channel: string; routing: boolean; signal: AbortSignal; run: () => Promise<unknown>; resolve: (v: any) => void; reject: (e: unknown) => void; abort: () => void }
 export class ModelScheduler {
   private active = 0
+  private routingActive = false
   private channels = new Map<string, number>()
   private pending: Job[] = []
   private taskOrder: string[] = []
   private lastTask: string | undefined
-  schedule<T>(task: string, channel: string, signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+  schedule<T>(task: string, channel: string, signal: AbortSignal, run: () => Promise<T>, routing = false): Promise<T> {
     if (signal.aborted) return Promise.reject(new ModelError('MODEL_CANCELLED'))
     if (this.pending.length >= defaults.queues.model_pending_app) return Promise.reject(new ModelError('MODEL_QUEUE_FULL'))
     return new Promise<T>((resolve, reject) => {
-      const job: Job = { task, channel, signal, run, resolve, reject, abort: () => { const index = this.pending.indexOf(job); if (index >= 0) { this.pending.splice(index, 1); reject(new ModelError('MODEL_CANCELLED')); this.pump() } } }
+      const job: Job = { task, channel, routing, signal, run, resolve, reject, abort: () => { const index = this.pending.indexOf(job); if (index >= 0) { this.pending.splice(index, 1); reject(new ModelError('MODEL_CANCELLED')); this.pump() } } }
       if (!this.taskOrder.includes(task)) this.taskOrder.push(task)
       this.pending.push(job); signal.addEventListener('abort', job.abort, { once: true }); this.pump()
     })
   }
   private pump(): void {
-    while (this.active < defaults.queues.model_active_app) {
-      const eligible = (j: Job) => !j.signal.aborted && (this.channels.get(j.channel) ?? 0) < defaults.queues.model_active_channel
+    for (;;) {
+      // One app-wide slot keeps the conversation routable while producers stream.
+      const eligible = (j: Job) => !j.signal.aborted && (j.routing ? !this.routingActive : this.active < defaults.queues.model_active_app && (this.channels.get(j.channel) ?? 0) < defaults.queues.model_active_channel)
       this.taskOrder = this.taskOrder.filter(task => task === this.lastTask || this.pending.some(job => job.task === task))
       let index = -1
       const start = this.lastTask === undefined ? 0 : this.taskOrder.indexOf(this.lastTask) + 1
@@ -47,14 +49,17 @@ export class ModelScheduler {
       this.lastTask = job.task
       job.signal.removeEventListener('abort', job.abort)
       if (job.signal.aborted) { job.reject(new ModelError('MODEL_CANCELLED')); continue }
-      this.active++; this.channels.set(job.channel, (this.channels.get(job.channel) ?? 0) + 1)
+      if (job.routing) this.routingActive = true
+      else { this.active++; this.channels.set(job.channel, (this.channels.get(job.channel) ?? 0) + 1) }
       Promise.resolve().then(() => { if (job.signal.aborted) throw new ModelError('MODEL_CANCELLED'); return job.run() }).then(job.resolve, job.reject).finally(() => {
-        this.active--; this.channels.set(job.channel, this.channels.get(job.channel)! - 1); this.pump()
+        if (job.routing) this.routingActive = false
+        else { this.active--; this.channels.set(job.channel, this.channels.get(job.channel)! - 1) }
+        this.pump()
       })
     }
   }
 }
-export interface ModelLease { id: string; revision: number; config: ModelConfiguration; release: () => void; accounting?: (event: RequestAccounting) => void; evidence?: (event: RequestEvidence) => string; owner?: ExecutionScope }
+export interface ModelLease { id: string; revision: number; config: ModelConfiguration; release: () => void; accounting?: (event: RequestAccounting) => void; evidence?: (event: RequestEvidence) => string; owner?: ExecutionScope; routing?: boolean }
 function restoredConfiguration(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value
   const configuration = value as Record<string, unknown>, limits = configuration.limits
@@ -319,10 +324,11 @@ export class ModelService {
     if (entry.locks) throw new ContractError('CONFIGURATION_BUSY', 'Related channel is occupied')
     entry.key = ''; this.configurations.delete(id)
   }
-  acquire(id: string, _role: 'main' | 'approval' | 'compaction'): ModelLease {
+  acquire(id: string, role: 'main' | 'approval' | 'compaction'): ModelLease {
     this.idle()
     const entry = this.entry(id)
     this.assertCredential(entry)
+    if (role === 'approval' && !entry.roles.has(role)) throw new ContractError('APPROVAL_MODEL_UNVERIFIED', 'The selected model must pass the approval role test')
     entry.locks++
     let released = false
     return { id, revision: entry.revision, config: structuredClone(entry.config), release: () => { if (!released) { released = true; entry.locks-- } } }
@@ -348,7 +354,7 @@ export class ModelService {
       const result = await this.send(entry, task, signal, inner => {
         onStart?.(); record('dispatched'); dispatched = true
         return this.adapter.complete(lease.config, entry.key, messages, tools, inner, onText, outputLimit)
-      })
+      }, lease.routing)
       record('completed', result.usage ?? null)
       return evidenceId ? { ...result, request_link: { request_id: requestId, evidence_event_id: evidenceId } } : result
     } catch (error) {
@@ -361,7 +367,7 @@ export class ModelService {
       throw error
     }
   }
-  private async send<T>(entry: Configuration, task: string, signal: AbortSignal, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  private async send<T>(entry: Configuration, task: string, signal: AbortSignal, run: (signal: AbortSignal) => Promise<T>, routing = false): Promise<T> {
     const combined = AbortSignal.any([signal, this.lifetime.signal])
     return this.scheduler.schedule(task, entry.channel, combined, async () => {
       const controller = new AbortController(), abort = () => controller.abort()
@@ -371,7 +377,7 @@ export class ModelService {
       try { return await run(controller.signal) }
       catch (e) { if (controller.signal.aborted && !combined.aborted) throw new ModelError('MODEL_TIMEOUT', e instanceof ModelError && e.partial, false, e instanceof ModelError ? e.usage : undefined); throw e }
       finally { clear(); combined.removeEventListener('abort', abort); this.allControllers.delete(controller) }
-    })
+    }, routing)
   }
   async discover(id: string, operationId?: string, metadata = false): Promise<unknown> {
     this.idle()

@@ -88,7 +88,7 @@ export function AgentPanel({ snapshot, run, approvalTarget, modelId, models, bus
     const execution = byMessage.get(message.id) ?? (message.execution && (runs.get(message.execution.id) ?? message.execution))
     const request = (message.request_id ? byRequest.get(message.request_id) : null) ?? message.request_state
     const live = execution && ['running', 'waiting'].includes(execution.state) && execution.wait_reason !== 'ending_cleanup'
-    const notice = request?.code === 'CONVERSATION_WAITING_FOR_RESULT' ? '等待前一轮回复' : request?.state === 'rejected' ? modelErrorMessage(request.code ?? 'REQUEST_START_FAILED')
+    const notice = request?.code === 'CONVERSATION_WAITING_FOR_RESULT' ? '等待前序结果' : request?.state === 'rejected' ? modelErrorMessage(request.code ?? 'REQUEST_START_FAILED')
       : request?.state === 'confirmation_required' ? request.code === 'CHAPTER_SCOPE_REQUIRED' ? null : '请求需要确认'
       : execution && execution.state !== 'completed' ? (execution.state === 'failed' && execution.primary_reason ? modelErrorMessage(execution.primary_reason) : execution.wait_reason && live ? runnerWaitLabel(execution.wait_reason) : runStatus(execution))
       : request?.state === 'queued' ? '等待执行' : request?.state === 'cancelled' ? '已取消' : null

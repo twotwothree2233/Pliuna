@@ -57,7 +57,7 @@ export function ApprovalSettings({ saved, models, locked, status, onSave }: {
         </div>}
       </div>
       {automatic && <p className="approval-settings-note">删除、信任与丢弃输入仍需本人确认。模型异常时转人工。</p>}
-      {changed && automatic && <p id={`${id}-consent`} className="approval-settings-consent">操作和必要的请求内容将发给所选模型服务，可能计费。</p>}
+      {changed && automatic && <p id={`${id}-consent`} className="approval-settings-consent">未验证的模型会先测试审批格式。审批会发送必要的请求内容。两者均可能计费。</p>}
       {changed && <div className="approval-settings-actions">
         <span>未保存</span>
         <button className="primary" disabled={locked || (automatic && !validModel)} aria-describedby={automatic ? `${id}-consent` : undefined}>

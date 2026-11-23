@@ -12,7 +12,7 @@ const stateLabels: Record<LiveFlowState, string> = {
 }
 const workLabels: Record<string, string> = { producer: '内容生产', lightweight: '轻量工作', integrator: '整合', diagnostic: '诊断', collator: '排版' }
 const reasons: Record<string, string> = {
-  material_pending: '等待材料导入', material_preflight: '正在检查材料', CONVERSATION_WAITING_FOR_RESULT: '等待前一轮回复',
+  material_pending: '等待材料导入', material_preflight: '正在检查材料', CONVERSATION_WAITING_FOR_RESULT: '等待前序结果',
   CHAPTER_SCOPE_REQUIRED: '等待确认章节范围', approval_evaluating: '正在评估权限', model_queue: '等待模型名额',
   model_generating: '正在生成', composition_queue: '等待编排批次', context_compacting: '正在整理上下文',
   ending_cleanup: '正在结束执行', surface_host: '正在检查内容更新'

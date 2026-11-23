@@ -182,7 +182,7 @@ export class RunnerWorkState {
   private productionPlan(source: Extract<RunnerRun | LogicalWork, { purpose: 'production' }>): ContentPlan {
     // Run/work authority uses its accepted message and exact plan version.
     // A chapter update is identified by the update's separate authorization.
-    const plan = this.goal(source.request_id, source.message_id ? source.intent_revision : undefined)
+    const plan = this.goal(source.request_id, source.update_id ? source.intent_revision : undefined)
     if (plan.task_id !== source.task_id || plan.intent_revision !== source.intent_revision || plan.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production plan revision is no longer current')
     if (source.message_id) {
       const update = source.update_id ? new ChapterState(this.db).update(source.task_id, source.update_id) : null

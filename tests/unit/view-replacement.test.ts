@@ -80,10 +80,12 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     expect((await invoke(store, task, run, input)).error).toBeUndefined()
     expect(store.snapshot(task.task.id)).toMatchObject({ approvals: [], surface_updates: [], views: expect.arrayContaining([expect.objectContaining({ id: target.id, revision: 2 })]) })
   })
-  it('preserves a saved draft with an automatic host check and no approval', async () => {
+  it('requires approval after local edits and preserves the saved draft through its host check', async () => {
     const { store, task, run } = setup(); save(store, task, '我的已保存答案')
     const result = invoke(store, task, run); await tick()
-    expect(store.snapshot(task.task.id).approvals).toHaveLength(0)
+    expect(store.snapshot(task.task.id).approvals).toMatchObject([{ decision: 'pending' }])
+    expect(store.snapshot(task.task.id).surface_updates).toEqual([])
+    approve(store, task); await tick()
     expect(store.snapshot(task.task.id).surface_updates[0]).toMatchObject({ reset_requires_confirmation: false })
     expect(workspaceTasks(store, 'workspace_review')).toEqual([])
     expect(workspaceTasks(store, 'workspace_running')).toMatchObject([{ id: task.task.id, phase: 'running' }])
@@ -91,17 +93,26 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     expect((await result).error).toBeUndefined()
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '我的已保存答案' })
   })
-  it('replaces a View created in an earlier Run without approval', async () => {
-    const { store, task, run } = setup()
+  it('requires exact single-action approval to replace a static View from an earlier Run', async () => {
+    const { store, task, run } = setup(), current = store.snapshot(task.task.id)
+    const staticBundle = { ...bundle(), html: '<h2>Original static view</h2>', forms: [], behaviors: [] }
+    store.modelTool(task.task.id, run, { type: 'write', input: { type: 'surface.update', surface_id: current.surface.id, expected_revision: current.surface.revision, operations: [{ type: 'view.create', client_ref: 'static', slot_id: 'main', bundle: { type: 'inline', bundle: staticBundle } }] } })
+    const view = store.snapshot(task.task.id).views.find(view => view.bundle.behaviors.length === 0)!
+    const input = request(store, task)
+    Object.assign(input.input.operations[0]!, { view_id: view.id, bundle: { type: 'inline', bundle: { ...staticBundle, html: '<h2>New static view</h2>' } } })
     store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run })
-    const nextRun = store.start(task.task.id, 'replace explicitly', 'fixture', []), result = invoke(store, task, nextRun)
-    await tick(); expect(store.snapshot(task.task.id).approvals).toHaveLength(0)
-    await respond(store, task)
+    const nextRun = store.start(task.task.id, 'replace explicitly', 'fixture', []), result = invoke(store, task, nextRun, input)
+    await tick()
+    expect(store.snapshot(task.task.id).approvals).toMatchObject([{ decision: 'pending', run_id: nextRun }])
+    expect(store.snapshot(task.task.id).views.find(item => item.id === view.id)?.revision).toBe(1)
+    approve(store, task)
     expect((await result).error).toBeUndefined()
+    expect(store.snapshot(task.task.id).views.find(item => item.id === view.id)?.revision).toBe(2)
   })
-  it('requires only discard confirmation for reset and cancellation keeps the draft', async () => {
+  it('requires a separate discard confirmation after approval and cancellation keeps the draft', async () => {
     const { store, task, run } = setup(); save(store, task, '不能自动清除')
     const result = invoke(store, task, run, request(store, task, true)); await tick()
+    approve(store, task); await tick()
     expect(workspaceTasks(store, 'workspace_review')).toMatchObject([{ id: task.task.id, phase: 'review' }])
     expect(workspaceTasks(store, 'workspace_running')).toEqual([])
     await expect(respond(store, task, true, false)).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
@@ -116,7 +127,7 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const view = store.snapshot(task.task.id).views[0]!
     const submit = { type: 'answer.submit', task_id: task.task.id, view_id: view.id, view_revision: 1, expected_state_revision: view.state_revision, form_id: 'form' }
     store.handle(submit); store.handle(submit)
-    const result = invoke(store, task, run, request(store, task, true)); await tick(); await respond(store, task, true, true)
+    const result = invoke(store, task, run, request(store, task, true)); await tick(); approve(store, task); await tick(); await respond(store, task, true, true)
     expect((await result).error).toBeUndefined()
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '新初值' })
     expect(store.snapshot(task.task.id).answers.map(a => a.value)).toEqual([{ answer: '旧题作答' }, { answer: '旧题作答' }])

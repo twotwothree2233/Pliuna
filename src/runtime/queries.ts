@@ -84,8 +84,8 @@ export class ObjectQueries {
     return next
   }
   taskOrganizationChanged(): void { this.organizationVersion++ }
-  messages(task: string, before?: string, after?: string) {
-    return conversationPage(this.db, task, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, before, after)
+  messages(task: string, before?: string, after?: string, through?: number, limit?: number) {
+    return conversationPage(this.db, task, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, before, after, through, limit)
   }
   messageText(task: string, id: string, cursor?: string) {
     return conversationText(this.db, task, id, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, cursor)

@@ -108,36 +108,76 @@ export function conversationReference(db: Database.Database, task: string, id: s
 // A chapter update keeps the published content's request ID on its Run.
 // A clarification can share that Run, whose reply still belongs to the original message.
 function dependencyChapterRun(db: Database.Database, task: string, id: string, requestId: string) {
-  return db.prepare(`SELECT c.id,c.state,${runMessage('c')} AS message_id FROM requests q
+  return db.prepare(`SELECT c.id,c.state,${runMessage('c')} AS message_id,u.state AS chapter_state FROM requests q
     JOIN runs c ON c.task_id=q.task_id AND c.id=json_extract(q.input_json,'$.chapter_run_id') AND c.chapter_update_id IS NOT NULL
+    JOIN runner_chapter_updates u ON u.task_id=c.task_id AND u.update_id=c.chapter_update_id
     LEFT JOIN requests original ON original.task_id=q.task_id AND original.id=json_extract(q.input_json,'$.clarifies_request_id')
       AND json_extract(original.input_json,'$.chapter_run_id')=c.id
     WHERE q.task_id=@task AND q.id=@requestId AND json_extract(q.input_json,'$.user_record_id')=@id
       AND ${runMessage('c')}=COALESCE(json_extract(original.input_json,'$.user_record_id'),@id)`)
-    .get({ task, id, requestId }) as { id: string; state: string; message_id: string } | undefined
+    .get({ task, id, requestId }) as { id: string; state: string; message_id: string; chapter_state: string } | undefined
 }
 
 export function conversationDependencyRunning(db: Database.Database, task: string, id: string, requestId: string): boolean {
   const chapter = dependencyChapterRun(db, task, id, requestId)
-  if (chapter) return ['running', 'waiting'].includes(chapter.state)
+  if (chapter) return ['running', 'waiting'].includes(chapter.state) || chapter.chapter_state === 'unknown'
+  const plan = conversationContentPlan(db, task, id)
+  if (plan) return !!db.prepare(`SELECT 1 FROM runner_runs n JOIN runs c ON c.id=n.run_id AND c.task_id=n.task_id
+    WHERE n.task_id=? AND n.request_id=? AND n.intent_revision=? AND n.purpose='production' AND c.chapter_update_id IS NULL AND c.commit_valid=1 AND c.state IN ('running','waiting')`)
+    .get(task, plan.request_id, plan.intent_revision)
   return !!db.prepare("SELECT 1 FROM runs WHERE task_id=? AND request_id=? AND state IN ('running','waiting')").get(task, requestId)
 }
 
 export function conversationDependencyResult(db: Database.Database, task: string, id: string, requestId: string) {
   const through = lastSequence(db, task)
   const chapter = dependencyChapterRun(db, task, id, requestId)
+  const plan = !chapter && conversationContentPlan(db, task, id)
+  if (plan) {
+    const row = db.prepare(`SELECT r.id,r.sequence,p.operation_id,json_extract(p.result_json,'$.surface_revision') AS surface_revision,
+      json_extract(p.result_json,'$.surface_history_id') AS surface_history_id,
+      json_extract(p.result_json,'$.manifest_id') AS manifest_id
+      FROM records r JOIN runner_publications p ON p.task_id=r.task_id AND p.action_id=${field('action_id')} AND p.state='published'
+      JOIN runner_view_mappings m ON m.task_id=p.task_id AND m.batch_id=p.batch_id
+      JOIN runner_artifacts a ON a.task_id=m.task_id AND a.artifact_id=m.artifact_id AND a.artifact_revision=m.artifact_revision
+      WHERE r.task_id=@task AND r.kind='conversation.delivery' AND ${field('reply_to')}=@id AND ${field('request_id')}=@request
+        AND json_extract(a.payload_json,'$.request_id')=@request AND json_extract(a.payload_json,'$.intent_revision')=@revision
+      ORDER BY r.sequence LIMIT 1`).get({ task, id, request: plan.request_id, revision: plan.intent_revision }) as
+      { id: string; sequence: number; operation_id: string; surface_revision: number; surface_history_id: string; manifest_id: string } | undefined
+    return row ? { id: row.id, sequence: row.sequence, kind: 'conversation.delivery', text: '内容已发布。', publication: { operation_id: row.operation_id, surface_revision: row.surface_revision, surface_history_id: row.surface_history_id, manifest_id: row.manifest_id } } : null
+  }
   const row = db.prepare(`SELECT r.id,r.sequence,r.kind,COALESCE(substr(${text},1,${16 * 1024}),X'') AS body,length(${text}) AS bytes FROM records r
     WHERE r.task_id=@task AND r.sequence<=@through AND ${chapter ? `r.kind='runner.answer' AND ${run}=@chapterRun` : `${request}=@requestId`}
-    AND NOT (${user}) AND r.kind!='chapter.route.clarification' AND ${visible} AND ${replyTo}=@id ORDER BY r.sequence LIMIT 1`)
+    AND NOT (${user}) AND r.kind NOT IN ('chapter.route.clarification','message.assistant.partial') AND ${visible} AND ${replyTo}=@id ORDER BY r.sequence LIMIT 1`)
     .get({ task, id: chapter?.message_id ?? id, requestId, chapterRun: chapter?.id ?? null, through }) as { id: string; sequence: number; kind: string; body: Buffer; bytes: number } | undefined
   if (!row) return null
   return { id: row.id, kind: row.kind, sequence: row.sequence, text: row.body.length === row.bytes ? row.body.toString('utf8') : null }
 }
 
-export function conversationPage(db: Database.Database, task: string, cursors: Cursors, before?: string, after?: string): TaskMessagePage {
+export function conversationContentPlan(db: Database.Database, task: string, message: string) {
+  return db.prepare(`SELECT p.request_id,p.intent_revision FROM runner_content_plans p
+    JOIN runner_inputs i ON i.task_id=p.task_id AND i.input_event_id=p.input_event_id
+    WHERE p.task_id=? AND i.record_id=? AND EXISTS (SELECT 1 FROM json_each(p.payload_json,'$.requirements') req WHERE json_extract(req.value,'$.kind')='artifact')`)
+    .get(task, message) as { request_id: string; intent_revision: number } | undefined
+}
+
+export function conversationPublicationRun(db: Database.Database, task: string, request: string, revision: number) {
+  // Batch targets include other scope entries that may not contribute to this publication.
+  return db.prepare(`SELECT c.id,c.state,c.wait_reason,c.primary_reason,c.commit_valid,p.state AS publication_state
+    FROM runner_batches b JOIN runner_runs n ON n.task_id=b.task_id AND n.batch_id=b.batch_id
+    JOIN runs c ON c.task_id=n.task_id AND c.id=n.run_id LEFT JOIN runner_publications p ON p.task_id=b.task_id AND p.batch_id=b.batch_id
+    WHERE b.task_id=@task AND EXISTS (SELECT 1 FROM json_each(b.payload_json,'$.indexes') x
+      JOIN runner_artifacts a ON a.task_id=b.task_id AND a.artifact_id=json_extract(x.value,'$.artifact_id')
+        AND a.artifact_revision=json_extract(x.value,'$.artifact_revision')
+      WHERE json_extract(a.payload_json,'$.request_id')=@request AND json_extract(a.payload_json,'$.intent_revision')=@revision)
+    ORDER BY (c.state IN ('running','waiting') AND c.commit_valid=1) DESC,b.rowid DESC LIMIT 1`)
+    .get({ task, request, revision }) as { id: string; state: string; wait_reason: string | null; primary_reason: string | null; commit_valid: number; publication_state: string | null } | undefined
+}
+
+export function conversationPage(db: Database.Database, task: string, cursors: Cursors, before?: string, after?: string, throughLimit?: number, limit = pageItems): TaskMessagePage {
   return db.transaction(() => {
-    const latest = lastSequence(db, task)
-    const olderKey = JSON.stringify(['messages-before', task]), updateKey = JSON.stringify(['messages-after', task])
+    const latest = Math.min(lastSequence(db, task), throughLimit ?? Number.MAX_SAFE_INTEGER)
+    const pageSize = Math.min(limit, pageItems)
+    const olderKey = JSON.stringify(['messages-before', task, throughLimit, pageSize]), updateKey = JSON.stringify(['messages-after', task, throughLimit, pageSize])
     let through = latest, low = 0, high = latest
     if (before !== undefined) {
       const position = cursors.read(olderKey, before)
@@ -155,14 +195,14 @@ export function conversationPage(db: Database.Database, task: string, cursors: C
     const rows = db.prepare(`SELECT r.id,r.sequence,r.created_at,r.kind,CASE WHEN ${user} THEN 'user' ELSE 'assistant' END AS role,
       ${request} AS request_id,${run} AS run_id,${replyTo} AS reply_to,COALESCE(substr(${text},1,${previewBytes}),X'') AS preview,length(${text}) AS bytes
       FROM records r WHERE r.task_id=@task AND r.sequence>@low AND r.sequence<=@high AND ${visible}
-      ORDER BY r.sequence ${forward ? 'ASC' : 'DESC'} LIMIT ${pageItems + 1}`).all({ task, low, high, through }) as Row[]
+      ORDER BY r.sequence ${forward ? 'ASC' : 'DESC'} LIMIT ${pageSize + 1}`).all({ task, low, high, through }) as Row[]
     const items: TaskMessage[] = []
     const executions = db.prepare(`SELECT c.id,c.state,c.primary_reason,c.wait_reason FROM runs c WHERE c.task_id=@task AND (
       (@run IS NOT NULL AND c.id=@run) OR (@role='user' AND (${runMessage('c')})=@message
-      AND (c.request_id=@request OR c.chapter_update_id IS NOT NULL))) ORDER BY c.rowid DESC LIMIT 1`)
+      AND (c.request_id=@request OR c.chapter_update_id IS NOT NULL OR c.id=(SELECT json_extract(input_json,'$.correction_run_id') FROM requests WHERE task_id=@task AND id=@request)))) ORDER BY c.rowid DESC LIMIT 1`)
     const requestState = db.prepare("SELECT id,state,json_extract(input_json,'$.code') AS code FROM requests WHERE task_id=? AND id=?")
     let bytes = 0
-    for (const { preview, bytes: fullSize, ...row } of rows.slice(0, pageItems)) {
+    for (const { preview, bytes: fullSize, ...row } of rows.slice(0, pageSize)) {
       const truncated = fullSize > preview.length
       const execution = executions.get({ task, run: row.run_id, role: row.role, message: row.id, request: row.request_id }) as Run | undefined
       if (execution?.state === 'failed') execution.primary_reason = runnerFailureReason(db, task, execution.id, execution.primary_reason)

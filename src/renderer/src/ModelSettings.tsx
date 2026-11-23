@@ -60,7 +60,10 @@ export function ModelSettings({ state, reload, section = 'models', onBusy, selec
     void operation(async () => { await hostRequest({ type: 'model.remove', model_id: model.id }); setStatus('模型已移除。') })
   }
   function saveApproval({ mode, model_id }: ModelState['approval']) {
-    void operation(async () => {
+    void operation(async id => {
+      if (mode === 'assisted' && !state.models.find(model => model.id === model_id)?.roles.includes('approval')) {
+        await hostRequest({ type: 'model.test', model_id, role: 'approval', confirm_cost: true, operation_id: id })
+      }
       try { await hostRequest({ type: 'approval.configure', mode, model_id, confirm_external_processing: mode === 'assisted' }) }
       catch (error) {
         if (error instanceof Error && 'code' in error && error.code === 'CONFIGURATION_BUSY') throw Error('执行期间无法修改审批设置。')
