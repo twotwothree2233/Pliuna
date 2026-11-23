@@ -90,20 +90,23 @@ export class ObjectQueries {
   messageText(task: string, id: string, cursor?: string) {
     return conversationText(this.db, task, id, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, cursor)
   }
-  taskPage(input: Extract<Query, { type: 'list' }>['input'], archived: boolean): unknown {
+  taskPage(input: Extract<Query, { type: 'list' }>['input'], archived: boolean, discardActions: readonly string[]): unknown {
     const { status, name_query } = input.filters ?? {}
     if (Object.keys(input.filters ?? {}).some(key => !['status', 'name_query'].includes(key))) fail('UNSUPPORTED_FILTER', 'Filter is not defined for the task directory')
     const limit = input.limit ?? defaults.list.default_items
     const binding = hash(['host-task-page', archived, name_query, status, limit, this.organizationVersion]).slice(0, 22)
     const from = 'tasks t LEFT JOIN task_organization o ON o.task_id=t.id'
+    const withDiscardActions = 'WITH discard_actions AS (SELECT value AS id FROM json_each(?))'
     const sortKey = archived ? 'COALESCE(o.archived_at,0)' : 'COALESCE(o.pin_order,0)'
     let where = "t.state!='deleting' AND COALESCE(o.archived,0)=?"
-    const args: unknown[] = [Number(archived)]
+    const args: unknown[] = [JSON.stringify(discardActions), Number(archived)]
     if (name_query !== undefined) { where += ' AND instr(lower(t.title),lower(?))>0'; args.push(name_query) }
     const phase = `CASE WHEN t.state!='active' THEN 'ready'
       WHEN EXISTS(SELECT 1 FROM requests q WHERE q.task_id=t.id AND q.state='confirmation_required')
         OR EXISTS(SELECT 1 FROM approvals a JOIN actions ac ON ac.id=a.action_id
-          WHERE ac.task_id=t.id AND a.decision='pending' AND a.validity='valid' AND a.handling='awaiting_human') THEN 'review'
+          WHERE ac.task_id=t.id AND a.decision='pending' AND a.validity='valid' AND a.handling='awaiting_human')
+        OR EXISTS(SELECT 1 FROM discard_actions d JOIN actions ac ON ac.id=d.id
+          WHERE ac.task_id=t.id AND ac.state='waiting' AND ac.wait_reason='surface_host' AND ac.commit_valid=1) THEN 'review'
       WHEN EXISTS(SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.state IN ('running','waiting'))
         OR EXISTS(SELECT 1 FROM requests q WHERE q.task_id=t.id AND q.state='queued') THEN 'running'
       ELSE 'ready' END`
@@ -112,11 +115,11 @@ export class ObjectQueries {
     } else if (status !== undefined) { where += ' AND t.state=?'; args.push(status) }
     if (input.cursor) {
       const [rowid, id, order] = this.position(input.cursor, binding)
-      const anchor = this.db.prepare(`SELECT t.id,${sortKey} AS sort_key FROM ${from} WHERE ${where} AND t.rowid=?`).get(...args, rowid) as { id: string; sort_key: number } | undefined
+      const anchor = this.db.prepare(`${withDiscardActions} SELECT t.id,${sortKey} AS sort_key FROM ${from} WHERE ${where} AND t.rowid=?`).get(...args, rowid) as { id: string; sort_key: number } | undefined
       if (!anchor || anchor.id !== id || anchor.sort_key !== order) fail('INVALID_CURSOR', 'Task page anchor changed; restart this query')
       where += ` AND (${sortKey}<? OR (${sortKey}=? AND t.rowid>?))`; args.push(order, order, rowid)
     }
-    const rows = this.db.prepare(`SELECT t.id,t.title,t.state,t.revision,t.rowid AS rowid,${sortKey} AS sort_key,o.pin_order IS NOT NULL AS pinned,o.archived_at,(${phase}) AS phase,
+    const rows = this.db.prepare(`${withDiscardActions} SELECT t.id,t.title,t.state,t.revision,t.rowid AS rowid,${sortKey} AS sort_key,o.pin_order IS NOT NULL AS pinned,o.archived_at,(${phase}) AS phase,
       (SELECT created_at FROM records WHERE task_id=t.id ORDER BY sequence DESC LIMIT 1) AS last_activity_at
       FROM ${from} WHERE ${where} ORDER BY sort_key DESC,t.rowid LIMIT ?`).all(...args, limit + 1) as (Omit<TaskListItem, 'archived' | 'pinned'> & { rowid: number; sort_key: number; pinned: number })[]
     const items: TaskListItem[] = []

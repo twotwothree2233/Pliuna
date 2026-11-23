@@ -759,7 +759,7 @@ test('restart settles the original pending publication without replaying or chan
   expect(s.internal().db.prepare('SELECT state,result FROM actions WHERE id=?').get(action)).toEqual({ state: 'ended', result: 'not_executed' })
 })
 
-test('a continuous conversation edits the same published View under the new message', async () => {
+test('a follow-up waits for the exact chapter update and uses its published reply', async () => {
   const s = setup(true), mapped = await original(s), model = chapterModel(s)
   s.complete.mockResolvedValueOnce(answer({ kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] }))
   const routerIndex = s.complete.mock.calls.length
@@ -779,6 +779,20 @@ test('a continuous conversation edits the same published View under the new mess
   const routeCall = s.complete.mock.calls[routerIndex]!
   expect(routeCall[3]!.map(tool => tool.function.name)).toEqual(['list', 'read'])
   expect(routeCall[2].some(message => message.role === 'tool')).toBe(false)
+  const exactMessage = userRecords[0]!.id, followText = 'Follow up only after that chapter is updated.'
+  const admissions = vi.spyOn(s.store as unknown as { startQueuedRequest(...args: unknown[]): unknown }, 'startQueuedRequest')
+  const resumeChapter = s.complete.getMockImplementation()!
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: exactMessage }))
+  s.complete.mockImplementation((...args) => {
+    const last = args[2].at(-1)?.content
+    if (!last?.includes(followText)) return resumeChapter(...args)
+    expect(JSON.parse(last).preceding_result).toMatchObject({ kind: 'runner.answer', text: '更新已完成。' })
+    return Promise.resolve(answer({ kind: 'reply', text: 'I used the updated chapter result.' }))
+  })
+  const follow = s.store.handle({ type: 'request.submit', task_id: s.task, text: followText, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  const followStatus = () => s.store.handle({ type: 'request.status', task_id: s.task, request_id: follow.request_id })
+  await vi.waitFor(() => expect(admissions.mock.calls.filter(args => args[4] === follow.request_id).length).toBeGreaterThanOrEqual(2))
+  expect(followStatus()).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' })
   await model.release(update.update_id, [['Alpha original', 'Alpha revised from the conversation']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
   await publish(s, s.status(update.update_id).action_id)
@@ -787,6 +801,8 @@ test('a continuous conversation edits the same published View under the new mess
   expect(s.snapshot().views[0]).toMatchObject({ id: mapped.view_id, revision: mapped.view_revision + 1 })
   expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha revised from the conversation')
   expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
+  await vi.waitFor(() => expect(followStatus()).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.records('conversation.reply')).toMatchObject([{ request_id: follow.request_id, text: 'I used the updated chapter result.' }])
 })
 
 test('view-only routing lets the worker read before registering its precise target', async () => {
@@ -895,24 +911,40 @@ test('ambiguous routing preserves the complete request, selection, materials and
   expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
-test('a clarification in the same composer resumes only the request whose question was selected', async () => {
+test.each([false, true])('a clarification merges both attachments and validates them before starting (missing=%s)', async missing => {
   const s = setup(true), mapped = await original(s), model = chapterModel(s)
-  const send = (text: string) => s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  const db = s.internal().db
+  const send = (text: string, resource_ids: string[] = []) => s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids, import_ids: [] }) as { request_id: string }
   const status = (request: { request_id: string }) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })
   s.complete.mockResolvedValueOnce(answer({ kind: 'ambiguous' })).mockResolvedValueOnce(answer({ kind: 'ambiguous' }))
-  const originalRequest = send('Please revise the introduction.'), other = send('Please expand the comparison.')
+  const originalRequest = send('Please revise the introduction.', [mapped.bundle_resource_id]), other = send('Please expand the comparison.')
   await vi.waitFor(() => expect(status(originalRequest)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' }))
   await vi.waitFor(() => expect(status(other)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' }))
-  const reply = s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='chapter.route.clarification' AND json_extract(payload_json,'$.request_id')=?").get(s.task, originalRequest.request_id) as { id: string }
-  s.complete.mockResolvedValueOnce(answer({ kind: 'clarify', message_id: reply.id, update: { kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] } }))
-  const clarified = send('For the introduction request, revise only the Alpha section.')
+  const reply = db.prepare("SELECT id FROM records WHERE task_id=? AND kind='chapter.route.clarification' AND json_extract(payload_json,'$.request_id')=?").get(s.task, originalRequest.request_id) as { id: string }
+  const operation_id = (s.store.handle({ type: 'material.internal.register', task_id: s.task, items: [{ display_name: 'Clarification.txt', source: 'text' }] }) as { items: { operation_id: string }[] }).items[0]!.operation_id
+  const attachment = Buffer.from('Extra notes for the revised introduction.')
+  s.store.handle({ type: 'material.internal.begin', task_id: s.task, operation_id, byte_length: attachment.length, media_type: 'text/plain; charset=utf-8' })
+  s.store.handle({ type: 'material.internal.chunk', task_id: s.task, operation_id, offset: 0, data: attachment.toString('base64') })
+  const extra = (s.store.handle({ type: 'material.internal.finish', task_id: s.task, operation_id }) as { resource: { id: string } }).resource.id
+  s.complete.mockImplementationOnce(async () => {
+    if (missing) db.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(s.task, extra)
+    return answer({ kind: 'clarify', message_id: reply.id, update: { kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] } })
+  })
+  const clarified = send('For the introduction request, revise only the Alpha section.', [mapped.bundle_resource_id, extra])
+  if (missing) {
+    await vi.waitFor(() => expect(status(clarified)).toMatchObject({ state: 'confirmation_required', code: 'NOT_FOUND' }))
+    expect(status(originalRequest)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' })
+    expect(s.records('chapter.input.received')).toEqual([])
+    return
+  }
   const updateId = 'chapter-update:' + clarified.request_id
   await vi.waitFor(() => expect(model.pending.has(updateId)).toBe(true))
   expect(s.status(updateId).text).toContain('Please revise the introduction.')
   expect(s.status(updateId).text).toContain('revise only the Alpha section')
   expect(status(originalRequest)).toMatchObject({ state: 'started' })
   expect(status(other)).toMatchObject({ state: 'confirmation_required' })
-  expect(s.records('chapter.input.received')).toHaveLength(1)
+  expect(s.records('chapter.input.received')).toMatchObject([{ material_resource_ids: [mapped.bundle_resource_id, extra] }])
+  expect(s.state().taskWorks(s.task).find(work => work.run_id === s.status(updateId).source?.run_id && work.role === 'producer')?.dependencies).toContainEqual({ kind: 'resource', task_id: s.task, resource_id: extra })
   expect(s.internal().db.prepare("SELECT json_extract(input_json,'$.conversation_reference') AS reference FROM requests WHERE id=?").get(clarified.request_id)).toEqual({ reference: reply.id })
   await model.release(updateId, [['Alpha original', 'Alpha revised after clarification']])
   await vi.waitFor(() => expect(s.status(updateId).action_id).toBeDefined())

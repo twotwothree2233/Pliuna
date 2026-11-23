@@ -12,7 +12,7 @@ let root:string,store:RuntimeStore,db:Database.Database,task:string,run:string
 const config={id:'isolated',base_url:'https://example.invalid',wire_model_id:'synthetic',context_tokens:1000000,max_output_tokens:1024,compatibility_profile:'chat-max-tokens' as const}
 beforeEach(()=>{vi.useFakeTimers();root=mkdtempSync(join(tmpdir(),'pliuna-accounting-runtime-'));store=new RuntimeStore(root);db=new Database(join(root,'pliuna.sqlite'));task=store.create('synthetic').task.id;run=store.start(task,'synthetic','fixture',[])})
 afterEach(()=>{vi.restoreAllMocks();store.close();db.close();vi.useRealTimers()})
-const read=():any=>store.handle({type:'task.query',task_id:task,query:{type:'read',input:{target:{kind:'run',id:run}}}})
+const read=(runId=run):any=>store.handle({type:'task.query',task_id:task,query:{type:'read',input:{target:{kind:'run',id:runId}}}})
 const page=(cursor?:string):any=>store.handle({type:'host.run.accounting',task_id:task,run_id:run,...(cursor?{cursor}:{})})
 const summary=(task_id=task,run_id=run)=>store.handle({type:'host.run.usage',task_id,run_id})
 function lease(){const value:ModelLease={id:config.id,revision:1,config,release(){}};(store as any).accountLease(task,run,value);return value}
@@ -146,6 +146,10 @@ it('totals a task across historical Runs and pre-Run routing without mixing othe
  const latest=store.start(task,'second','fixture',[]),latestLease:ModelLease={id:config.id,revision:1,config,release(){}}
  ;(store as any).accountLease(task,latest,latestLease)
  report(latestLease,300,30,60,'unknown')
+ const reported = { phase: 'unknown', dispatched: true, usage: { prompt_tokens: 300, completion_tokens: 30, cached_prompt_tokens: 60 } }
+ expect(summary(task,latest)).toMatchObject({dispatched_requests:1,reported_requests:1,input_tokens:300,output_tokens:30,cache_hit_ratio:0.2})
+ expect(store.handle({type:'host.run.accounting',task_id:task,run_id:latest})).toMatchObject({requests:[reported]})
+ expect(read(latest)).toMatchObject({data:{accounting:{requests:[reported]}}})
  const other=store.create('other').task.id
  const routingLease=(taskId:string):ModelLease=>({...latestLease,accounting:event=>(store as any).record(taskId,'model.request.accounting',{...event,routing_operation_id:'route'})})
  expect(taskUsage(other)).toMatchObject({reported_requests:0,cache_hit_ratio:null})

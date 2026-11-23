@@ -22,7 +22,7 @@ export function accountingFacts(rows: Row[]) {
     const identity = (item: RequestAccounting) => JSON.stringify([item.version, item.output_policy, item.model_id, item.model_revision, item.purpose, item.input_bytes, item.estimated_input_tokens, item.output_reserve, item.context_tokens, ...Object.keys(item.components).sort().map(key => [key, item.components[key as keyof typeof item.components]])])
     if (old && (!next.includes(value.phase) || identity(value) !== identity(old))) throw new ContractError('ACCOUNTING_INVALID', 'Accounting sequence is inconsistent')
     if (!Number.isFinite(Date.parse(value.at)) || new Date(value.at).toISOString() !== value.at) throw new ContractError('ACCOUNTING_INVALID', 'Accounting timestamp is invalid')
-    if (Object.values(value.components).reduce((sum, bytes) => sum + bytes, 0) !== value.input_bytes || (value.phase !== 'completed' && value.usage !== null) || (!['unknown', 'failed'].includes(value.phase) && value.error !== null)) throw new ContractError('ACCOUNTING_INVALID', 'Accounting fields are inconsistent')
+    if (Object.values(value.components).reduce((sum, bytes) => sum + bytes, 0) !== value.input_bytes || (!['completed', 'unknown'].includes(value.phase) && value.usage !== null) || (!['unknown', 'failed'].includes(value.phase) && value.error !== null)) throw new ContractError('ACCOUNTING_INVALID', 'Accounting fields are inconsistent')
     requests.set(value.request_id, { ...value, event_id: row.id, dispatched: old?.dispatched === true || value.phase === 'dispatched' })
     owners.set(value.request_id, binding)
   }
@@ -82,10 +82,10 @@ export function usageSummary(db: Database.Database, task: string, through: numbe
   ), dispatched AS (
     SELECT execution,request,MIN(sequence) AS position FROM facts WHERE phase='dispatched' GROUP BY execution,request
   ), settled AS (
-    SELECT COALESCE(MIN(CASE WHEN e.phase='completed' THEN e.sequence END),MIN(e.sequence)) AS position
+    SELECT MIN(e.sequence) AS position
     FROM dispatched d JOIN facts f ON f.sequence=d.position
     JOIN facts e ON e.execution=d.execution AND e.request=d.request AND e.sequence>f.sequence AND e.owner IS f.owner
-      AND ${run === undefined ? "e.phase IN ('completed','unknown')" : "e.phase='completed'"}
+      AND e.phase IN ('completed','unknown')
     WHERE EXISTS (SELECT 1 FROM facts r WHERE r.execution=d.execution AND r.request=d.request AND r.phase='reserved' AND r.owner IS f.owner AND r.sequence<f.sequence)
     GROUP BY d.execution,d.request
   ), reported AS (

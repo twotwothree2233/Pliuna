@@ -66,7 +66,7 @@ import { RunnerWorkState, type QualifiedAttempt } from './runner/work-state'
 import { WorkerContext } from './runner/worker-context'
 import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory } from './runner/conversation'
 import { liveRunnerFlow } from './runner/live-flow'
-import { approvalMessages, conversationDependencyResult, conversationReference, runMessage, type BoundConversationDependency } from './runner/conversation-query'
+import { approvalMessages, conversationDependencyResult, conversationDependencyRunning, conversationReference, runMessage, type BoundConversationDependency } from './runner/conversation-query'
 import type { WorkerGrant, WorkerProfile } from './runner/worker-profile'
 import { captureExecutionScope } from './model/request-evidence'
 import type { ExecutionScope, ExecutionAttempt, InputEvent, ContentPlan } from '../shared/contracts.generated'
@@ -548,7 +548,7 @@ export class RuntimeStore {
         const result = conversationDependencyResult(this.db, task, dependency.message_id, dependency.request_id)
         if (!result) {
           const parent = this.one('SELECT state FROM requests WHERE task_id=? AND id=?', task, dependency.request_id)
-          const live = this.db.prepare("SELECT 1 FROM runs WHERE task_id=? AND request_id=? AND state IN ('running','waiting')").get(task, dependency.request_id)
+          const live = conversationDependencyRunning(this.db, task, dependency.message_id, dependency.request_id)
           if (!live && !['queued', 'confirmation_required'].includes(parent.state)) {
             this.db.transaction(() => {
               this.db.prepare("UPDATE requests SET state='rejected',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: 'CONVERSATION_DEPENDENCY_UNAVAILABLE' }), task, requestId)
@@ -683,7 +683,7 @@ export class RuntimeStore {
         const scope = route.update, manifest = this.chapters().state.manifest(task, scope.view_id)!
         const view = this.one('SELECT revision,state_revision FROM views WHERE id=?', scope.view_id)
         const update = this.db.transaction(() => {
-          const result = this.startChapterUpdate({ type: 'chapter.update', task_id: task, input_event_id: `chapter-input:${requestId}`, update_id: `chapter-update:${requestId}`, view_id: scope.view_id, view_revision: view.revision, state_revision: view.state_revision, region_ids: scope.region_ids ?? [manifest.content_tree?.root_id ?? manifest.chapters[0]!.region_id], text, model_config_id: config, source_request_id: original.request_id!, ...(scope.tree_operations ? { tree_operations: scope.tree_operations } : {}) }, { record_id: input.user_record_id, conversation: input.conversation, material_resource_ids: [] })
+          const result = this.startChapterUpdate({ type: 'chapter.update', task_id: task, input_event_id: `chapter-input:${requestId}`, update_id: `chapter-update:${requestId}`, view_id: scope.view_id, view_revision: view.revision, state_revision: view.state_revision, region_ids: scope.region_ids ?? [manifest.content_tree?.root_id ?? manifest.chapters[0]!.region_id], text, model_config_id: config, source_request_id: original.request_id!, ...(scope.tree_operations ? { tree_operations: scope.tree_operations } : {}) }, { record_id: input.user_record_id, conversation: input.conversation, material_resource_ids: attachments.map(item => item.id) })
           this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: null, conversation_reference: original.id, clarifies_request_id: original.request_id, chapter_run_id: result.source?.run_id }), task, requestId)
           return result
         })()
@@ -2033,10 +2033,12 @@ export class RuntimeStore {
     if (input.source_request_id) {
       const row = this.one('SELECT * FROM requests WHERE task_id=? AND id=?', input.task_id, input.source_request_id), original = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json)
       if (original.binding_version !== 1 || !(row.state === 'confirmation_required' && original.code === 'CHAPTER_SCOPE_REQUIRED' || row.state === 'started' && original.chapter_update_id === input.update_id)) fail('REQUEST_NOT_CONFIRMABLE', 'Select chapters for the original request awaiting scope clarification')
-      const materialIds = (this.requests.handle({ type: 'request.status', task_id: input.task_id, request_id: input.source_request_id }).materials as Row[]).map(material => {
+      const originalMaterialIds = (this.requests.handle({ type: 'request.status', task_id: input.task_id, request_id: input.source_request_id }).materials as Row[]).map(material => {
         if (material.state !== 'success') fail('REQUEST_MATERIALS_INCOMPLETE', 'Original materials must remain available')
-        return this.requestMaterial(input.task_id, material.id).id as string
+        return material.id as string
       })
+      const materialIds = [...new Set([...originalMaterialIds, ...(received?.material_resource_ids ?? [])])]
+      for (const resourceId of materialIds) this.requestMaterial(input.task_id, resourceId)
       const clarification = received && this.features.runner?.conversationRouting ? this.one("SELECT payload_json FROM records WHERE id=? AND task_id=? AND kind='message.user'", received.record_id, input.task_id) : null
       if (clarification && JSON.parse(clarification.payload_json).text !== input.text) fail('REQUEST_SOURCE_INVALID', 'Clarification must retain its exact accepted user input')
       const text = clarification ? `${original.text}\n\nUser clarification:\n${input.text}` : original.text
@@ -3825,7 +3827,11 @@ export class RuntimeStore {
       case 'storage.status': return this.storage.status(r.after)
       case 'storage.retry': return this.storage.retry(r.job_id)
       case 'task.query': return this.query(r.task_id, r.query)
-      case 'host.tasks.page': return this.queries.taskPage(r.input, r.archived ?? false)
+      case 'host.tasks.page': {
+        const now = Date.now()
+        const discardActions = [...this.surfaceWaiters].filter(([, waiter]) => waiter.reset && Date.parse(waiter.expires) > now).map(([id]) => id)
+        return this.queries.taskPage(r.input, r.archived ?? false, discardActions)
+      }
       case 'sync.subscribe': return this.subscribe(r.task_id, r.after)
       case 'context.status': this.task(r.task_id); return { current: this.currentSummary(r.task_id), notice: 'Model-generated lossy navigation; sources and current state take precedence' }
       case 'context.compact': return this.manualCompaction(r.task_id, r.model_config_id)

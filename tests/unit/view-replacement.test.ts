@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
 import { ModelService } from '../../src/runtime/model/service'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { Snapshot } from '../../src/shared/types'
+import type { Snapshot, TaskListItem } from '../../src/shared/types'
 import { replacementDraft } from '../../src/runtime/surface-transition'
 
 const cleanups: (() => void)[] = []
@@ -48,6 +48,9 @@ function save(store: RuntimeStore, task: Snapshot, answer: string) {
   const view = store.snapshot(task.task.id).views[0]!
   return store.handle({ type: 'draft.save', task_id: task.task.id, view_id: view.id, view_revision: view.revision, expected_state_revision: view.state_revision, fields: [{ path: '/answer', value: answer }] })
 }
+function workspaceTasks(store: RuntimeStore, status: 'workspace_review' | 'workspace_running') {
+  return (store.handle({ type: 'host.tasks.page', input: { kind: 'task', filters: { status } } }) as { items: TaskListItem[] }).items
+}
 
 describe('View replacement (written while behavioral testing is paused)', () => {
   it('keeps unverified replacement disabled by default', async () => {
@@ -81,6 +84,9 @@ describe('View replacement (written while behavioral testing is paused)', () => 
     const { store, task, run } = setup(); save(store, task, '我的已保存答案')
     const result = invoke(store, task, run); await tick()
     expect(store.snapshot(task.task.id).approvals).toHaveLength(0)
+    expect(store.snapshot(task.task.id).surface_updates[0]).toMatchObject({ reset_requires_confirmation: false })
+    expect(workspaceTasks(store, 'workspace_review')).toEqual([])
+    expect(workspaceTasks(store, 'workspace_running')).toMatchObject([{ id: task.task.id, phase: 'running' }])
     await respond(store, task)
     expect((await result).error).toBeUndefined()
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '我的已保存答案' })
@@ -96,10 +102,13 @@ describe('View replacement (written while behavioral testing is paused)', () => 
   it('requires only discard confirmation for reset and cancellation keeps the draft', async () => {
     const { store, task, run } = setup(); save(store, task, '不能自动清除')
     const result = invoke(store, task, run, request(store, task, true)); await tick()
+    expect(workspaceTasks(store, 'workspace_review')).toMatchObject([{ id: task.task.id, phase: 'review' }])
+    expect(workspaceTasks(store, 'workspace_running')).toEqual([])
     await expect(respond(store, task, true, false)).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
     expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: '不能自动清除' })
     await respond(store, task, false)
     expect((await result).error).toMatchObject({ code: 'SURFACE_NOT_CONFIRMED' })
+    expect(workspaceTasks(store, 'workspace_review')).toEqual([])
     expect(store.snapshot(task.task.id).views[0]!.revision).toBe(1)
   })
   it('explicit reset installs initial but does not change old immutable answers', async () => {

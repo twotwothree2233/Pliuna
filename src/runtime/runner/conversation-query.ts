@@ -105,12 +105,31 @@ export function conversationReference(db: Database.Database, task: string, id: s
     { id: string; kind: string; request_id: string | null } | undefined
 }
 
+// A chapter update keeps the published content's request ID on its Run.
+// A clarification can share that Run, whose reply still belongs to the original message.
+function dependencyChapterRun(db: Database.Database, task: string, id: string, requestId: string) {
+  return db.prepare(`SELECT c.id,c.state,${runMessage('c')} AS message_id FROM requests q
+    JOIN runs c ON c.task_id=q.task_id AND c.id=json_extract(q.input_json,'$.chapter_run_id') AND c.chapter_update_id IS NOT NULL
+    LEFT JOIN requests original ON original.task_id=q.task_id AND original.id=json_extract(q.input_json,'$.clarifies_request_id')
+      AND json_extract(original.input_json,'$.chapter_run_id')=c.id
+    WHERE q.task_id=@task AND q.id=@requestId AND json_extract(q.input_json,'$.user_record_id')=@id
+      AND ${runMessage('c')}=COALESCE(json_extract(original.input_json,'$.user_record_id'),@id)`)
+    .get({ task, id, requestId }) as { id: string; state: string; message_id: string } | undefined
+}
+
+export function conversationDependencyRunning(db: Database.Database, task: string, id: string, requestId: string): boolean {
+  const chapter = dependencyChapterRun(db, task, id, requestId)
+  if (chapter) return ['running', 'waiting'].includes(chapter.state)
+  return !!db.prepare("SELECT 1 FROM runs WHERE task_id=? AND request_id=? AND state IN ('running','waiting')").get(task, requestId)
+}
+
 export function conversationDependencyResult(db: Database.Database, task: string, id: string, requestId: string) {
   const through = lastSequence(db, task)
+  const chapter = dependencyChapterRun(db, task, id, requestId)
   const row = db.prepare(`SELECT r.id,r.sequence,r.kind,COALESCE(substr(${text},1,${16 * 1024}),X'') AS body,length(${text}) AS bytes FROM records r
-    WHERE r.task_id=@task AND r.sequence<=@through AND ${request}=@requestId
+    WHERE r.task_id=@task AND r.sequence<=@through AND ${chapter ? `r.kind='runner.answer' AND ${run}=@chapterRun` : `${request}=@requestId`}
     AND NOT (${user}) AND r.kind!='chapter.route.clarification' AND ${visible} AND ${replyTo}=@id ORDER BY r.sequence LIMIT 1`)
-    .get({ task, id, requestId, through }) as { id: string; sequence: number; kind: string; body: Buffer; bytes: number } | undefined
+    .get({ task, id: chapter?.message_id ?? id, requestId, chapterRun: chapter?.id ?? null, through }) as { id: string; sequence: number; kind: string; body: Buffer; bytes: number } | undefined
   if (!row) return null
   return { id: row.id, kind: row.kind, sequence: row.sequence, text: row.body.length === row.bytes ? row.body.toString('utf8') : null }
 }
