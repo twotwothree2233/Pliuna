@@ -20,9 +20,6 @@ importers:
       css-tree:
         specifier: 3.1.0
         version: 3.1.0
-      markdown-it:
-        specifier: 14.1.1
-        version: 14.1.1
       parse5:
         specifier: 8.0.0
         version: 8.0.0
@@ -75,6 +72,9 @@ importers:
       json-schema-to-typescript:
         specifier: 15.0.4
         version: 15.0.4
+      markdown-it:
+        specifier: 14.1.1
+        version: 14.1.1
       typescript:
         specifier: 5.9.3
         version: 5.9.3
