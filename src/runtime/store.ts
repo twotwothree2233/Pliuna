@@ -64,7 +64,7 @@ import { boundedRecent, snapshotValue } from './snapshot-summary'
 import { runActivity } from './run-activity'
 import { RunnerWorkState, type QualifiedAttempt } from './runner/work-state'
 import { WorkerContext } from './runner/worker-context'
-import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory } from './runner/conversation'
+import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory, type ConversationResult } from './runner/conversation'
 import { liveRunnerFlow } from './runner/live-flow'
 import { approvalMessages, conversationContentPlan, conversationDependencyResult, conversationDependencyRunning, conversationPublicationRun, conversationReference, runMessage, type BoundConversationDependency } from './runner/conversation-query'
 import type { WorkerGrant, WorkerProfile } from './runner/worker-profile'
@@ -535,11 +535,11 @@ export class RuntimeStore {
   private requestAdmissionAvailable(task: string, request: string): boolean {
     if (!this.features.runner?.conversationRouting) return this.runnerRunAvailable(task, request)
     const row = this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, request)
-    if (JSON.parse(row.config_selection_json).id === 'fixture') return this.runnerRunAvailable(task, request)
     const input = JSON.parse(row.input_json)
-    if (input.admission_route) return this.runnerRunAvailable(task, request)
-    // One semantic routing slot per task, independent of its production slots.
-    return ![...this.chapterRoutes.values()].some(route => route.taskId === task)
+    if (input.correction_pending) return this.runnerRunAvailable(task, input.corrects_request_id)
+    if (input.admission_route || JSON.parse(row.config_selection_json).id === 'fixture') return this.runnerRunAvailable(task, request)
+    // Routing does not occupy a production slot. The shared scheduler owns network limits.
+    return [...this.chapterRoutes.values()].filter(route => route.taskId === task).length < defaults.queues.model_active_app
   }
   private publishedChapterManifests(task: string): ChapterManifest[] {
     return (this.db.prepare('SELECT v.id,v.revision,v.bundle_resource_id FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? ORDER BY v.rowid').all(task) as Row[]).flatMap(view => {
@@ -549,10 +549,17 @@ export class RuntimeStore {
     })
   }
   private startQueuedRequest(task: string, text: string, config: string, attachments: Row[], requestId: string): string | Promise<string> {
-    if (!this.features.runner || config === 'fixture') return this.start(task, text, config, attachments, requestId)
+    if (!this.features.runner) return this.start(task, text, config, attachments, requestId)
     if (this.features.runner.conversationRouting) {
-      const row = this.one("SELECT input_json FROM requests WHERE task_id=? AND id=? AND state='queued'", task, requestId)
+      const row = this.one("SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=? AND state='queued'", task, requestId)
       const input = JSON.parse(row.input_json), dependency = input.conversation_dependency
+      if (input.correction_pending) {
+        if (config === 'fixture') fail('MODEL_NOT_CONFIGURED', 'Select a configured model to continue the correction')
+        const plan = conversationContentPlan(this.db, task, input.user_record_id)
+        if (!plan || plan.request_id !== input.corrects_request_id) fail('CONVERSATION_REFERENCE_INVALID', 'Correction no longer identifies a saved content plan')
+        return this.startRunnerGoal(task, plan.request_id, plan.intent_revision, { id: requestId, row, materials: attachments.map(item => this.requestMaterial(task, item.id)) }).then(run => run ?? '')
+      }
+      if (config === 'fixture') return this.start(task, text, config, attachments, requestId)
       if (dependency && !dependency.result_id) {
         const result = conversationDependencyResult(this.db, task, dependency.message_id, dependency.request_id)
         if (!result) {
@@ -571,6 +578,7 @@ export class RuntimeStore {
         return ''
       }
     }
+    if (config === 'fixture') return this.start(task, text, config, attachments, requestId)
     const views = this.db.prepare('SELECT v.id AS viewId FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=?').all(task) as { viewId: string }[]
     if (!views.length && !this.features.runner.conversationRouting) return this.start(task, text, config, attachments, requestId)
     this.registerPublishedChapters(task, views)
@@ -581,8 +589,7 @@ export class RuntimeStore {
     const row = this.one("SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=? AND state='queued'", task, requestId)
     const input = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json), dialogue = this.features.runner?.conversationRouting === true
     const history = loadConversation(this.db, task, input.conversation)
-    const boundResult = dialogue && input.conversation_dependency?.result_id ? conversationDependencyResult(this.db, task, input.conversation_dependency.message_id, input.conversation_dependency.request_id) : null
-    if (input.conversation_dependency?.result_id && boundResult?.id !== input.conversation_dependency.result_id) fail('CONVERSATION_DEPENDENCY_UNAVAILABLE', 'The exact preceding result is unavailable')
+    const boundResult = this.boundConversationResult(task, input.conversation_dependency)
     const clarifications = dialogue ? this.db.prepare(`SELECT r.id,q.id AS request_id,substr(json_extract(r.payload_json,'$.text'),1,250) AS question FROM records r JOIN requests q
       ON q.task_id=r.task_id AND q.id=json_extract(r.payload_json,'$.request_id') WHERE r.task_id=? AND r.kind='chapter.route.clarification'
       AND r.sequence<=? AND q.state='confirmation_required' AND json_extract(q.input_json,'$.code')='CHAPTER_SCOPE_REQUIRED'
@@ -593,7 +600,6 @@ export class RuntimeStore {
     if (dialogue) grants.push({ type: 'list', kind: 'event' }, { type: 'read', kind: 'event' })
     const profile = dialogue ? createConversationRouterProfile(manifests, grants) : createChapterRouterProfile(manifests)
     const lease = this.models.acquire(config, 'main'), controller = new AbortController(), operation = id()
-    if (dialogue) lease.routing = true
     const savedRoute = input.admission_route as ConversationRoute | undefined
     let routingRun: string | undefined
     if (!savedRoute) this.chapterRoutes.set(requestId, { taskId: task, controller, runId: operation })
@@ -669,7 +675,8 @@ export class RuntimeStore {
         if (parent.kind !== 'message.user' || !parent.request_id) fail('CONVERSATION_REFERENCE_INVALID', 'Select the message that requested the pending content')
         const run = routingRun
         this.db.transaction(() => {
-          this.removePendingContent(task, parent.request_id!, parent.id, input.user_record_id)
+          const plan = conversationContentPlan(this.db, task, parent.id)
+          this.removePendingContent(task, plan?.request_id ?? parent.request_id!, parent.id, input.user_record_id)
           this.record(task, 'conversation.reply', { text: '已将这项未交付内容移出成稿范围。', request_id: requestId, run_id: run, reply_to: input.user_record_id })
           this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: null, conversation_run_id: run, conversation_route: route.kind, conversation_reference: parent.id }), task, requestId)
           this.finish(task, run, 'completed', 'conversation_replied')
@@ -686,7 +693,10 @@ export class RuntimeStore {
             JOIN json_each(b.payload_json,'$.targets') t WHERE b.task_id=? AND c.state IN ('running','waiting')
             AND json_extract(t.value,'$.request_id')=? AND json_extract(t.value,'$.intent_revision')=?`).all(task, target.request_id, target.intent_revision) as { id: string }[]
           const boundMaterials = attachments.map(item => this.requestMaterial(task, item.id))
-          this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: null, conversation_run_id: run, conversation_route: route.kind, conversation_reference: parent.id, corrects_request_id: target.request_id, bound_materials: boundMaterials }), task, requestId)
+          this.db.prepare(`UPDATE requests SET state='rejected',input_json=json_set(input_json,'$.code','CONTENT_REQUIREMENT_UNAVAILABLE')
+            WHERE task_id=? AND state IN ('queued','confirmation_required') AND json_extract(input_json,'$.correction_pending')=1
+              AND json_extract(input_json,'$.corrects_request_id')=?`).run(task, target.request_id)
+          this.db.prepare("UPDATE requests SET input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: 'PRODUCTION_ADMISSION_PENDING', conversation_run_id: run, conversation_route: route.kind, conversation_reference: parent.id, corrects_request_id: target.request_id, correction_pending: true, bound_materials: boundMaterials }), task, requestId)
           this.runner().receive({ input_event_id: eventId, task_id: task, kind: 'correction', record_id: input.user_record_id, request_id: target.request_id, caused_by_event_id: target.input_event_id, stage: 'received' })
           this.runner().advance(eventId)
           this.runnerGoalText(task, target.request_id, target.intent_revision + 1)
@@ -712,7 +722,8 @@ export class RuntimeStore {
         } else {
           const manifest = 'view_id' in route && route.view_id ? this.chapters().state.manifest(task, route.view_id) : null
           const legacy = manifest && !manifest.content_tree && 'region_ids' in route && route.region_ids
-          answer = await runPhase(createConversationReadingProfile(grants), true, `conversation-read:${operation}`, legacy ? chapterContext(this.bundle(manifest.bundle_resource_id), manifest, route.region_ids!) : undefined)
+          const boundViews = this.precedingViewGrants(boundResult)
+          answer = await runPhase(createConversationReadingProfile([...grants, ...boundViews], boundViews.length > 0), true, `conversation-read:${operation}`, legacy && !boundViews.length ? chapterContext(this.bundle(manifest.bundle_resource_id), manifest, route.region_ids!) : undefined)
         }
         valid()
         this.db.transaction(() => {
@@ -794,7 +805,11 @@ export class RuntimeStore {
   private conversationProgress(task: string, routing: string, message?: string, request?: string): string {
     const labels: Record<string, string> = { queued: '排队中', confirmation_required: '等待确认', started: '已受理', rejected: '未能执行', running: '执行中', waiting: '等待中', completed: '已完成', failed: '失败', cancelled: '已停止', interrupted: '已中断' }
     if (!message || !request) {
-      const states = this.db.prepare("SELECT state,count(*) AS count FROM runs WHERE task_id=? AND id!=? AND COALESCE(primary_reason,'') NOT IN ('conversation_routed','conversation_replied') GROUP BY state").all(task, routing) as { state: string; count: number }[]
+      const states = this.db.prepare(`SELECT c.state,count(*) AS count FROM runs c
+        LEFT JOIN requests q ON q.task_id=c.task_id AND q.id=c.request_id
+        WHERE c.task_id=? AND c.id!=? AND COALESCE(c.primary_reason,'')!='conversation_routed'
+        AND NOT (c.id IS json_extract(q.input_json,'$.conversation_run_id') AND json_extract(q.input_json,'$.conversation_route') IS 'progress')
+        GROUP BY c.state`).all(task, routing) as { state: string; count: number }[]
       return states.length ? states.map(({ state, count }) => `${labels[state] ?? state}：${count} 次`).join('\n') : '当前任务还没有其他执行记录。'
     }
     const saved = this.one('SELECT state,input_json FROM requests WHERE task_id=? AND id=?', task, request), input = JSON.parse(saved.input_json)
@@ -1179,7 +1194,7 @@ export class RuntimeStore {
       return { id: v.id, revision: v.revision, state_revision: v.state_revision, draft: JSON.parse(v.draft_json), bundle: checked.bundle, presentation: { html: checked.html, css: checked.css, ...(error ? { error } : {}) }, ...(manifest && manifest.view_revision === v.revision ? { chapter_manifest: manifest, chapter_updates: chapters.updates(taskId, v.id) } : {}) }
     })
     return {
-      runtime_epoch: this.epoch, task, surface: { id: surface.id, revision: surface.revision, layout }, view_page: { offset, limit: 10, total },
+      runtime_epoch: this.epoch, task, task_archived: this.taskArchived(taskId), surface: { id: surface.id, revision: surface.revision, layout }, view_page: { offset, limit: 10, total },
       ...(this.features.runner ? { runner: this.features.runner.conversationRouting
         ? { goals: [], next_cursor: null, scope: new RunnerHostStatus(this.db, this.epoch).scope(taskId) }
         : this.runnerGoals({ task_id: taskId, limit: 16 }) } : {}),
@@ -1199,11 +1214,14 @@ export class RuntimeStore {
   private messageRequests(task: string): NonNullable<Snapshot['message_requests']> {
     return this.db.prepare("SELECT id,state,json_extract(input_json,'$.code') AS code FROM requests WHERE task_id=? ORDER BY rowid DESC LIMIT 50").all(task) as NonNullable<Snapshot['message_requests']>
   }
+  private taskArchived(task: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM task_organization WHERE task_id=? AND archived=1').get(task)
+  }
   private subscribe(task: string, after?: { runtime_epoch: string; sequence: number }): unknown {
     this.settlePluginCleanup()
     this.task(task)
     const facts = json([
-      this.one('SELECT revision FROM tasks WHERE id=?', task), this.viewPages.get(task) ?? 0,
+      this.one('SELECT revision FROM tasks WHERE id=?', task), this.taskArchived(task), this.viewPages.get(task) ?? 0,
       this.db.prepare('SELECT revision,state_revision FROM views WHERE surface_id IN (SELECT id FROM surfaces WHERE task_id=?) ORDER BY id').all(task),
       this.db.prepare('SELECT state,wait_reason,primary_reason,budget_json FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 50').all(task),
       this.messageRequests(task),
@@ -1331,32 +1349,43 @@ export class RuntimeStore {
       LEFT JOIN requests q ON q.task_id=r.task_id AND q.id=json_extract(r.payload_json,'$.request_id') WHERE g.task_id=? AND g.request_id=? AND g.intent_revision=?`, task, request, revision)
     const payload = JSON.parse(source.payload_json)
     const input = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', task, request).input_json)
+    const accepted = source.accepted_input ? JSON.parse(source.accepted_input) : undefined
     // Old requests have no snapshot. Their own input still fixes the boundary;
     // replay and restart must never pull in later Task or sibling-worker events.
-    const binding: ConversationBinding = payload.conversation ?? (source.accepted_input ? JSON.parse(source.accepted_input).conversation : undefined) ?? (revision === 1 ? input.conversation : undefined) ?? { version: 1, through_sequence: source.sequence - 1, reply_to_request_id: null }
-    return this.loadBoundConversation(task, binding, input.conversation_dependency)
+    const binding: ConversationBinding = payload.conversation ?? accepted?.conversation ?? (revision === 1 ? input.conversation : undefined) ?? { version: 1, through_sequence: source.sequence - 1, reply_to_request_id: null }
+    return this.loadBoundConversation(task, binding, accepted?.conversation_dependency ?? input.conversation_dependency)
+  }
+  private boundConversationResult(task: string, dependency?: BoundConversationDependency): ConversationResult | null {
+    if (!dependency?.result_id) return null
+    return conversationDependencyResult(this.db, task, dependency.message_id, dependency.request_id, dependency.result_id)
+      ?? fail('CONVERSATION_DEPENDENCY_UNAVAILABLE', 'The exact preceding result is unavailable')
   }
   private loadBoundConversation(task: string, binding: ConversationBinding, dependency?: BoundConversationDependency): ConversationHistory {
-    const history = loadConversation(this.db, task, binding)
-    if (dependency?.result_id) {
-      const result = conversationDependencyResult(this.db, task, dependency.message_id, dependency.request_id)
-      if (!result || result.id !== dependency.result_id) fail('CONVERSATION_DEPENDENCY_UNAVAILABLE', 'The exact preceding result is unavailable')
-      if (result.text !== null && !history.messages.some(item => item.source.id === result.id)) {
-        history.messages.push({ source: { task_id: task, id: result.id, sequence: result.sequence, kind: result.kind }, message: { role: 'assistant', content: 'publication' in result ? json({ text: result.text, publication: result.publication }) : result.text } })
-        history.messages.sort((a, b) => a.source.sequence - b.source.sequence)
-      }
-      if (result.text === null && !history.refs.some(ref => ref.id === result.id)) { history.refs.push({ kind: 'event', id: result.id }); history.truncated = true }
-    }
-    return history
+    const history = loadConversation(this.db, task, binding), result = this.boundConversationResult(task, dependency)
+    return result ? { ...history, preceding_result: result } : history
+  }
+  private precedingViewGrants(result?: ConversationResult | null): WorkerGrant[] {
+    return result?.views?.length ? [
+      { type: 'read', kind: 'view_history', ids: result.views.map(view => view.history.id) },
+      { type: 'read', kind: 'resource', ids: result.views.map(view => view.content.id) }
+    ] : []
+  }
+  private runnerCorrectionInputs(task: string, request: string, revision: number): Row[] {
+    return this.db.prepare(`SELECT r.id,q.id AS request_id,q.input_json,q.config_selection_json FROM runner_content_plans g
+      JOIN runner_inputs i ON i.task_id=g.task_id AND i.input_event_id=g.input_event_id AND i.kind='correction'
+      JOIN records r ON r.task_id=i.task_id AND r.id=i.record_id AND r.kind='message.user'
+      JOIN requests q ON q.task_id=r.task_id AND q.id=json_extract(r.payload_json,'$.request_id')
+      WHERE g.task_id=? AND g.request_id=? AND g.intent_revision<=? ORDER BY g.intent_revision`).all(task, request, revision) as Row[]
   }
   private pumpRunnerGoals(task: string): void {
     if (!this.features.runner || this.closing || this.closed || this.recoveringRunnerInputs.has(task) || this.task(task).state !== 'active') return
+    // Dialogue corrections re-enter the persistent message queue after routing.
+    if (this.features.runner.conversationRouting) return
     const goals = this.db.prepare(`SELECT h.request_id,h.intent_revision FROM runner_current_content_plans h
-      JOIN runner_inputs i ON i.task_id=h.task_id AND i.input_event_id=h.input_event_id
-      WHERE h.task_id=? AND json_extract(h.payload_json,'$.state')='active' AND (?=0 OR i.kind='correction')
+      WHERE h.task_id=? AND json_extract(h.payload_json,'$.state')='active'
       AND NOT EXISTS (SELECT 1 FROM runner_content_removals d WHERE d.task_id=h.task_id AND d.request_id=h.request_id AND d.intent_revision=h.intent_revision)
       AND NOT EXISTS (SELECT 1 FROM runner_runs r WHERE r.task_id=h.task_id AND r.request_id=h.request_id AND r.intent_revision=h.intent_revision AND r.purpose='production')
-      ORDER BY h.position LIMIT 32`).all(task, Number(!!this.features.runner.conversationRouting)) as Row[]
+      ORDER BY h.position LIMIT 32`).all(task) as Row[]
     for (const goal of goals) {
       if (this.preparingRunnerGoals.has(goal.request_id) || !this.runnerRunAvailable(task, goal.request_id)) continue
       this.preparingRunnerGoals.add(goal.request_id)
@@ -1366,16 +1395,13 @@ export class RuntimeStore {
       }).finally(() => { if (this.epoch === epoch) this.preparingRunnerGoals.delete(goal.request_id) })
     }
   }
-  private async startRunnerGoal(task: string, request: string, revision: number): Promise<string | null> {
+  private async startRunnerGoal(task: string, request: string, revision: number, pending?: { id: string; row: Row; materials: Row[] }): Promise<string | null> {
     const epoch = this.epoch
-    const row = this.one('SELECT config_selection_json,input_json FROM requests WHERE task_id=? AND id=?', task, request), selection = JSON.parse(row.config_selection_json), input = JSON.parse(row.input_json)
-    const correctiveInputs = this.db.prepare(`SELECT r.id,q.id AS request_id,q.input_json FROM runner_content_plans g
-      JOIN runner_inputs i ON i.task_id=g.task_id AND i.input_event_id=g.input_event_id AND i.kind='correction'
-      JOIN records r ON r.task_id=i.task_id AND r.id=i.record_id AND r.kind='message.user'
-      JOIN requests q ON q.task_id=r.task_id AND q.id=json_extract(r.payload_json,'$.request_id')
-      WHERE g.task_id=? AND g.request_id=? AND g.intent_revision<=? ORDER BY g.intent_revision`).all(task, request, revision) as Row[]
+    const row = this.one('SELECT config_selection_json,input_json FROM requests WHERE task_id=? AND id=?', task, request), selection = JSON.parse((pending?.row ?? row).config_selection_json), input = JSON.parse(row.input_json)
+    const correctiveInputs = this.runnerCorrectionInputs(task, request, revision)
     const correction = correctiveInputs.at(-1)
-    const sources: Row[] = [...(input.bound_materials ?? []), ...correctiveInputs.flatMap(row => JSON.parse(row.input_json).bound_materials ?? [])]
+    if (pending && correction?.request_id !== pending.id) fail('CONTENT_REQUIREMENT_UNAVAILABLE', 'The queued correction no longer owns this revision')
+    const sources: Row[] = [...(input.bound_materials ?? []), ...correctiveInputs.flatMap(row => row.request_id === pending?.id ? pending!.materials : JSON.parse(row.input_json).bound_materials ?? [])]
     const checked = sources.map(source => this.requestMaterial(task, source.id))
     if (json(checked) !== json(sources)) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Original material binding changed')
     const materials = [...new Map(checked.map(material => [material.id, material])).values()]
@@ -1387,7 +1413,17 @@ export class RuntimeStore {
     if (this.epoch !== epoch) return null
     this.acceptWork(); this.recovery.assertWrite()
     const state = new RunnerWorkState(this.db, this.epoch), goal = state.goal(request)
-    if (goal.task_id !== task || goal.intent_revision !== revision || goal.state !== 'active' || !this.runnerRunAvailable(task, request)) return null
+    if (goal.task_id !== task || goal.intent_revision !== revision || goal.state !== 'active') {
+      if (pending) fail('CONTENT_REQUIREMENT_UNAVAILABLE', 'The queued correction no longer owns the current revision')
+      return null
+    }
+    if (this.db.prepare('SELECT 1 FROM runner_content_removals WHERE task_id=? AND request_id=? AND intent_revision=?').get(task, request, revision)) return null
+    if (!this.runnerRunAvailable(task, request)) return null
+    if (pending) {
+      const fresh = this.one('SELECT state,input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, pending.id)
+      if (fresh.state !== 'queued' || fresh.input_json !== pending.row.input_json || fresh.config_selection_json !== pending.row.config_selection_json) return null
+      if (json(this.requestSelection(selection.id)) !== pending.row.config_selection_json) fail('REQUEST_CONFIGURATION_CHANGED', 'Confirm the model configuration for the correction')
+    }
     const main = this.models.acquire(selection.id, 'main')
     let compact: ModelLease | undefined, approval: ModelLease | undefined
     const runId = id()
@@ -1405,7 +1441,11 @@ export class RuntimeStore {
         const previous = this.db.prepare("SELECT run_id FROM runner_runs WHERE task_id=? AND request_id=? AND purpose='production' ORDER BY rowid DESC LIMIT 1").get(task, request) as Row | undefined
         this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, task, request, this.epoch, json({ ...defaults, run: main.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now())
         this.installRunnerProduction(task, request, runId, main, materials, correction?.id)
-        if (correction) this.db.prepare('UPDATE requests SET input_json=? WHERE id=? AND task_id=?').run(json({ ...JSON.parse(correction.input_json), correction_run_id: runId }), correction.request_id, task)
+        if (correction) {
+          const saved = JSON.parse(correction.input_json)
+          delete saved.correction_pending
+          this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE id=? AND task_id=?").run(json({ ...saved, code: null, correction_run_id: runId, ...(pending ? { bound_materials: pending.materials } : {}) }), correction.request_id, task)
+        }
         this.record(task, 'runner.production.started', { run_id: runId, request_id: request, intent_revision: revision, input_event_id: goal.input_event_id, previous_run_id: previous?.run_id ?? null })
       })()
     } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
@@ -1489,9 +1529,14 @@ export class RuntimeStore {
     const state = new RunnerWorkState(this.db, epoch), previous = state.run(previousRunId)
     if (previous.purpose !== 'production') fail('RUNNER_RECOVERY_INELIGIBLE', 'Only undispatched production can resume')
     const request = previous.request_id, row = this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, request)
-    const input = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json)
-    const materials = (input.bound_materials ?? []).map((source: Row) => this.requestMaterial(task, source.id))
-    if (json(materials) !== json(input.bound_materials ?? [])) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Recovery retains exact original materials')
+    const input = JSON.parse(row.input_json), corrections = this.runnerCorrectionInputs(task, request, previous.intent_revision)
+    const correction = corrections.find(item => item.id === previous.message_id)
+    const sourceRequest = correction?.request_id ?? request, selectionRow = correction ?? row
+    const selection = JSON.parse(selectionRow.config_selection_json)
+    const sources: Row[] = [...(input.bound_materials ?? []), ...corrections.flatMap(item => JSON.parse(item.input_json).bound_materials ?? [])]
+    const checked = sources.map(source => this.requestMaterial(task, source.id))
+    if (json(checked) !== json(sources)) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Recovery retains exact original materials')
+    const materials = [...new Map(checked.map(material => [material.id, material])).values()]
     for (const resource of materials) if (resource.byte_length > defaults.resource.inline_bytes) {
       const source = this.one('SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', task, resource.id)
       await readPluginResource(this.root, source as any, 0, true)
@@ -1519,12 +1564,14 @@ export class RuntimeStore {
           recheck: () => {
             this.acceptWork(); this.recovery.assertWrite()
             if (!this.runnerRunAvailable(task, request)) fail('RUN_BUSY', 'Recovery awaits production admission')
-            if (this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, request).config_selection_json !== row.config_selection_json || json(materials.map((source: Row) => this.requestMaterial(task, source.id))) !== json(materials)) fail('REQUEST_SOURCE_INVALID', 'Recovery bindings changed during preparation')
+            const current = this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, sourceRequest)
+            if (current.config_selection_json !== selectionRow.config_selection_json || current.input_json !== selectionRow.input_json || json(materials.map(source => this.requestMaterial(task, source.id))) !== json(materials)) fail('REQUEST_SOURCE_INVALID', 'Recovery bindings changed during preparation')
           },
           installRun: () => { this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, task, request, epoch, json({ ...defaults, run: main.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now()) }
         })
         const source = this.runnerComposition().source(task, request, previous.intent_revision)
         if (source && works.some(work => work.work_id === source.work_id)) this.runnerComposition().designateSource({ ...source, plan_revision: state.work(source.work_id).plan_revision }, { work_id: source.work_id, plan_revision: source.plan_revision })
+        if (correction) this.db.prepare("UPDATE requests SET input_json=json_set(input_json,'$.correction_run_id',?) WHERE task_id=? AND id=?").run(runId, task, sourceRequest)
         this.record(task, 'runner.production.resumed', { run_id: runId, previous_run_id: previous.run_id, request_id: request, intent_revision: previous.intent_revision, work_ids: works.map(work => work.work_id), attempt_ids: attempts.map(attempt => attempt.attempt_id), budget_id: previous.budget_id })
       })()
       this.agents.set(runId, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
@@ -1537,7 +1584,8 @@ export class RuntimeStore {
     return [
       { type: 'list', kind: 'content_tree' }, { type: 'read', kind: 'content_tree' }, { type: 'read', kind: 'content_node' },
       { type: 'list', kind: 'resource' }, { type: 'read', kind: 'resource' },
-      { type: 'read', kind: 'event', ids: [...new Set([...conversation.refs.map(ref => ref.id), ...conversation.messages.map(item => item.source.id)])] },
+      { type: 'read', kind: 'event', ids: [...new Set([...conversation.refs.map(ref => ref.id), ...conversation.messages.map(item => item.source.id), ...(conversation.preceding_result ? [conversation.preceding_result.id] : [])])] },
+      ...this.precedingViewGrants(conversation.preceding_result),
       { type: 'list', kind: 'task_data' }, { type: 'read', kind: 'task_data' },
       { type: 'list', kind: 'plugin' }, { type: 'read', kind: 'plugin' },
       { type: 'list', kind: 'capability' }, { type: 'read', kind: 'capability', ids: capabilities },
@@ -1784,9 +1832,11 @@ export class RuntimeStore {
         const text = input?.text ?? (run.purpose === 'production' ? this.runnerGoalText(taskId, run.request_id, run.intent_revision) : JSON.parse(this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.trigger_request_id, taskId).input_json).text)
         if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > defaults.data.object_bytes) fail('INVALID_INPUT', 'Worker input must be nonempty and bounded')
         const materials = worker.context.navigation(attempt.input_versions)
-        const bound = input?.bound === undefined ? {} : { bound: input.bound }
+        const bound = { ...(input?.bound === undefined ? {} : { bound: input.bound }), ...(conversation?.preceding_result ? { preceding_result: conversation.preceding_result } : {}) }
         if (Buffer.byteLength(json(bound)) > defaults.transport.rpc_message_bytes) fail('INPUT_TOO_LARGE', 'Bound worker input exceeds transport capacity')
-        const navigation = (history?: ConversationHistory) => history ? { conversation_history: { refs: history.refs, truncated: history.truncated, notice: 'Earlier messages belong to this Task conversation. Use the read event tool with these exact IDs for complete originals when needed.' } } : {}
+        const navigation = (history?: ConversationHistory) => history ? { conversation_history: { refs: history.refs, truncated: history.truncated, notice: history.preceding_result
+          ? 'Read earlier replies by exact event ID. For preceding_result, use views[].content for the exact published body and views[].history for version metadata. Read its event if text is null.'
+          : 'Earlier messages belong to this Task conversation. Use the read event tool with these exact IDs for complete originals when needed.' } } : {}
         if (conversation) conversation = fitConversation(conversation, history => !worker.budget.plan([
           { role: 'system', content: profile.system }, ...history.messages.map(item => item.message),
           { role: 'user', content: JSON.stringify({ request: text, request_materials: materials, ...bound, ...navigation(history) }) }
@@ -2680,6 +2730,9 @@ export class RuntimeStore {
     const production = db.prepare(`SELECT n.run_id AS id FROM runner_runs n JOIN runs r ON r.task_id=n.task_id AND r.id=n.run_id
       WHERE n.task_id=? AND n.request_id=? AND n.purpose='production' AND r.state IN ('running','waiting')`).all(task, request) as Row[]
     db.prepare('INSERT INTO runner_content_removals(task_id,request_id,intent_revision,message_id) VALUES (?,?,?,?)').run(task, request, target.intent_revision, message)
+    db.prepare(`UPDATE requests SET state='rejected',input_json=json_set(input_json,'$.code','CONTENT_REQUIREMENT_UNAVAILABLE')
+      WHERE task_id=? AND state IN ('queued','confirmation_required') AND json_extract(input_json,'$.correction_pending')=1
+        AND json_extract(input_json,'$.user_record_id')=?`).run(task, origin)
     const artifacts = this.runnerArtifacts(), outline = artifacts.outline(task)
     if (outline?.sections.some(section => section.request_id === request)) artifacts.installOutline({ ...outline,
       base_outline_revision: outline.outline_revision, outline_revision: outline.outline_revision + 1, sections: outline.sections.filter(section => section.request_id !== request) })
@@ -2740,7 +2793,7 @@ export class RuntimeStore {
     return this.taskRunner ??= new TaskRunner(new RunnerWorkState(this.db, this.epoch), {
       goal: (input, current) => {
         if (this.features.runner?.conversationRouting && !(input.kind === 'correction' && current && input.caused_by_event_id === current.input_event_id && this.db.prepare(`SELECT 1 FROM requests q JOIN records r ON r.task_id=q.task_id AND r.id=json_extract(q.input_json,'$.user_record_id')
-          WHERE q.task_id=? AND q.state='started' AND r.kind='message.user' AND r.id=? AND q.id=json_extract(r.payload_json,'$.request_id')
+          WHERE q.task_id=? AND q.state='queued' AND json_extract(q.input_json,'$.correction_pending')=1 AND r.kind='message.user' AND r.id=? AND q.id=json_extract(r.payload_json,'$.request_id')
           AND json_extract(q.input_json,'$.conversation_route')='correct_pending' AND json_extract(q.input_json,'$.corrects_request_id')=?`).get(input.task_id, input.record_id, current.request_id))) fail('UNSUPPORTED_OPERATION', 'Only a correction from an accepted conversation message can revise a content plan')
         if (input.kind !== 'request' && !current) fail('RUNNER_NOT_FOUND', 'The target goal does not exist')
         if (input.kind === 'request' && current) fail('RUNNER_INPUT_CONFLICT', 'A new goal cannot replace an existing goal')

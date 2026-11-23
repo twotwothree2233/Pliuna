@@ -1,5 +1,5 @@
 import { applicationPreference } from '../../shared/branding'
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import type { HostRequest, Snapshot, Task, TaskListItem, View } from '../../shared/types'
@@ -532,6 +532,7 @@ function App() {
   const generation = useRef(0)
   const syncQuery = useRef(0)
   const syncState = useRef<{ task: string; cursor: { runtime_epoch: string; sequence: number }; snapshot: Snapshot } | null>(null)
+  const openedFromArchive = useRef(false)
   function installSnapshot(next: Snapshot) {
     setSnapshot(previous => {
       if (previous?.task.id === next.task.id && previous.runtime_epoch === next.runtime_epoch) {
@@ -566,17 +567,31 @@ function App() {
       if (generation.current === gen && query === syncQuery.current && selected.current === taskId && next) { syncState.current = { task: taskId, cursor: { runtime_epoch: reply.runtime_epoch, sequence: reply.sequence }, snapshot: next }; installSnapshot(next) }
     }
   }
-  function changeSelection(taskId: string | null) {
+  function changeSelection(taskId: string | null, archived = false) {
     if (selected.current) composerDrafts.current.set(selected.current, text)
-    generation.current++; selected.current = taskId; syncState.current = null
+    generation.current++; selected.current = taskId; openedFromArchive.current = archived; syncState.current = null
     setSnapshot(null); setTaskQueue(null); setFlowFocus(null); setApprovalTarget(null); setText(taskId ? composerDrafts.current.get(taskId) ?? '' : ''); setTab('surface'); setError('')
     if (taskId) workspace.current?.showContent()
   }
   async function select(taskId: string) {
     if (organizing.current?.archiveTaskId === taskId || !canLeave()) return
-    changeSelection(taskId)
+    changeSelection(taskId, tasks.some(item => item.id === taskId && item.archived))
     try { await refresh() } catch (e) { setError(String(e)); setConnected(false) }
   }
+  const leaveArchivedTask = useEffectEvent(() => {
+    if (!snapshot || snapshot.task.id !== selected.current) return
+    if (!snapshot.task_archived) { openedFromArchive.current = false; return }
+    if (openedFromArchive.current || busy || organizing.current || submissions.current.size || maintenance.current || replacing.current || dirty.current.size) return
+    changeSelection(null)
+    setOrganizationFeedback({ error: false, text: '任务已归档' })
+  })
+  useEffect(() => {
+    leaveArchivedTask()
+    // Draft writes may settle without rendering App. Retry only while viewing a newly archived task.
+    if (!snapshot?.task_archived || openedFromArchive.current || selected.current !== snapshot.task.id) return
+    const retry = setInterval(leaveArchivedTask, 300)
+    return () => clearInterval(retry)
+  }, [snapshot?.task.id, snapshot?.task_archived, busy])
   function changeTaskFilter(name: string, group: TaskFilter) {
     const groupChanged = group !== taskFilter.current.group
     taskFilter.current = { name, group }
@@ -695,7 +710,7 @@ function App() {
       <div className="sidebar-footer"><button onClick={() => void settings()} title={`设置（${shortcutLabel(',')}）`}><WorkspaceIcon name="settings" />设置</button></div>
     </>}
     content={<>{snapshot && <header className="task-heading">
-      <div className="task-heading-copy"><h1>{snapshot.task.title}</h1><div className="task-heading-meta"><span className="task-phase" data-phase={reviewCount ? 'review' : currentListTask?.phase ?? (run ? 'running' : 'ready')}>{currentListTask?.archived ? '已归档' : reviewCount ? '待确认' : taskState(snapshot.task)}</span><TaskTime at={snapshot.records.at(-1)?.created_at ?? currentListTask?.last_activity_at} /></div></div>
+      <div className="task-heading-copy"><h1>{snapshot.task.title}</h1><div className="task-heading-meta"><span className="task-phase" data-phase={snapshot.task_archived ? 'inactive' : reviewCount ? 'review' : currentListTask?.phase ?? (run ? 'running' : 'ready')}>{snapshot.task_archived ? '已归档' : reviewCount ? '待确认' : taskState(snapshot.task)}</span><TaskTime at={snapshot.records.at(-1)?.created_at ?? currentListTask?.last_activity_at} /></div></div>
       <div className="task-heading-actions"><button disabled={busy || exportOpen} onClick={() => setExportOpen(true)}><WorkspaceIcon name="download" />导出内容</button><details className="task-management"><summary aria-label="任务管理" title="任务管理"><WorkspaceIcon name="more" /></summary><div><button disabled={busy || snapshot.task.state === 'stopping'} onClick={() => void act({ type: snapshot.task.state === 'stopped' ? 'task.resume' : 'task.stop', task_id: snapshot.task.id })}>{snapshot.task.state === 'stopped' ? '恢复任务' : snapshot.task.state === 'stopping' ? '停止中…' : '停止任务'}</button><button disabled={busy} onClick={async () => { if (!canLeave() || !confirm('永久删除任务及应用内记录？此操作不能撤销。资源文件先保留并登记收尾，只有全部保护解除后，才能在“存储检查”另行确认物理回收。')) return; setBusy(true); try { const recovery = await request<{ active: { id: string; task_ids: string[] } | null }>({ type: 'maintenance.status' }); const affected = recovery.active?.task_ids.includes(snapshot.task.id) ? recovery.active.id : undefined; if (affected && !confirm('该任务包含在当前唯一有效恢复点中。继续删除会先废止整个恢复点（包括其他任务的恢复能力），不能撤销。确认继续？')) return; await request({ type: 'task.delete', task_id: snapshot.task.id, ...(affected ? { invalidate_recovery_id: affected } : {}) }); composerDrafts.current.delete(snapshot.task.id); selected.current = null; generation.current++; setSnapshot(null); setTaskQueue(null); setText(''); setError(''); await refresh() } catch (e) { setError(String(e)) } finally { setBusy(false) } }}>删除</button></div></details></div></header>}
     {detachedDrafts.length > 0 && <section className="notice" aria-label="恢复前未发送文本"><h3>恢复前未发送文本（只读，未自动发送）</h3>{detachedDrafts.map((draft, index) => <pre key={index}>{draft}</pre>)}<button onClick={() => { if (confirm('确认清除当前窗口保留的恢复前未发送文本？')) setDetachedDrafts([]) }}>清除恢复前文本</button></section>}
     {maintenanceUnknown && <div className="error" role="alert">维护结果尚未确认，输入保持暂停。<button onClick={() => void queryMaintenance().catch(e => setError(String(e)))}>查询原维护结果</button></div>}

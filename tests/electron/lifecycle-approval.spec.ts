@@ -13,6 +13,7 @@ const electronPath: string = createRequire(import.meta.url)('electron')
 const dataSchema = { type: 'object', properties: { stage: { type: 'string' } }, required: ['stage'], additionalProperties: false }
 
 test('approval settings switch modes and let users choose the approval model', async () => {
+  const server = await modelServer(({ body }, res) => { if (!synthetic(body, res)) textStream(res, 'Unexpected model input') })
   const directory = await mkdtemp(join(tmpdir(), 'pliuna-approval-settings-'))
   const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
   try {
@@ -36,7 +37,7 @@ test('approval settings switch modes and let users choose the approval model', a
     await closeSettings(page)
 
     for (const id of ['review-a', 'review-b']) {
-      await configureModel(page, { id, model: id, url: 'https://example.invalid/v1', key: 'test-key', context: 64000 })
+      await configureModel(page, { id, model: id, url: server.url, key: 'test-key', context: 64000 })
     }
     await openSettings(page, '权限与审批')
     await automatic.check()
@@ -53,6 +54,22 @@ test('approval settings switch modes and let users choose the approval model', a
     await expect(consent).toBeHidden()
     expect(await current()).toEqual({ mode: 'assisted', model_id: 'review-a' })
 
+    await openSettings(page, '模型服务')
+    await page.getByRole('button', { name: '渠道设置', exact: true }).click()
+    const channel = page.getByRole('dialog', { name: '渠道设置', exact: true })
+    await channel.getByLabel('API Key', { exact: true }).fill('rotated-test-key')
+    await channel.getByRole('button', { name: '保存渠道', exact: true }).click()
+    await expect(channel).toHaveCount(0)
+    await openSettings(page, '权限与审批')
+    await expect(automatic).toBeChecked()
+    await expect(model).toHaveValue('review-a')
+    await expect(page.getByText('当前模型需要重新验证')).toBeVisible()
+    const retest = page.getByRole('button', { name: '同意并重新验证', exact: true })
+    await retest.click()
+    await expect(retest).toBeHidden()
+    expect(await current()).toEqual({ mode: 'assisted', model_id: 'review-a' })
+    expect(server.exchanges.at(-1)!.authorization).toBe('Bearer rotated-test-key')
+
     await manual.check()
     await expect(model).toBeHidden()
     expect(await current()).toEqual({ mode: 'assisted', model_id: 'review-a' })
@@ -60,7 +77,32 @@ test('approval settings switch modes and let users choose the approval model', a
     await save.click()
     await expect(save).toBeHidden()
     expect(await current()).toEqual({ mode: 'manual', model_id: '' })
-  } finally { await app.close(); await rm(directory, { recursive: true, force: true }) }
+  } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('cancelling a pending approval model test keeps the saved mode and unlocks settings', async () => {
+  const server = await modelServer(({ body }, res) => {
+    if (!body.messages?.[0]?.content?.startsWith('Synthetic approval') && !synthetic(body, res)) textStream(res, 'Unexpected model input')
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-cancel-approval-test-'))
+  const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
+  try {
+    const page = await app.firstWindow()
+    await configureModel(page, { id: 'waiting-review', model: 'waiting-review', url: server.url, key: 'test-key', context: 64000 })
+    await openSettings(page, '权限与审批')
+    const automatic = page.getByRole('radio', { name: '自动', exact: true })
+    const model = page.getByLabel('审批模型', { exact: true })
+    await automatic.check()
+    await model.selectOption('waiting-review')
+    await page.getByRole('button', { name: '同意并保存', exact: true }).click()
+    await expect.poll(() => server.exchanges.some(({ body }) => body.messages?.[0]?.content?.startsWith('Synthetic approval'))).toBe(true)
+    await expect(model).toBeDisabled()
+    const cancel = page.getByRole('button', { name: '取消审批模型测试', exact: true })
+    await cancel.click()
+    await expect(cancel).toBeHidden()
+    await expect(model).toBeEnabled()
+    expect(await page.evaluate(() => window.pliuna.request({ type: 'model.list' }))).toMatchObject({ ok: true, data: { approval: { mode: 'manual', model_id: '' } } })
+  } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })
 
 async function configure(page: Page, url: string, approval = false) {

@@ -15,7 +15,7 @@ import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { loadConversation } from '../../src/runtime/runner/conversation'
 import { RuntimeStore } from '../../src/runtime/store'
 import { artifactDraft } from '../helpers/producer-draft'
-import type { LiveFlowSnapshot } from '../../src/shared/types'
+import type { LiveFlowSnapshot, TaskMessagePage } from '../../src/shared/types'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks() })
@@ -31,9 +31,16 @@ function setup(conversationRouting = false, context_tokens = 100000) {
   const directory = mkdtempSync(join(tmpdir(), 'pliuna-chapter-runtime-')), adapter = new ChatAdapter(), models = new ModelService(adapter)
   const config: ModelConfiguration = { id: 'chapter-model', base_url: 'https://example.invalid/v1', wire_model_id: 'fixture', context_tokens, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }
   models.configure({ type: 'model.configure', configuration: config, api_key: 'fixture-key', confirm_memory_only: true })
-  vi.spyOn(models, 'acquire').mockImplementation((): ModelLease => ({ id: config.id, revision: 1, config, release: vi.fn() }))
+  const other = { ...config, id: 'other-channel-model', base_url: 'https://other.example.invalid/v1' }
+  const revisions: Record<string, number> = { [config.id]: 1, [other.id]: 1 }
+  models.configure({ type: 'model.configure', configuration: other, api_key: 'fixture-key', confirm_memory_only: true })
+  const reviseModel = async (id: string) => {
+    const revision = revisions[id] = revisions[id]! + 1
+    await models.configure({ type: 'model.configure', configuration: id === other.id ? other : config, api_key: `fixture-key-${revision}`, confirm_memory_only: true })
+  }
+  vi.spyOn(models, 'acquire').mockImplementation(id => ({ id, revision: revisions[id]!, config: id === other.id ? other : config, release: vi.fn() } satisfies ModelLease))
   vi.spyOn(models, 'acquireCompaction').mockReturnValue(undefined)
-  vi.spyOn(models, 'list').mockReturnValue([{ ...config, revision: 1, roles: ['main'], credential_missing: false }])
+  vi.spyOn(models, 'list').mockImplementation(() => [config, other].map(model => ({ ...model, revision: revisions[model.id]!, roles: ['main'], credential_missing: false })))
   let store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting } })
   cleanups.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
   const internal = () => store as unknown as { db: Database.Database; epoch: string; features: { viewReplacement: boolean } }
@@ -43,7 +50,7 @@ function setup(conversationRouting = false, context_tokens = 100000) {
   const status = (update_id: string) => store.handle({ type: 'chapter.status', task_id: task, update_id }) as ChapterUpdate
   const records = (kind: string) => (internal().db.prepare('SELECT payload_json FROM records WHERE task_id=? AND kind=? ORDER BY sequence').all(task, kind) as { payload_json: string }[]).map(row => JSON.parse(row.payload_json))
   const restart = () => { store.close(); store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting } }); return store }
-  return { get store() { return store }, internal, directory, task, complete, state, snapshot, status, records, restart, conversationRouting }
+  return { get store() { return store }, internal, directory, task, complete, state, snapshot, status, records, restart, conversationRouting, reviseModel }
 }
 type Fixture = ReturnType<typeof setup>
 
@@ -99,7 +106,7 @@ async function publishOriginal(s: Fixture, content = bundle(), beforePublish?: (
   return s.snapshot().views[0]!
 }
 
-const sendTurn = (s: Fixture, text: string) => (s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }).request_id
+const sendTurn = (s: Fixture, text: string, model_config_id = 'chapter-model') => (s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id, resource_ids: [], import_ids: [] }) as { request_id: string }).request_id
 const turnStatus = (s: Fixture, request_id: string) => s.store.handle({ type: 'request.status', task_id: s.task, request_id }) as { state: string; code: string; run_id: string; run_state: string }
 const turnMessage = (s: Fixture, request: string) => (s.internal().db.prepare("SELECT json_extract(input_json,'$.user_record_id') AS id FROM requests WHERE task_id=? AND id=?").get(s.task, request) as { id: string }).id
 
@@ -109,13 +116,15 @@ test('answers targeted progress while both production models are streaming and c
   const a = sendTurn(s, 'Create a short museum guide in English.'), aMessage = turnMessage(s, a)
   await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(2))
   s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => bHold.promise)
-  const b = sendTurn(s, 'Create a separate travel budget.'), bMessage = turnMessage(s, b)
+  const b = sendTurn(s, 'Create a separate travel budget.', 'other-channel-model'), bMessage = turnMessage(s, b)
   await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(4))
   const aRun = turnStatus(s, a).run_id, bRun = turnStatus(s, b).run_id
   s.complete.mockResolvedValueOnce(answer({ kind: 'progress', message_id: bMessage }))
   const progress = sendTurn(s, 'How is the travel budget progressing?')
   await vi.waitFor(() => expect(turnStatus(s, progress)).toMatchObject({ state: 'started', run_state: 'completed' }))
   expect(s.records('conversation.reply')).toMatchObject([{ request_id: progress, reply_to: turnMessage(s, progress), reference_message_id: bMessage, text: '此请求：执行中。' }])
+  const messages = s.store.handle({ type: 'host.messages.page', task_id: s.task }) as TaskMessagePage
+  expect(messages.items.find(item => item.kind === 'conversation.reply')).toMatchObject({ reply_to: turnMessage(s, progress), reference_message_id: bMessage })
   const bWork = s.state().taskWorks(s.task).find(work => work.run_id === bRun)
   s.complete.mockResolvedValueOnce(answer({ kind: 'correct_pending', message_id: aMessage })).mockImplementationOnce(async (_c, _k, messages) => {
     const input = JSON.parse(messages.find(message => message.role === 'user' && message.content?.includes('original_request'))!.content!)
@@ -135,33 +144,78 @@ test('answers targeted progress while both production models are streaming and c
   revisedHold.resolve(answer({ version: 1, complete: false, answer: null, artifacts: [], requirement_ids: [], unresolved: ['content'] }))
 })
 
-test('corrects a classified request before a production slot becomes available', async () => {
+test.each([false, true])('returns a queued correction to normal admission (cancelled=%s)', async cancelled => {
   const s = setup(true), aHold = deferred<Completion>(), bHold = deferred<Completion>(), corrected = deferred<Completion>()
   const incomplete = answer({ version: 1, complete: false, answer: null, artifacts: [], requirement_ids: [], unresolved: ['content'] })
   s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => aHold.promise)
   const a = sendTurn(s, 'Create a museum guide.')
   await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(2))
   s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => bHold.promise)
-  const b = sendTurn(s, 'Create a travel budget.')
+  const b = sendTurn(s, 'Create a travel budget.', 'other-channel-model')
   await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(4))
   s.complete.mockResolvedValueOnce(answer({ kind: 'new' }))
   const queued = sendTurn(s, 'Create a report about buses.')
   await vi.waitFor(() => expect(turnStatus(s, queued)).toMatchObject({ state: 'queued', code: 'PRODUCTION_ADMISSION_PENDING' }))
+  await s.reviseModel('chapter-model')
   s.complete.mockResolvedValueOnce(answer({ kind: 'correct_pending', message_id: turnMessage(s, queued) }))
   const correction = sendTurn(s, 'Include trains in that report too.')
   await vi.waitFor(() => expect(s.state().goal(queued).intent_revision).toBe(2))
   expect(s.complete.mock.calls).toHaveLength(6)
   expect(s.state().run(turnStatus(s, a).run_id).state).toBe('running')
   expect(s.state().run(turnStatus(s, b).run_id).state).toBe('running')
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: turnMessage(s, correction) }))
+  const follow = sendTurn(s, 'Use the corrected report once it is published.')
+  await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' }))
+  // An independent message still routes. A fresh queue sweep must retain the waiting follow-up.
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Independent reply.' }))
+  const independent = sendTurn(s, 'Independent question.')
+  await vi.waitFor(() => expect(turnStatus(s, independent)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' })
+  if (cancelled) {
+    s.store.handle({ type: 'request.cancel', task_id: s.task, request_id: correction })
+    await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'rejected', code: 'CONVERSATION_DEPENDENCY_UNAVAILABLE' }))
+    expect(s.state().taskWorks(s.task).some(work => work.purpose === 'production' && work.request_id === queued)).toBe(false)
+    aHold.resolve(incomplete); bHold.resolve(incomplete)
+    return
+  }
+  await s.reviseModel('other-channel-model')
+  await s.reviseModel('chapter-model')
   s.complete.mockImplementation(async (_config, _key, messages) => messages.some(message => message.content?.includes('original_request')) ? corrected.promise : incomplete)
   aHold.resolve(incomplete)
+  await vi.waitFor(() => expect(turnStatus(s, correction)).toMatchObject({ state: 'confirmation_required', code: 'REQUEST_CONFIGURATION_CHANGED' }))
+  expect(s.state().taskWorks(s.task).some(work => work.purpose === 'production' && work.request_id === queued)).toBe(false)
+  s.store.handle({ type: 'request.resolve', task_id: s.task, request_id: correction, model_config_id: 'other-channel-model', use_successful: true, replacements: [], confirm: true })
   await vi.waitFor(() => expect(s.state().run(turnStatus(s, correction).run_id)).toMatchObject({ request_id: queued, intent_revision: 2, message_id: turnMessage(s, correction) }))
   await vi.waitFor(() => {
-    const input = s.complete.mock.calls.slice(6).flatMap(([, , messages]) => messages).find(message => message.role === 'user' && message.content?.includes('original_request'))
-    expect(JSON.parse(JSON.parse(input!.content!).request)).toEqual({ original_request: 'Create a report about buses.', corrections: ['Include trains in that report too.'] })
+    const calls = s.complete.mock.calls.filter(([, , messages]) => messages.some(message => message.role === 'user' && message.content?.includes('original_request')))
+    expect(calls).toHaveLength(1)
+    const [config, , messages] = calls[0]!
+    expect(config.id).toBe('other-channel-model')
+    const input = messages.find(message => message.role === 'user' && message.content?.includes('original_request'))!
+    expect(JSON.parse(JSON.parse(input.content!).request)).toEqual({ original_request: 'Create a report about buses.', corrections: ['Include trains in that report too.'] })
   })
+  const work = s.state().taskWorks(s.task).find(item => item.run_id === turnStatus(s, correction).run_id)!
+  expect(s.state().attempt(work.current_attempt_id!)).toMatchObject({ model_config_id: 'other-channel-model', model_config_revision: 2 })
   corrected.resolve(incomplete)
   bHold.resolve(incomplete)
+})
+
+test('holds a same-channel route while both shared network slots are in use', async () => {
+  const s = setup(true), first = deferred<Completion>(), second = deferred<Completion>()
+  s.complete.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+    .mockResolvedValueOnce(answer({ kind: 'reply', text: 'Next reply.' }))
+  sendTurn(s, 'First question')
+  sendTurn(s, 'Second question')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(2))
+  const queued = sendTurn(s, 'Third question')
+  const progress = sendTurn(s, 'Independent question on another channel', 'other-channel-model')
+  await vi.waitFor(() => expect(turnStatus(s, progress)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.complete.mock.calls[2]![0].id).toBe('other-channel-model')
+  expect(turnStatus(s, queued).state).toBe('queued')
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Third reply.' }))
+  first.resolve(answer({ kind: 'reply', text: 'First reply.' }))
+  await vi.waitFor(() => expect(turnStatus(s, queued)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  second.resolve(answer({ kind: 'reply', text: 'Second reply.' }))
 })
 
 test('a dependent request waits after production ends and binds the committed publication version', async () => {
@@ -173,7 +227,7 @@ test('a dependent request waits after production ends and binds the committed pu
     if (source.purpose !== 'production') throw Error('expected production')
     const baseMessage = turnMessage(s, source.request_id)
     s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: baseMessage })).mockImplementationOnce(async (_config, _key, messages) => {
-      expect(JSON.parse(messages.at(-1)!.content!).preceding_result).toMatchObject({ kind: 'conversation.delivery', publication: { operation_id: expect.any(String), surface_revision: 2, manifest_id: expect.any(String) } })
+      expect(JSON.parse(messages.at(-1)!.content!).preceding_result).toMatchObject({ kind: 'conversation.delivery', publication: { operation_id: expect.any(String), surface_revision: 2, manifest_id: expect.any(String) }, views: [{ view_id: expect.any(String), history: { kind: 'view_history', id: expect.any(String), selection: { revision: 1 } }, content: { kind: 'resource', id: expect.any(String) } }] })
       return answer({ kind: 'reply', text: finalReply })
     })
     follow = sendTurn(s, 'Continue only when the document is published.')
@@ -183,6 +237,45 @@ test('a dependent request waits after production ends and binds the committed pu
     expect(s.records('conversation.reply')).toEqual([])
   })
   await vi.waitFor(() => expect(s.records('conversation.reply')).toMatchObject([{ request_id: follow, text: finalReply }]))
+})
+
+test('a follow-up can read the bound publication after the current View changes', async () => {
+  const s = setup(true), first = await original(s), model = chapterModel(s)
+  const update = start(s, first, 'Alpha', 'later-alpha')
+  await model.release(update.update_id, [['Alpha original', 'Alpha updated later']])
+  await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
+  await publish(s, s.status(update.update_id).action_id)
+  await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
+  await vi.waitFor(() => expect(s.state().run(s.status(update.update_id).source!.run_id).state).toBe('completed'))
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha updated later')
+  const latest = s.internal().db.prepare('SELECT id FROM view_history WHERE task_id=? AND view_id=? AND view_revision=?')
+    .get(s.task, first.view_id, first.view_revision + 1) as { id: string }
+  const read = (key: string, input: unknown) => ({ id: key, type: 'function' as const, function: { name: 'read', arguments: JSON.stringify(input) } })
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: turnMessage(s, first.request_id) }))
+    .mockResolvedValueOnce(answer({ kind: 'explanation' }))
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      const input = JSON.parse(messages.at(-1)!.content!)
+      expect(input).not.toHaveProperty('published_context')
+      const [view] = input.preceding_result.views
+      expect(view).toMatchObject({ view_id: first.view_id, history: { kind: 'view_history', selection: { revision: first.view_revision } }, content: { kind: 'resource', id: first.bundle_resource_id } })
+      return { finish: 'tool_calls', text: '', calls: [read('first-page', { ...view.content, max_chars: 160 })] }
+    })
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      const [view] = JSON.parse(messages.find(message => message.role === 'user' && message.content?.includes('preceding_result'))!.content!).preceding_result.views
+      const firstPage = JSON.parse(messages.at(-1)!.content!)
+      expect(firstPage).toMatchObject({ truncated: true, next_cursor: expect.any(String) })
+      return { finish: 'tool_calls', text: '', calls: [read('next-page', { kind: view.content.kind, id: view.content.id, cursor: firstPage.next_cursor }), read('bound-view', view.content), read('later-view', { ...view.history, id: latest.id, selection: { revision: first.view_revision + 1 } })] }
+    })
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      expect(JSON.parse(messages.find(message => message.tool_call_id === 'next-page')!.content!)).toMatchObject({ data: { text: expect.any(String) } })
+      const original = JSON.parse(messages.find(message => message.tool_call_id === 'bound-view')!.content!)
+      expect(JSON.stringify(original)).toContain('Alpha original')
+      expect(JSON.stringify(original)).not.toContain('Alpha updated later')
+      expect(JSON.parse(messages.find(message => message.tool_call_id === 'later-view')!.content!)).toMatchObject({ error: { code: 'WORKER_CAPABILITY_DENIED' } })
+      return { finish: 'stop', calls: [], text: 'I read the original publication.' }
+    })
+  const follow = sendTurn(s, 'Explain the original version of the published document.')
+  await vi.waitFor(() => expect(s.records('conversation.reply')).toMatchObject([{ request_id: follow, text: 'I read the original publication.' }]))
 })
 
 test('a dependent request stops waiting when the preceding publication is denied', async () => {
@@ -920,7 +1013,7 @@ test('a follow-up waits for the exact chapter update and uses its published repl
   s.complete.mockImplementation((...args) => {
     const last = args[2].at(-1)?.content
     if (!last?.includes(followText)) return resumeChapter(...args)
-    expect(JSON.parse(last).preceding_result).toMatchObject({ kind: 'runner.answer', text: '更新已完成。' })
+    expect(JSON.parse(last).preceding_result).toMatchObject({ kind: 'runner.answer', text: '更新已完成。', views: [{ view_id: mapped.view_id, history: { kind: 'view_history', id: expect.any(String), selection: { revision: mapped.view_revision + 1 } } }] })
     return Promise.resolve(answer({ kind: 'reply', text: 'I used the updated chapter result.' }))
   })
   const follow = s.store.handle({ type: 'request.submit', task_id: s.task, text: followText, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }

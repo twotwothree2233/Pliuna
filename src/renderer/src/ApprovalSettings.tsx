@@ -3,12 +3,13 @@ import type { ModelState } from './ModelSettings'
 
 type Approval = ModelState['approval']
 
-export function ApprovalSettings({ saved, models, locked, status, onSave }: {
+export function ApprovalSettings({ saved, models, locked, status, onSave, onCancelTest }: {
   saved: Approval
-  models: { id: string; label: string }[]
+  models: { id: string; label: string; verified: boolean }[]
   locked: boolean
   status: string
   onSave(approval: Approval): void
+  onCancelTest?(): void
 }) {
   const id = useId()
   const [edit, setEdit] = useState<{ from: Approval; next: Approval } | null>(null)
@@ -18,21 +19,23 @@ export function ApprovalSettings({ saved, models, locked, status, onSave }: {
   const setDraft = (next: Approval) => setEdit({ from: saved, next })
   const automatic = current.mode === 'assisted'
   const modelId = current.model_id
-  const validModel = models.some(model => model.id === modelId)
+  const model = models.find(model => model.id === modelId)
   const changed = current.mode !== saved.mode || (automatic && modelId !== saved.model_id)
+  const needsRevalidation = automatic && !changed && model && !model.verified
+  const showActions = changed || Boolean(needsRevalidation)
 
   useEffect(() => {
-    if (!locked && !changed && saveRequested.current) {
+    if (!locked && !showActions && saveRequested.current) {
       saveRequested.current = false
       if (document.activeElement === document.body) activeMode.current?.focus()
     }
-  }, [locked, changed])
+  }, [locked, showActions])
 
   return <div className="approval-settings">
     <header className="model-page-title"><h1>权限与审批</h1></header>
     <form onSubmit={event => {
       event.preventDefault()
-      if (locked || !changed || (automatic && !validModel)) return
+      if (locked || !showActions || (automatic && !model)) return
       saveRequested.current = true
       onSave({ mode: current.mode, model_id: automatic ? modelId : '' })
     }}>
@@ -51,20 +54,21 @@ export function ApprovalSettings({ saved, models, locked, status, onSave }: {
           <label htmlFor={`${id}-model`}>审批模型</label>
           <select id={`${id}-model`} value={modelId} disabled={locked || !models.length} onChange={event => setDraft({ ...current, model_id: event.target.value })}>
             <option value="" disabled>{models.length ? '选择审批模型' : '请先在模型服务中添加模型'}</option>
-            {modelId && !validModel && <option value={modelId} disabled>当前审批模型不可用</option>}
+            {modelId && !model && <option value={modelId} disabled>当前审批模型不可用</option>}
             {models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
           </select>
         </div>}
       </div>
-      {automatic && <p className="approval-settings-note">删除、信任与丢弃输入仍需本人确认。模型异常时转人工。</p>}
-      {changed && automatic && <p id={`${id}-consent`} className="approval-settings-consent">未验证的模型会先测试审批格式。审批会发送必要的请求内容。两者均可能计费。</p>}
-      {changed && <div className="approval-settings-actions">
-        <span>未保存</span>
-        <button className="primary" disabled={locked || (automatic && !validModel)} aria-describedby={automatic ? `${id}-consent` : undefined}>
-          {automatic ? '同意并保存' : '保存'}
+      {automatic && <p className="approval-settings-note">删除、信任与丢弃输入仍需本人确认。单次评估失败时转人工。</p>}
+      {showActions && automatic && <p id={`${id}-consent`} className="approval-settings-consent">未验证的模型会先测试审批格式。审批会发送必要的请求内容。两者均可能计费。</p>}
+      {showActions && <div className="approval-settings-actions">
+        <span>{needsRevalidation ? '当前模型需要重新验证' : '未保存'}</span>
+        <button className="primary" disabled={locked || (automatic && !model)} aria-describedby={automatic ? `${id}-consent` : undefined}>
+          {needsRevalidation ? '同意并重新验证' : automatic ? '同意并保存' : '保存'}
         </button>
       </div>}
       <p role="status" className="settings-operation-status">{changed && status === '已保存' ? '' : status}</p>
+      {onCancelTest && <button type="button" onClick={onCancelTest}>取消审批模型测试</button>}
     </form>
   </div>
 }

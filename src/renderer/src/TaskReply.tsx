@@ -121,9 +121,12 @@ export function TaskReply({ snapshot, scroll, underMessage, unplaced, locateAppr
       const author = message.role === 'user' ? '你' : 'Agent'
       const parent = message.reply_to ? byId.get(message.reply_to) : undefined
       const showReference = message.reply_to && message.reply_to !== items[index - 1]?.id
+      const sourceId = message.reference_message_id !== message.reply_to ? message.reference_message_id : null
+      const source = sourceId ? byId.get(sourceId) : undefined
       return <article key={message.id} ref={node => { if (node) shown.current.set(message.id, node); else shown.current.delete(message.id) }} tabIndex={-1} className="agent-message" aria-label={`${author}的消息`}>
         <header><span><WorkspaceIcon name={message.role === 'user' ? 'chat' : 'agent'} /></span><b>{author}</b></header>
         {showReference && (parent || older) && <button type="button" className="conversation-reference" disabled={loading} onClick={() => void history(message.reply_to!)}>{parent ? `回复：${parent.text.trim().slice(0, 64)}` : '加载原消息'}</button>}
+        {sourceId && (source || older) && <button type="button" className="conversation-reference" disabled={loading} onClick={() => void history(sourceId)}>{source ? `关联请求：${source.text.trim().slice(0, 64)}` : '查看关联请求'}</button>}
         <MessageText taskId={taskId} message={message} />
         {underMessage?.(message, byId)}
       </article>

@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { MessageRequestState, Run, TaskMessage, TaskMessagePage, TaskMessageText } from '../../shared/types'
 import { ContractError } from '../../shared/validation'
-import { conversationRecordKinds } from './conversation'
+import { conversationRecordKinds, type ConversationResult } from './conversation'
 import { runnerFailureReason } from './failure-reason'
 
 interface Cursors { read(binding: string, cursor: string): unknown; write(binding: string, value: unknown): string }
@@ -70,6 +70,9 @@ const replyTo = `CASE WHEN NOT (${user}) THEN (SELECT origin.id FROM records ori
   AND origin.id=CASE WHEN r.kind='runner.answer' THEN COALESCE(${chapterInput},${originalInput})
   ELSE COALESCE(${field('reply_to')},${queuedInput},(SELECT CASE WHEN count(*)=1 THEN min(u.id) END FROM records u
     WHERE u.task_id=r.task_id AND u.sequence<r.sequence AND u.kind='message.user' AND json_extract(u.payload_json,'$.run_id')=${run})) END) END`
+const referencedMessage = `(SELECT origin.id FROM records origin WHERE r.kind='conversation.reply'
+  AND origin.task_id=r.task_id AND origin.sequence<r.sequence AND origin.kind='message.user'
+  AND origin.id=${field('reference_message_id')})`
 const fail = (code: string, message: string): never => { throw new ContractError(code, message) }
 const sequence = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 
@@ -123,34 +126,69 @@ export function conversationDependencyRunning(db: Database.Database, task: strin
   if (chapter) return ['running', 'waiting'].includes(chapter.state) || chapter.chapter_state === 'unknown'
   const plan = conversationContentPlan(db, task, id)
   if (plan) return !!db.prepare(`SELECT 1 FROM runner_runs n JOIN runs c ON c.id=n.run_id AND c.task_id=n.task_id
-    WHERE n.task_id=? AND n.request_id=? AND n.intent_revision=? AND n.purpose='production' AND c.chapter_update_id IS NULL AND c.commit_valid=1 AND c.state IN ('running','waiting')`)
-    .get(task, plan.request_id, plan.intent_revision)
+    WHERE n.task_id=@task AND n.request_id=@request AND n.intent_revision=@revision AND n.purpose='production'
+      AND c.chapter_update_id IS NULL AND c.commit_valid=1 AND c.state IN ('running','waiting')
+    UNION ALL
+    SELECT 1 FROM runner_current_content_plans h JOIN runner_inputs i ON i.task_id=h.task_id AND i.input_event_id=h.input_event_id
+    JOIN requests q ON q.task_id=i.task_id AND json_extract(q.input_json,'$.user_record_id')=i.record_id
+    WHERE h.task_id=@task AND h.request_id=@request AND h.intent_revision=@revision AND i.kind='correction'
+      AND json_extract(h.payload_json,'$.state')='active'
+      AND q.state IN ('queued','confirmation_required') AND json_extract(q.input_json,'$.correction_pending')=1
+      AND NOT EXISTS (SELECT 1 FROM runner_content_removals d WHERE d.task_id=h.task_id AND d.request_id=h.request_id AND d.intent_revision=h.intent_revision)
+      AND NOT EXISTS (SELECT 1 FROM runner_runs n WHERE n.task_id=h.task_id AND n.request_id=h.request_id AND n.intent_revision=h.intent_revision AND n.purpose='production')
+    LIMIT 1`).get({ task, request: plan.request_id, revision: plan.intent_revision })
   return !!db.prepare("SELECT 1 FROM runs WHERE task_id=? AND request_id=? AND state IN ('running','waiting')").get(task, requestId)
 }
 
-export function conversationDependencyResult(db: Database.Database, task: string, id: string, requestId: string) {
+type PublishedView = { id: string; view_id: string; view_revision: number; bundle_resource_id: string }
+const historyTarget = ({ id, view_id, view_revision, bundle_resource_id }: PublishedView) => ({
+  view_id,
+  history: { kind: 'view_history' as const, id, selection: { revision: view_revision } },
+  content: { kind: 'resource' as const, id: bundle_resource_id, selection: { view: 'object' as const } }
+})
+
+export function conversationDependencyResult(db: Database.Database, task: string, id: string, requestId: string, resultId?: string): ConversationResult | null {
   const through = lastSequence(db, task)
   const chapter = dependencyChapterRun(db, task, id, requestId)
   const plan = !chapter && conversationContentPlan(db, task, id)
   if (plan) {
+    // A manifest reports gaps per target, including unsealed inventories and
+    // artifacts missing from this Surface version. Other targets may still be incomplete.
+    const matchesTarget = (alias: string) => `json_extract(${alias}.value,'$.task_id')=@task
+      AND json_extract(${alias}.value,'$.request_id')=@request AND json_extract(${alias}.value,'$.intent_revision')=@revision`
+    const binding = { task, id, request: plan.request_id, revision: plan.intent_revision, resultId: resultId ?? null }
     const row = db.prepare(`SELECT r.id,r.sequence,p.operation_id,json_extract(p.result_json,'$.surface_revision') AS surface_revision,
       json_extract(p.result_json,'$.surface_history_id') AS surface_history_id,
-      json_extract(p.result_json,'$.manifest_id') AS manifest_id
+      f.manifest_id
       FROM records r JOIN runner_publications p ON p.task_id=r.task_id AND p.action_id=${field('action_id')} AND p.state='published'
-      JOIN runner_view_mappings m ON m.task_id=p.task_id AND m.batch_id=p.batch_id
-      JOIN runner_artifacts a ON a.task_id=m.task_id AND a.artifact_id=m.artifact_id AND a.artifact_revision=m.artifact_revision
+      JOIN runner_manifests f ON f.task_id=p.task_id AND f.operation_id=p.operation_id AND f.manifest_id=json_extract(p.result_json,'$.manifest_id')
       WHERE r.task_id=@task AND r.kind='conversation.delivery' AND ${field('reply_to')}=@id AND ${field('request_id')}=@request
-        AND json_extract(a.payload_json,'$.request_id')=@request AND json_extract(a.payload_json,'$.intent_revision')=@revision
-      ORDER BY r.sequence LIMIT 1`).get({ task, id, request: plan.request_id, revision: plan.intent_revision }) as
+        AND (@resultId IS NULL OR r.id=@resultId)
+        AND EXISTS (SELECT 1 FROM json_each(f.payload_json,'$.targets') t WHERE ${matchesTarget('t')})
+        AND EXISTS (SELECT 1 FROM json_each(f.payload_json,'$.contributions') c WHERE ${matchesTarget('c')})
+        AND NOT EXISTS (SELECT 1 FROM json_each(f.payload_json,'$.unresolved') u WHERE ${matchesTarget('u')})
+      ORDER BY r.sequence LIMIT 1`).get(binding) as
       { id: string; sequence: number; operation_id: string; surface_revision: number; surface_history_id: string; manifest_id: string } | undefined
-    return row ? { id: row.id, sequence: row.sequence, kind: 'conversation.delivery', text: '内容已发布。', publication: { operation_id: row.operation_id, surface_revision: row.surface_revision, surface_history_id: row.surface_history_id, manifest_id: row.manifest_id } } : null
+    if (!row) return null
+    const views = db.prepare(`SELECT DISTINCT h.id,h.view_id,h.view_revision,h.bundle_resource_id
+      FROM runner_manifests f JOIN json_each(f.payload_json,'$.contributions') c
+      JOIN view_history h ON h.task_id=f.task_id AND h.view_id=json_extract(c.value,'$.view_id')
+        AND h.view_revision=json_extract(c.value,'$.view_revision') AND h.bundle_resource_id=json_extract(c.value,'$.published_bundle_resource_id')
+      WHERE f.task_id=@task AND f.manifest_id=@manifest AND f.operation_id=@operation AND ${matchesTarget('c')}
+      ORDER BY h.view_id,h.view_revision`).all({ ...binding, manifest: row.manifest_id, operation: row.operation_id }) as PublishedView[]
+    return views.length ? { id: row.id, sequence: row.sequence, kind: 'conversation.delivery', text: '内容已发布。', publication: { operation_id: row.operation_id, surface_revision: row.surface_revision, surface_history_id: row.surface_history_id, manifest_id: row.manifest_id }, views: views.map(historyTarget) } : null
   }
-  const row = db.prepare(`SELECT r.id,r.sequence,r.kind,COALESCE(substr(${text},1,${16 * 1024}),X'') AS body,length(${text}) AS bytes FROM records r
+  const row = db.prepare(`SELECT r.id,r.sequence,r.kind,${field('operation_id')} AS operation_id,COALESCE(substr(${text},1,${previewBytes}),X'') AS body,length(${text}) AS bytes FROM records r
     WHERE r.task_id=@task AND r.sequence<=@through AND ${chapter ? `r.kind='runner.answer' AND ${run}=@chapterRun` : `${request}=@requestId`}
+    AND (@resultId IS NULL OR r.id=@resultId)
     AND NOT (${user}) AND r.kind NOT IN ('chapter.route.clarification','message.assistant.partial') AND ${visible} AND ${replyTo}=@id ORDER BY r.sequence LIMIT 1`)
-    .get({ task, id: chapter?.message_id ?? id, requestId, chapterRun: chapter?.id ?? null, through }) as { id: string; sequence: number; kind: string; body: Buffer; bytes: number } | undefined
+    .get({ task, id: chapter?.message_id ?? id, requestId, chapterRun: chapter?.id ?? null, through, resultId: resultId ?? null }) as { id: string; sequence: number; kind: string; body: Buffer; bytes: number; operation_id: string | null } | undefined
   if (!row) return null
-  return { id: row.id, kind: row.kind, sequence: row.sequence, text: row.body.length === row.bytes ? row.body.toString('utf8') : null }
+  const view = chapter && db.prepare(`SELECT h.id,h.view_id,h.view_revision,h.bundle_resource_id FROM runner_chapter_publications p
+    JOIN view_history h ON h.task_id=p.task_id AND h.view_id=json_extract(p.result_json,'$.view_id') AND h.view_revision=json_extract(p.result_json,'$.view_revision')
+    WHERE p.task_id=? AND p.operation_id=? AND p.state='published'`).get(task, row.operation_id) as PublishedView | undefined
+  if (chapter && !view) return null
+  return { id: row.id, kind: row.kind, sequence: row.sequence, text: row.body.length === row.bytes ? row.body.toString('utf8') : null, ...(view ? { views: [historyTarget(view)] } : {}) }
 }
 
 export function conversationContentPlan(db: Database.Database, task: string, message: string) {
@@ -193,7 +231,8 @@ export function conversationPage(db: Database.Database, task: string, cursors: C
     const forward = after !== undefined
     type Row = Omit<TaskMessage, 'text' | 'truncated'> & { preview: Buffer; bytes: number }
     const rows = db.prepare(`SELECT r.id,r.sequence,r.created_at,r.kind,CASE WHEN ${user} THEN 'user' ELSE 'assistant' END AS role,
-      ${request} AS request_id,${run} AS run_id,${replyTo} AS reply_to,COALESCE(substr(${text},1,${previewBytes}),X'') AS preview,length(${text}) AS bytes
+      ${request} AS request_id,${run} AS run_id,${replyTo} AS reply_to,${referencedMessage} AS reference_message_id,
+      COALESCE(substr(${text},1,${previewBytes}),X'') AS preview,length(${text}) AS bytes
       FROM records r WHERE r.task_id=@task AND r.sequence>@low AND r.sequence<=@high AND ${visible}
       ORDER BY r.sequence ${forward ? 'ASC' : 'DESC'} LIMIT ${pageSize + 1}`).all({ task, low, high, through }) as Row[]
     const items: TaskMessage[] = []

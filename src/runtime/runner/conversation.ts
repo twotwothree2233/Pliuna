@@ -10,11 +10,24 @@ export interface ConversationBinding {
   reply_to_request_id: string | null
   resource_ids?: string[]
 }
+export interface ConversationResult {
+  id: string
+  sequence: number
+  kind: string
+  text: string | null
+  publication?: { operation_id: string; surface_revision: number; surface_history_id: string; manifest_id: string }
+  views?: Array<{
+    view_id: string
+    history: { kind: 'view_history'; id: string; selection: { revision: number } }
+    content: { kind: 'resource'; id: string; selection: { view: 'object' } }
+  }>
+}
 export interface ConversationHistory {
   messages: Array<{ source: ConversationSource; message: ChatMessage }>
   refs: Array<{ kind: 'event'; id: string }>
   truncated: boolean
   resource_ids: string[]
+  preceding_result?: ConversationResult
 }
 
 export function fitConversation(history: ConversationHistory, fits: (candidate: ConversationHistory) => boolean): ConversationHistory {

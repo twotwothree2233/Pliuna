@@ -58,6 +58,24 @@ test('desktop and Web share task history when launched together', async () => {
     await expect.poll(webHistory).toEqual(['来自桌面', '收到：来自桌面', '来自网页', '收到：来自网页'])
     const fromDesktop = await desktop.evaluate(request => window.pliuna.request(request), messages)
     expect(fromDesktop).toMatchObject({ ok: true, data: { items: (await web(messages)).data.items } })
+
+    const row = (page: Page) => page.locator('.task-row').filter({ hasText: 'Web 与桌面共用任务' })
+    const draft = desktop.locator('.agent-composer textarea')
+    await row(desktop).click()
+    await draft.fill('跨端归档前未发送的草稿')
+    const webWindow = app.waitForEvent('window')
+    await app.evaluate(({ BrowserWindow }, url) => {
+      const window = new BrowserWindow({ show: false, width: 1200, height: 850, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
+      void window.loadURL(url)
+    }, origin)
+    const browser = await webWindow
+    await browser.getByRole('group', { name: '任务操作：Web 与桌面共用任务' }).getByRole('button', { name: '归档', exact: true }).click()
+    await expect(row(browser)).toHaveCount(0)
+    await expect(desktop.getByRole('heading', { name: '尚无任务', exact: true })).toBeVisible()
+    await expect(draft).toHaveCount(0)
+    await desktop.getByRole('button', { name: '已归档', exact: true }).click()
+    await row(desktop).click()
+    await expect(draft).toHaveValue('跨端归档前未发送的草稿')
   } finally {
     await app?.close()
     await server.close()

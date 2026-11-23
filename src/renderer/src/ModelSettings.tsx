@@ -28,6 +28,7 @@ export function ModelSettings({ state, reload, section = 'models', onBusy, selec
   const [editor, setEditor] = useState<{ channelId: string; id: string; existing: boolean; name: string; model: string; context: string; output: string; compact: string; history: boolean; limits: Record<string,string>; metadata?: ModelConfiguration['metadata'] } | null>(null)
   const [catalogue, setCatalogue] = useState<{ channelId: string; data: ModelCatalogue } | null>(null)
   const [test, setTest] = useState<ModelOption | null>(null)
+  const [testingApproval, setTestingApproval] = useState(false)
   const [expanded, setExpanded] = useState<Record<string,boolean>>({})
   const channels = state.channels ?? []
   const catalogueChannel = channels.find(c => c.id === catalogue?.channelId)
@@ -62,7 +63,9 @@ export function ModelSettings({ state, reload, section = 'models', onBusy, selec
   function saveApproval({ mode, model_id }: ModelState['approval']) {
     void operation(async id => {
       if (mode === 'assisted' && !state.models.find(model => model.id === model_id)?.roles.includes('approval')) {
-        await hostRequest({ type: 'model.test', model_id, role: 'approval', confirm_cost: true, operation_id: id })
+        setTestingApproval(true)
+        try { await hostRequest({ type: 'model.test', model_id, role: 'approval', confirm_cost: true, operation_id: id }) }
+        finally { setTestingApproval(false) }
       }
       try { await hostRequest({ type: 'approval.configure', mode, model_id, confirm_external_processing: mode === 'assisted' }) }
       catch (error) {
@@ -72,8 +75,8 @@ export function ModelSettings({ state, reload, section = 'models', onBusy, selec
       setStatus('已保存')
     })
   }
-  if (section === 'approval') return <ApprovalSettings saved={state.approval} models={available.map(model => ({ id: model.id, label: modelLabel(model) }))}
-    locked={selection.locked || busy} status={status} onSave={saveApproval} />
+  if (section === 'approval') return <ApprovalSettings saved={state.approval} models={available.map(model => ({ id: model.id, label: modelLabel(model), verified: model.roles.includes('approval') }))}
+    locked={selection.locked || busy} status={status} onSave={saveApproval} onCancelTest={testingApproval ? () => void cancel() : undefined} />
   return <div className="model-settings-content">
       <header className="model-page-title"><h1>模型服务</h1><p>保存模型后即可使用，连接测试可选。</p></header>
       <section className="model-current" aria-labelledby="current-model-heading">

@@ -13,6 +13,7 @@ import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerHostRecovery } from '../../src/runtime/runner/host-recovery'
 import { RunnerHostComposition } from '../../src/runtime/runner/host-composition'
 import { liveRunnerFlow } from '../../src/runtime/runner/live-flow'
+import { conversationDependencyResult } from '../../src/runtime/runner/conversation-query'
 import type { LiveFlowSnapshot } from '../../src/shared/types'
 
 const cleanups: (() => void)[] = []
@@ -206,6 +207,8 @@ it('publishes an independent goal automatically while retaining a cancelled unpu
   const manifest = JSON.parse((s.db.prepare('SELECT payload_json FROM runner_manifests ORDER BY rowid DESC LIMIT 1').get() as { payload_json: string }).payload_json)
   expect(manifest.state).toBe('partial')
   expect(manifest.contributions.map((entry: { artifact_id: string }) => entry.artifact_id)).toEqual([beta.artifactId])
+  expect(conversationDependencyResult(s.db, s.task, s.state.input('input-beta').record_id, 'beta')).toMatchObject({ publication: { manifest_id: manifest.manifest_id } })
+  expect(conversationDependencyResult(s.db, s.task, s.state.input('input-alpha').record_id, 'alpha')).toBeNull()
 })
 
 it('keeps an unsealed required contribution partial while publishing its accepted first piece', async () => {
@@ -387,11 +390,13 @@ it('requires exact host discard confirmation before a composition can reset a sa
 
 it('checks every sealed fragment across batches before marking a single goal complete', async () => {
   const s = setup(), source = s.source('goal', bundle(), true, true, 'model', 17)
+  const preceding = () => conversationDependencyResult(s.db, s.task, s.state.input('input-goal').record_id, 'goal')
   const first = s.store.prepareRunnerComposition(s.task, 'goal')
   expect(first.batch.indexes).toHaveLength(16)
   const initial = s.store.publishRunnerComposition(s.task, first.batch.batch_id, first.collator.rulePlan())
   await approveAndConfirm(s, first.batch.action_id); expect((await initial).state).toBe('published')
   expect(s.composition.scope(s.task)?.state).toBe('working')
+  expect(preceding()).toBeNull()
   const next = s.store.prepareRunnerComposition(s.task, 'goal')
   expect(next.batch.indexes).toHaveLength(1)
   expect(next.batch.composition_version).toBe(first.batch.composition_version)
@@ -399,6 +404,7 @@ it('checks every sealed fragment across batches before marking a single goal com
   await approveAndConfirm(s, next.batch.action_id); expect((await final).state).toBe('published')
   const manifest = JSON.parse((s.db.prepare('SELECT payload_json FROM runner_manifests ORDER BY rowid DESC LIMIT 1').get() as { payload_json: string }).payload_json)
   expect(manifest).toMatchObject({ state: 'complete', unresolved: [] })
+  expect(preceding()).toMatchObject({ publication: { manifest_id: manifest.manifest_id, operation_id: next.batch.operation_id } })
   expect(manifest.targets).toEqual([{ task_id: s.task, request_id: 'goal', intent_revision: 1 }])
   expect(manifest.contributions.map((entry: { artifact_id: string }) => entry.artifact_id).sort()).toEqual(source.indexes.map(index => index.artifact_id).sort())
   expect(s.db.prepare('SELECT count(*) count FROM views').get()).toEqual({ count: 17 })

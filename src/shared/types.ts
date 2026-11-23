@@ -9,7 +9,7 @@ export interface RecordEntry { id: string; kind: string; payload: Record<string,
 export interface LatestMessages { request: Pick<RecordEntry, 'id' | 'kind' | 'created_at'> | null; reply: Pick<RecordEntry, 'id' | 'kind' | 'created_at'> | null }
 export interface TaskMessage {
   id: string; sequence: number; created_at: string; role: 'user' | 'assistant'; kind: string
-  text: string; truncated: boolean; request_id: string | null; run_id: string | null; reply_to: string | null
+  text: string; truncated: boolean; request_id: string | null; run_id: string | null; reply_to: string | null; reference_message_id: string | null
   execution?: Run
   request_state?: MessageRequestState
 }
@@ -69,6 +69,7 @@ export interface TaskUsageSummary {
 export interface RunUsageSummary extends TaskUsageSummary { run_id: string }
 export interface Snapshot {
   runner?: RunnerProjection
+  task_archived?: boolean
   message_requests?: MessageRequestState[]
   runtime_epoch: string; task: Task; surface: { id: string; revision: number; layout?: { slots: { id: string; groups: { id: string; type: string; views: string[]; gap?: string; align?: string; column_weights?: number[] }[] }[] } }; views: View[];
   view_page?: { offset: number; limit: number; total: number };

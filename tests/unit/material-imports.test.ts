@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto'
 import { RuntimeStore } from '../../src/runtime/store'
 import { MaterialSources } from '../../src/main/material-sources'
 import { validateIpc,validateModel } from '../../src/shared/validation'
+import { binaryPreviewChunk } from '../../src/shared/material-formats'
+import * as resourceReader from '../../src/runtime/plugins/resource-reader'
 let root:string,store:RuntimeStore,task:string
 beforeEach(()=>{root=fs.mkdtempSync(join(tmpdir(),'pliuna-material-'));store=new RuntimeStore(root);task=store.create('isolated material').task.id})
 afterEach(()=>{vi.restoreAllMocks();store.close();fs.rmSync(root,{recursive:true,force:true})})
@@ -31,6 +33,25 @@ it('modified destination is not committed',()=>{const id=begin(Buffer.from('x'))
 it('UTF8 continuation never splits complete multi-byte characters',async()=>{const body=Buffer.from('字'.repeat(90000)),id=begin(body);for(let off=0;off<body.length;off+=262144)chunk(id,body.subarray(off,off+262144),off);const r=await call('material.internal.finish',{operation_id:id});let text='',offset=0;do{const part=await call('material.read',{resource_id:r.resource.id,offset});text+=part.text;offset=part.next_offset}while(offset!==null);expect(text).toBe(body.toString());const first=await call('task.query',{query:{type:'read',input:{target:{kind:'resource',id:r.resource.id}}}});expect(first.representation).toBe('text/plain; charset=utf-8');expect(first.next_cursor).toBeTruthy();expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(32768)})
 it('invalid UTF8 remains saved but is not represented as text',()=>{const r=save(Buffer.from([0xff]));expect(r.resource.media_type).toBe('application/octet-stream');expect(call('material.read',{resource_id:r.resource.id})).toMatchObject({content_available:false})})
 it('reads enforce same-task access and refuse corrupted content',()=>{const r=save();const other=store.create('other').task.id;expect(()=>store.handle({type:'material.read',task_id:other,resource_id:r.resource.id})).toThrow();fs.writeFileSync(join(root,'resources',r.resource.id),'tampered');expect(()=>call('material.read',{resource_id:r.resource.id})).toThrow()})
+it('reuses verified preview bytes across chunks and refuses a changed managed file', async () => {
+ const body = Buffer.alloc(binaryPreviewChunk * 2 + 8, 33)
+ Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]).copy(body)
+ const operation = call('material.internal.register', { items: [{ display_name: 'large.png', source: 'file' }] }).items[0].operation_id
+ begin(body, operation, 'application/octet-stream')
+ for (let offset = 0; offset < body.length; offset += binaryPreviewChunk) chunk(operation, body.subarray(offset, offset + binaryPreviewChunk), offset)
+ const { resource } = await call('material.internal.finish', { operation_id: operation })
+ const verify = vi.spyOn(resourceReader, 'verifiedResource')
+ const preview = (offset: number) => call('material.read', { resource_id: resource.id, representation: 'preview', offset })
+ const first = await preview(0), second = await preview(first.next_offset)
+ expect(second.next_offset).toBe(binaryPreviewChunk * 2)
+ expect(Buffer.from(first.base64 + second.base64, 'base64')).toEqual(body.subarray(0, second.next_offset))
+ expect(verify).toHaveBeenCalledTimes(1)
+ const path = join(root, 'resources', resource.id)
+ fs.writeFileSync(path + '.replacement', body)
+ fs.renameSync(path + '.replacement', path)
+ await expect(preview(second.next_offset)).rejects.toMatchObject({ code: 'RESOURCE_CORRUPT' })
+ expect(verify).toHaveBeenCalledTimes(1)
+})
 it('task deletion retains file and complete source for separate explicit cleanup',()=>{const r=save();store.handle({type:'task.delete',task_id:task});expect(fs.existsSync(join(root,'resources',r.resource.id))).toBe(true);const candidate=(store.handle({type:'maintenance.resource.list'}) as any).items[0];expect(candidate.resource_id).toBe(r.resource.id);expect(candidate.phase).toBe('candidate')})
 it('pages 21 operations and bounds registration queue',()=>{register(21);const first=call('material.list'),last=call('material.list',{before:first.next_before});expect(first.items).toHaveLength(20);expect(last.items).toHaveLength(1);expect(()=>register(30)).toThrow()})
 it('host schema forbids paths, oversized batches and model importing',()=>{expect(()=>validateIpc({type:'material.pick',task_id:task,path:'/private'})).toThrow();expect(()=>validateIpc({type:'material.internal.register',task_id:task,items:Array(51).fill({display_name:'x',source:'file'})})).toThrow();expect(()=>validateModel({type:'material.pick',task_id:task})).toThrow()})

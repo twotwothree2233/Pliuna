@@ -1,4 +1,4 @@
-import { fileLstatSync, fileFstatSync, flushDirectorySync, managedFile, openExclusiveFileSync, openRegularFileSync, publishManagedFileSync } from '../platform/files'
+import { fileHandleStat, fileLstat, fileLstatSync, fileFstatSync, flushDirectorySync, managedFile, openExclusiveFileSync, openRegularFileSync, publishManagedFileSync } from '../platform/files'
 import type Database from 'better-sqlite3'
 import { createHash,randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
 import defaults from '../shared/contracts/development-defaults.json'
 import { ContractError } from '../shared/validation'
-import { readPluginResource, verifiedResource, type Resource } from './plugins/resource-reader'
+import { pluginFileIdentity, readPluginResource, verifiedResource, type Resource } from './plugins/resource-reader'
 import { binaryPreviewChunk, binaryPreviewLimit, binaryPreviewType } from '../shared/material-formats'
 import type { RestoreJournal } from './restore-journal'
 import type { StorageLifecycle } from './storage-lifecycle'
@@ -14,11 +14,14 @@ import { isMaterialRemoved } from './material-removals'
 
 type Row = Record<string, any>
 type Transfer = { fd: number; key: string; stage: string; received: number; expected: number; hash: ReturnType<typeof createHash>; text: TextDecoder | null; media: string }
+type VerifiedPreview = { resource: string; identity: string; bytes: Buffer }
+const previewCacheEntries = 2
 const now=()=>new Date().toISOString()
 const fail=(code:string):never=>{throw new ContractError(code,'Material operation unavailable; query the original result. No automatic retry or source path access.')}
 export class MaterialImports {
   private closed = false
   private transfers=new Map<string,Transfer>()
+  private previews = new Map<string, VerifiedPreview>()
   constructor(private db:Database.Database,private root:string,private epoch:string,private storage:StorageLifecycle,private journal:RestoreJournal,private record:(task:string,kind:string,data:unknown)=>void){}
   private row(task:string,id:string):Row {
     const row=this.db.prepare("SELECT * FROM actions WHERE id=? AND task_id=? AND json_extract(request_json,'$.type')='material.import'").get(id,task) as Row|undefined
@@ -40,6 +43,7 @@ export class MaterialImports {
     return this.db.transaction(() => {
       if (!this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(task, resource)) fail('IMPORT_NOT_FOUND')
       if (!isMaterialRemoved(this.db, task, resource)) this.record(task, 'material.removed', { resource_id: resource })
+      this.previews.delete(JSON.stringify([task, resource]))
       return { resource_id: resource, removed: true }
     })()
   }
@@ -104,7 +108,7 @@ export class MaterialImports {
             this.db.prepare("UPDATE actions SET state='ended',result='success',commit_valid=0,authorization_json=?,result_json=?,ended_at=? WHERE id=?").run('{"basis":"explicit_host_import"}',JSON.stringify({resource}),now(),row.id)
           })(); this.transfers.delete(row.id); return this.public(this.row(r.task_id,row.id)) }
           const resource = { id: t!.key, storage_key: t!.key, sha256: hash, byte_length: t!.expected }
-          if (t!.expected > 262144) return readPluginResource(this.root, resource, 0, true).then(commit).catch(error => { if (!this.closed) this.end(r.task_id,row.id,'failure',error instanceof ContractError ? error.code : 'IMPORT_SAVE_FAILED'); throw new ContractError('IMPORT_SAVE_FAILED','Material final verification failed; query the original operation') })
+          if (t!.expected > 262144) return verifiedResource(this.root, resource, async () => {}, undefined, t!.media.startsWith('text/')).then(commit).catch(error => { if (!this.closed) this.end(r.task_id,row.id,'failure',error instanceof ContractError ? error.code : 'IMPORT_SAVE_FAILED'); throw new ContractError('IMPORT_SAVE_FAILED','Material final verification failed; query the original operation') })
           this.readText(resource,0); return commit()
         }else fail('IMPORT_SEQUENCE_INVALID')
       }
@@ -119,7 +123,7 @@ export class MaterialImports {
     this.storage.failed(id);return this.public(this.row(task,id))
   }
   cancelTask(task:string):void {for(const r of this.db.prepare("SELECT id FROM actions WHERE task_id=? AND state!='ended' AND json_extract(request_json,'$.type')='material.import'").all(task) as Row[])this.end(task,r.id,'cancelled','IMPORT_TASK_STOPPED')}
-  close():void {this.closed=true;for(const t of this.transfers.values())if(t.fd>=0)fs.closeSync(t.fd);this.transfers.clear()}
+  close():void {this.closed=true;for(const t of this.transfers.values())if(t.fd>=0)fs.closeSync(t.fd);this.transfers.clear();this.previews.clear()}
   private async preview(task: string, id: string, offset: number) {
     const resource = () => this.db.prepare("SELECT r.* FROM resources r JOIN task_resources t ON t.resource_id=r.id JOIN tasks task ON task.id=t.task_id WHERE t.task_id=? AND r.id=? AND task.state!='deleting'").get(task, id) as (Resource & { display_name: string; media_type: string }) | undefined
     const r = resource()
@@ -128,26 +132,36 @@ export class MaterialImports {
     if (!mime) throw new ContractError('UNSUPPORTED_REPRESENTATION', 'Material does not support binary preview')
     if (r.byte_length > binaryPreviewLimit) throw new ContractError('PREVIEW_TOO_LARGE', 'Preview is limited to 8 MiB')
     if (!Number.isSafeInteger(offset) || offset < 0 || offset % binaryPreviewChunk !== 0 || offset >= r.byte_length) throw new ContractError('RESOURCE_RANGE_INVALID', 'Preview requires a bounded chunk offset')
-    const original = JSON.stringify(r)
+    const original = JSON.stringify(r), key = JSON.stringify([task, id])
     const valid = () => {
       if (this.closed || !this.db.open || JSON.stringify(resource()) !== original) throw new ContractError('RESOURCE_CORRUPT', 'Material changed during preview')
       this.journal.assertResource(r)
     }
     valid()
-    const bytes = await verifiedResource(this.root, r, async file => {
-      const header = Buffer.alloc(Math.min(12, r.byte_length))
-      const result = await file.read(header, 0, header.length, 0)
-      if (!hasPreviewSignature(mime, header.subarray(0, result.bytesRead))) throw new ContractError('UNSUPPORTED_REPRESENTATION', 'Material bytes do not match the preview format')
-      const chunk = Buffer.alloc(Math.min(binaryPreviewChunk, r.byte_length - offset))
-      for (let read = 0; read < chunk.length;) {
-        const { bytesRead } = await file.read(chunk, read, chunk.length - read, offset + read)
+    let preview = this.previews.get(key)
+    if (preview) {
+      const current = await fileLstat(managedFile(this.root, 'resources', r.storage_key)).catch(() => null)
+      if (!current || preview.resource !== original || preview.identity !== pluginFileIdentity(current)) {
+        this.previews.delete(key)
+        if (offset !== 0) throw new ContractError('RESOURCE_CORRUPT', 'Material changed during preview')
+        preview = undefined
+      }
+    }
+    preview ??= await verifiedResource(this.root, r, async file => {
+      const bytes = Buffer.alloc(r.byte_length)
+      for (let read = 0; read < bytes.length;) {
+        const { bytesRead } = await file.read(bytes, read, bytes.length - read, read)
         if (!bytesRead) throw new ContractError('RESOURCE_CORRUPT', 'Material preview is incomplete')
         read += bytesRead
       }
-      return chunk
-    })
+      if (!hasPreviewSignature(mime, bytes.subarray(0, 12))) throw new ContractError('UNSUPPORTED_REPRESENTATION', 'Material bytes do not match the preview format')
+      return { resource: original, identity: pluginFileIdentity(await fileHandleStat(file)), bytes }
+    }, valid)
     valid()
-    const end = offset + bytes.length
+    this.previews.delete(key)
+    this.previews.set(key, preview)
+    if (this.previews.size > previewCacheEntries) this.previews.delete(this.previews.keys().next().value!)
+    const end = Math.min(offset + binaryPreviewChunk, r.byte_length), bytes = preview.bytes.subarray(offset, end)
     return { base64: bytes.toString('base64'), mime, offset, byte_length: r.byte_length, content_version: r.sha256, next_offset: end < r.byte_length ? end : null }
   }
   private read(task:string,id:string,offset:number):unknown {
