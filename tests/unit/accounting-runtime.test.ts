@@ -134,3 +134,29 @@ it('isolates Run summaries, deduplicates settled facts, and distinguishes incomp
  expect(summary(other,otherRun)).toMatchObject({dispatched_requests:1,input_tokens:100,cache_hit_ratio:0.9})
  expect(()=>summary(other,run)).toThrow(/unavailable/)
 })
+
+it('totals a task across historical Runs and pre-Run routing without mixing other tasks',()=>{
+ const taskUsage=(task_id=task)=>store.handle({type:'host.task.usage',task_id})
+ const report=(value:ModelLease,input:number,output:number,cached:number,phase:'completed'|'unknown'='completed')=>{
+  const emit=requestAccounting(value,[],undefined,1024,'main');emit('reserved');emit('dispatched')
+  emit(phase,{prompt_tokens:input,completion_tokens:output,cached_prompt_tokens:cached},phase==='unknown'?'MODEL_TIMEOUT':null)
+ }
+ report(lease(),100,10,80)
+ store.handle({type:'run.cancel',task_id:task,run_id:run})
+ const latest=store.start(task,'second','fixture',[]),latestLease:ModelLease={id:config.id,revision:1,config,release(){}}
+ ;(store as any).accountLease(task,latest,latestLease)
+ report(latestLease,300,30,60,'unknown')
+ const other=store.create('other').task.id
+ const routingLease=(taskId:string):ModelLease=>({...latestLease,accounting:event=>(store as any).record(taskId,'model.request.accounting',{...event,routing_operation_id:'route'})})
+ expect(taskUsage(other)).toMatchObject({reported_requests:0,cache_hit_ratio:null})
+ report(routingLease(other),500,50,400)
+ expect(taskUsage()).toMatchObject({task_id:task,dispatched_requests:2,reported_requests:2,input_tokens:400,output_tokens:40,cached_input_tokens:140,cache_hit_ratio:0.35})
+ report(routingLease(task),600,60,360)
+ expect(taskUsage()).toMatchObject({dispatched_requests:3,reported_requests:3,input_tokens:1000,output_tokens:100,cached_input_tokens:500,cache_hit_ratio:0.5})
+ const late=requestAccounting(latestLease,[],undefined,1024,'main');late('reserved');late('dispatched')
+ expect(taskUsage()).toMatchObject({dispatched_requests:4,reported_requests:3,input_tokens:1000,cache_hit_ratio:null})
+ late('completed',{prompt_tokens:1000,completion_tokens:20,cached_prompt_tokens:0})
+ expect(taskUsage()).toMatchObject({dispatched_requests:4,reported_requests:4,input_tokens:2000,output_tokens:120,cache_hit_ratio:0.25})
+ expect(summary()).toMatchObject({dispatched_requests:1,input_tokens:100,cache_hit_ratio:0.8})
+ expect(taskUsage(other)).toMatchObject({reported_requests:1,input_tokens:500,cache_hit_ratio:0.8})
+})

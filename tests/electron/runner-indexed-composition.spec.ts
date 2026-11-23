@@ -5,10 +5,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { configureModel, chooseModel } from '../helpers/settings-ui'
 import { frame, modelInputFromHost, modelServer, synthetic } from '../helpers/model-server'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, RunnerFlowPage, RunnerProjection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, LiveFlowSnapshot, RunnerProjection, Snapshot, WorkDependency } from '../../src/shared/types'
 
 const require = createRequire(import.meta.url), executablePath: string = require('electron')
 type RunnerLimits = typeof import('../../src/runtime/runner/limits').RUNNER_LIMITS
@@ -31,79 +30,6 @@ async function runnerLimits(): Promise<RunnerLimits> {
   new Function('require', 'module', 'exports', built.outputFiles[0].text)(require, loaded, loaded.exports)
   return loaded.exports.RUNNER_LIMITS
 }
-
-test('approval stays on its originating message while another Run is stopped', async () => {
-  test.setTimeout(90000)
-  const alpha = 'ALPHA：生成交付内容，先移除临时的任务条目。', beta = 'BETA：等待独立回复。'
-  let dataId = '', held: ServerResponse | undefined, removeCalls = 0
-  const server = await modelServer(({ body }, response) => {
-    if (synthetic(body, response)) return
-    const system = body.messages[0].content ?? '', last = body.messages.at(-1)
-    const current = JSON.parse(body.messages.findLast((message: { role: string }) => message.role === 'user').content).request
-    if (!system.includes('Bound data: ')) {
-      if (current === alpha) textStream(response, JSON.stringify({ kind: 'new' }))
-      else if (current === beta) held = response
-      else textStream(response, JSON.stringify({ kind: 'reply', text: '后续对话仍然可用。' }))
-      return
-    }
-    const binding = JSON.parse(system.slice(system.indexOf('Bound data: ') + 'Bound data: '.length)) as ProducerBinding
-    if (last.role !== 'tool') {
-      hostToolStream(response, 'write', { type: 'task_data.create', data: { schema: { type: 'string' }, value: 'PRIVATE_ALPHA_DATA', references: [] } }, '', 'alpha-create')
-    } else if (last.tool_call_id === 'alpha-create') {
-      dataId = JSON.parse(last.content).data.id
-      removeCalls++
-      hostToolStream(response, 'write', { type: 'task_data.remove', id: dataId, expected_revision: 1 }, '', 'alpha-remove')
-    } else textStream(response, JSON.stringify({ version: 1, complete: false, answer: 'ALPHA 操作已结束。', artifacts: [], requirement_ids: [], unresolved: binding.requirement_ids }))
-  })
-  const directory = await mkdtemp(join(tmpdir(), 'pliuna-runner-messages-')), env = { ...process.env }
-  delete env.PLIUNA_TEST_RUNNER; delete env.TRELLIS_TEST_RUNNER
-  const app = await electron.launch({ executablePath, args: ['.'], env: { ...env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
-  try {
-    const page = await app.firstWindow()
-    await page.setViewportSize({ width: 1440, height: 960 })
-    const call = async <T,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
-      const response = await window.pliuna.request(request)
-      if (!response.ok) throw Error(response.error.code)
-      return response.data as T
-    }, request)
-    await configureModel(page, { id: 'runner-main', url: server.url, key: 'isolated-runner-key', model: 'runner-wire', context: 100000, output: 4096 })
-    await chooseModel(page, 'runner-main')
-    await page.getByRole('button', { name: '创建第一个任务' }).click()
-    await page.getByLabel('任务名称').fill('消息审批和独立运行')
-    await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    const task = (await call<{ id: string }[]>({ type: 'host.tasks' }))[0]!.id
-    const snapshot = () => call<Snapshot>({ type: 'task.snapshot', task_id: task })
-    const chat = page.getByRole('region', { name: '任务对话', exact: true })
-    const row = (text: string) => chat.getByRole('article', { name: '你的消息' }).filter({ hasText: text })
-    const send = async (text: string) => {
-      await page.getByLabel('想从哪里开始？').fill(text)
-      await page.getByRole('button', { name: '发送消息', exact: true }).click()
-    }
-    await send(alpha)
-    const approval = row(alpha).locator('.approval-card')
-    await expect(approval).toContainText('移除任务数据')
-    await expect(approval).not.toContainText('PRIVATE_ALPHA_DATA')
-    await expect(approval.getByRole('button')).toHaveCount(2)
-    const pending = (await snapshot()).approvals.find(item => item.decision === 'pending')!
-    await send(beta)
-    await expect.poll(() => !!held).toBe(true)
-    await expect(row(beta).locator('.approval-card')).toHaveCount(0)
-    await row(beta).getByRole('button', { name: '停止本次执行' }).click()
-    await page.getByRole('dialog', { name: '停止当前执行？' }).getByRole('button', { name: '停止本次执行' }).click()
-    await expect(row(beta)).toContainText('本次执行已停止')
-    await expect(approval).toBeVisible()
-    await approval.getByRole('button', { name: '批准', exact: true }).click()
-    await expect(approval).toHaveCount(0)
-    await expect.poll(async () => (await snapshot()).approvals.find(item => item.id === pending.id)?.decision).toBe('approve')
-    await expect(call({ type: 'approval.decide', task_id: task, approval_id: pending.id, decision: 'approve' })).rejects.toThrow('APPROVAL_INVALID')
-    await expect.poll(async () => (await snapshot()).task_data.total).toBe(0)
-    expect(removeCalls).toBe(1)
-    await expect.poll(async () => (await snapshot()).records.filter(record => record.kind === 'approval.decided')).toHaveLength(1)
-    await expect(page.getByRole('region', { name: '各目标状态' })).toHaveCount(0)
-  } finally {
-    held?.destroy(); await app.close(); await server.close(); await rm(directory, { recursive: true, force: true })
-  }
-})
 
 interface ProducerBinding {
   owner: ExecutionScope
@@ -141,6 +67,7 @@ test('real resources reach the working copy through bounded model Collators whil
     expect(bytes).toBeLessThan(256 * 1024)
   }
   const held: { alpha: ServerResponse | null; beta: ServerResponse | null } = { alpha: null, beta: null }
+  let alphaLayout: { response: ServerResponse; complete: () => void } | undefined
   const collators: { request: string; snapshot: CollatorSnapshot }[] = []
   const sourceResources = new Map<string, string>()
   const createResource = (response: ServerResponse, name: 'ALPHA' | 'BETA') => hostToolStream(response, 'write', {
@@ -159,7 +86,10 @@ test('real resources reach the working copy through bounded model Collators whil
           return { artifact: { task_id: index.task_id, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision }, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, slot_id: 'main', layout_mode: 'column', width_constraint: index.width_constraint }
         })
       }
-      textStream(response, JSON.stringify(plan)); return
+      if (collators.length === 1) {
+        alphaLayout = { response, complete: () => textStream(response, JSON.stringify(plan)) }
+      } else textStream(response, JSON.stringify(plan))
+      return
     }
     const current = [...body.messages].reverse().find((message: any) => message.role === 'user')
     const request = JSON.parse(current.content).request as string
@@ -168,6 +98,10 @@ test('real resources reach the working copy through bounded model Collators whil
     const last = body.messages.at(-1)
     if (last.role !== 'tool') { held[name === 'ALPHA' ? 'alpha' : 'beta'] = response; return }
     const result = JSON.parse(last.content)
+    if (last.tool_call_id === 'beta-create') {
+      hostToolStream(response, 'write', { type: 'task_data.remove', id: result.data.id, expected_revision: 1 }, '', 'beta-remove'); return
+    }
+    if (last.tool_call_id === 'beta-remove') { createResource(response, 'BETA'); return }
     expect(result).toMatchObject({ execution: 'success', data: { id: expect.any(String) } })
     const resource = result.data.id as string
     const system = body.messages.find((message: any) => message.role === 'system' && message.content.includes('Bound data: ')).content as string
@@ -211,7 +145,9 @@ test('real resources reach the working copy through bounded model Collators whil
     await expect.poll(() => Boolean(held.beta)).toBe(true)
     expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals).toHaveLength(2)
     const flowTab = page.getByRole('tab', { name: '执行流程', exact: true }), contentTab = page.getByRole('tab', { name: /^内容/ })
-    const graph = page.getByRole('region', { name: '数据交接图' })
+    const graph = page.getByRole('region', { name: '实时执行流程', exact: true })
+    const workerLane = graph.getByRole('region', { name: 'Worker', exact: true })
+    const collatorLane = graph.getByRole('region', { name: 'Collator', exact: true })
     const message = (name: string) => reply.getByRole('article', { name: '你的消息' }).filter({ hasText: name })
     await page.emulateMedia({ reducedMotion: 'no-preference' })
     const agentTabs = agent.getByRole('navigation', { name: 'Agent 视图' })
@@ -220,62 +156,70 @@ test('real resources reach the working copy through bounded model Collators whil
     await message('RESOURCE_ALPHA').getByRole('button', { name: '执行详情' }).press('Enter')
     await page.getByRole('dialog', { name: '本次请求详情' }).getByRole('button', { name: '查看此执行流程' }).press('Enter')
     await expect(flowTab).toHaveAttribute('aria-selected', 'true')
-    await expect(graph).toBeVisible()
-    await expect(graph.locator('.flow-worker-branch')).toHaveCount(1)
-    await expect(graph.locator('.flow-worker-branch')).toContainText('Worker')
+    await expect(workerLane.locator('.flow-card')).toHaveCount(2)
+    await expect(workerLane.locator('.flow-card[aria-pressed=true]')).toBeFocused()
     await expect(graph.locator('.flow-packet')).toHaveCount(0)
     await graph.evaluate(element => {
       document.body.dataset.flowEmissions = '[]'
-      const observer = new MutationObserver(changes => {
+      new MutationObserver(changes => {
         const ids = JSON.parse(document.body.dataset.flowEmissions ?? '[]') as string[]
-        for (const change of changes) if (change.target instanceof Element && change.target.closest('.flow-graph')) {
-          for (const added of change.addedNodes) if (added instanceof Element) {
-            const packets = added.matches('.flow-packet') ? [added] : [...added.querySelectorAll('.flow-packet')]
-            for (const packet of packets) ids.push(packet.closest<HTMLElement>('[data-kind]')?.dataset.kind ?? '')
-          }
+        for (const change of changes) for (const added of change.addedNodes) if (added instanceof Element) {
+          const packets = added.matches('.flow-packet') ? [added] : [...added.querySelectorAll('.flow-packet')]
+          for (const packet of packets) ids.push(packet.closest<HTMLElement>('[data-kind]')?.dataset.kind ?? '')
         }
         document.body.dataset.flowEmissions = JSON.stringify(ids)
-      })
-      observer.observe(element, { childList: true, subtree: true })
+      }).observe(element, { childList: true, subtree: true })
     })
     await page.setViewportSize({ width: 575, height: 760 })
     await expect(graph).toBeVisible()
     await expect(page.getByRole('navigation', { name: '工作区视图' })).toBeVisible()
-    await expect.poll(() => graph.evaluate(el => {
-      const { left, right } = el.getBoundingClientRect()
-      return [...el.querySelectorAll('.flow-node')].every(node => {
-        const rect = node.getBoundingClientRect()
-        return rect.left >= left - 1 && rect.right <= right + 1
-      })
-    })).toBe(true)
-    await graph.getByRole('button', { name: /Router.*分派工作/ }).press('Enter')
-    await expect(page.getByRole('dialog', { name: '交接原记录' })).toContainText('RESOURCE_ALPHA')
-    await page.getByRole('button', { name: '关闭弹窗' }).click()
+    expect(await graph.evaluate(el => [...el.querySelectorAll('.flow-lane')].every(node => node.getBoundingClientRect().left === el.querySelector('.flow-lane')!.getBoundingClientRect().left))).toBe(true)
     createResource(held.alpha!, 'ALPHA'); held.alpha = null
+    await expect.poll(() => Boolean(alphaLayout)).toBe(true)
+    const alphaBatch = collators[0]!.snapshot.batch
+    const alphaCard = graph.locator(`[data-flow-id="batch:${alphaBatch.batch_id}"].flow-card`)
+    await expect(collatorLane.locator('.flow-card')).toHaveCount(1)
+    await expect(alphaCard).toContainText('排版中')
+    await expect(alphaCard).toContainText('Worker → Collator')
+    await expect(graph.getByRole('heading', { name: '实时执行流程' })).toBeFocused()
+    hostToolStream(held.beta!, 'write', { type: 'task_data.create', data: { schema: { type: 'string' }, value: 'BETA_PENDING_APPROVAL', references: [] } }, '', 'beta-create')
+    held.beta = null
+    const betaCard = workerLane.locator('.flow-card[data-state="approval"]')
+    await expect(betaCard).toBeVisible()
+    const betaKey = await betaCard.getAttribute('data-flow-id')
+    const beta = workerLane.locator(`[data-flow-id="${betaKey}"]`)
+    await beta.focus()
+    await expect(alphaCard).toContainText('排版中')
+    await expect(beta).toBeFocused()
+    await page.screenshot({ path: test.info().outputPath('runner-flow-concurrent.png') })
+    alphaLayout!.complete()
+    await expect(graph.getByRole('region', { name: 'Host', exact: true }).locator('.flow-card')).toContainText('Collator → Host')
+    await expect(beta).toBeFocused()
     const snapshot = () => call<Snapshot>({ type: 'task.snapshot', task_id: task })
-    const publishThroughHost = async (count: number) => {
+    const publishThroughHost = async (count: number, actionId?: string) => {
       await expect.poll(async () => {
         const current = await snapshot()
-        for (const approval of current.approvals.filter(approval => approval.decision === 'pending' && approval.validity === 'valid')) {
+        for (const approval of current.approvals.filter(approval => approval.decision === 'pending' && approval.validity === 'valid' && (!actionId || approval.action_id === actionId))) {
           await call({ type: 'approval.decide', task_id: task, approval_id: approval.id, decision: 'approve' })
         }
-        for (const update of (await snapshot()).surface_updates) {
+        for (const update of (await snapshot()).surface_updates.filter(update => !actionId || update.action_id === actionId)) {
           await call({ type: 'surface.respond', task_id: task, action_id: update.action_id, proceed: true, confirm_discard: false })
         }
         return (await snapshot()).views.length
       }, { timeout: 30000, intervals: [100, 200, 500] }).toBe(count)
       return snapshot()
     }
-    const first = await publishThroughHost(1), alpha = first.views[0]!
-    await expect(graph.getByRole('button', { name: /Host.*发布内容.*已发布/ })).toBeVisible()
+    const first = await publishThroughHost(1, alphaBatch.action_id), alpha = first.views[0]!
+    await expect(alphaCard).toHaveCount(0)
+    await expect(beta).toContainText('待审批')
+    await expect(beta).toBeFocused()
     await expect(graph.locator('.flow-packet')).toHaveCount(0)
     const emissions = await page.evaluate(() => JSON.parse(document.body.dataset.flowEmissions ?? '[]'))
-    expect(emissions).toEqual(expect.arrayContaining(['indexes', 'plan']))
     expect(emissions.filter((kind: string) => kind === 'indexes')).toHaveLength(1)
     expect(emissions.filter((kind: string) => kind === 'plan')).toHaveLength(1)
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await contentTab.click(); await flowTab.click()
-    await expect(graph.getByRole('button', { name: /Host.*发布内容.*已发布/ })).toBeVisible()
+    await expect(beta).toContainText('Router → Worker')
     await expect(graph.locator('.flow-packet')).toHaveCount(0)
     await page.setViewportSize({ width: 1440, height: 960 })
     await contentTab.click()
@@ -292,7 +236,7 @@ test('real resources reach the working copy through bounded model Collators whil
     expect(first.runner?.scope).toMatchObject({ required_content_count: 2, published_count: 1 })
     expect(first.runner!.scope!.unresolved_count).toBeGreaterThan(0)
     expect(first.runner!.scope!.state).not.toBe('complete')
-    expect(held.beta).not.toBeNull()
+    await expect(message('RESOURCE_BETA').locator('.approval-card')).toContainText('移除任务数据')
     const beforeExport = server.exchanges.length
     const operation = await call<{ id: string }>({ type: 'export.prepare', task_id: task, answer_ids: [], view_ids: [alpha.id], expected_revision: first.surface.revision })
     await expect.poll(async () => (await call<{ phase: string }>({ type: 'export.status', task_id: task, operation_id: operation.id })).phase).toBe('preview')
@@ -304,7 +248,7 @@ test('real resources reach the working copy through bounded model Collators whil
     expect(frozen.selection).toMatchObject({ state: 'partial', target_count: 2, published_count: 1, surface_revision: first.surface.revision })
     expect(frozen.selection.unresolved_count).toBeGreaterThan(0)
     expect(server.exchanges).toHaveLength(beforeExport)
-    createResource(held.beta!, 'BETA'); held.beta = null
+    await message('RESOURCE_BETA').getByRole('button', { name: '批准', exact: true }).click()
     const complete = await publishThroughHost(2)
     await expect(center.getByRole('heading', { name: 'BETA_PUBLISHED', exact: true })).toBeVisible()
     await expect(center.getByRole('heading', { name: 'ALPHA_PUBLISHED', exact: true })).toBeVisible()
@@ -336,37 +280,14 @@ test('real resources reach the working copy through bounded model Collators whil
       for (const index of snapshot.indexes) expect(index.bundle_resource_id).toBe(sourceResources.get(index.work_id))
     }
     await page.screenshot({ path: test.info().outputPath('runner-resource-composition-actual-store.png') })
-    const alphaGoal = complete.runner!.goals.find(goal => goal.title.startsWith('RESOURCE_ALPHA'))!
-    const alphaScope = { run_id: alphaGoal.run!.id }
-    const originalGraph = (await call<RunnerFlowPage>({ type: 'host.runner.flow', task_id: task, scope: alphaScope })).graph!
-    const producerId = originalGraph.find(item => item.kind === 'work')!.work_id!
-    // Add completed non-publishing work to the isolated fixture. Its branch has
-    // a Router input but must not inherit the real producer's index link.
-    await app.evaluate((_electron, { directory, task, run }) => {
-      const Database = process.getBuiltinModule('module')!.createRequire(`${process.cwd()}/package.json`)('better-sqlite3')
-      const db = new Database(`${directory}/pliuna.sqlite`)
-      try {
-        const insert = db.prepare('INSERT INTO runner_work VALUES (?,?,?,1,?,?)')
-        for (let i = 1; i <= 2; i++) insert.run(`helper-${i}`, task, run, 'succeeded', JSON.stringify({ role: 'lightweight' }))
-      } finally { db.close() }
-    }, { directory, task, run: alphaScope.run_id })
-    await page.setViewportSize({ width: 1118, height: 863 })
+    const live = await call<LiveFlowSnapshot>({ type: 'host.runner.flow', task_id: task })
+    expect(Object.values(live.lanes).every(lane => lane.total === 0)).toBe(true)
     await flowTab.click()
-    const branches = graph.locator('.flow-worker-branch')
-    await expect(branches).toHaveCount(3)
-    await expect(branches.locator('.flow-trace[data-kind="work"]')).toHaveCount(3)
-    await expect(branches.locator('.flow-trace[data-kind="indexes"]')).toHaveCount(1)
-    await expect(branches.filter({ hasText: producerId.slice(0, 8) }).locator('.flow-trace[data-kind="indexes"]')).toHaveCount(1)
-    await page.screenshot({ path: test.info().outputPath('runner-flow-workers-desktop.png') })
-    await page.setViewportSize({ width: 390, height: 780 })
-    await expect(graph.locator('.flow-trunk[data-kind="work"]')).toBeVisible()
-    await expect(graph.locator('.flow-trunk[data-kind="indexes"]')).toBeVisible()
-    await expect(graph.getByRole('button', { name: /Host.*发布内容.*已发布/ })).toBeVisible()
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.screenshot({ path: test.info().outputPath('runner-flow-workers-narrow.png') })
+    await expect(graph.getByText('当前没有正在执行的工作')).toBeVisible()
+    await expect(graph.locator('.flow-card')).toHaveCount(0)
     expect(errors).toEqual([])
   } finally {
-    held.alpha?.destroy(); held.beta?.destroy()
+    held.alpha?.destroy(); held.beta?.destroy(); alphaLayout?.response.destroy()
     await app.close(); await server.close(); await rm(directory, { recursive: true, force: true })
   }
 })

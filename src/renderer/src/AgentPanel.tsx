@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
-import type { HostRequest, Run, RunnerFlowScope, Snapshot, TaskMessage } from '../../shared/types'
+import type { HostRequest, Run, Snapshot, TaskMessage } from '../../shared/types'
+import type { FlowApproval } from './RunnerFlow'
 import type { ModelState } from './ModelSettings'
 import { AgentDialog } from './Dialog'
 import { WorkspaceIcon } from './WorkspaceIcon'
 import { ContextPanel } from './ContextPanel'
 import { ApprovalCard, approvalLabel } from './ApprovalCard'
 import { RunOutcome } from './RunOutcome'
-import { RequestUsage, RunUsageAction } from './RequestUsage'
+import { RequestUsage, TaskUsageAction } from './RequestUsage'
 import { RecordBrowser, viewTitle } from './TaskInspector'
 import { RequestComposer } from './RequestComposer'
 import type { RequestQueueState } from './task-status'
@@ -34,13 +35,13 @@ function discardLabel(update: SurfaceUpdate, views: Snapshot['views']) {
   return index >= 0 ? `${operation}：《${viewTitle(views[index]!, index)}》` : operation
 }
 
-export function AgentPanel({ snapshot, run, usageScope, modelId, models, busy, text, setText, composer, onDirty, onQueueChange, refresh, act, settings, onRecords, onShowFlow, onFlow, onChapterScope, onConfirmSurface }: {
-  snapshot: Snapshot | null; run?: Run; usageScope?: RunnerFlowScope | null; modelId: string; models: ModelState; busy: boolean
+export function AgentPanel({ snapshot, run, approvalTarget, modelId, models, busy, text, setText, composer, onDirty, onQueueChange, refresh, act, settings, onRecords, onShowFlow, onFlow, onChapterScope, onConfirmSurface }: {
+  snapshot: Snapshot | null; run?: Run; approvalTarget?: FlowApproval; modelId: string; models: ModelState; busy: boolean
   text: string; setText(value: string): void; composer: RefObject<HTMLTextAreaElement | null>
   onDirty(id: string, dirty: boolean): void; onQueueChange(state: RequestQueueState): void; refresh(): Promise<void>; act(request: HostRequest): Promise<void>; settings(): void; onRecords(): void; onShowFlow(): void
   onConfirmSurface(update: SurfaceUpdate): void
   onChapterScope(request: ChapterSourceRequest): boolean
-  onFlow(scope: RunnerFlowScope): void
+  onFlow(runId: string): void
 }) {
   const [view, setView] = useState<'chat' | 'records'>('chat')
   const [recordsOpened, setRecordsOpened] = useState(false)
@@ -53,7 +54,6 @@ export function AgentPanel({ snapshot, run, usageScope, modelId, models, busy, t
   }, [snapshot?.task.id, onQueueChange])
   const menuRoot = useRef<HTMLDivElement>(null), chatScroll = useRef<HTMLDivElement>(null)
   const current = run ?? snapshot?.runs[0]
-  const usageRunId = usageScope === undefined ? current?.id : usageScope?.run_id ?? undefined
   const pending = snapshot?.approvals.filter(p => p.decision === 'pending' && p.validity === 'valid') ?? []
   const approvals = pending.filter(p => p.handling === 'awaiting_human')
   const surfaceChecks = snapshot?.surface_updates.filter(update => update.reset_requires_confirmation) ?? []
@@ -63,6 +63,7 @@ export function AgentPanel({ snapshot, run, usageScope, modelId, models, busy, t
   const decide = (approvalId: string, decision: 'approve' | 'deny') => {
     if (snapshot && !busy) void act({ type: 'approval.decide', task_id: snapshot.task.id, approval_id: approvalId, decision })
   }
+  useEffect(() => { if (approvalTarget) { setView('chat'); setTool(null); setMenu(false) } }, [approvalTarget])
   useEffect(() => {
     if (!menu) return
     menuRoot.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
@@ -77,8 +78,11 @@ export function AgentPanel({ snapshot, run, usageScope, modelId, models, busy, t
   const open = (value: Tool, execution?: Run) => { setSelectedRun(execution ?? null); setMenu(false); setTool(value) }
   const showDetails = (execution: Run) => { setDetailTab('process'); open('details', execution) }
   const approvalCard = (p: Snapshot['approvals'][number]) => <ApprovalCard key={p.id} id={p.id} label={approvalLabel(p)} busy={busy} proceed="批准" reject="拒绝" onProceed={() => decide(p.id, 'approve')} onReject={() => decide(p.id, 'deny')} />
-  const approvalMessage = (p: Snapshot['approvals'][number], visible: ReadonlyMap<string, TaskMessage>) =>
-    (p.message_ids ?? []).filter(id => visible.has(id)).sort((left, right) => visible.get(right)!.sequence - visible.get(left)!.sequence)[0]
+  const approvalMessage = (p: Snapshot['approvals'][number], visible: ReadonlyMap<string, TaskMessage>) => {
+    const target = approvalTarget?.approvalId === p.id ? approvalTarget.messageId : undefined
+    if (target && visible.has(target) && p.message_ids?.includes(target)) return target
+    return (p.message_ids ?? []).filter(id => visible.has(id)).sort((left, right) => visible.get(right)!.sequence - visible.get(left)!.sequence)[0]
+  }
   const underMessage = (message: TaskMessage, visible: ReadonlyMap<string, TaskMessage>) => {
     if (message.role !== 'user') return null
     const execution = byMessage.get(message.id) ?? (message.execution && (runs.get(message.execution.id) ?? message.execution))
@@ -118,7 +122,7 @@ export function AgentPanel({ snapshot, run, usageScope, modelId, models, busy, t
     <div ref={chatScroll} className="agent-state-scroll" data-agent-view="chat" hidden={view !== 'chat'}>
       {snapshot ? <>
         {(queue.pending > 0 || queue.unknown) && <button className="agent-queue-row" aria-label="请求队列" onClick={() => setQueueOpen(true)}><span>{queue.unknown ? '核对原请求' : queue.confirmation ? '请求需要确认' : '待执行请求'}</span><span>{queue.unknown ? '发送已暂停' : `${queue.pending} 项`} ›</span></button>}
-        <TaskReply key={`${snapshot.task.id}:${snapshot.runtime_epoch}`} snapshot={snapshot} scroll={chatScroll} underMessage={underMessage} unplaced={visible => {
+        <TaskReply key={`${snapshot.task.id}:${snapshot.runtime_epoch}`} snapshot={snapshot} scroll={chatScroll} locateApproval={view === 'chat' ? approvalTarget : undefined} underMessage={underMessage} unplaced={visible => {
           const remaining = approvals.filter(p => !approvalMessage(p, visible))
           return remaining.length ? <section className="conversation-approvals" aria-label="待审批操作">{remaining.map(approvalCard)}</section> : null
         }} />{!modelId && <p className="agent-note">选择主模型后即可发送。<button onClick={settings}>配置主模型 →</button></p>}
@@ -130,10 +134,10 @@ export function AgentPanel({ snapshot, run, usageScope, modelId, models, busy, t
           <RunnerWorkingCopy runner={snapshot.runner} />
           <button className="agent-text-link" onClick={onRecords}>查看完整执行记录 →</button>
     </div>}
-    {snapshot && <RequestComposer usage={<RunUsageAction taskId={snapshot.task.id} runId={usageRunId} epoch={snapshot.runtime_epoch} />} taskId={snapshot.task.id} active={snapshot.task.state === 'active'} text={text} setText={setText} modelId={modelId} models={models} busy={busy} run={Boolean(run)} composer={composer} onDirty={onDirty} refresh={refresh} queueOpen={queueOpen} setQueueOpen={setQueueOpen} onQueueChange={updateQueue} onChapterScope={onChapterScope} />}
+    {snapshot && <RequestComposer usage={<TaskUsageAction taskId={snapshot.task.id} epoch={snapshot.runtime_epoch} />} taskId={snapshot.task.id} active={snapshot.task.state === 'active'} text={text} setText={setText} modelId={modelId} models={models} busy={busy} run={Boolean(run)} composer={composer} onDirty={onDirty} refresh={refresh} queueOpen={queueOpen} setQueueOpen={setQueueOpen} onQueueChange={updateQueue} onChapterScope={onChapterScope} />}
     {tool && snapshot && <AgentDialog key={tool} title={titles[tool]} close={() => setTool(null)}>
       {tool === 'context' && <ContextPanel taskId={snapshot.task.id} modelId={modelId} latest={snapshot.records.at(-1)?.id} refresh={refresh} />}
-      {tool === 'details' && detailRun && <><nav className="agent-detail-tabs" aria-label="请求详情"><button aria-pressed={detailTab === 'process'} onClick={() => setDetailTab('process')}>过程与结果</button><button aria-pressed={detailTab === 'usage'} onClick={() => setDetailTab('usage')}>用量</button><button aria-pressed={detailTab === 'raw'} onClick={() => setDetailTab('raw')}>原记录</button></nav>{detailTab === 'process' && <><button type="button" onClick={() => { setTool(null); onFlow({ run_id: detailRun.id }) }}>查看此执行流程</button><RunOutcome run={detailRun} taskId={snapshot.task.id} showUsage={false} /></>}{detailTab === 'usage' && <RequestUsage key={`${snapshot.runtime_epoch}:${detailRun.id}`} taskId={snapshot.task.id} runId={detailRun.id} />}{detailTab === 'raw' && <RecordBrowser taskId={snapshot.task.id} kind="run" label="本次运行" initialId={detailRun.id} />}</>}
+      {tool === 'details' && detailRun && <><nav className="agent-detail-tabs" aria-label="请求详情"><button aria-pressed={detailTab === 'process'} onClick={() => setDetailTab('process')}>过程与结果</button><button aria-pressed={detailTab === 'usage'} onClick={() => setDetailTab('usage')}>用量</button><button aria-pressed={detailTab === 'raw'} onClick={() => setDetailTab('raw')}>原记录</button></nav>{detailTab === 'process' && <><button type="button" onClick={() => { setTool(null); onFlow(detailRun.id) }}>查看此执行流程</button><RunOutcome run={detailRun} taskId={snapshot.task.id} showUsage={false} /></>}{detailTab === 'usage' && <RequestUsage key={`${snapshot.runtime_epoch}:${detailRun.id}`} taskId={snapshot.task.id} runId={detailRun.id} />}{detailTab === 'raw' && <RecordBrowser taskId={snapshot.task.id} kind="run" label="本次运行" initialId={detailRun.id} />}</>}
       {tool === 'stop' && <><p>已经保存的回复和数据保留。停止后不自动重试。</p><div className="agent-dialog-actions"><button onClick={() => setTool(null)}>继续执行</button><button disabled={busy || !detailRun || !['running', 'waiting'].includes(detailRun.state)} onClick={() => { if (detailRun) void act({ type: 'run.cancel', task_id: snapshot.task.id, run_id: detailRun.id }); setTool(null) }}>停止本次执行</button></div></>}
     </AgentDialog>}
   </>

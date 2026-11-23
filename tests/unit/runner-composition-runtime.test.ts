@@ -12,6 +12,8 @@ import { RunnerCompositionState } from '../../src/runtime/runner/composition-sta
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerHostRecovery } from '../../src/runtime/runner/host-recovery'
 import { RunnerHostComposition } from '../../src/runtime/runner/host-composition'
+import { liveRunnerFlow } from '../../src/runtime/runner/live-flow'
+import type { LiveFlowSnapshot } from '../../src/shared/types'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks() })
@@ -94,14 +96,24 @@ async function approveAndConfirm(s: ReturnType<typeof setup>, actionId?: string)
 it('attributes one shared approval only to the messages that contributed to its batch', async () => {
   const s = setup(), first = s.source('alpha'), second = s.source('beta')
   s.source('trigger')
+  const live = () => s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot
+  expect(Object.values(live().lanes).every(lane => lane.total === 0)).toBe(true)
   const prepared = s.store.prepareRunnerComposition(s.task, 'trigger', { artifact_ids: [first.artifactId, second.artifactId] })
+  const batchId = `batch:${prepared.batch.batch_id}`
+  expect(live().lanes.Collator.items).toMatchObject([{ id: batchId, state: 'queued',
+    sources: [{ run_id: first.run }, { run_id: second.run }], handoff: { from: 'Worker', kind: 'indexes' } }])
   const publishing = s.store.publishRunnerComposition(s.task, prepared.batch.batch_id, prepared.collator.rulePlan())
   await tick()
   const pending = s.store.snapshot(s.task).approvals.filter(item => item.decision === 'pending')
   const originals = ['alpha', 'beta'].map(request => s.state.input(`input-${request}`).record_id)
   expect(pending).toEqual([expect.objectContaining({ action_id: prepared.batch.action_id, run_id: prepared.run_id, message_ids: originals })])
+  expect(live().lanes.Host.items).toMatchObject([{ id: batchId, state: 'approval', approval_id: pending[0]?.id,
+    handoff: { from: 'Collator', kind: 'plan' } }])
+  expect(live().lanes.Collator.total).toBe(0)
+  expect(JSON.stringify(live())).not.toContain('proposed_surface')
   await approveAndConfirm(s, prepared.batch.action_id)
   expect((await publishing).state).toBe('published')
+  expect(Object.values(live().lanes).every(lane => lane.total === 0)).toBe(true)
   expect(() => s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending[0]!.id, decision: 'approve' })).toThrow(expect.objectContaining({ code: 'APPROVAL_INVALID' }))
   expect(s.records('approval.decided')).toHaveLength(1)
 })
@@ -298,6 +310,8 @@ it.each(['cleanup', 'usage-unknown', 'legacy-budget-exceeded'] as const)('rebuil
   s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
   expect(await stale).toMatchObject({ state: 'failure', code: 'VERSION_CONFLICT' })
   expect(s.state.run(original.run_id)).toMatchObject({ state: blocker === 'usage-unknown' ? 'failed' : 'closing', commit_valid: false })
+  const live = () => liveRunnerFlow(s.db, { task_id: s.task }, s.epoch).lanes.Host.items
+  if (blocker !== 'usage-unknown') expect(live()).toMatchObject([{ id: `batch:${original.batch.batch_id}`, state: 'closing' }])
   const batches = () => (s.db.prepare('SELECT batch_id FROM runner_batches WHERE task_id=? ORDER BY rowid').all(s.task) as { batch_id: string }[]).map(row => s.composition.batch(s.task, row.batch_id)!)
   const rebuilding = s.automatic('alpha', original.batch.batch_id)
   s.pump(); await tick()
@@ -317,6 +331,7 @@ it.each(['cleanup', 'usage-unknown', 'legacy-budget-exceeded'] as const)('rebuil
     s.aggregate(original.run_id); await tick()
   }
   expect(s.state.run(original.run_id)).toMatchObject({ state: 'failed', commit_valid: false })
+  expect(live().some(item => item.id === `batch:${original.batch.batch_id}`)).toBe(false)
   expect(s.store.runnerPublicationOperation(s.task, original.batch.operation_id!)?.result).toMatchObject({ state: 'failure', code: 'VERSION_CONFLICT' })
   expect(batches()).toHaveLength(3)
   const next = batches()[2]!
@@ -429,6 +444,7 @@ it('refuses successor IDs when the original dispatched reservation remains unkno
   ledger.markDispatched('already-dispatched')
   const nextEpoch = `${s.epoch}-next`, report = new RunnerHostRecovery(s.db, nextEpoch).recover()
   expect(report.unknown_attempt_ids).toContain(original.attempt_id)
+  expect(liveRunnerFlow(s.db, { task_id: s.task }, nextEpoch).lanes.Host.items).toMatchObject([{ id: `batch:${original.batch.batch_id}`, state: 'unknown' }])
   const work = new RunnerWorkState(s.db, nextEpoch), artifacts = new RunnerArtifactState(s.db, work), composition = new RunnerCompositionState(s.db, work, artifacts)
   const host = new RunnerHostComposition(s.db, work, artifacts, composition), lease = s.models.acquire('model', 'main')
   expect(() => host.prepare(s.task, 'goal', lease, { previous_batch_id: original.batch.batch_id })).toThrow(expect.objectContaining({ code: 'RUNNER_PUBLICATION_CONFLICT' })); lease.release()

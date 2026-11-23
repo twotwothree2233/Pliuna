@@ -45,26 +45,28 @@ export interface RunActivity {
   request: string | null
   items: { id: string; type: 'tool' | 'reply'; name: string; operation: string | null; target_kind: string | null; target_id: string | null; label: string | null; execution: string | null; delivery: string | null; error: string | null }[]
 }
-export interface RunnerFlowScope { run_id: string }
-export interface RunnerFlowOption extends RunnerFlowScope { state: string; at: string | null; input: string | null }
 export type RunnerFlowRole = 'Router' | 'Worker' | 'Collator' | 'Host'
-export interface RunnerFlowEvidence {
-  id: string; kind: 'work' | 'accepted' | 'indexes' | 'plan'; state: string; at: string | null
-  from?: RunnerFlowRole; to?: RunnerFlowRole; work_id?: string; role?: string; attempt?: number
-  batch_id?: string; shared?: boolean; count?: number; work_ids?: string[]
-  ref?: { kind: 'event' | 'resource' | 'action' | 'run'; id: string }
+export const liveFlowPageSize = 8
+export type LiveFlowState = 'queued' | 'running' | 'waiting' | 'approval' | 'input' | 'unknown' | 'closing' | 'publishing'
+export interface LiveFlowSource { request_id?: string; message_id?: string; run_id?: string }
+export interface LiveFlowHandoff { sequence: number; from: RunnerFlowRole; kind: 'work' | 'indexes' | 'plan' }
+export interface LiveFlowItem {
+  id: string; role: RunnerFlowRole; kind: 'request' | 'run' | 'work' | 'batch' | 'chapter'
+  state: LiveFlowState; reason?: string; work_role?: string; run_id?: string; sources: LiveFlowSource[]
+  source_count?: number; approval_id?: string; action_id?: string; handoff?: LiveFlowHandoff
 }
-export interface RunnerFlowPage {
-  task_id: string; scope: RunnerFlowScope; through_sequence: number; work_count: number
-  items: RunnerFlowEvidence[]; next_cursor: string | null; graph?: RunnerFlowEvidence[]
+export interface LiveFlowLane { items: LiveFlowItem[]; total: number; page: number }
+export interface LiveFlowSnapshot {
+  task_id: string; runtime_epoch: string; through_sequence: number; lanes: Record<RunnerFlowRole, LiveFlowLane>
+  focus?: { role: RunnerFlowRole; id: string }
 }
-export interface RunnerFlowOptions { task_id: string; options: RunnerFlowOption[]; next_cursor: string | null }
-export interface RunUsageSummary {
-  task_id: string; run_id: string; through_sequence: number
+export interface TaskUsageSummary {
+  task_id: string; through_sequence: number
   dispatched_requests: number; reported_requests: number; cache_reported_requests: number
   input_tokens: number; output_tokens: number; cached_input_tokens: number
   cache_hit_ratio: number | null
 }
+export interface RunUsageSummary extends TaskUsageSummary { run_id: string }
 export interface Snapshot {
   runner?: RunnerProjection
   message_requests?: MessageRequestState[]
@@ -80,9 +82,9 @@ export interface Snapshot {
 export type ExportRequest = { type: 'export.catalog'; task_id: string; offset: number; expected_revision: number } | { type: 'export.check'; task_id: string; answer_ids: string[]; view_ids?: string[]; expected_revision?: number; fragment_selection?: { view_id: string; fragment_ids: string[] }[]; offset?: number } | { type: 'export.check.start'; task_id: string; answer_ids: string[]; view_ids?: string[]; expected_revision?: number; fragment_selection?: { view_id: string; fragment_ids: string[] }[] } | { type: 'export.check.status'; task_id: string; check_id: string; offset?: number } | { type: 'export.check.cancel'; task_id: string; check_id: string } | { type: 'export.prepare'; task_id: string; answer_ids: string[]; view_ids?: string[]; expected_revision?: number; fragment_selection?: { view_id: string; fragment_ids: string[] }[] } | { type: 'export.list'; task_id: string } | { type: 'export.status' | 'export.cancel' | 'export.preview'; task_id: string; operation_id: string } | { type: 'export.save'; task_id: string; operation_id: string; partial: boolean } | { type: 'export.resolve'; task_id: string; operation_id: string; acknowledge: boolean }
 export type HostRunnerRequest =
   | { type: 'host.runner.status'; task_id: string; request_id?: string; cursor?: string; limit?: number }
-  | { type: 'host.runner.flow'; task_id: string; scope?: RunnerFlowScope; cursor?: string }
+  | { type: 'host.runner.flow'; task_id: string; pages?: Partial<Record<RunnerFlowRole, number>>; focus_run_id?: string }
   | { type: 'host.runner.input'; task_id: string; input_event_id: string; kind: 'query' | 'explanation' | 'correction' | 'cancel_work' | 'cancel_run' | 'stop_task' | 'withdraw_goal'; text?: string; request_id?: string; run_id?: string; work_id?: string }
-export type HostRequest = IpcRequest | HostModelRequest | HostPluginRequest | ExportRequest | HostRunnerRequest | HostMessageRequest | { type: 'host.messages.latest'; task_id: string } | { type: 'host.run.activity' | 'host.run.usage'; task_id: string; run_id: string } | { type: 'host.run.accounting'; task_id: string; run_id: string; cursor?: string } | { type: 'host.run.results'; task_id: string; run_id: string; offset: number } | { type: 'host.views.page'; task_id: string; offset: number; expected_revision: number } | { type: 'host.tasks' } | { type: 'host.cache.clear' } | { type: 'host.directory.clear' } | { type: 'host.directory.lookup'; base_url: string; provider_id: string; wire_model_id: string; refresh: boolean }
+export type HostRequest = IpcRequest | HostModelRequest | HostPluginRequest | ExportRequest | HostRunnerRequest | HostMessageRequest | { type: 'host.messages.latest' | 'host.task.usage'; task_id: string } | { type: 'host.run.activity' | 'host.run.usage'; task_id: string; run_id: string } | { type: 'host.run.accounting'; task_id: string; run_id: string; cursor?: string } | { type: 'host.run.results'; task_id: string; run_id: string; offset: number } | { type: 'host.views.page'; task_id: string; offset: number; expected_revision: number } | { type: 'host.tasks' } | { type: 'host.cache.clear' } | { type: 'host.directory.clear' } | { type: 'host.directory.lookup'; base_url: string; provider_id: string; wire_model_id: string; refresh: boolean }
 export type HostResponse = { ok: true; data: unknown } | { ok: false; error: { code: string; message: string } }
 export interface Bridge { readonly platform: string; readonly transport?: 'desktop' | 'web'; request(request: HostRequest): Promise<HostResponse> }
 declare global { interface Window { pliuna: Bridge } }

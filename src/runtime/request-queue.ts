@@ -13,6 +13,7 @@ export class RequestQueue {
  private through=0
  private checking=new Set<string>()
  busy():boolean{return this.checking.size>0}
+ checkingRequest(id:string):boolean{return this.checking.has(id)}
  // A host admission adapter owns Run limits and actual call/cleanup conflicts.
  // Without it, the legacy single-Run and Task-wide resource guards still apply.
  constructor(private db:Database.Database,private epoch:string,private selection:(id:string)=>Row,private validateResource:(task:string,id:string)=>Row,private start:(task:string,text:string,config:string,attachments:Row[],requestId:string)=>string|Promise<string>,private available:()=>boolean,private preflight?:(task:string,resources:Row[])=>Promise<void>,private canAdmit?:(task:string,request:string)=>boolean,private receive?:(task:string,request:string,input:Row)=>Row){this.schedule()}

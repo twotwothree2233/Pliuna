@@ -3,9 +3,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
+import type { ServerResponse } from 'node:http'
 import { configureModel, chooseModel, chooseTheme } from '../helpers/settings-ui'
 import { hostToolStream, modelServer, synthetic, textStream } from '../helpers/model-server'
-import type { HostRequest, RunActivity, TaskMessagePage } from '../../src/shared/types'
+import type { HostRequest, RunActivity, Snapshot, TaskMessagePage } from '../../src/shared/types'
 
 const executablePath: string = createRequire(import.meta.url)('electron')
 
@@ -77,9 +78,15 @@ test('loading earlier messages and receiving a late reply preserve the reading p
     await expect(details.getByRole('status')).toContainText('快照截至记录序号')
     await expect(details.getByText('请求 1 · 主模型 · 请求完成')).toBeVisible()
     await details.getByRole('button', { name: '过程与结果', exact: true }).click()
+    const usage = page.locator('.composer-usage')
+    await expect(usage).toHaveAttribute('title', /Run/)
+    const originalUsage = await usage.getAttribute('title')
+    expect(originalUsage).not.toContain(run)
     await details.getByRole('button', { name: '查看此执行流程' }).click()
-    await expect(page.getByRole('region', { name: '执行流程', exact: true }).getByLabel('执行', { exact: true })).toHaveValue(run)
-    await expect(page.locator('.composer-usage')).toHaveAttribute('title', new RegExp(run))
+    const flow = page.getByRole('region', { name: '实时执行流程', exact: true })
+    await expect(flow.getByText('当前没有正在执行的工作')).toBeVisible()
+    await expect(flow.locator('.flow-card')).toHaveCount(0)
+    await expect(usage).toHaveAttribute('title', originalUsage!)
     await expect(chat).toContainText(late)
   } finally { pending?.destroy(); await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })
@@ -325,4 +332,85 @@ test('Agent activity follows this request and actual tool outcomes instead of a 
     await expect(dynamic).toHaveCount(0)
     expect(errors).toEqual([])
   } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('approval stays on its originating message while another Run is stopped', async () => {
+  test.setTimeout(90000)
+  const alpha = 'ALPHA：生成交付内容，先移除临时的任务条目。', beta = 'BETA：等待独立回复。'
+  let dataId = '', held: ServerResponse | undefined, removeCalls = 0
+  const server = await modelServer(({ body }, response) => {
+    if (synthetic(body, response)) return
+    const system = body.messages[0].content ?? '', last = body.messages.at(-1)
+    const current = JSON.parse(body.messages.findLast((message: { role: string }) => message.role === 'user').content).request
+    if (!system.includes('Bound data: ')) {
+      if (current === alpha) textStream(response, JSON.stringify({ kind: 'new' }))
+      else if (current === beta) held = response
+      else textStream(response, JSON.stringify({ kind: 'reply', text: '后续对话仍然可用。' }))
+      return
+    }
+    const binding = JSON.parse(system.slice(system.indexOf('Bound data: ') + 'Bound data: '.length)) as { requirement_ids: string[] }
+    if (last.role !== 'tool') {
+      hostToolStream(response, 'write', { type: 'task_data.create', data: { schema: { type: 'string' }, value: 'PRIVATE_ALPHA_DATA', references: [] } }, '', 'alpha-create')
+    } else if (last.tool_call_id === 'alpha-create') {
+      dataId = JSON.parse(last.content).data.id
+      removeCalls++
+      hostToolStream(response, 'write', { type: 'task_data.remove', id: dataId, expected_revision: 1 }, '', 'alpha-remove')
+    } else textStream(response, JSON.stringify({ version: 1, complete: false, answer: 'ALPHA 操作已结束。', artifacts: [], requirement_ids: [], unresolved: binding.requirement_ids }))
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-runner-messages-')), env = { ...process.env }
+  delete env.PLIUNA_TEST_RUNNER; delete env.TRELLIS_TEST_RUNNER
+  const app = await electron.launch({ executablePath, args: ['.'], env: { ...env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory } })
+  try {
+    const page = await app.firstWindow()
+    await page.setViewportSize({ width: 1440, height: 960 })
+    const call = async <T,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
+      const response = await window.pliuna.request(request)
+      if (!response.ok) throw Error(response.error.code)
+      return response.data as T
+    }, request)
+    await configureModel(page, { id: 'runner-main', url: server.url, key: 'isolated-runner-key', model: 'runner-wire', context: 100000, output: 4096 })
+    await chooseModel(page, 'runner-main')
+    await page.getByRole('button', { name: '创建第一个任务' }).click()
+    await page.getByLabel('任务名称').fill('消息审批和独立运行')
+    await page.getByRole('button', { name: '创建任务', exact: true }).click()
+    const task = (await call<{ id: string }[]>({ type: 'host.tasks' }))[0]!.id
+    const snapshot = () => call<Snapshot>({ type: 'task.snapshot', task_id: task })
+    const chat = page.getByRole('region', { name: '任务对话', exact: true })
+    const row = (text: string) => chat.getByRole('article', { name: '你的消息' }).filter({ hasText: text })
+    const send = async (text: string) => {
+      await page.getByLabel('想从哪里开始？').fill(text)
+      await page.getByRole('button', { name: '发送消息', exact: true }).click()
+    }
+    await send(alpha)
+    const approval = row(alpha).locator('.approval-card')
+    await expect(approval).toContainText('移除任务数据')
+    await expect(approval).not.toContainText('PRIVATE_ALPHA_DATA')
+    await expect(approval.getByRole('button')).toHaveCount(2)
+    const pending = (await snapshot()).approvals.find(item => item.decision === 'pending')!
+    await send(beta)
+    await expect.poll(() => !!held).toBe(true)
+    await expect(row(beta).locator('.approval-card')).toHaveCount(0)
+    await row(alpha).getByRole('button', { name: '执行详情' }).click()
+    await page.getByRole('dialog', { name: '本次请求详情' }).getByRole('button', { name: '查看此执行流程' }).click()
+    const flow = page.getByRole('region', { name: '实时执行流程', exact: true })
+    await expect(flow.locator('.flow-card[aria-pressed=true]')).toContainText('待审批')
+    await page.getByRole('navigation', { name: 'Agent 视图' }).getByRole('button', { name: '执行记录', exact: true }).click()
+    await page.getByRole('button', { name: '收起Agent 栏' }).click()
+    await flow.getByRole('button', { name: '前往 Agent 审批' }).click()
+    await expect(approval).toBeFocused()
+    await row(beta).getByRole('button', { name: '停止本次执行' }).click()
+    await page.getByRole('dialog', { name: '停止当前执行？' }).getByRole('button', { name: '停止本次执行' }).click()
+    await expect(row(beta)).toContainText('本次执行已停止')
+    await expect(approval).toBeVisible()
+    await approval.getByRole('button', { name: '批准', exact: true }).click()
+    await expect(approval).toHaveCount(0)
+    await expect.poll(async () => (await snapshot()).approvals.find(item => item.id === pending.id)?.decision).toBe('approve')
+    await expect(call({ type: 'approval.decide', task_id: task, approval_id: pending.id, decision: 'approve' })).rejects.toThrow('APPROVAL_INVALID')
+    await expect.poll(async () => (await snapshot()).task_data.total).toBe(0)
+    expect(removeCalls).toBe(1)
+    await expect.poll(async () => (await snapshot()).records.filter(record => record.kind === 'approval.decided')).toHaveLength(1)
+    await expect(page.getByRole('region', { name: '各目标状态' })).toHaveCount(0)
+  } finally {
+    held?.destroy(); await app.close(); await server.close(); await rm(directory, { recursive: true, force: true })
+  }
 })

@@ -5,13 +5,12 @@ import type { ModelRequest } from '../shared/contracts.generated'
 import { ContractError } from '../shared/validation'
 import { readPluginResource, readResourceContent } from './plugins/resource-reader'
 import { accountingPage, readRequestAccounting, usagePosition, usageSummary } from './model/accounting-query'
-import type { RunUsageSummary, TaskListItem } from '../shared/types'
+import type { RunUsageSummary, TaskListItem, TaskUsageSummary } from '../shared/types'
 import { operationContract, operationDirectory, contractRepresentation } from './model/operation-contracts'
 import { modelReadOptions } from './model/tool-input'
 import { readTextSelection } from './plugins/text-selection'
 import { RepresentationPager } from './model/representation'
 import { runnerFailureReason } from './runner/failure-reason'
-import { runnerFlow } from './runner/flow-query'
 import { materialRemoved } from './material-removals'
 import { conversationPage, conversationText } from './runner/conversation-query'
 
@@ -39,7 +38,7 @@ export class ObjectQueries {
   private secret = randomBytes(32)
   private pager = new RepresentationPager()
   private organizationVersion = 0
-  private usage = new Map<string, RunUsageSummary>()
+  private usage = new Map<string, TaskUsageSummary>()
   constructor(private db: Database.Database, private readView: (row: Row) => Row, private definition: (id: string) => Row | undefined, private readResource: (row: Row) => Row, private readHistory: (row: Row) => Row, private readText?: (row: Row, offset: number) => Row, private pluginRoot?: string, private checkPluginResource?: (row: Row) => void, private provenance?: (task: string, resource: string) => Row | null, private derivedResults?: (task: string, resource: string) => Row, private exportCheck?: (task: string, row: Row) => Row) {}
   rebind(db: Database.Database): void { this.db = db; this.secret = randomBytes(32); this.pager.reset(); this.usage.clear() }
   private token(binding: string, position: unknown): string {
@@ -73,17 +72,18 @@ export class ObjectQueries {
   }
   runUsage(task: string, run: string): RunUsageSummary {
     if (!this.db.prepare('SELECT id FROM runs WHERE task_id=? AND id=?').get(task, run)) fail('NOT_FOUND', 'Run unavailable within current task')
+    return { ...this.usageFor(task, run), run_id: run }
+  }
+  taskUsage(task: string): TaskUsageSummary { return this.usageFor(task) }
+  private usageFor(task: string, run?: string): TaskUsageSummary {
     const key = JSON.stringify([task, run]), through = usagePosition(this.db, task, run), previous = this.usage.get(key)
     if (previous?.through_sequence === through) return previous
-    const next = usageSummary(this.db, task, run, through)
+    const next = usageSummary(this.db, task, through, run)
     if (this.usage.size >= 64) this.usage.delete(this.usage.keys().next().value!)
     this.usage.set(key, next)
     return next
   }
   taskOrganizationChanged(): void { this.organizationVersion++ }
-  flow(raw: Record<string, unknown>) {
-    return runnerFlow(this.db, raw, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) })
-  }
   messages(task: string, before?: string, after?: string) {
     return conversationPage(this.db, task, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, before, after)
   }

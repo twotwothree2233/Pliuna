@@ -10,8 +10,7 @@ import { RunnerHostRecovery } from '../../src/runtime/runner/host-recovery'
 import { RunnerHostStatus } from '../../src/runtime/runner/host-status'
 import { RUNNER_LIMITS } from '../../src/runtime/runner/limits'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
-import { ObjectQueries } from '../../src/runtime/queries'
-import type { RunnerFlowOptions, RunnerFlowPage } from '../../src/shared/types'
+import { liveRunnerFlow } from '../../src/runtime/runner/live-flow'
 
 const coreSql = readFileSync(new URL('../../src/shared/contracts/001-core.sql', import.meta.url), 'utf8')
 const runnerSql = readFileSync(new URL('../../src/shared/contracts/002-runner.sql', import.meta.url), 'utf8')
@@ -101,58 +100,61 @@ function fixture() {
   return { db, work, composition, status, record, goal, revise, start, finish, fragment, scope, publish, batch }
 }
 
-it('projects documented run handoffs and separates shared-batch publication from acceptance', () => {
-  const s = fixture(), producing = s.goal('primary', 'PRIVATE REQUEST', 'artifact'), second = s.goal('secondary')
-  const owner = s.start(producing), concurrent = s.start(second), index = s.fragment(producing, owner)
-  s.finish(producing, owner, [index]); s.scope(producing)
-  s.db.prepare("INSERT INTO runner_consumptions VALUES (?,'task','installed',?,'time')").run(producing.input_event_id, JSON.stringify({ goal: producing }))
-  const batch = s.batch(producing, index, 'shared', 'prepared', undefined, [second])
-  s.db.prepare("INSERT INTO runner_budgets VALUES ('batch-budget','task','composition',NULL,'{}','time')").run()
-  s.db.prepare("INSERT INTO runner_runs VALUES (?,'task','composition',NULL,NULL,?,1,'batch-budget','{}')").run(batch.run_id, batch.batch_id)
-  const queries = new ObjectQueries(s.db, () => ({}), () => undefined, () => ({}), () => ({}))
-  const scope = { run_id: owner.run_id }
-  const read = (cursor?: string) => queries.flow({ type: 'host.runner.flow', task_id: 'task', scope, ...(cursor ? { cursor } : {}) }) as RunnerFlowPage
-  expect((queries.flow({ task_id: 'task' }) as RunnerFlowOptions).options.map(option => option.run_id)).toEqual([batch.run_id, concurrent.run_id, owner.run_id])
-  const first = read()
-  expect(first.items).toMatchObject([
-    { kind: 'work', from: 'Router', to: 'Worker', ref: { kind: 'event', id: 'request-primary' } },
-    { kind: 'accepted', from: 'Worker', to: 'Host', state: 'accepted' },
-    { kind: 'indexes', from: 'Worker', to: 'Collator', state: 'pending_layout', shared: true, count: 1 }
-  ])
-  expect(JSON.stringify(first)).not.toContain('PRIVATE')
-  const unrelated = queries.flow({ task_id: 'task', scope: { run_id: concurrent.run_id } }) as RunnerFlowPage
-  expect(unrelated.items).toHaveLength(1)
-  expect(unrelated.items[0]).not.toHaveProperty('from')
-  expect(() => queries.flow({ task_id: 'other', scope })).toThrow('unavailable')
-  expect(() => queries.flow({ task_id: 'task', scope: { run_id: 'missing-run' } })).toThrow('unavailable')
-  s.db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES (?,'task',?,'mutation','waiting','{}','{}',1,'time')").run(batch.action_id, batch.run_id)
-  s.db.prepare("INSERT INTO runner_publications VALUES (?,'task',?,?,'prepared','{}',NULL)").run(batch.operation_id, batch.batch_id, batch.action_id)
-  expect(read().items.at(-1)).toMatchObject({ kind: 'plan', state: 'pending_publication', ref: { kind: 'action', id: batch.action_id } })
-  for (const state of ['unknown', 'published']) {
-    s.db.prepare('UPDATE runner_publications SET state=? WHERE operation_id=?').run(state, batch.operation_id)
-    expect(read().items.at(-1)).toMatchObject({ kind: 'plan', state })
-  }
-  const insert = s.db.prepare("INSERT INTO runner_work VALUES (?,'task',?,1,'queued','{}')")
-  for (let i = 0; i < 50; i++) insert.run(`queued-${i}`, owner.run_id)
-  const page = read()
-  expect(page.items).toHaveLength(24)
-  expect(page.work_count).toBe(51)
-  const workers = page.graph!.filter(item => item.kind === 'work')
-  expect(workers).toHaveLength(24)
-  expect(workers.map(item => item.work_id)).toContain(owner.work_id)
-  expect(page.graph).toEqual(expect.arrayContaining([
-    expect.objectContaining({ kind: 'indexes', work_ids: [owner.work_id] }),
-    expect.objectContaining({ kind: 'plan', state: 'published' })
+it('projects queued requests, routing and independent live work without borrowing expired approvals', () => {
+  const s = fixture(), a = s.start(s.goal('alpha')), b = s.start(s.goal('beta'))
+  s.db.prepare("INSERT INTO requests VALUES ('queued','task','queued','{}',?,'time'),('routing','task','queued','{}',?,'time')")
+    .run(JSON.stringify({ epoch: 'epoch', text: 'Queued input' }), JSON.stringify({ epoch: 'epoch', text: 'Routing input' }))
+  s.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES ('router','task','routing','running','epoch','{}','{}','time'),('foreign','other',NULL,'running','epoch','{}','{}','time')").run()
+  const another = { ...s.work.work(a.work_id), work_id: 'second-work', state: 'queued' }
+  s.db.prepare("INSERT INTO runner_work VALUES ('second-work','task',?,1,'queued',?)").run(a.run_id, JSON.stringify(another))
+  s.work.updateAttempt({ ...s.work.attempt(b.attempt_id), state: 'waiting' })
+  s.record('waiting', 'worker.state', { owner: b, reason: 'approval' })
+  s.db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES ('action','task',?,'mutation','waiting',?,'{}',1,'time')").run(b.run_id, JSON.stringify({ owner: b }))
+  s.db.prepare("INSERT INTO approvals VALUES ('approval','action','pending','valid','manual','awaiting_human','2000-01-01',NULL,?)").run(JSON.stringify({ runtime_epoch: 'epoch' }))
+  const read = (task_id = 'task') => liveRunnerFlow(s.db, { task_id }, 'epoch')
+  expect(read().lanes.Router.items).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'request:queued', state: 'queued' }),
+    expect.objectContaining({ id: 'request:routing', state: 'running', sources: [{ request_id: 'routing', run_id: 'router' }] })
   ]))
-  insert.run('newer-work', owner.run_id)
-  const ids = page.items.map(item => item.id)
-  for (let cursor = page.next_cursor; cursor;) {
-    const next = read(cursor)
-    expect(next.graph).toBeUndefined()
-    ids.push(...next.items.map(item => item.id)); cursor = next.next_cursor
-  }
-  expect(ids).toHaveLength(54); expect(new Set(ids).size).toBe(54); expect(ids).not.toContain('1:newer-work')
-  expect(() => queries.flow({ task_id: 'task', cursor: page.next_cursor })).toThrow(/Cursor/)
+  expect(read().lanes.Worker.items).toMatchObject([
+    { id: `work:${a.work_id}`, state: 'running' }, { id: 'work:second-work', state: 'queued' }, { id: `work:${b.work_id}`, state: 'waiting' }
+  ])
+  s.db.prepare("UPDATE approvals SET expires_at='2999-01-01'").run()
+  expect(read().lanes.Worker.items.at(-1)).toMatchObject({ state: 'approval', approval_id: 'approval' })
+  expect(read('other').lanes.Worker.items).toMatchObject([{ id: 'run:foreign' }])
+  expect(() => read('missing')).toThrow('Task unavailable')
+  expect(() => liveRunnerFlow(s.db, { task_id: 'task', scope: { run_id: a.run_id } }, 'epoch')).toThrow('Invalid live flow lookup')
+})
+
+it('pages only active work and exposes verified handoff references without bodies', () => {
+  const s = fixture(), live = s.start(s.goal('live', 'PRIVATE REQUEST')), old = s.start(s.goal('old'))
+  s.db.prepare("UPDATE runs SET state='completed',commit_valid=0 WHERE id=?").run(old.run_id)
+  s.record('handoff', 'worker.input', { owner: live, text: 'PRIVATE WORKER BODY' })
+  s.record('wrong-owner', 'worker.input', { owner: { ...live, work_id: 'different' }, text: 'PRIVATE WORKER BODY' })
+  const insert = s.db.prepare("INSERT INTO runner_work VALUES (?,'task',?,1,'queued','{}')")
+  for (let i = 0; i < 20; i++) insert.run(`live-${i}`, live.run_id)
+  insert.run('dead-work', old.run_id)
+  const read = (page = 0, focus_run_id?: string) => liveRunnerFlow(s.db, { task_id: 'task', pages: { Worker: page }, ...(focus_run_id ? { focus_run_id } : {}) }, 'epoch')
+  const first = read()
+  expect(first.lanes.Worker).toMatchObject({ total: 21, page: 0 })
+  expect(first.lanes.Worker.items).toHaveLength(8)
+  expect(first.lanes.Worker.items[0]).toMatchObject({ handoff: { from: 'Router', kind: 'work', sequence: 3 } })
+  expect(JSON.stringify(first)).not.toContain('PRIVATE')
+  expect(read(2).lanes.Worker.items.map(item => item.id)).toEqual(['work:live-15', 'work:live-16', 'work:live-17', 'work:live-18', 'work:live-19'])
+  expect(read(2, live.run_id)).toMatchObject({ focus: { role: 'Worker', id: `work:${live.work_id}` }, lanes: { Worker: { page: 0 } } })
+  expect(read(2, old.run_id).focus).toBeUndefined()
+})
+
+it('retains unknown outcomes and cleanup until the original operations settle', () => {
+  const s = fixture(), cleanup = s.start(s.goal('cleanup')), pending = s.start(s.goal('pending'))
+  s.db.prepare("UPDATE runs SET state='waiting',runtime_epoch='previous',commit_valid=0,intended_terminal='cancelled',wait_reason='ending_cleanup' WHERE id=?").run(cleanup.run_id)
+  s.db.prepare("UPDATE runs SET state='interrupted',runtime_epoch='previous',commit_valid=0 WHERE id=?").run(pending.run_id)
+  s.db.prepare("INSERT INTO calls(id,task_id,run_id,capability_id,state,dispatch,execution,delivery,input_json,limits_json,commit_valid,created_at) VALUES ('call','task',?,'test','ended','unknown','unknown','not_applicable','{}','{}',0,'time')").run(pending.run_id)
+  const read = () => liveRunnerFlow(s.db, { task_id: 'task' }, 'epoch').lanes.Host.items
+  expect(read()).toMatchObject([{ id: `run:${cleanup.run_id}`, state: 'closing' }, { id: `run:${pending.run_id}`, state: 'unknown' }])
+  s.db.prepare("UPDATE runs SET state='cancelled' WHERE id=?").run(cleanup.run_id)
+  s.db.prepare("UPDATE calls SET execution='failure' WHERE id='call'").run()
+  expect(read()).toEqual([])
 })
 
 it.each([

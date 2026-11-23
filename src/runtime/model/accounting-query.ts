@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import { assertContract, ContractError } from '../../shared/validation'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import type { RequestAccounting } from './accounting'
-import type { RunUsageSummary } from '../../shared/types'
+import type { TaskUsageSummary } from '../../shared/types'
 
 type Row = { id: string; payload_json: string }
 export function accountingFacts(rows: Row[]) {
@@ -56,32 +56,38 @@ export function accountingPage(db: Database.Database, task: string, run: string,
   return { requests, next_after: selected.length > 20 ? selected[19]!.first_sequence : null }
 }
 
-const ledgerScope = "task_id=? AND kind='model.request.accounting' AND json_valid(payload_json) AND json_extract(payload_json,'$.run_id')=?"
-export function usagePosition(db: Database.Database, task: string, run: string): number {
-  return (db.prepare(`SELECT sequence FROM records WHERE ${ledgerScope} ORDER BY sequence DESC LIMIT 1`).get(task, run) as { sequence: number } | undefined)?.sequence ?? 0
+function usageScope(run: string | undefined) {
+  return "task_id=? AND kind='model.request.accounting' AND json_valid(payload_json)" +
+    (run === undefined ? '' : " AND json_extract(payload_json,'$.run_id')=?")
+}
+export function usagePosition(db: Database.Database, task: string, run?: string): number {
+  const scope = run === undefined ? [task] : [task, run]
+  return (db.prepare(`SELECT sequence FROM records WHERE ${usageScope(run)} ORDER BY sequence DESC LIMIT 1`).get(...scope) as { sequence: number } | undefined)?.sequence ?? 0
 }
 
-// Scan the indexed Run, aggregate in SQLite, and return a fixed-size result.
-// A dispatch without a verified completion contributes only to completeness.
-export function usageSummary(db: Database.Database, task: string, run: string, through: number): RunUsageSummary {
+// Aggregate the persisted ledger in SQLite, including routing before a Run exists.
+export function usageSummary(db: Database.Database, task: string, through: number, run?: string): TaskUsageSummary {
+  const scope = run === undefined ? [task] : [task, run]
   const totals = db.prepare(`WITH facts AS MATERIALIZED (
     SELECT sequence,payload_json,
       json_extract(payload_json,'$.request_id') AS request,
+      json_array(json_extract(payload_json,'$.run_id'),json_extract(payload_json,'$.routing_operation_id')) AS execution,
       json_extract(payload_json,'$.phase') AS phase,
       json_extract(payload_json,'$.owner') AS owner
-    FROM records WHERE ${ledgerScope} AND sequence<=?
+    FROM records WHERE ${usageScope(run)} AND sequence<=?
       AND json_extract(payload_json,'$.version') IN (1,2)
       AND json_type(payload_json,'$.request_id')='text' AND json_extract(payload_json,'$.request_id')!=''
       AND (json_type(payload_json,'$.owner') IS NULL OR
         (json_extract(payload_json,'$.owner.task_id')=task_id AND json_extract(payload_json,'$.owner.run_id')=json_extract(payload_json,'$.run_id')))
   ), dispatched AS (
-    SELECT request,MIN(sequence) AS position FROM facts WHERE phase='dispatched' GROUP BY request
+    SELECT execution,request,MIN(sequence) AS position FROM facts WHERE phase='dispatched' GROUP BY execution,request
   ), settled AS (
-    SELECT d.request,MIN(e.sequence) AS position
+    SELECT COALESCE(MIN(CASE WHEN e.phase='completed' THEN e.sequence END),MIN(e.sequence)) AS position
     FROM dispatched d JOIN facts f ON f.sequence=d.position
-    JOIN facts e ON e.request=d.request AND e.phase='completed' AND e.sequence>f.sequence AND e.owner IS f.owner
-    WHERE EXISTS (SELECT 1 FROM facts r WHERE r.request=d.request AND r.phase='reserved' AND r.owner IS f.owner AND r.sequence<f.sequence)
-    GROUP BY d.request
+    JOIN facts e ON e.execution=d.execution AND e.request=d.request AND e.sequence>f.sequence AND e.owner IS f.owner
+      AND ${run === undefined ? "e.phase IN ('completed','unknown')" : "e.phase='completed'"}
+    WHERE EXISTS (SELECT 1 FROM facts r WHERE r.execution=d.execution AND r.request=d.request AND r.phase='reserved' AND r.owner IS f.owner AND r.sequence<f.sequence)
+    GROUP BY d.execution,d.request
   ), reported AS (
     SELECT json_extract(f.payload_json,'$.usage.prompt_tokens') AS input,
       json_extract(f.payload_json,'$.usage.completion_tokens') AS output,
@@ -93,10 +99,10 @@ export function usageSummary(db: Database.Database, task: string, run: string, t
   ), clean AS (
     SELECT input,output,CASE WHEN typeof(cached)='integer' AND cached BETWEEN 0 AND input THEN cached END AS cached FROM reported
   ) SELECT (SELECT COUNT(*) FROM dispatched) AS dispatched_requests,COUNT(*) AS reported_requests,
-    COUNT(cached) AS cache_reported_requests,TOTAL(input) AS input_tokens,TOTAL(output) AS output_tokens,TOTAL(cached) AS cached_input_tokens FROM clean`).get(task, run, through) as Omit<RunUsageSummary, 'task_id' | 'run_id' | 'through_sequence' | 'cache_hit_ratio'>
-  if (!Number.isSafeInteger(totals.input_tokens + totals.output_tokens)) throw new ContractError('ACCOUNTING_RANGE', 'Run usage exceeds the supported exact range')
+    COUNT(cached) AS cache_reported_requests,TOTAL(input) AS input_tokens,TOTAL(output) AS output_tokens,TOTAL(cached) AS cached_input_tokens FROM clean`).get(...scope, through) as Omit<TaskUsageSummary, 'task_id' | 'through_sequence' | 'cache_hit_ratio'>
+  if (!Number.isSafeInteger(totals.input_tokens + totals.output_tokens)) throw new ContractError('ACCOUNTING_RANGE', 'Usage exceeds the supported exact range')
   return {
-    task_id: task, run_id: run, through_sequence: through, ...totals,
+    task_id: task, through_sequence: through, ...totals,
     cache_hit_ratio: totals.input_tokens > 0 && totals.dispatched_requests === totals.cache_reported_requests ? totals.cached_input_tokens / totals.input_tokens : null
   }
 }

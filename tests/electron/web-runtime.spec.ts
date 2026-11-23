@@ -7,7 +7,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, HostRequest, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, HostRequest, LiveFlowSnapshot, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
 import { chooseModel, configureModel } from '../helpers/settings-ui'
 import { frame, modelServer, synthetic, textStream } from '../helpers/model-server'
 
@@ -98,6 +98,8 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
   delete env.PLIUNA_TEST_RUNNER; delete env.TRELLIS_TEST_RUNNER
   delete env.PLIUNA_TEST_RUNNER_COLLATOR; delete env.TRELLIS_TEST_RUNNER_COLLATOR
   let app: ElectronApplication | undefined, page!: Page
+  let releaseFlow: () => void = () => {}, heldFlow = Promise.resolve()
+  const holdNextFlow = () => { heldFlow = new Promise<void>(resolve => { releaseFlow = resolve }) }
   const call = async <T = unknown,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
     const response = await window.pliuna.request(request)
     if (!response.ok) throw Error(`${response.error.code}: ${response.error.message}`)
@@ -139,6 +141,28 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     const empty = await snapshot()
     expect(empty.runs).toHaveLength(0)
     expect(empty.runner?.goals ?? []).toHaveLength(0)
+    const flowTab = page.getByRole('tab', { name: '执行流程', exact: true })
+    const flow = page.getByRole('region', { name: '实时执行流程', exact: true })
+    const emptyMessage = flow.getByText('当前没有正在执行的工作')
+    const flowRequest = { type: 'host.runner.flow', task_id: task } as const
+    let flowMode: 'hold' | 'fail' | 'old' | 'live' = 'hold', intercepted = 0
+    holdNextFlow()
+    await page.route(`${webUrl}_pliuna/request`, async route => {
+      const body = route.request().postDataJSON() as HostRequest
+      if (body.type !== 'host.runner.flow') return route.continue()
+      intercepted++
+      if (flowMode === 'hold') {
+        const gate = heldFlow, response = await route.fetch()
+        await gate
+        return route.fulfill({ response })
+      }
+      if (flowMode === 'fail') return route.fulfill({ json: { ok: false, error: { code: 'TRANSPORT_UNAVAILABLE', message: 'Fixture outage' } } })
+      if (flowMode === 'old') {
+        const response = await route.fetch(), result = await response.json()
+        return route.fulfill({ response, json: { ...result, data: { ...result.data, runtime_epoch: 'old-epoch' } } })
+      }
+      return route.continue()
+    })
     const send = async (text: string, reply: string, count: number) => {
       await page.getByLabel('想从哪里开始？').fill(text)
       await page.getByRole('button', { name: '发送消息', exact: true }).click()
@@ -155,13 +179,40 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     await expect(badge).toHaveText('执行中')
     await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('执行中')
     expect((await snapshot()).runs.some(run => run.state === 'running')).toBe(true)
+    expect(intercepted).toBe(0)
+    await flowTab.click()
+    await expect.poll(() => intercepted).toBe(1)
+    await expect(flow.getByText('正在读取执行状态…')).toBeVisible()
+    await expect(emptyMessage).toHaveCount(0)
+    flowMode = 'live'; releaseFlow()
+    await expect(flow.getByRole('region', { name: 'Router', exact: true }).locator('.flow-card')).toContainText('路由中')
+    expect((await call<LiveFlowSnapshot>(flowRequest)).lanes.Router.total).toBe(1)
+    flowMode = 'fail'
+    await expect(flow.getByText('状态暂不可用')).toBeVisible()
+    await expect(emptyMessage).toHaveCount(0)
+    flowMode = 'old'
+    const beforeRetry = intercepted
+    await flow.getByRole('button', { name: '重试' }).click()
+    await expect.poll(() => intercepted).toBeGreaterThan(beforeRetry)
+    await expect(flow.getByText('状态暂不可用')).toBeVisible()
+    flowMode = 'live'
+    await expect(flow.locator('.flow-card')).toHaveCount(1)
+    await expect(flow.locator('.flow-packet')).toHaveCount(0)
 
+    const beforeSwitch = intercepted
+    flowMode = 'hold'; holdNextFlow()
+    await expect.poll(() => intercepted).toBeGreaterThan(beforeSwitch)
     await page.getByRole('button', { name: '＋ 新建任务', exact: true }).click()
     await page.getByLabel('任务名称').fill(idleTitle)
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await expect(badge).toHaveText('就绪')
     await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('执行中')
     await expect(taskRow(idleTitle).locator('.task-phase')).toHaveText('就绪')
+    flowMode = 'live'
+    await flowTab.click()
+    await expect(emptyMessage).toBeVisible()
+    releaseFlow()
+    await expect(flow.locator('.flow-card')).toHaveCount(0)
     await taskRow(firstTitle).click()
     await expect(badge).toHaveText('执行中')
     await expect(taskRow(idleTitle).locator('.task-phase')).toHaveText('就绪')
@@ -176,6 +227,10 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText(firstReply)
     await expect(badge).toHaveText('就绪')
     await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('就绪')
+    await flowTab.click()
+    await expect(emptyMessage).toBeVisible()
+    await expect(flow.locator('.flow-card')).toHaveCount(0)
+    await page.getByRole('tab', { name: '内容', exact: true }).click()
     await send(followup, secondReply, 2)
     expect(captured).toHaveLength(2)
     const history = captured[1]!.filter(message => message.role !== 'system')
@@ -188,6 +243,7 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     expect(bridgeRequests.filter(request => request.type === 'request.submit')).toHaveLength(2)
     expect(serverErrors).toEqual([]); expect(pageErrors).toEqual([])
   } finally {
+    releaseFlow()
     releaseFirst()
     if (app) {
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {})

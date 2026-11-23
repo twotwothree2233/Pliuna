@@ -15,6 +15,7 @@ import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { loadConversation } from '../../src/runtime/runner/conversation'
 import { RuntimeStore } from '../../src/runtime/store'
 import { artifactDraft } from '../helpers/producer-draft'
+import type { LiveFlowSnapshot } from '../../src/shared/types'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks() })
@@ -988,12 +989,16 @@ test.each(['replace', 'move', 'delete'] as const)('an uncertain %s action remain
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
   const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   const pending = s.status(update.update_id), calls = s.complete.mock.calls.length
+  const live = () => (s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot).lanes
+  expect(live().Host.items).toMatchObject([{ id: `chapter:${update.update_id}`, handoff: { from: 'Worker', kind: 'plan' } }])
+  expect(live().Worker.items).toEqual([])
   const request = s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(action)
   const actionCount = s.internal().db.prepare('SELECT COUNT(*) n FROM actions WHERE task_id=?').get(s.task)
   // Emulate a persisted action whose transport closed without a known outcome.
   s.internal().db.prepare("UPDATE actions SET state='ended',result='unknown',result_json=?,commit_valid=0 WHERE id=?").run(JSON.stringify({ code: 'CONNECTION_LOST' }), action)
   s.restart()
   for (let query = 0; query < 2; query++) expect(s.status(update.update_id)).toMatchObject({ state: 'unknown', action_id: action, publication_operation_id: pending.publication_operation_id })
+  expect(live().Host.items).toMatchObject([{ id: `chapter:${update.update_id}`, state: 'unknown' }])
   expect(s.snapshot().views[0]!.bundle.html).toBe(bundle().html)
   expect(s.snapshot().views[0]!.chapter_manifest!.content_tree).toEqual(tree)
   expect(s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(action)).toEqual(request)

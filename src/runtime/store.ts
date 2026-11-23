@@ -65,6 +65,7 @@ import { runActivity } from './run-activity'
 import { RunnerWorkState, type QualifiedAttempt } from './runner/work-state'
 import { WorkerContext } from './runner/worker-context'
 import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory } from './runner/conversation'
+import { liveRunnerFlow } from './runner/live-flow'
 import { approvalMessages, conversationDependencyResult, conversationReference, runMessage, type BoundConversationDependency } from './runner/conversation-query'
 import type { WorkerGrant, WorkerProfile } from './runner/worker-profile'
 import { captureExecutionScope } from './model/request-evidence'
@@ -3693,7 +3694,17 @@ export class RuntimeStore {
       const query = raw as Row
       if (typeof query.task_id !== 'string') fail('INVALID_REQUEST', 'Task is required for execution flow')
       this.task(query.task_id)
-      return this.queries.flow(query)
+      return liveRunnerFlow(this.db, query, this.epoch, {
+        checking: id => this.requests.checkingRequest(id),
+        compositionWaiting: this.runnerCompositionMerges.has(query.task_id) || this.runnerCompositionWaiting.has(query.task_id),
+        canCompose: (artifact, revision) => {
+          try { this.runnerComposition().checkArtifact(query.task_id, artifact, revision); return true }
+          catch (error) {
+            if (error instanceof ContractError && ['RUNNER_DEPENDENCY_INVALID', 'RUNNER_OWNERSHIP_INVALID'].includes(error.code)) return false
+            throw error
+          }
+        }
+      })
     }
     if (raw && typeof raw === 'object' && (raw as Row).type === 'host.runner.status') {
       if (this.features.runner?.conversationRouting) fail('UNSUPPORTED_OPERATION', 'Open execution details from the originating message')
@@ -3727,6 +3738,12 @@ export class RuntimeStore {
       if (Object.keys(r).some(key => !['type', 'task_id', 'run_id', 'cursor'].includes(key)) || typeof r.task_id !== 'string' || typeof r.run_id !== 'string' || (r.cursor !== undefined && (typeof r.cursor !== 'string' || r.cursor.length > 2048))) fail('INVALID_REQUEST', 'Invalid paged Run accounting lookup')
       this.task(r.task_id)
       return this.queries.accounting(r.task_id, r.run_id, r.cursor)
+    }
+    if (raw && typeof raw === 'object' && (raw as Row).type === 'host.task.usage') {
+      const r = raw as Row
+      if (Object.keys(r).sort().join(',') !== 'task_id,type' || typeof r.task_id !== 'string' || !r.task_id || r.task_id.length > 200) fail('INVALID_REQUEST', 'Invalid task usage lookup')
+      this.task(r.task_id)
+      return this.queries.taskUsage(r.task_id)
     }
     if (raw && typeof raw === 'object' && (raw as Row).type === 'host.run.usage') {
       const r = raw as Row

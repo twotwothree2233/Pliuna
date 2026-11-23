@@ -16,8 +16,15 @@ test('paged accounting replaces pages, preserves snapshots and survives isolated
     await app.evaluate(async (_electron, { directory, task }) => {
       const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(directory + '/pliuna.sqlite')
       try { db.transaction(() => {
-        db.prepare("INSERT INTO runs (id,task_id,state,commit_valid,runtime_epoch,limits_json,budget_json,created_at,ended_at) VALUES ('paged-run',?,'completed',0,'synthetic','{}','{}',?,?)").run(task, '2026-10-30T00:00:00.000Z', '2026-10-30T00:00:00.000Z')
+        const run = db.prepare("INSERT INTO runs (id,task_id,state,commit_valid,runtime_epoch,limits_json,budget_json,created_at,ended_at) VALUES (?,?,'completed',0,'synthetic','{}','{}',?,?)")
+        run.run('older-run', task, '2026-10-29T00:00:00.000Z', '2026-10-29T00:00:00.000Z')
+        run.run('paged-run', task, '2026-10-30T00:00:00.000Z', '2026-10-30T00:00:00.000Z')
         const insert = db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)'); let sequence = 1
+        for (const phase of ['reserved', 'dispatched', 'completed']) {
+          const at = '2026-10-29T00:00:00.000Z'
+          const event = { version: 2, output_policy: 'service-default', request_id: 'older-request', run_id: 'older-run', model_id: 'synthetic', model_revision: 1, purpose: 'main', phase, at, input_bytes: 2, estimated_input_tokens: 258, output_reserve: null, context_tokens: 1000000, components: { rules: 0, tools: 0, history: 0, summary: 0, current: 0, tool_results: 0, envelope: 2 }, usage: phase === 'completed' ? { prompt_tokens: 85300, completion_tokens: 12, cached_prompt_tokens: 60000 } : null, error: null }
+          insert.run('accounting-' + sequence, task, sequence++, 'model.request.accounting', JSON.stringify(event), at)
+        }
         for (let n = 0; n < 75; n++) for (const phase of ['reserved', 'dispatched', 'completed']) {
           const event = { version: 2, output_policy: 'service-default', request_id: 'request-' + n, run_id: 'paged-run', model_id: 'synthetic', model_revision: 1, purpose: 'main', phase, at: '2026-10-30T00:00:00.000Z', input_bytes: 2, estimated_input_tokens: 258, output_reserve: null, context_tokens: 1000000, components: { rules: 0, tools: 0, history: 0, summary: 0, current: 0, tool_results: 0, envelope: 2 }, usage: phase === 'completed' && n !== 74 ? { prompt_tokens: n, completion_tokens: 2 } : null, error: null }
           insert.run('accounting-' + sequence, task, sequence++, 'model.request.accounting', JSON.stringify(event), event.at)
@@ -29,13 +36,12 @@ test('paged accounting replaces pages, preserves snapshots and survives isolated
     const runSummary = () => call({ type: 'host.run.usage', task_id: task, run_id: 'paged-run' })
     const totals = await runSummary()
     expect(totals).toMatchObject({ dispatched_requests: 75, reported_requests: 74, input_tokens: 2701, output_tokens: 148, cache_hit_ratio: null })
-    const summary = page.getByRole('button', { name: '模型用量：部分 Token 2,849，缓存命中率 —' })
+    const summary = page.getByRole('button', { name: '任务模型用量：部分 Token 88,161，缓存命中率 —' })
+    await expect(summary).toContainText('Token 88.2K')
     await summary.press('Enter')
-    const summaryDialog = page.getByRole('dialog', { name: '模型用量', exact: true })
-    await expect(summaryDialog).toContainText('Run paged-run')
+    const summaryDialog = page.getByRole('dialog', { name: '任务模型用量', exact: true })
+    await expect(summaryDialog).toContainText('88,161')
     await expect(summaryDialog).toContainText('1 个已派发请求尚无实报用量')
-    await summaryDialog.getByRole('button', { name: '查询单次请求用量' }).click()
-    await expect(summaryDialog.locator('details')).toHaveCount(20)
     await summaryDialog.getByRole('button', { name: '关闭弹窗' }).press('Enter')
     await expect(summary).toBeFocused()
     await page.getByRole('button', { name: '更多 Agent 操作' }).click()
@@ -52,6 +58,6 @@ test('paged accounting replaces pages, preserves snapshots and survives isolated
     const restored = await call({ type: 'host.run.accounting', task_id: task, run_id: 'paged-run' }); expect(restored.requests).toEqual(first.requests)
     expect(await runSummary()).toEqual(totals)
     await expect(call({ type: 'host.run.accounting', task_id: task, run_id: 'paged-run', cursor: first.next_cursor })).rejects.toThrow('INVALID_CURSOR')
-    expect((await call({ type: 'task.snapshot', task_id: task })).record_total).toBe(225)
+    expect((await call({ type: 'task.snapshot', task_id: task })).record_total).toBe(228)
   } finally { await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {}); await app.close().catch(() => {}) }
 })

@@ -3,9 +3,10 @@ import { defaultWorkspace, fitWorkspace, maximumPaneWidth, paneMinimum, resizeWo
 import { shortcutLabel } from './desktop-platform'
 import { WorkspaceIcon } from './WorkspaceIcon'
 
-export interface WorkspaceHandle { showContent(): void; showAgent(): void }
+export interface WorkspaceHandle { showContent(): void; showAgent(focusComposer?: boolean): void }
 interface LayoutControls {
   narrow: boolean
+  contentVisible: boolean
   visible(side: PaneSide): boolean
   toggle(side: PaneSide): void
   resize(side: PaneSide | 'center', value: number): void
@@ -15,6 +16,7 @@ interface LayoutControls {
 }
 const LayoutContext = createContext<LayoutControls | null>(null)
 function useLayoutControls() { const controls = useContext(LayoutContext); if (!controls) throw new Error('Workspace controls require WorkspaceLayout'); return controls }
+export function useWorkspaceContentVisible() { return useLayoutControls().contentVisible }
 const paneName = { left: '任务栏', right: 'Agent 栏' }
 
 export function PaneToggle({ side, pending = 0 }: { side: PaneSide; pending?: number }) {
@@ -81,11 +83,11 @@ export const WorkspaceLayout = forwardRef<WorkspaceHandle, Props>(function Works
   }, [geometry.leftDock, geometry.rightDock, narrow, page])
   useImperativeHandle(ref, () => ({
     showContent: () => setPage('content'),
-    showAgent: () => {
+    showAgent: (focusComposer = true) => {
       const next = { ...state.current.preferences, rightOpen: true }
       if (state.current.narrow) setPage('right')
       else setPreferences(next)
-      requestAnimationFrame(() => body.current?.querySelector<HTMLTextAreaElement>('#message')?.focus())
+      if (focusComposer) requestAnimationFrame(() => body.current?.querySelector<HTMLTextAreaElement>('#message')?.focus())
     }
   }), [])
   function resize(side: PaneSide | 'center', value: number) {
@@ -100,7 +102,7 @@ export const WorkspaceLayout = forwardRef<WorkspaceHandle, Props>(function Works
     setPreferences(next)
   }
   const controls: LayoutControls = {
-    narrow, visible, preferences, geometry, resize,
+    narrow, contentVisible: !narrow || page === 'content', visible, preferences, geometry, resize,
     toggle(side) {
       stopDrag(); const next = { ...preferences, [dockPreference[side]]: !visible(side) }
       changePanes(next); focusToggle(side)

@@ -2,12 +2,12 @@ import { applicationPreference } from '../../shared/branding'
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
-import type { HostRequest, RunnerFlowScope, Snapshot, Task, TaskListItem, View } from '../../shared/types'
+import type { HostRequest, Snapshot, Task, TaskListItem, View } from '../../shared/types'
 import { availableModels, hostRequest, type ModelState } from './ModelSettings'
 import { applySync } from './sync'
 import type { SyncReply } from '../../runtime/sync'
 import { AgentPanel } from './AgentPanel'
-import { RunnerFlow, useFlowOptions } from './RunnerFlow'
+import { RunnerFlow, type FlowApproval, type FlowFocus } from './RunnerFlow'
 import { taskStatus, type RequestQueueState } from './task-status'
 import { TaskData, ExecutionHistory, AnswerHistory, viewTitle } from './TaskInspector'
 import { DialogFocus } from './Dialog'
@@ -265,14 +265,9 @@ function App() {
   const [modelId, setModelId] = useState('')
   const [filter, setFilter] = useState('')
   const [tab, setTab] = useState<'surface' | 'data' | 'answers' | 'execution' | 'resources' | 'flow'>('surface')
-  const flowOptions = useFlowOptions(snapshot?.task.id, snapshot?.runtime_epoch)
   const flowKey = snapshot ? `${snapshot.task.id}:${snapshot.runtime_epoch}` : ''
-  const [flowSelection, setFlowSelection] = useState<{ key: string; scope: RunnerFlowScope } | null>(null)
-  const flowScope = flowSelection?.key === flowKey ? flowSelection.scope : flowOptions.latest
-  const selectFlow = (scope: RunnerFlowScope) => setFlowSelection({ key: flowKey, scope })
-  useEffect(() => {
-    if (tab === 'flow' && flowScope?.run_id && flowSelection?.key !== flowKey) selectFlow(flowScope)
-  }, [tab, flowKey, flowScope?.run_id, flowSelection?.key])
+  const [flowFocus, setFlowFocus] = useState<{ key: string; target: FlowFocus } | null>(null)
+  const [approvalTarget, setApprovalTarget] = useState<{ key: string; target: FlowApproval } | null>(null)
   const [connected, setConnected] = useState(false)
   const [models, setModels] = useState<ModelState>({ models: [], approval: { mode: 'manual', model_id: '' } })
   const composerDrafts = useRef(new Map<string, string>())
@@ -574,7 +569,7 @@ function App() {
   function changeSelection(taskId: string | null) {
     if (selected.current) composerDrafts.current.set(selected.current, text)
     generation.current++; selected.current = taskId; syncState.current = null
-    setSnapshot(null); setTaskQueue(null); setFlowSelection(null); setText(taskId ? composerDrafts.current.get(taskId) ?? '' : ''); setTab('surface'); setError('')
+    setSnapshot(null); setTaskQueue(null); setFlowFocus(null); setApprovalTarget(null); setText(taskId ? composerDrafts.current.get(taskId) ?? '' : ''); setTab('surface'); setError('')
     if (taskId) workspace.current?.showContent()
   }
   async function select(taskId: string) {
@@ -669,10 +664,14 @@ function App() {
     setChapterScope({ task_id: snapshot.task.id, ...(snapshot.views.length === 1 ? { view_id: snapshot.views[0]!.id } : {}), request: source })
     setTab('surface'); workspace.current?.showContent(); return true
   }
-  function openFlow(scope: RunnerFlowScope) {
+  function openFlow(runId?: string) {
     if (!canLeave()) return
-    selectFlow(scope); setTab('flow'); workspace.current?.showContent()
+    setFlowFocus(runId ? { key: flowKey, target: { runId } } : null); setTab('flow'); workspace.current?.showContent()
     requestAnimationFrame(() => document.getElementById('tab-flow')?.focus())
+  }
+  function openFlowApproval(target: FlowApproval) {
+    setApprovalTarget({ key: flowKey, target })
+    workspace.current?.showAgent(false)
   }
   return <WorkspaceLayout ref={workspace} nativeMac={desktopPlatform() === 'darwin' && Boolean(window.pliuna) && window.pliuna.transport !== 'web'}
     taskInert={Boolean(snapshot && organization?.archiveTaskId === snapshot.task.id)} agentPending={reviewCount}
@@ -704,7 +703,7 @@ function App() {
     {error && <div className="error" role="alert">{error}<button onClick={() => void Promise.all([refresh(), reloadModels()]).catch(e => setError(String(e)))}>重新查询状态</button></div>}
     {snapshot ? <><div className="workspace-tabs" role="tablist" aria-label="任务工作区">{([
       ['surface', '内容', 'doc'], ['resources', '材料', 'folder'], ['execution', '记录', 'clock'], ['flow', '执行流程', 'flow']
-    ] as const).map(([id, label, glyph]) => <button key={id} role="tab" id={`tab-${id}`} aria-selected={id === 'execution' ? ['execution', 'data', 'answers'].includes(tab) : tab === id} aria-controls="workspace-panel" onClick={() => { if (canLeave()) { setError(''); setTab(id) } }}><WorkspaceIcon name={glyph} />{label}</button>)}</div><div className="workspace-scroll" role="tabpanel" id="workspace-panel" aria-labelledby={`tab-${tab === 'answers' || tab === 'data' ? 'execution' : tab}`}>
+    ] as const).map(([id, label, glyph]) => <button key={id} role="tab" id={`tab-${id}`} aria-selected={id === 'execution' ? ['execution', 'data', 'answers'].includes(tab) : tab === id} aria-controls="workspace-panel" onClick={() => { if (canLeave()) { setError(''); setFlowFocus(null); setTab(id) } }}><WorkspaceIcon name={glyph} />{label}</button>)}</div><div className="workspace-scroll" role="tabpanel" id="workspace-panel" aria-labelledby={`tab-${tab === 'answers' || tab === 'data' ? 'execution' : tab}`}>
       {['execution', 'data', 'answers'].includes(tab) && <nav className="workspace-record-nav" aria-label="记录分类">{([
         ['execution', '执行记录'], ['data', '任务数据'], ['answers', '作答记录']
       ] as const).map(([id, label]) => <button key={id} aria-pressed={tab === id} onClick={() => { if (canLeave()) setTab(id) }}>{label}</button>)}</nav>}
@@ -713,10 +712,10 @@ function App() {
       {tab === 'resources' && <Materials key={snapshot.task.id} taskId={snapshot.task.id} active={snapshot.task.state==='active'} onDirty={onDirty} />}
       {tab === 'data' && <TaskData key={snapshot.task.id} snapshot={snapshot} />}
       {tab === 'answers' && <AnswerHistory key={snapshot.task.id} snapshot={snapshot} continueDisabled={busy || Boolean(run) || !modelId || snapshot.task.state !== 'active'} onReturnToContent={() => { if (canLeave()) setTab('surface') }} onContinue={answerId => { if (!confirm(`基于当前选中的正式作答发送新请求？这会调用当前主模型，并产生一次新的运行。\n作答 ID：${answerId}`)) return; void act({ type: 'request.submit', task_id: snapshot.task.id, text: `请阅读已保存的正式作答（ID：${answerId}），继续本任务。`, model_config_id: modelId, resource_ids: [], import_ids: [] }) }} />}
-      {tab === 'flow' && <RunnerFlow key={flowKey} taskId={snapshot.task.id} epoch={snapshot.runtime_epoch} scope={flowScope} options={flowOptions} onScope={selectFlow} />}
+      {tab === 'flow' && <RunnerFlow key={flowKey} taskId={snapshot.task.id} epoch={snapshot.runtime_epoch} focus={flowFocus?.key === flowKey ? flowFocus.target : undefined} paused={settingsOpen || exportOpen || creating} onApproval={openFlowApproval} />}
       {tab === 'execution' && <ExecutionHistory key={snapshot.task.id} snapshot={snapshot} />}
     </div></> : <div className="workspace-scroll"><section className="workspace-start"><header><span className="eyebrow">本地工作空间</span><h1>{tasks.length ? '选择任务' : '尚无任务'}</h1><p>{tasks.length ? '从左侧选择已有任务，或新建任务。打开任务不会自动运行 Agent。' : '先配置主模型，再创建任务并发送消息。内容、任务数据、作答和执行记录分别保存。'}</p></header><div className="start-actions"><button className="primary" onClick={newTask}>{tasks.length ? '新建任务' : '创建第一个任务'}</button><button onClick={() => void settings('models')}>配置模型与审批</button></div><dl className="workspace-readiness"><div><dt>主模型</dt><dd>{readyModels.length ? `${readyModels.length} 个已配置` : '未配置 · 不自动联网'}</dd></div><div><dt>审批</dt><dd>{models.approval.mode === 'manual' ? '手动批准具体动作' : '独立辅助审批'}</dd></div><div><dt>可用入口</dt><dd>任务内容 / 数据 / 材料 / 作答 / 请求与执行记录</dd></div><div><dt>计算能力</dt><dd>Monty · 通过工具发现可用性</dd></div></dl></section></div>}</>}
-    agent={<AgentPanel key={snapshot?.task.id ?? 'no-task'} snapshot={snapshot} run={run} usageScope={flowSelection?.key === flowKey ? flowSelection.scope : tab === 'flow' ? flowScope : undefined} modelId={modelId} models={models} busy={busy} text={text} setText={setText} composer={composer} onDirty={onDirty} onQueueChange={onQueueChange} onChapterScope={openChapterScope} onFlow={openFlow} refresh={async()=>{await refresh();await reloadModels()}} act={act} settings={() => void settings('models')} onConfirmSurface={update => void completeSurface(update, true)} onShowFlow={() => { if (canLeave()) { setTab('flow'); workspace.current?.showContent() } }} onRecords={() => { if (canLeave()) { setTab('execution'); workspace.current?.showContent() } }} />}
+    agent={<AgentPanel key={snapshot?.task.id ?? 'no-task'} snapshot={snapshot} run={run} approvalTarget={approvalTarget?.key === flowKey ? approvalTarget.target : undefined} modelId={modelId} models={models} busy={busy} text={text} setText={setText} composer={composer} onDirty={onDirty} onQueueChange={onQueueChange} onChapterScope={openChapterScope} onFlow={openFlow} refresh={async()=>{await refresh();await reloadModels()}} act={act} settings={() => void settings('models')} onConfirmSurface={update => void completeSurface(update, true)} onShowFlow={openFlow} onRecords={() => { if (canLeave()) { setTab('execution'); workspace.current?.showContent() } }} />}
     footer={<><span className={connected ? 'online' : ''}>{connected ? '● 运行时已连接' : '○ 未连接运行时'}</span><span>本地运行</span><span>{snapshot ? `${snapshot.views.length} 个内容单元 · ${snapshot.task_data.total} 个数据对象 · ${snapshot.answer_total} 份作答` : `${tasks.length} 个本地任务`}</span></>}
   >
     {exportOpen && snapshot && <DialogFocus><ExportPanel snapshot={snapshot} close={() => setExportOpen(false)} /></DialogFocus>}

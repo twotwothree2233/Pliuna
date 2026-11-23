@@ -2,10 +2,12 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefO
 import type { Snapshot, TaskMessage, TaskMessagePage, TaskMessageText } from '../../shared/types'
 import { hostRequest } from './ModelSettings'
 import { WorkspaceIcon } from './WorkspaceIcon'
+import type { FlowApproval } from './RunnerFlow'
 
 /** The scroll container belongs to Agent, so queue notices and messages scroll together. */
-export function TaskReply({ snapshot, scroll, underMessage, unplaced }: {
+export function TaskReply({ snapshot, scroll, underMessage, unplaced, locateApproval }: {
   snapshot: Snapshot; scroll: RefObject<HTMLDivElement | null>
+  locateApproval?: FlowApproval
   underMessage?(message: TaskMessage, visible: ReadonlyMap<string, TaskMessage>): ReactNode
   unplaced?(visible: ReadonlyMap<string, TaskMessage>): ReactNode
 }) {
@@ -15,7 +17,8 @@ export function TaskReply({ snapshot, scroll, underMessage, unplaced }: {
   const [ready, setReady] = useState(false), [loading, setLoading] = useState(false)
   const [error, setError] = useState(''), [retry, setRetry] = useState(0)
   const after = useRef<string | null>(null), loaded = useRef(false), mounted = useRef(false), readingOlder = useRef(false)
-  const position = useRef<{ follow?: boolean; id?: string; offset?: number; jump?: string } | null>(null)
+  const position = useRef<{ follow?: boolean; id?: string; offset?: number; jump?: string; approvalId?: string } | null>(null)
+  const located = useRef<FlowApproval | undefined>(undefined)
   const tail = useRef<HTMLDivElement>(null)
   const shown = useRef(new Map<string, HTMLElement>())
   const watermark = snapshot.records.at(-1)?.id
@@ -66,8 +69,9 @@ export function TaskReply({ snapshot, scroll, underMessage, unplaced }: {
     const viewport = scroll.current, anchor = position.current
     if (!viewport?.clientHeight || !anchor) return
     position.current = null
-    if (anchor.jump) {
-      const node = shown.current.get(anchor.jump)
+    if (anchor.jump || anchor.approvalId) {
+      const card = anchor.approvalId ? document.getElementById(`approval-${anchor.approvalId}`) : null
+      const node = card ?? (anchor.jump ? shown.current.get(anchor.jump) : null)
       if (node) { node.focus({ preventScroll: true }); node.scrollIntoView({ block: 'nearest' }); return }
     }
     if (anchor.follow && tail.current) viewport.scrollTop = viewport.scrollHeight
@@ -77,9 +81,13 @@ export function TaskReply({ snapshot, scroll, underMessage, unplaced }: {
     }
   })
 
-  async function history(jump?: string) {
+  async function history(jump?: string, approvalId?: string) {
     const current = jump ? shown.current.get(jump) : null
-    if (current) { current.focus({ preventScroll: true }); current.scrollIntoView({ block: 'nearest' }); return }
+    if (current || !older || !jump && approvalId) {
+      const node = (approvalId ? document.getElementById(`approval-${approvalId}`) : null) ?? current
+      node?.focus({ preventScroll: true }); node?.scrollIntoView({ block: 'nearest' })
+      return
+    }
     if (!older || readingOlder.current) return
     readingOlder.current = true
     setLoading(true); setError('')
@@ -92,11 +100,17 @@ export function TaskReply({ snapshot, scroll, underMessage, unplaced }: {
         batch.push(...page.items)
         cursor = page.older_cursor
       } while (jump && cursor && !batch.some(item => item.id === jump))
-      position.current = { ...capturePosition(), jump }
+      position.current = { ...capturePosition(), jump, approvalId }
       merge(batch); setOlder(cursor)
     } catch { if (mounted.current) setError('无法读取更早的消息。') }
     finally { readingOlder.current = false; if (mounted.current) setLoading(false) }
   }
+
+  useEffect(() => {
+    if (!locateApproval || located.current === locateApproval || !ready || loading) return
+    located.current = locateApproval
+    void history(locateApproval.messageId, locateApproval.approvalId)
+  }, [locateApproval, ready, loading])
 
   const byId = new Map(items.map(item => [item.id, item]))
   return <section className="task-reply" aria-label="任务对话">

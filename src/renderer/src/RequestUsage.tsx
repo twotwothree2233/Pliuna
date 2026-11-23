@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { RunUsageSummary } from '../../shared/types'
+import type { TaskUsageSummary } from '../../shared/types'
 import { hostRequest } from './ModelSettings'
 import { AgentDialog } from './Dialog'
 import type { RequestAccounting } from '../../runtime/model/accounting'
@@ -51,23 +51,22 @@ export function RequestUsage({ taskId, runId }: { taskId: string; runId: string 
   </section>
 }
 const tokens = new Intl.NumberFormat('zh-CN')
-const compactTokens = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 })
+const compactTokens = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 })
 const percent = new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 })
 
-export function RunUsageAction({ taskId, runId, epoch }: { taskId: string; runId?: string; epoch: string }) {
-  const key = JSON.stringify([taskId, runId, epoch])
+export function TaskUsageAction({ taskId, epoch }: { taskId: string; epoch: string }) {
+  const key = JSON.stringify([taskId, epoch])
   const control = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(false)
-  const [result, setResult] = useState<{ key: string; usage: RunUsageSummary | null } | null>(null)
+  const [result, setResult] = useState<{ key: string; usage: TaskUsageSummary | null } | null>(null)
   useEffect(() => {
-    if (!runId) return
     let stale = false, pending = false
     async function refresh() {
       if (stale || pending || document.hidden || !control.current?.getClientRects().length) return
       pending = true
       try {
-        const usage = await hostRequest<RunUsageSummary>({ type: 'host.run.usage', task_id: taskId, run_id: runId! })
-        if (!stale && usage.task_id === taskId && usage.run_id === runId) {
+        const usage = await hostRequest<TaskUsageSummary>({ type: 'host.task.usage', task_id: taskId })
+        if (!stale && usage.task_id === taskId) {
           setResult(old => old?.key === key && old.usage?.through_sequence === usage.through_sequence ? old : { key, usage })
         }
       } catch { if (!stale) setResult({ key, usage: null }) }
@@ -76,7 +75,7 @@ export function RunUsageAction({ taskId, runId, epoch }: { taskId: string; runId
     void refresh()
     const timer = setInterval(refresh, 1000)
     return () => { stale = true; clearInterval(timer) }
-  }, [key, taskId, runId])
+  }, [key, taskId])
 
   const current = result?.key === key ? result : null
   const usage = current?.usage
@@ -85,23 +84,21 @@ export function RunUsageAction({ taskId, runId, epoch }: { taskId: string; runId
   const ratio = usage?.cache_hit_ratio
   const cache = ratio == null ? '—' : ratio > 0 && ratio < 0.001 ? '<0.1%' : percent.format(ratio)
   const tokenText = total == null ? '—' : tokens.format(total)
-  const displayTotal = total != null && total >= 100_000 ? compactTokens.format(total) : tokenText
-  const label = `模型用量：${partial ? '部分 ' : ''}Token ${tokenText}，缓存命中率 ${cache}`
-  const missing = !runId ? '当前范围没有 Run。' : !current ? '正在查询用量。' : !usage ? '暂时无法读取此 Run 的用量。' : !usage.reported_requests ? '此 Run 暂无实报 Token。' : ''
+  const displayTotal = total == null ? '—' : compactTokens.format(total)
+  const label = `任务模型用量：${partial ? '部分 ' : ''}Token ${tokenText}，缓存命中率 ${cache}`
+  const missing = !current ? '正在查询用量。' : !usage ? '暂时无法读取此任务的用量。' : !usage.reported_requests ? '此任务暂无实报 Token。' : ''
   return <>
-    <button ref={control} type="button" className="composer-usage" aria-label={label} title={`${label} · ${runId ? `Run ${runId}` : missing}`} aria-haspopup="dialog" onClick={() => setOpen(true)}>
+    <button ref={control} type="button" className="composer-usage" aria-label={label} title={missing || label} aria-haspopup="dialog" onClick={() => setOpen(true)}>
       <span>Token {displayTotal}{partial && ' 部分'}</span><span aria-hidden="true">·</span><span>缓存 {cache}</span>
     </button>
-    {open && <AgentDialog title="模型用量" close={() => setOpen(false)}>
-      {runId && <p>当前执行：<span className="mono">Run {runId}</span></p>}
+    {open && <AgentDialog title="任务模型用量" close={() => setOpen(false)}>
       {missing ? <p>{missing}</p> : <dl className="agent-usage-facts">
-        <div><dt>{partial ? '已上报 Token 小计' : '本轮 Token'}</dt><dd>{tokenText}</dd></div>
+        <div><dt>{partial ? '已上报 Token 小计' : '累计 Token'}</dt><dd>{tokenText}</dd></div>
         <div><dt>输入 / 输出</dt><dd>{tokens.format(usage!.input_tokens)} / {tokens.format(usage!.output_tokens)}</dd></div>
         <div><dt>缓存命中率</dt><dd>{cache}{ratio != null && `（${tokens.format(usage!.cached_input_tokens)} 个命中输入）`}</dd></div>
       </dl>}
-      {partial && <p>{usage!.dispatched_requests - usage!.reported_requests} 个已派发请求尚无实报用量。</p>}
+      {usage && usage.dispatched_requests > usage.reported_requests && <p>{usage.dispatched_requests - usage.reported_requests} 个已派发请求尚无实报用量。</p>}
       <p>Token 为服务上报的输入与输出之和。缓存命中率为命中输入除以总输入。用量未报齐、缓存字段缺失或总输入为零时，比例显示「—」。</p>
-      {runId && <RequestUsage key={key} taskId={taskId} runId={runId} />}
     </AgentDialog>}
   </>
 }
