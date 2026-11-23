@@ -40,6 +40,7 @@ settings.json
 
 # Project documentation and local planning artifacts stay local.
 /docs/
+/src/renderer/prototype/
 *.md
 *.mdx
 *.rst
@@ -51,3 +52,7 @@ settings.json
 *.pptx
 *.xls
 *.xlsx
+
+# Markdown used by test fixtures stays versioned.
+!/tests/fixtures/legacy-trellis/README.md
+!/tests/fixtures/plugin-demo/workflow.md
