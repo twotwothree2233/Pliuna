@@ -102,7 +102,7 @@ function executionItems(db: Database.Database, params: Params, options: Options,
       continue
     }
     if (request?.state === 'queued' && !run.purpose) {
-      items.push({ id: `request:${request.id}`, role: 'Router', kind: 'request', state: run.state === 'waiting' ? 'waiting' : 'running', sources: [ref] })
+      items.push({ id: `request:${request.id}`, role: 'Router', kind: 'request', state: run.state === 'waiting' ? 'waiting' : 'running', reason: reasonCode(run.wait_reason), sources: [ref] })
       queued.delete(request.id)
       continue
     }

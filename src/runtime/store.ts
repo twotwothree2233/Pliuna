@@ -150,7 +150,6 @@ export class RuntimeStore {
   private queries: ObjectQueries
   private root: string
   private sync = new TaskSync()
-  private viewPages = new Map<string, number>()
   private syncFacts = new Map<string, { key: string; snapshot: Snapshot }>()
   private closed = false
   private closing = false
@@ -631,7 +630,8 @@ export class RuntimeStore {
         const fitted = fitConversation(history, candidate => !budget.plan([{ role: 'system', content: phase.system }, ...messages(candidate)], phase.tools).needsCompaction)
         let result!: T
         await runAgent(this.models, lease, task, messages(fitted), {
-          valid, state: () => {}, budget: value => { if (routingRun) this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(value), routingRun) },
+          valid, state: (state, reason) => { if (routingRun) { valid(); this.actionState(routingRun, state, reason) } },
+          budget: value => { if (routingRun) this.db.prepare('UPDATE runs SET budget_json=? WHERE id=?').run(json(value), routingRun) },
           record: (kind, payload) => { this.record(task, kind, { ...payload, routing_operation_id: operation, input_request_id: requestId, ...(routingRun ? { run_id: routingRun } : {}) }) },
           tool: async request => {
             valid(); phase.authorize(request)
@@ -1162,16 +1162,14 @@ export class RuntimeStore {
     if (r.type === 'export.internal.created' && Object.keys(r).sort().join(',') === 'identity,operation_id,task_id,type') { this.exports.created(job.id, r.identity); return this.exports.public(job.id) }
     fail('INVALID_REQUEST', 'Invalid export operation')
   }
-  snapshot(taskId: string): Snapshot {
+  snapshot(taskId: string, viewOffset = 0): Snapshot {
     this.settlePluginCleanup()
     this.chapters().reconcile(taskId)
     const row = this.task(taskId)
     const task: Task = { id: row.id, title: row.title, state: row.state, revision: row.revision }
     const surface = this.one('SELECT * FROM surfaces WHERE task_id=?', taskId)
     const total = this.one('SELECT count(*) n FROM views WHERE surface_id=?', surface.id).n
-    const offset = Math.min(this.viewPages.get(taskId) ?? 0, Math.max(0, Math.floor((total - 1) / 10) * 10))
-    this.viewPages.set(taskId, offset)
-    if (this.viewPages.size > 64) this.viewPages.delete(this.viewPages.keys().next().value!)
+    const offset = Math.min(viewOffset, Math.max(0, Math.floor((total - 1) / 10) * 10))
     const layout = JSON.parse(surface.layout_json), ordered = layout.slots.flatMap((slot: Row) => slot.groups.flatMap((group: Row) => group.views)) as string[]
     if (new Set(ordered).size !== total || ordered.length !== total) fail('INVALID_LAYOUT', 'Persisted layout does not match current Views')
     const rows = ordered.slice(offset, offset + 10).map(viewId => this.one('SELECT * FROM views WHERE surface_id=? AND id=?', surface.id, viewId))
@@ -1217,11 +1215,12 @@ export class RuntimeStore {
   private taskArchived(task: string): boolean {
     return !!this.db.prepare('SELECT 1 FROM task_organization WHERE task_id=? AND archived=1').get(task)
   }
-  private subscribe(task: string, after?: { runtime_epoch: string; sequence: number }): unknown {
+  private subscribe(task: string, viewOffset = 0, after?: Extract<IpcRequest, { type: 'sync.subscribe' }>['after']): unknown {
     this.settlePluginCleanup()
     this.task(task)
+    const pageKey = json([task, viewOffset])
     const facts = json([
-      this.one('SELECT revision FROM tasks WHERE id=?', task), this.taskArchived(task), this.viewPages.get(task) ?? 0,
+      this.one('SELECT revision FROM tasks WHERE id=?', task), this.taskArchived(task),
       this.db.prepare('SELECT revision,state_revision FROM views WHERE surface_id IN (SELECT id FROM surfaces WHERE task_id=?) ORDER BY id').all(task),
       this.db.prepare('SELECT state,wait_reason,primary_reason,budget_json FROM runs WHERE task_id=? ORDER BY rowid DESC LIMIT 50').all(task),
       this.messageRequests(task),
@@ -1229,10 +1228,10 @@ export class RuntimeStore {
       [...this.surfaceWaiters].filter(([, value]) => value.taskId === task).map(([key]) => key)
       ,this.db.prepare('SELECT update_id,state FROM runner_chapter_updates WHERE task_id=? ORDER BY rowid').all(task)
     ])
-    let cached = this.syncFacts.get(task)
-    if (!cached || cached.key !== facts) { cached = { key: facts, snapshot: this.snapshot(task) }; this.syncFacts.set(task, cached) }
-    if (this.syncFacts.size > 8) for (const key of this.syncFacts.keys()) if (key !== task) { this.syncFacts.delete(key); break }
-    return this.sync.subscribe(cached.snapshot, after)
+    let cached = this.syncFacts.get(pageKey)
+    if (!cached || cached.key !== facts) { cached = { key: facts, snapshot: this.snapshot(task, viewOffset) }; this.syncFacts.set(pageKey, cached) }
+    if (this.syncFacts.size > 8) for (const key of this.syncFacts.keys()) if (key !== pageKey) { this.syncFacts.delete(key); break }
+    return this.sync.subscribe(cached.snapshot, (after?.view_offset ?? 0) === viewOffset ? after : undefined, viewOffset)
   }
   private view(taskId: string, viewId: string, revision: number, stateRevision: number): Row {
     this.task(taskId)
@@ -3956,10 +3955,7 @@ export class RuntimeStore {
       if (Object.keys(r).sort().join(',') !== 'expected_revision,offset,task_id,type' || typeof r.task_id !== 'string' || !Number.isSafeInteger(r.offset) || r.offset < 0 || r.offset % 10 || !Number.isSafeInteger(r.expected_revision)) fail('INVALID_REQUEST', 'Invalid View page')
       this.task(r.task_id)
       if (this.one('SELECT revision FROM surfaces WHERE task_id=?', r.task_id).revision !== r.expected_revision) fail('VERSION_CONFLICT', 'Surface changed; refresh before changing page')
-      const previous = this.viewPages.get(r.task_id)
-      this.viewPages.set(r.task_id, r.offset); this.syncFacts.delete(r.task_id)
-      try { return this.snapshot(r.task_id) }
-      catch (error) { if (previous === undefined) this.viewPages.delete(r.task_id); else this.viewPages.set(r.task_id, previous); throw error }
+      return this.snapshot(r.task_id, r.offset)
     }
     if (raw && typeof raw === 'object' && typeof (raw as Row).type === 'string' && (raw as Row).type.startsWith('export.')) return this.exportRequest(raw as Row)
     if (raw && typeof raw === 'object' && Object.keys(raw).length === 1 && (raw as Row).type === 'host.tasks') return this.tasks()
@@ -4021,7 +4017,7 @@ export class RuntimeStore {
         const discardActions = [...this.surfaceWaiters].filter(([, waiter]) => waiter.reset && Date.parse(waiter.expires) > now).map(([id]) => id)
         return this.queries.taskPage(r.input, r.archived ?? false, discardActions)
       }
-      case 'sync.subscribe': return this.subscribe(r.task_id, r.after)
+      case 'sync.subscribe': return this.subscribe(r.task_id, r.view_offset, r.after)
       case 'context.status': this.task(r.task_id); return { current: this.currentSummary(r.task_id), notice: 'Model-generated lossy navigation; sources and current state take precedence' }
       case 'context.compact': return this.manualCompaction(r.task_id, r.model_config_id)
       case 'task.create': return this.create(r.title)
@@ -4040,7 +4036,7 @@ export class RuntimeStore {
         }
         return { task_id: r.task_id, archived, pinned }
       }
-      case 'task.snapshot': return this.snapshot(r.task_id)
+      case 'task.snapshot': return this.snapshot(r.task_id, r.view_offset)
       case 'task.data.read': {
         this.task(r.task_id)
         const row = this.one('SELECT id,revision,schema_json,value_json FROM task_data WHERE id=? AND task_id=?', r.id, r.task_id)

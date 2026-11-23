@@ -3,6 +3,12 @@
   "$id": "https://pliuna.local/contracts/0.1/core.schema.json",
   "title": "Pliuna core contract draft 0.1",
   "$defs": {
+    "view_page_offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "multipleOf": 10
+    },
     "target": {
       "type": "object",
       "properties": {
@@ -2144,6 +2150,9 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 200
+            },
+            "view_offset": {
+              "$ref": "#/$defs/view_page_offset"
             }
           },
           "required": [
@@ -2408,6 +2417,9 @@
               "minLength": 1,
               "maxLength": 200
             },
+            "view_offset": {
+              "$ref": "#/$defs/view_page_offset"
+            },
             "after": {
               "type": "object",
               "properties": {
@@ -2416,13 +2428,21 @@
                   "minLength": 1,
                   "maxLength": 200
                 },
+                "cache_generation": {
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "sequence": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "view_offset": {
+                  "$ref": "#/$defs/view_page_offset"
                 }
               },
               "required": [
                 "runtime_epoch",
+                "cache_generation",
                 "sequence"
               ],
               "additionalProperties": false

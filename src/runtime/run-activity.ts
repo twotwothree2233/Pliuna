@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import type { RunActivity } from '../shared/types'
-import { runConversationReply, runMessage } from './runner/conversation-query'
+import { runMessage } from './runner/conversation-query'
 
 type Item = RunActivity['items'][number] & { sequence: number; position: number; created_at: string }
 
@@ -52,7 +52,12 @@ export function runActivity(db: Database.Database, task: string, run: string): R
       FROM actions WHERE task_id=? AND run_id=? ORDER BY rowid DESC LIMIT 3
     `).all(task, run) as Item[])
   }
-  const reply = runConversationReply(db, task, run)
+  const reply = db.prepare(`SELECT id,sequence,created_at,kind FROM records WHERE task_id=?
+    AND json_extract(payload_json,'$.run_id')=? AND (
+      kind IN ('conversation.reply','chapter.route.clarification','conversation.delivery')
+      OR (kind IN ('message.assistant','message.assistant.partial') AND json_type(payload_json,'$.routing_operation_id') IS NULL AND json_type(payload_json,'$.owner') IS NULL)
+      OR (kind='runner.answer' AND json_extract(payload_json,'$.purpose')='final_answer')
+    ) ORDER BY sequence DESC LIMIT 1`).get(task, run) as { id: string; sequence: number; created_at: string; kind: string } | undefined
   if (reply) items.push({ id: reply.id, sequence: reply.sequence, created_at: reply.created_at, position: 0, type: 'reply', name: 'reply', operation: null, target_kind: null, target_id: null, label: null, execution: reply.kind === 'message.assistant.partial' ? 'partial' : 'success', delivery: null, error: null })
   const recent = items.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.sequence - b.sequence || a.position - b.position).slice(-3)
   const text = request?.text

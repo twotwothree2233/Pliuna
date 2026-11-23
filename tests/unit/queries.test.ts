@@ -298,6 +298,7 @@ it('derives bounded run-specific activity beyond the mixed-event window without 
   toolRecord(run, 'write', { operation: 'task_data.create', input_json: JSON.stringify({ value: 'PRIVATE_ARGUMENT' }) }, { execution: 'success', delivery: 'delivered', data: { id: 'learning-progress', value: 'PRIVATE_RESULT' } })
   toolRecord(run, 'read', { kind: 'task_data', id: 'learning-progress' }, { execution: 'not_executed', delivery: 'delivered', error: { code: 'NOT_FOUND', message: 'PRIVATE_ERROR' } })
   activityRecord(run, 'message.assistant', { text: 'PRIVATE_REPLY'.repeat(20000) })
+  activityRecord(run, 'message.assistant.partial', { text: 'PRIVATE_ROUTING', routing_operation_id: run })
   for (let i = 0; i < 210; i++) activityRecord(run, 'test.event', {})
   const next = store.start(task.task.id, '下一个任务请求', 'fixture', [])
   store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: next })

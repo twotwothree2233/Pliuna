@@ -5,7 +5,7 @@ import { flushSync } from 'react-dom'
 import type { HostRequest, Snapshot, Task, TaskListItem, View } from '../../shared/types'
 import { availableModels, hostRequest, type ModelState } from './ModelSettings'
 import { applySync } from './sync'
-import type { SyncReply } from '../../runtime/sync'
+import type { SyncCursor, SyncReply } from '../../runtime/sync'
 import { AgentPanel } from './AgentPanel'
 import { RunnerFlow, type FlowApproval, type FlowFocus } from './RunnerFlow'
 import { taskStatus, type RequestQueueState } from './task-status'
@@ -51,7 +51,7 @@ async function surfaceOutcome(taskId: string, actionId: string): Promise<{ settl
   const reason = code === 'RUNNER_OUTPUT_INCOMPLETE' ? '发布完整性校验未通过' : code === 'VERSION_CONFLICT' ? '正文或输入版本已变化' : result === 'cancelled' ? '原动作已取消' : '原动作未提交'
   return { settled: true, error: `替换未完成：${reason}${code ? `（${code}）` : ''}。当前正文和输入已保留。` }
 }
-function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmission, register, onChapterResolve, sourceRequest, onSourceResolved }: { view: View; taskId: string; modelId: string; enabled: boolean; refresh: () => Promise<void>; onDirty: (id: string, dirty: boolean) => void; onSubmission: (id: string, pending: boolean) => void; register: (id: string, editor: ViewEditor | null) => void; onChapterResolve: () => void; sourceRequest?: ChapterSourceRequest; onSourceResolved(): void }) {
+function ManagedView({ view, taskId, viewOffset, modelId, enabled, refresh, onDirty, onSubmission, register, onChapterResolve, sourceRequest, onSourceResolved }: { view: View; taskId: string; viewOffset: number; modelId: string; enabled: boolean; refresh: () => Promise<void>; onDirty: (id: string, dirty: boolean) => void; onSubmission: (id: string, pending: boolean) => void; register: (id: string, editor: ViewEditor | null) => void; onChapterResolve: () => void; sourceRequest?: ChapterSourceRequest; onSourceResolved(): void }) {
   const root = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement | null>(null)
   const pending = useRef(new Map<string, unknown>())
@@ -199,10 +199,10 @@ function ManagedView({ view, taskId, modelId, enabled, refresh, onDirty, onSubmi
     }
   }, [view.state_revision])
   return <article className="managed" id={`content-${view.id}`}><header className="view-meta"><span>内容 · v{view.revision}</span><span role="status">{checked.error ? '已阻止呈现' : status}</span></header>{checked.error && <p className="error" role="alert">{checked.error.message}（{checked.error.code}）</p>}{answerUnknown.current && <div className="error" role="alert">答案提交结果未知；禁止重复提交和创建恢复点。<button onClick={async () => {
-    try { await request({ type: 'task.snapshot', task_id: taskId }); await refresh(); answerUnknown.current = false; onSubmission(view.id, false); content.current?.querySelectorAll('button').forEach(button => { button.disabled = false }); setStatus('已同步保存状态；请查看作答记录确认原答案，未自动重发') } catch (e) { setStatus(String(e)) }
+    try { await request({ type: 'task.snapshot', task_id: taskId, view_offset: viewOffset }); await refresh(); answerUnknown.current = false; onSubmission(view.id, false); content.current?.querySelectorAll('button').forEach(button => { button.disabled = false }); setStatus('已同步保存状态；请查看作答记录确认原答案，未自动重发') } catch (e) { setStatus(String(e)) }
   }}>查询已保存作答状态</button></div>}{conflict.current && <div className="error"><button onClick={async () => {
     if (!confirm('放弃本地未保存输入并重新加载已保存版本？')) return
-    const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId })
+    const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId, view_offset: viewOffset })
     const remote = next.views.find(v => v.id === view.id)
     if (!remote || remote.revision !== view.revision) { setStatus('内容版本变化，请关闭此任务后重新打开'); return }
     pending.current.clear(); conflict.current = false; revision.current = remote.state_revision
@@ -238,10 +238,16 @@ function App() {
   const organizationPending = organization !== null
   const [organizationFeedback, setOrganizationFeedback] = useState<{ error: boolean; text: string } | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const installedSnapshot = useRef<Snapshot | null>(null)
   const [taskQueue, setTaskQueue] = useState<RequestQueueState | null>(null)
   const [chapterScope, setChapterScope] = useState<{ task_id: string; view_id?: string; request: ChapterSourceRequest } | null>(null)
   const [error, setError] = useState('')
-  const [text, setText] = useState('')
+  const [text, setComposerText] = useState('')
+  const latestComposerText = useRef('')
+  function setText(value: string) {
+    latestComposerText.current = value
+    setComposerText(value)
+  }
   const [title, setTitle] = useState('')
   const taskNameComposing = useRef(false)
   const [creating, setCreating] = useState(false)
@@ -318,8 +324,8 @@ function App() {
   async function synchronizeRestoredWorkspace() {
     const unsent = [...composerDrafts.current.values(), text, title].filter(value => value.trim())
     setDetachedDrafts(old => [...new Set([...old, ...unsent])])
-    composerDrafts.current.clear(); selected.current = null; generation.current++; taskQueryGeneration.current++
-    flushSync(() => { setSnapshot(null); setTaskQueue(null); setText(''); setTitle(''); setTab('surface') })
+    composerDrafts.current.clear(); selected.current = null; generation.current++; taskQueryGeneration.current++; resetViewPage(0)
+    flushSync(() => { installSnapshot(null); setTaskQueue(null); setText(''); setTitle(''); setTab('surface') })
     dirty.current.clear(); submissions.current.clear(); await refresh(); await reloadModels()
   }
   async function restoreRecovery(point: { id: string; created_at: string; database_sha256: string; task_ids: string[]; schema_version: number; app_version: string }) {
@@ -477,7 +483,7 @@ function App() {
       if (targets.some(id => dirty.current.has(id))) throw new Error('目标 View 仍有未保存输入，替换已阻止')
       submitted = true
       await request({ type: 'surface.respond', task_id: taskId, action_id: update.action_id, proceed: true, confirm_discard: confirmDiscard })
-      const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId })
+      const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId, view_offset: viewOffset.current })
       flushSync(() => { if (selected.current === taskId) installSnapshot(next) })
       settled = true
     } catch (e) {
@@ -497,19 +503,19 @@ function App() {
   }
   async function changeViewPage(offset: number) {
     if (!snapshot || busy || replacing.current || submissions.current.size || maintenance.current) return
-    const taskId = snapshot.task.id, releases: (() => void)[] = []
+    const taskId = snapshot.task.id, gen = generation.current, releases: (() => void)[] = []
     setBusy(true); setError('')
     try {
       for (const editor of editors.current.values()) if (editor.taskId === taskId) { releases.push(editor.hold()); await editor.save() }
       if (dirty.current.size) throw Error('当前页仍有未保存输入，请先处理冲突')
       const next = await request<Snapshot>({ type: 'host.views.page', task_id: taskId, offset, expected_revision: snapshot.surface.revision })
-      flushSync(() => { if (selected.current === taskId) installSnapshot(next) })
+      flushSync(() => { if (generation.current === gen) installSnapshot(next) })
     } catch (error) { setError(String(error)) }
     finally { releases.reverse().forEach(release => release()); setBusy(false) }
   }
   async function synchronizeSurfaceOutcome(taskId: string, actionId: string): Promise<boolean> {
     const outcome = await surfaceOutcome(taskId, actionId)
-    const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId })
+    const next = await request<Snapshot>({ type: 'task.snapshot', task_id: taskId, view_offset: viewOffset.current })
     flushSync(() => { if (selected.current === taskId) installSnapshot(next) })
     setError(outcome.error)
     return outcome.settled
@@ -531,16 +537,24 @@ function App() {
   }, [])
   const generation = useRef(0)
   const syncQuery = useRef(0)
-  const syncState = useRef<{ task: string; cursor: { runtime_epoch: string; sequence: number }; snapshot: Snapshot } | null>(null)
+  const viewOffset = useRef(0)
+  const syncState = useRef<{ task: string; cursor: SyncCursor & { view_offset: number }; snapshot: Snapshot } | null>(null)
   const openedFromArchive = useRef(false)
-  function installSnapshot(next: Snapshot) {
-    setSnapshot(previous => {
-      if (previous?.task.id === next.task.id && previous.runtime_epoch === next.runtime_epoch) {
-        if (previous.task.revision > next.task.revision || previous.surface.revision > next.surface.revision) return previous
-        if (previous.views.some(view => { const other = next.views.find(v => v.id === view.id); return other && (view.revision > other.revision || view.state_revision > other.state_revision) })) return previous
-      }
-      return next
-    })
+  function resetViewPage(offset: number) {
+    viewOffset.current = offset
+    syncQuery.current++
+    syncState.current = null
+  }
+  function installSnapshot(next: Snapshot | null) {
+    const previous = installedSnapshot.current
+    if (next && previous?.task.id === next.task.id && previous.runtime_epoch === next.runtime_epoch) {
+      if (previous.task.revision > next.task.revision || previous.surface.revision > next.surface.revision) return
+      if (previous.views.some(view => { const other = next.views.find(v => v.id === view.id); return other && (view.revision > other.revision || view.state_revision > other.state_revision) })) return
+    }
+    const offset = next?.view_page?.offset ?? 0
+    if (viewOffset.current !== offset) resetViewPage(offset)
+    installedSnapshot.current = next
+    setSnapshot(next)
   }
   async function refreshTasks() {
     const taskQuery = ++taskQueryGeneration.current, { name, group } = taskFilter.current
@@ -556,21 +570,23 @@ function App() {
     setTasks(list); setTaskCursor(cursor ?? null)
   }
   async function refresh() {
-    const taskId = selected.current, gen = generation.current, query = ++syncQuery.current
+    const taskId = selected.current, gen = generation.current, query = ++syncQuery.current, offset = viewOffset.current
     await refreshTasks()
     setConnected(true)
-    if (taskId) {
-      const state = syncState.current?.task === taskId ? syncState.current : null
-      let reply = await request<SyncReply>({ type: 'sync.subscribe', task_id: taskId, ...(state ? { after: state.cursor } : {}) })
+    const current = () => generation.current === gen && query === syncQuery.current
+    if (taskId && current()) {
+      const state = syncState.current?.task === taskId && syncState.current.cursor.view_offset === offset ? syncState.current : null
+      let reply = await request<SyncReply>({ type: 'sync.subscribe', task_id: taskId, view_offset: offset, ...(state ? { after: state.cursor } : {}) })
+      if (!current()) return
       let next = applySync(state?.snapshot ?? null, state?.cursor ?? null, reply)
-      if (!next) { reply = await request<SyncReply>({ type: 'sync.subscribe', task_id: taskId }); next = reply.snapshot ?? null }
-      if (generation.current === gen && query === syncQuery.current && selected.current === taskId && next) { syncState.current = { task: taskId, cursor: { runtime_epoch: reply.runtime_epoch, sequence: reply.sequence }, snapshot: next }; installSnapshot(next) }
+      if (!next) { reply = await request<SyncReply>({ type: 'sync.subscribe', task_id: taskId, view_offset: offset }); next = reply.snapshot ?? null }
+      if (current() && next) { syncState.current = { task: taskId, cursor: { runtime_epoch: reply.runtime_epoch, cache_generation: reply.cache_generation, sequence: reply.sequence, view_offset: offset }, snapshot: next }; installSnapshot(next) }
     }
   }
   function changeSelection(taskId: string | null, archived = false) {
-    if (selected.current) composerDrafts.current.set(selected.current, text)
-    generation.current++; selected.current = taskId; openedFromArchive.current = archived; syncState.current = null
-    setSnapshot(null); setTaskQueue(null); setFlowFocus(null); setApprovalTarget(null); setText(taskId ? composerDrafts.current.get(taskId) ?? '' : ''); setTab('surface'); setError('')
+    if (selected.current) composerDrafts.current.set(selected.current, latestComposerText.current)
+    generation.current++; selected.current = taskId; openedFromArchive.current = archived; resetViewPage(0)
+    installSnapshot(null); setTaskQueue(null); setFlowFocus(null); setApprovalTarget(null); setText(taskId ? composerDrafts.current.get(taskId) ?? '' : ''); setTab('surface'); setError('')
     if (taskId) workspace.current?.showContent()
   }
   async function select(taskId: string) {
@@ -609,7 +625,7 @@ function App() {
     organizing.current = pending; setOrganization(pending); setOrganizationFeedback(null)
     try {
       await request({ type: 'host.task.organize', task_id: task.id, field, value })
-      if (closesCurrent && selected.current === task.id) changeSelection(null)
+      if (closesCurrent && selected.current === task.id && canLeave()) changeSelection(null)
       if (field === 'archived' && button === document.activeElement) taskGroup.current?.focus()
       if (field === 'pinned' && button === document.activeElement) movedTaskButton.current = button
       taskQueryGeneration.current++; taskPageLimit.current = field === 'archived' ? 50 : taskPageLimit.current
@@ -711,7 +727,7 @@ function App() {
     </>}
     content={<>{snapshot && <header className="task-heading">
       <div className="task-heading-copy"><h1>{snapshot.task.title}</h1><div className="task-heading-meta"><span className="task-phase" data-phase={snapshot.task_archived ? 'inactive' : reviewCount ? 'review' : currentListTask?.phase ?? (run ? 'running' : 'ready')}>{snapshot.task_archived ? '已归档' : reviewCount ? '待确认' : taskState(snapshot.task)}</span><TaskTime at={snapshot.records.at(-1)?.created_at ?? currentListTask?.last_activity_at} /></div></div>
-      <div className="task-heading-actions"><button disabled={busy || exportOpen} onClick={() => setExportOpen(true)}><WorkspaceIcon name="download" />导出内容</button><details className="task-management"><summary aria-label="任务管理" title="任务管理"><WorkspaceIcon name="more" /></summary><div><button disabled={busy || snapshot.task.state === 'stopping'} onClick={() => void act({ type: snapshot.task.state === 'stopped' ? 'task.resume' : 'task.stop', task_id: snapshot.task.id })}>{snapshot.task.state === 'stopped' ? '恢复任务' : snapshot.task.state === 'stopping' ? '停止中…' : '停止任务'}</button><button disabled={busy} onClick={async () => { if (!canLeave() || !confirm('永久删除任务及应用内记录？此操作不能撤销。资源文件先保留并登记收尾，只有全部保护解除后，才能在“存储检查”另行确认物理回收。')) return; setBusy(true); try { const recovery = await request<{ active: { id: string; task_ids: string[] } | null }>({ type: 'maintenance.status' }); const affected = recovery.active?.task_ids.includes(snapshot.task.id) ? recovery.active.id : undefined; if (affected && !confirm('该任务包含在当前唯一有效恢复点中。继续删除会先废止整个恢复点（包括其他任务的恢复能力），不能撤销。确认继续？')) return; await request({ type: 'task.delete', task_id: snapshot.task.id, ...(affected ? { invalidate_recovery_id: affected } : {}) }); composerDrafts.current.delete(snapshot.task.id); selected.current = null; generation.current++; setSnapshot(null); setTaskQueue(null); setText(''); setError(''); await refresh() } catch (e) { setError(String(e)) } finally { setBusy(false) } }}>删除</button></div></details></div></header>}
+      <div className="task-heading-actions"><button disabled={busy || exportOpen} onClick={() => setExportOpen(true)}><WorkspaceIcon name="download" />导出内容</button><details className="task-management"><summary aria-label="任务管理" title="任务管理"><WorkspaceIcon name="more" /></summary><div><button disabled={busy || snapshot.task.state === 'stopping'} onClick={() => void act({ type: snapshot.task.state === 'stopped' ? 'task.resume' : 'task.stop', task_id: snapshot.task.id })}>{snapshot.task.state === 'stopped' ? '恢复任务' : snapshot.task.state === 'stopping' ? '停止中…' : '停止任务'}</button><button disabled={busy} onClick={async () => { if (!canLeave() || !confirm('永久删除任务及应用内记录？此操作不能撤销。资源文件先保留并登记收尾，只有全部保护解除后，才能在“存储检查”另行确认物理回收。')) return; setBusy(true); try { const recovery = await request<{ active: { id: string; task_ids: string[] } | null }>({ type: 'maintenance.status' }); const affected = recovery.active?.task_ids.includes(snapshot.task.id) ? recovery.active.id : undefined; if (affected && !confirm('该任务包含在当前唯一有效恢复点中。继续删除会先废止整个恢复点（包括其他任务的恢复能力），不能撤销。确认继续？')) return; await request({ type: 'task.delete', task_id: snapshot.task.id, ...(affected ? { invalidate_recovery_id: affected } : {}) }); composerDrafts.current.delete(snapshot.task.id); selected.current = null; generation.current++; resetViewPage(0); installSnapshot(null); setTaskQueue(null); setText(''); setError(''); await refresh() } catch (e) { setError(String(e)) } finally { setBusy(false) } }}>删除</button></div></details></div></header>}
     {detachedDrafts.length > 0 && <section className="notice" aria-label="恢复前未发送文本"><h3>恢复前未发送文本（只读，未自动发送）</h3>{detachedDrafts.map((draft, index) => <pre key={index}>{draft}</pre>)}<button onClick={() => { if (confirm('确认清除当前窗口保留的恢复前未发送文本？')) setDetachedDrafts([]) }}>清除恢复前文本</button></section>}
     {maintenanceUnknown && <div className="error" role="alert">维护结果尚未确认，输入保持暂停。<button onClick={() => void queryMaintenance().catch(e => setError(String(e)))}>查询原维护结果</button></div>}
     {surfaceUnknown && <div className="error" role="alert">替换结果尚未确认，目标输入保持暂停。只查询原动作，不重发。<button disabled={busy} onClick={() => void querySurfaceOutcome()}>查询原替换结果并同步</button></div>}
@@ -723,7 +739,7 @@ function App() {
         ['execution', '执行记录'], ['data', '任务数据'], ['answers', '作答记录']
       ] as const).map(([id, label]) => <button key={id} aria-pressed={tab === id} onClick={() => { if (canLeave()) setTab(id) }}>{label}</button>)}</nav>}
       {tab === 'surface' && currentScope && <section className="chapter-scope" aria-label="确认修改范围"><div><b>确认修改范围</b><p>{currentScope.view_id ? '在正文下选择要修改的章节，再继续原请求。' : '先选择原请求对应的内容。'}</p></div><div className="inline-actions"><label htmlFor="chapter-scope-view">内容<select id="chapter-scope-view" value={snapshot.views.some(view => view.id === currentScope.view_id) ? currentScope.view_id : ''} disabled={busy} onChange={event => { if (canLeave()) setChapterScope({ ...currentScope, view_id: event.target.value }) }}><option value="" disabled>选择本页内容…</option>{snapshot.views.map((view, index) => <option key={view.id} value={view.id}>{viewTitle(view, index)}</option>)}</select></label><button disabled={busy} onClick={() => { if (canLeave()) setChapterScope(null) }}>稍后处理</button></div></section>}
-      {tab === 'surface' && <div className="document">{snapshot.views.length > 1 && <nav className="content-directory" aria-label="内容目录"><label htmlFor="content-location">本页内容</label><select id="content-location" value="" onChange={event => { const target = document.getElementById(`content-${event.target.value}`); target?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><option value="" disabled>定位到内容…</option>{snapshot.views.map((view, index) => <option key={view.id} value={view.id}>{viewTitle(view, index)}</option>)}</select></nav>}{snapshot.view_page && snapshot.view_page.total > 10 && <div className="inline-actions"><button disabled={busy || snapshot.view_page.offset === 0} onClick={() => void changeViewPage(snapshot.view_page!.offset - 10)}>上一页内容</button><span>第 {snapshot.view_page.offset + 1}–{Math.min(snapshot.view_page.offset + 10, snapshot.view_page.total)} 项 / 共 {snapshot.view_page.total} 项</span><button disabled={busy || snapshot.view_page.offset + 10 >= snapshot.view_page.total} onClick={() => void changeViewPage(snapshot.view_page!.offset + 10)}>下一页内容</button></div>}{(snapshot.surface.layout?.slots.flatMap(slot => slot.groups) ?? [{ id: 'default', type: 'column', views: snapshot.views.map(v => v.id) }]).map(group => <div key={group.id} className={'surface-group ' + (group.type === 'responsive_columns' ? 'surface-columns' : '')} style={{ ...(group.type === 'responsive_columns' && 'column_weights' in group && group.column_weights ? { '--surface-columns': group.column_weights.map(weight => `minmax(0,${weight}fr)`).join(' ') } : {}), gap: ({ none: 0, small: 8, medium: 16, large: 24 } as Record<string, number>)[group.gap ?? 'medium'], alignItems: group.align === 'start' ? 'start' : group.align === 'center' ? 'center' : 'stretch' }}>{group.views.map(viewId => { const v = snapshot.views.find(item => item.id === viewId); return v ? <ManagedView key={v.id} view={v} taskId={snapshot.task.id} modelId={modelId} enabled={!busy && snapshot.task.state === 'active'} refresh={refresh} onDirty={onDirty} onSubmission={onSubmission} register={registerEditor} onChapterResolve={() => workspace.current?.showAgent()} sourceRequest={currentScope?.view_id === v.id ? currentScope.request : undefined} onSourceResolved={() => setChapterScope(null)} /> : null })}</div>)}{!snapshot.views.length && <section className="empty-state"><h2>尚无已发布内容</h2><p>{run ? 'Agent 正在处理。排版后的内容发布后会显示在这里。' : '排版后的内容发布后会显示在这里。指令、回复和进度请在右侧 Agent 面板查看。'}</p><div className="inline-actions">{snapshot.task_data.total > 0 && <button onClick={() => setTab('data')}>查看任务数据</button>}<button onClick={() => { workspace.current?.showAgent() }}>打开 Agent 输入</button>{!modelId && <button className="primary" onClick={() => void settings('models')}>配置主模型</button>}</div></section>}</div>}
+      {tab === 'surface' && <div className="document">{snapshot.views.length > 1 && <nav className="content-directory" aria-label="内容目录"><label htmlFor="content-location">本页内容</label><select id="content-location" value="" onChange={event => { const target = document.getElementById(`content-${event.target.value}`); target?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><option value="" disabled>定位到内容…</option>{snapshot.views.map((view, index) => <option key={view.id} value={view.id}>{viewTitle(view, index)}</option>)}</select></nav>}{snapshot.view_page && snapshot.view_page.total > 10 && <div className="inline-actions"><button disabled={busy || snapshot.view_page.offset === 0} onClick={() => void changeViewPage(snapshot.view_page!.offset - 10)}>上一页内容</button><span>第 {snapshot.view_page.offset + 1}–{Math.min(snapshot.view_page.offset + 10, snapshot.view_page.total)} 项 / 共 {snapshot.view_page.total} 项</span><button disabled={busy || snapshot.view_page.offset + 10 >= snapshot.view_page.total} onClick={() => void changeViewPage(snapshot.view_page!.offset + 10)}>下一页内容</button></div>}{(snapshot.surface.layout?.slots.flatMap(slot => slot.groups) ?? [{ id: 'default', type: 'column', views: snapshot.views.map(v => v.id) }]).map(group => <div key={group.id} className={'surface-group ' + (group.type === 'responsive_columns' ? 'surface-columns' : '')} style={{ ...(group.type === 'responsive_columns' && 'column_weights' in group && group.column_weights ? { '--surface-columns': group.column_weights.map(weight => `minmax(0,${weight}fr)`).join(' ') } : {}), gap: ({ none: 0, small: 8, medium: 16, large: 24 } as Record<string, number>)[group.gap ?? 'medium'], alignItems: group.align === 'start' ? 'start' : group.align === 'center' ? 'center' : 'stretch' }}>{group.views.map(viewId => { const v = snapshot.views.find(item => item.id === viewId); return v ? <ManagedView key={v.id} view={v} taskId={snapshot.task.id} viewOffset={snapshot.view_page?.offset ?? 0} modelId={modelId} enabled={!busy && snapshot.task.state === 'active'} refresh={refresh} onDirty={onDirty} onSubmission={onSubmission} register={registerEditor} onChapterResolve={() => workspace.current?.showAgent()} sourceRequest={currentScope?.view_id === v.id ? currentScope.request : undefined} onSourceResolved={() => setChapterScope(null)} /> : null })}</div>)}{!snapshot.views.length && <section className="empty-state"><h2>尚无已发布内容</h2><p>{run ? 'Agent 正在处理。排版后的内容发布后会显示在这里。' : '排版后的内容发布后会显示在这里。指令、回复和进度请在右侧 Agent 面板查看。'}</p><div className="inline-actions">{snapshot.task_data.total > 0 && <button onClick={() => setTab('data')}>查看任务数据</button>}<button onClick={() => { workspace.current?.showAgent() }}>打开 Agent 输入</button>{!modelId && <button className="primary" onClick={() => void settings('models')}>配置主模型</button>}</div></section>}</div>}
       {tab === 'resources' && <Materials key={snapshot.task.id} taskId={snapshot.task.id} active={snapshot.task.state==='active'} onDirty={onDirty} />}
       {tab === 'data' && <TaskData key={snapshot.task.id} snapshot={snapshot} />}
       {tab === 'answers' && <AnswerHistory key={snapshot.task.id} snapshot={snapshot} continueDisabled={busy || Boolean(run) || !modelId || snapshot.task.state !== 'active'} onReturnToContent={() => { if (canLeave()) setTab('surface') }} onContinue={answerId => { if (!confirm(`基于当前选中的正式作答发送新请求？这会调用当前主模型，并产生一次新的运行。\n作答 ID：${answerId}`)) return; void act({ type: 'request.submit', task_id: snapshot.task.id, text: `请阅读已保存的正式作答（ID：${answerId}），继续本任务。`, model_config_id: modelId, resource_ids: [], import_ids: [] }) }} />}
@@ -745,7 +761,7 @@ function App() {
         return
       }
       if (e.key === 'Escape' && !busy) setCreating(false)
-    }} onSubmit={async e => { e.preventDefault(); if (taskNameComposing.current || busy || !title.trim()) return; setCreationError(''); setBusy(true); try { const next = await request<Snapshot>({ type: 'task.create', title }); if (selected.current) composerDrafts.current.set(selected.current, text); selected.current = next.task.id; generation.current++; setSnapshot(next); setTaskQueue(null); setText(''); setTab('surface'); setCreating(false); setTitle(''); await refresh(); workspace.current?.showAgent() } catch (e) { setCreationError(String(e)) } finally { setBusy(false) } }}><h2>新建任务</h2>{creationError && <p className="error" role="alert">{creationError}</p>}<label htmlFor="title">任务名称</label><input autoFocus id="title" maxLength={200} required value={title} onChange={e => setTitle(e.target.value)} onCompositionStart={() => { taskNameComposing.current = true }} onCompositionEnd={e => { taskNameComposing.current = false; setTitle(e.currentTarget.value) }} placeholder="为这个任务命名" /><p className="muted">创建只保存任务，不启动模型。目标在右侧 Agent 中输入。</p><div><button type="button" disabled={busy} onClick={() => setCreating(false)}>取消</button><button className="primary" disabled={busy || !title.trim()}>创建任务</button></div></form></div></DialogFocus>}
+    }} onSubmit={async e => { e.preventDefault(); if (taskNameComposing.current || busy || !title.trim()) return; setCreationError(''); setBusy(true); try { const next = await request<Snapshot>({ type: 'task.create', title }); changeSelection(next.task.id); installSnapshot(next); setCreating(false); setTitle(''); await refresh(); workspace.current?.showAgent() } catch (e) { setCreationError(String(e)) } finally { setBusy(false) } }}><h2>新建任务</h2>{creationError && <p className="error" role="alert">{creationError}</p>}<label htmlFor="title">任务名称</label><input autoFocus id="title" maxLength={200} required value={title} onChange={e => setTitle(e.target.value)} onCompositionStart={() => { taskNameComposing.current = true }} onCompositionEnd={e => { taskNameComposing.current = false; setTitle(e.currentTarget.value) }} placeholder="为这个任务命名" /><p className="muted">创建只保存任务，不启动模型。目标在右侧 Agent 中输入。</p><div><button type="button" disabled={busy} onClick={() => setCreating(false)}>取消</button><button className="primary" disabled={busy || !title.trim()}>创建任务</button></div></form></div></DialogFocus>}
   </WorkspaceLayout>
 }
 createRoot(document.getElementById('root')!).render(<App />)

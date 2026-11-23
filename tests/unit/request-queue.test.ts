@@ -26,7 +26,7 @@ it('publishes a request cancellation to an open subscription without a Run chang
  const request=submit({import_ids:[reg()]}),first=call('sync.subscribe')
  expect(first.snapshot.message_requests).toContainEqual({id:request.request_id,state:'queued',code:null})
  call('request.cancel',{request_id:request.request_id})
- const next=call('sync.subscribe',{after:{runtime_epoch:first.runtime_epoch,sequence:first.sequence}})
+ const next=call('sync.subscribe',{after:{runtime_epoch:first.runtime_epoch,cache_generation:first.cache_generation,sequence:first.sequence}})
  expect(next.deltas[0].changes[0].value.message_requests).toContainEqual({id:request.request_id,state:'cancelled',code:'USER_CANCELLED'})
  expect(store.snapshot(task).runs).toEqual([])
 })

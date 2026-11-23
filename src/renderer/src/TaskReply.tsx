@@ -126,7 +126,7 @@ export function TaskReply({ snapshot, scroll, underMessage, unplaced, locateAppr
       return <article key={message.id} ref={node => { if (node) shown.current.set(message.id, node); else shown.current.delete(message.id) }} tabIndex={-1} className="agent-message" aria-label={`${author}的消息`}>
         <header><span><WorkspaceIcon name={message.role === 'user' ? 'chat' : 'agent'} /></span><b>{author}</b></header>
         {showReference && (parent || older) && <button type="button" className="conversation-reference" disabled={loading} onClick={() => void history(message.reply_to!)}>{parent ? `回复：${parent.text.trim().slice(0, 64)}` : '加载原消息'}</button>}
-        {sourceId && (source || older) && <button type="button" className="conversation-reference" disabled={loading} onClick={() => void history(sourceId)}>{source ? `关联请求：${source.text.trim().slice(0, 64)}` : '查看关联请求'}</button>}
+        {sourceId && (source || older) && <button type="button" className="conversation-reference" disabled={loading} onClick={() => void history(sourceId)}>{source ? `${source.role === 'user' ? '关联请求' : '引用回复'}：${source.text.trim().slice(0, 64)}` : '查看引用消息'}</button>}
         <MessageText taskId={taskId} message={message} />
         {underMessage?.(message, byId)}
       </article>

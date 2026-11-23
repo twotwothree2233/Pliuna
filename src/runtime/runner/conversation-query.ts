@@ -71,8 +71,8 @@ const replyTo = `CASE WHEN NOT (${user}) THEN (SELECT origin.id FROM records ori
   ELSE COALESCE(${field('reply_to')},${queuedInput},(SELECT CASE WHEN count(*)=1 THEN min(u.id) END FROM records u
     WHERE u.task_id=r.task_id AND u.sequence<r.sequence AND u.kind='message.user' AND json_extract(u.payload_json,'$.run_id')=${run})) END) END`
 const referencedMessage = `(SELECT origin.id FROM records origin WHERE r.kind='conversation.reply'
-  AND origin.task_id=r.task_id AND origin.sequence<r.sequence AND origin.kind='message.user'
-  AND origin.id=${field('reference_message_id')})`
+  AND origin.task_id=r.task_id AND origin.sequence<r.sequence AND origin.id=${field('reference_message_id')}
+  AND EXISTS (SELECT 1 FROM records r WHERE r.id=origin.id AND ${visible}))`
 const fail = (code: string, message: string): never => { throw new ContractError(code, message) }
 const sequence = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 
@@ -92,14 +92,6 @@ function decode(bytes: Buffer, more: boolean): { text: string; size: number } {
 function lastSequence(db: Database.Database, task: string): number {
   const row = db.prepare("SELECT next_sequence-1 AS through FROM tasks WHERE id=? AND state!='deleting'").get(task) as { through: number } | undefined
   return row?.through ?? fail('NOT_FOUND', 'Task is unavailable')
-}
-
-export function runConversationReply(db: Database.Database, task: string, runId: string) {
-  return db.prepare(`SELECT r.id,r.sequence,r.created_at,r.kind FROM records r
-    WHERE r.task_id=@task AND r.sequence<=@through AND ${field('run_id')}=@runId
-    AND NOT (${user}) AND ${visible} ORDER BY r.sequence DESC LIMIT 1`)
-    .get({ task, runId, through: lastSequence(db, task) }) as
-    { id: string; sequence: number; created_at: string; kind: string } | undefined
 }
 
 export function conversationReference(db: Database.Database, task: string, id: string, through: number) {

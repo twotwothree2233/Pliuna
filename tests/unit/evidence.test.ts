@@ -93,7 +93,7 @@ it('binds answers to original View history, not current sources or replacement',
   const id = await data(); publish([source(id)]); change(id)
   const view = store.snapshot(task.task.id).views[0]!
   const answer: any = store.handle({ type: 'answer.submit', task_id: task.task.id, view_id: view.id, view_revision: 1, expected_state_revision: 1, form_id: 'f' })
-  const pending = replace([source(id, 2)]); await tick(); await respond(); expect((await pending).error).toBeUndefined()
+  const pending = replace([source(id, 2)]); await tick(); approve(); await tick(); await respond(); expect((await pending).error).toBeUndefined()
   expect(query('answer', answer.answer_id).data.view_history.evidence.sources[0]).toMatchObject({ revision: 1, value: { text: '原始依据' } })
   const second = query('view_history').items[1]; expect(query('view_history', second.id).data.evidence.sources[0].revision).toBe(2)
 })

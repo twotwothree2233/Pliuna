@@ -76,6 +76,36 @@ test('desktop and Web share task history when launched together', async () => {
     await desktop.getByRole('button', { name: '已归档', exact: true }).click()
     await row(desktop).click()
     await expect(draft).toHaveValue('跨端归档前未发送的草稿')
+
+    expect(await web({ type: 'task.create', title: '等待归档的草稿' })).toMatchObject({ ok: true })
+    await browser.reload()
+    const pendingRow = browser.locator('.task-row').filter({ hasText: '等待归档的草稿' })
+    const webDraft = browser.locator('.agent-composer textarea')
+    await pendingRow.click()
+    await webDraft.fill('归档前的文字')
+    await browser.evaluate(() => {
+      const original = window.fetch.bind(window)
+      window.fetch = async (input, init) => {
+        if (input === '/_pliuna/request' && typeof init?.body === 'string' && JSON.parse(init.body).type === 'host.task.organize') {
+          // Deliver a final edit in the same event turn, before the workspace becomes inert.
+          const draft = document.querySelector<HTMLTextAreaElement>('.agent-composer textarea')!
+          draft.setRangeText('归档开始时收到的文字', 0, draft.value.length)
+          draft.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText' }))
+          document.body.dataset.archivePending = 'true'
+          await new Promise<void>(resolve => window.addEventListener('test:release-archive', () => resolve(), { once: true }))
+          window.fetch = original
+        }
+        return original(input, init)
+      }
+    })
+    await browser.getByRole('group', { name: '任务操作：等待归档的草稿' }).getByRole('button', { name: '归档', exact: true }).click()
+    await expect(browser.locator('body')).toHaveAttribute('data-archive-pending', 'true')
+    await expect(browser.locator('#pane-slot-right')).toHaveJSProperty('inert', true)
+    await browser.evaluate(() => window.dispatchEvent(new Event('test:release-archive')))
+    await expect(pendingRow).toHaveCount(0)
+    await browser.getByRole('button', { name: '已归档', exact: true }).click()
+    await pendingRow.click()
+    await expect(webDraft).toHaveValue('归档开始时收到的文字')
   } finally {
     await app?.close()
     await server.close()
@@ -407,6 +437,41 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
       await app.close().catch(() => {})
     }
     await server.close(); await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('desktop and Web shut down normally on a launcher IPC request', async () => {
+  const port = await unusedPort(), origin = `http://127.0.0.1:${port}`
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-web-quit-'))
+  const child = spawn(executablePath, ['.'], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory, PLIUNA_WEB: 'desktop', PLIUNA_WEB_PORT: String(port) }
+  })
+  let output = '', timedOut = false
+  child.stdout?.on('data', chunk => { output += chunk.toString() })
+  child.stderr?.on('data', chunk => { output += chunk.toString() })
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => resolve({ code, signal }))
+  })
+  const deadline = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 20000)
+  try {
+    await expect.poll(async () => {
+      const response = await fetch(`${origin}/_pliuna/request`, {
+        method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'host.tasks' }), signal: AbortSignal.timeout(1000)
+      }).catch(() => null)
+      return response?.ok ? (await response.json()).ok : false
+    }, { timeout: 10000 }).toBe(true)
+    await new Promise<void>((resolve, reject) => child.send('pliuna:web:quit', error => error ? reject(error) : resolve()))
+    const result = await closed
+    expect(timedOut, output).toBe(false)
+    expect(result, output).toEqual({ code: 0, signal: null })
+  } finally {
+    clearTimeout(deadline)
+    if (child.pid && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await closed.catch(() => {})
+    await rm(directory, { recursive: true, force: true })
   }
 })
 

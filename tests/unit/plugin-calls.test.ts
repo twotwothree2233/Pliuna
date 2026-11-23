@@ -246,22 +246,22 @@ it('publishes independent inline resources through an actual staging owner after
  expect(db.prepare('SELECT run_id,result FROM actions').get()).toEqual({run_id:null,result:'success'})
  expect(db.prepare('SELECT state FROM staging').get()).toEqual({state:'committed'})
 })
-it('stages a no-Run View and preserves user input without approval after the host input check',async()=>{
+it('stages a no-Run View and preserves user input only after independent approval and host check',async()=>{
  const p=await plugin();await createView(p.capability);saveAnswer('keep this input');const before=store.snapshot(task).views[0]!
- await surface(p.capability,replacement());await until(()=>store.snapshot(task).surface_updates.length===1)
- expect(store.snapshot(task).approvals).toHaveLength(0)
+ await surface(p.capability,replacement());const a=await approval();expect(a.run_id).toBeNull()
+ call('approval.decide',{task_id:task,approval_id:a.id,decision:'approve'});await until(()=>store.snapshot(task).surface_updates.length===1)
  const pending=store.snapshot(task).surface_updates[0]!;expect(pending.run_id).toBeNull()
  await call('surface.respond',{task_id:task,action_id:pending.action_id,proceed:true,confirm_discard:false})
  expect(store.snapshot(task).views[0]).toMatchObject({id:before.id,revision:2,draft:{answer:'keep this input'}})
 })
-it('keeps plugin reset input on cancellation and rejects a saved-input conflict at commit',async()=>{
+it('keeps plugin reset input on cancellation and rejects a saved-input conflict after approval',async()=>{
  const p=await plugin();await createView(p.capability);saveAnswer('never silently discard')
- await surface(p.capability,replacement(true));await until(()=>store.snapshot(task).surface_updates.length===1)
+ await surface(p.capability,replacement(true));let a=await approval();call('approval.decide',{task_id:task,approval_id:a.id,decision:'approve'});await until(()=>store.snapshot(task).surface_updates.length===1)
  let pending=store.snapshot(task).surface_updates[0]!
  await expect(call('surface.respond',{task_id:task,action_id:pending.action_id,proceed:true,confirm_discard:false})).rejects.toMatchObject({code:'CONFIRMATION_REQUIRED'})
  await call('surface.respond',{task_id:task,action_id:pending.action_id,proceed:false,confirm_discard:false})
  expect(store.snapshot(task).views[0]).toMatchObject({revision:1,draft:{answer:'never silently discard'}})
- await surface(p.capability,replacement());await until(()=>store.snapshot(task).surface_updates.length===1)
+ await surface(p.capability,replacement());a=await approval();call('approval.decide',{task_id:task,approval_id:a.id,decision:'approve'});await until(()=>store.snapshot(task).surface_updates.length===1)
  pending=store.snapshot(task).surface_updates[0]!;saveAnswer('newer input')
  await expect(call('surface.respond',{task_id:task,action_id:pending.action_id,proceed:true,confirm_discard:false})).rejects.toMatchObject({code:'VERSION_CONFLICT'})
  expect(store.snapshot(task).views[0]).toMatchObject({revision:1,draft:{answer:'newer input'}})
@@ -382,14 +382,15 @@ it('rechecks an approved invocation expiry after waiting for its serial instance
  expect(db.prepare('SELECT dispatch,execution FROM calls ORDER BY rowid DESC LIMIT 1').get()).toEqual({dispatch:'not_sent',execution:'not_executed'})
 })
 
-it('publishes resource-backed plugin drafts and replaces a View from its task resource without approval',async()=>{
+it('publishes resource-backed plugin drafts and preserves source-bound replacement approval',async()=>{
  const p=await plugin(),id=store.start(task,'fixture resources','fixture',[]);clearTimeout((store as any).timers.get(id))
  const resource:any=store.modelTool(task,id,{type:'write',input:{type:'resource.create',display_name:'plugin-bundle.json',content:{type:'json',value:viewBundle('resource')}}});call('run.cancel',{task_id:task,run_id:id})
  const ref={type:'resource',resource:{kind:'resource',id:resource.data.id}},s=store.snapshot(task)
  await surface(p.capability,{type:'surface.update',surface_id:s.surface.id,expected_revision:s.surface.revision,operations:[{type:'view.create',client_ref:'resource',slot_id:'main',bundle:ref}]});await until(()=>store.snapshot(task).views.length===1)
- const input:any=replacement();input.operations[0].bundle=ref;await surface(p.capability,input);await until(()=>store.snapshot(task).surface_updates.length===1)
- const pending=store.snapshot(task).surface_updates[0]!;expect(store.snapshot(task).approvals).toHaveLength(0)
- const row=db.prepare('SELECT request_json FROM actions WHERE id=?').get(pending.action_id) as any;expect(JSON.parse(row.request_json)).toEqual(input)
+ const input:any=replacement();input.operations[0].bundle=ref;await surface(p.capability,input);const a=await approval()
+ const row=db.prepare('SELECT request_json FROM actions WHERE id=?').get(a.action_id) as any;expect(JSON.parse(row.request_json)).toEqual(input)
+ expect(a.request).toMatchObject({version:1,effective_request:{operations:[{bundle:{type:'inline',bundle:{profile:'managed-v1'}}}]},sources:[{id:resource.data.id}]})
+ call('approval.decide',{task_id:task,approval_id:a.id,decision:'approve'});await until(()=>store.snapshot(task).surface_updates.length===1)
  await call('surface.respond',{task_id:task,action_id:store.snapshot(task).surface_updates[0]!.action_id,proceed:true,confirm_discard:false});expect(store.snapshot(task).views[0]!.revision).toBe(2)
 })
 it('rejects overlapping plugin publications at staging without registering an action',async()=>{

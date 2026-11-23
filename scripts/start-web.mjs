@@ -28,18 +28,22 @@ function main() {
   const require = createRequire(import.meta.url)
   const env = { ...process.env, PLIUNA_WEB: desktopIndex === -1 ? '1' : 'desktop', PLIUNA_WEB_PORT: selectedPort }
   delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn(require('electron'), [root], { cwd: root, env, stdio: 'inherit', windowsHide: true })
-  const forwardInterrupt = () => child.kill('SIGINT')
-  const forwardTermination = () => child.kill('SIGTERM')
-  process.on('SIGINT', forwardInterrupt)
-  process.on('SIGTERM', forwardTermination)
+  const child = spawn(require('electron'), [root], { cwd: root, env, stdio: ['inherit', 'inherit', 'inherit', 'ipc'], windowsHide: true })
+  const requestQuit = () => {
+    if (!child.connected) return
+    child.send('pliuna:web:quit', error => {
+      if (error && child.exitCode === null && child.signalCode === null) console.error(`Unable to request Pliuna Web shutdown: ${error.message}`)
+    })
+  }
+  process.on('SIGINT', requestQuit)
+  process.on('SIGTERM', requestQuit)
   child.on('error', error => {
     console.error(`Unable to start Pliuna Web: ${error.message}`)
     process.exitCode = 1
   })
   child.on('close', (code, signal) => {
-    process.removeListener('SIGINT', forwardInterrupt)
-    process.removeListener('SIGTERM', forwardTermination)
+    process.removeListener('SIGINT', requestQuit)
+    process.removeListener('SIGTERM', requestQuit)
     process.exitCode = code !== null && code >= 0 ? code : signal ? 128 + (constants.signals[signal] ?? 1) : 1
   })
 }

@@ -79,14 +79,13 @@ test('loading earlier messages and receiving a late reply preserve the reading p
     await expect(details.getByText('请求 1 · 主模型 · 请求完成')).toBeVisible()
     await details.getByRole('button', { name: '过程与结果', exact: true }).click()
     const usage = page.locator('.composer-usage')
-    await expect(usage).toHaveAttribute('title', /Run/)
-    const originalUsage = await usage.getAttribute('title')
-    expect(originalUsage).not.toContain(run)
+    const originalUsage = '此任务暂无实报 Token。'
+    await expect(usage).toHaveAttribute('title', originalUsage)
     await details.getByRole('button', { name: '查看此执行流程' }).click()
     const flow = page.getByRole('region', { name: '实时执行流程', exact: true })
     await expect(flow.getByText('当前没有正在执行的工作')).toBeVisible()
     await expect(flow.locator('.flow-card')).toHaveCount(0)
-    await expect(usage).toHaveAttribute('title', originalUsage!)
+    await expect(usage).toHaveAttribute('title', originalUsage)
     await expect(chat).toContainText(late)
   } finally { pending?.destroy(); await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })

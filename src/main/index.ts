@@ -187,7 +187,10 @@ app.whenReady().then(() => {
     else window.loadFile(join(__dirname, '../renderer/index.html'))
   }
 })
-if (webEnabled) for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => app.quit())
+if (webEnabled) {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => app.quit())
+  if (process.channel) process.on('message', (message: unknown) => { if (message === 'pliuna:web:quit') app.quit() })
+}
 // A renderer may still veto quitting to retain unsaved input or an unknown result.
 app.on('will-quit', event => {
   if (quitReady) { runtime?.kill(); if (webStartupFailed) app.exit(1); return }

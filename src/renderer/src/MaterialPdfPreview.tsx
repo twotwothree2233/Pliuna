@@ -48,11 +48,15 @@ export default function MaterialPdfPreview({ base64, name }: { base64: string; n
     try {
       port = new PdfWorker()
       port.addEventListener('error', event => { event.preventDefault(); fail('无法启动 PDF 预览。') })
+      // PDF.js can complete the draw after its operator stream has failed.
+      port.addEventListener('message', event => {
+        if (active && event.data?.reason?.message === 'Image exceeded maximum allowed size and was removed.') setPageError(true)
+      })
       worker = new PDFWorker({ port })
       const task: Loading = getDocument({
         data: decode(base64), worker, BinaryDataFactory: PdfAssets, cMapPacked: true, useWorkerFetch: false,
         useWasm: false, disableFontFace: true, enableXfa: false, maxImageSize: 16_000_000,
-        canvasMaxAreaInBytes: 64_000_000, disableAutoFetch: true, verbosity: 0
+        canvasMaxAreaInBytes: 64_000_000, stopAtErrors: true, disableAutoFetch: true, verbosity: 0
       })
       loading = task
       task.onPassword = () => fail('此 PDF 需要密码，已保存原件。')

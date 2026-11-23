@@ -1,5 +1,4 @@
 import { openTaskRecords } from '../helpers/workspace-ui'
-import { pendingApprovals } from '../helpers/agent-ui'
 import { chooseModel, openSettings, closeSettings, addChannel, addModel } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -63,8 +62,11 @@ test('desktop uses an untested model, general loop, manual approval, memory-only
     await expect(page.locator('.record-values')).toContainText('initial')
     await page.getByLabel('想从哪里开始？').fill('更新已有进度')
     await page.getByRole('button', { name: /发送消息/ }).click()
-    const approval = await pendingApprovals(page)
-    await expect(approval).toContainText(`更新任务数据：${dataId}`)
+    const conversation = () => page.getByRole('region', { name: '任务对话', exact: true })
+    const pendingApproval = () => conversation().getByRole('article', { name: '你的消息', exact: true }).filter({ hasText: '更新已有进度' })
+      .getByRole('article', { name: `更新任务数据：${dataId}`, exact: true })
+    const approval = pendingApproval()
+    await expect(approval).toBeVisible()
     expect(correctedInvalidValue).toBe(true)
     await expect(approval.locator('pre,details')).toHaveCount(0)
     await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -77,8 +79,8 @@ test('desktop uses an untested model, general loop, manual approval, memory-only
     await test.info().attach('Agent 审批', { body: await page.locator('#pane-right').screenshot(), contentType: 'image/png' })
     await approval.getByRole('button', { name: '批准', exact: true }).click()
     await page.setViewportSize({ width: 1200, height: 865 })
-    await expect(page.locator('.agent-status')).toContainText('已完成');await page.getByRole('tab', { name: /^内容/ }).click();await expect(page.getByText('本机合成模型完成，无真实服务调用。', { exact: true })).toHaveCount(1)
-    await expect(page.locator('.agent-messages .approval-card')).toHaveCount(0)
+    await expect(page.locator('.agent-status')).toContainText('已完成');await page.getByRole('tab', { name: /^内容/ }).click();await expect(conversation().getByText('本机合成模型完成，无真实服务调用。', { exact: true })).toHaveCount(2)
+    await expect(approval).toHaveCount(0)
     await openTaskRecords(page, '任务数据');await page.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     await page.getByRole('button', { name: new RegExp(dataId) }).click()
     await expect(page.locator('.record-values')).toContainText('updated')
@@ -92,7 +94,7 @@ test('desktop uses an untested model, general loop, manual approval, memory-only
     app = await launch(); page = await app.firstWindow()
     await page.getByRole('button', { name: /模型审批任务/ }).click()
     await expect(page.locator('.agent-note')).toContainText('选择主模型后即可发送')
-    await expect(page.locator('.agent-messages .approval-card')).toHaveCount(0)
+    await expect(pendingApproval()).toHaveCount(0)
     expect(server.exchanges.every(e => e.authorization === 'Bearer desktop-secret-sentinel')).toBe(true)
   } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })

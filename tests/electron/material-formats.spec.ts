@@ -42,8 +42,11 @@ for (const transport of ['desktop', 'web'] as const) test(`${transport} imports 
     }), 'base64')
     expect(png.byteLength).toBeGreaterThan(binaryPreviewChunk)
     const csv = '\ufeff城市,备注\r\n上海,"一,二"\r\n北京,"跨行\n""引号"""\r\n'
+    const oversizedScan = pdfFixture(['Scan caption', 'Readable next page'], { firstPageImage: { width: 4001, height: 4000 } })
+    expect(oversizedScan.byteLength).toBeLessThan(binaryPreviewLimit)
     const fixtures: [string, string | Buffer][] = [
       ['地图.PNG', png], ['报告.pdf', pdfFixture(undefined, { activityUrl: 'https://invalid.example/pdf' })],
+      ['大像素扫描.pdf', oversizedScan],
       ['项目.csv', csv], ['记录.tsv', '名称\t值\n记录\t"带\t制表符"'], ['脚本.py', 'def report():\n    return 42\n'],
       ['错误.gif', Buffer.alloc(binaryPreviewChunk + 1)], ['空图.webp', ''], ['大图.jpg', Buffer.alloc(binaryPreviewLimit + 1)]
     ]
@@ -69,6 +72,12 @@ for (const transport of ['desktop', 'web'] as const) test(`${transport} imports 
     await expect(pdf.getByRole('button', { name: '下一页' })).toBeDisabled()
     await article.getByRole('button', { name: '来源与记录' }).click()
     await expect(article.getByText('只读原记录')).toBeVisible()
+
+    await open('大像素扫描.pdf')
+    await expect(pdf.getByText('无法显示此页。')).toBeVisible()
+    await expect(pdf.getByRole('img', { name: '大像素扫描.pdf，第 1 页' })).toBeHidden()
+    await pdf.getByRole('button', { name: '下一页' }).click()
+    await expect(pdf.getByRole('img', { name: '大像素扫描.pdf，第 2 页' })).toBeVisible()
 
     await open('项目.csv')
     const table = article.getByRole('table', { name: '表格预览' })

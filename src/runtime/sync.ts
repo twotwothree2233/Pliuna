@@ -1,17 +1,19 @@
 import type { Snapshot } from '../shared/types'
 import type { SyncDelta } from '../shared/contracts.generated'
 import defaults from '../shared/contracts/development-defaults.json'
-export interface SyncReply { runtime_epoch: string; sequence: number; snapshot?: Snapshot; deltas: SyncDelta[] }
-interface State { snapshot: Snapshot; sequence: number; deltas: { delta: SyncDelta; bytes: number }[]; bytes: number; accessed: number }
+export interface SyncCursor { runtime_epoch: string; cache_generation: number; sequence: number }
+export interface SyncReply extends SyncCursor { snapshot?: Snapshot; deltas: SyncDelta[] }
+interface State { snapshot: Snapshot; generation: number; sequence: number; deltas: { delta: SyncDelta; bytes: number }[]; bytes: number; accessed: number }
 export class TaskSync {
   private states = new Map<string, State>()
+  private nextGeneration = 1
   clear(): void { this.states.clear() }
-  subscribe(snapshot: Snapshot, after?: { runtime_epoch: string; sequence: number }): SyncReply {
+  subscribe(snapshot: Snapshot, after?: SyncCursor, viewOffset = 0): SyncReply {
     const task = snapshot.task.id
-    let state = this.states.get(task)
-    const reset = !state || state.snapshot.runtime_epoch !== snapshot.runtime_epoch
+    const pageKey = JSON.stringify([task, viewOffset])
+    let state = this.states.get(pageKey)
     if (!state || state.snapshot.runtime_epoch !== snapshot.runtime_epoch) {
-      state = { snapshot, sequence: 0, deltas: [], bytes: 0, accessed: Date.now() }; this.states.set(task, state)
+      state = { snapshot, generation: this.nextGeneration++, sequence: 0, deltas: [], bytes: 0, accessed: Date.now() }; this.states.set(pageKey, state)
     } else {
       const changes: SyncDelta['changes'][number][] = []
       const header = (s: Snapshot) => ({ ...s, views: [] })
@@ -30,9 +32,10 @@ export class TaskSync {
       }
     }
     state.accessed = Date.now()
-    for (const [id, item] of this.states) if (id !== task && (this.states.size > 8 || Date.now() - item.accessed > 60000)) this.states.delete(id)
+    for (const [key, item] of this.states) if (key !== pageKey && (this.states.size > 8 || Date.now() - item.accessed > 60000)) this.states.delete(key)
     const oldest = state.deltas[0]?.delta.sequence ?? state.sequence + 1
-    const valid = !reset && after && after.runtime_epoch === snapshot.runtime_epoch && after.sequence >= oldest - 1 && after.sequence <= state.sequence
-    return valid ? { runtime_epoch: snapshot.runtime_epoch, sequence: state.sequence, deltas: state.deltas.filter(d => d.delta.sequence > after.sequence).map(d => d.delta) } : { runtime_epoch: snapshot.runtime_epoch, sequence: state.sequence, snapshot, deltas: [] }
+    const cursor = { runtime_epoch: snapshot.runtime_epoch, cache_generation: state.generation, sequence: state.sequence }
+    const valid = after && after.runtime_epoch === cursor.runtime_epoch && after.cache_generation === cursor.cache_generation && after.sequence >= oldest - 1 && after.sequence <= cursor.sequence
+    return valid ? { ...cursor, deltas: state.deltas.filter(d => d.delta.sequence > after.sequence).map(d => d.delta) } : { ...cursor, snapshot, deltas: [] }
   }
 }

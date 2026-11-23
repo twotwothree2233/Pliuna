@@ -157,6 +157,7 @@ title: string
 } | {
 type: "task.snapshot"
 task_id: string
+view_offset?: IpcRequestViewPageOffset
 } | {
 type: "task.submit"
 task_id: string
@@ -209,9 +210,12 @@ form_id: string
 } | {
 type: "sync.subscribe"
 task_id: string
+view_offset?: IpcRequestViewPageOffset
 after?: {
 runtime_epoch: string
+cache_generation: number
 sequence: number
+view_offset?: IpcRequestViewPageOffset
 }
 } | {
 type: "operation.list"
@@ -531,6 +535,7 @@ type: "chapter.status"
 task_id: IpcRequestRunnerId
 update_id: IpcRequestRunnerId
 })
+export type IpcRequestViewPageOffset = number
 export type IpcRequestJsonPointer = string
 export type IpcRequestRead = ({
 [k: string]: unknown

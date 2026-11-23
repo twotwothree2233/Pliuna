@@ -1,8 +1,8 @@
 import type { Snapshot, View } from '../../shared/types'
-import type { SyncReply } from '../../runtime/sync'
-export function applySync(previous: Snapshot | null, cursor: { runtime_epoch: string; sequence: number } | null, reply: SyncReply): Snapshot | null {
+import type { SyncCursor, SyncReply } from '../../runtime/sync'
+export function applySync(previous: Snapshot | null, cursor: SyncCursor | null, reply: SyncReply): Snapshot | null {
   if (reply.snapshot) return reply.snapshot
-  if (!previous || !cursor || cursor.runtime_epoch !== reply.runtime_epoch) return null
+  if (!previous || !cursor || cursor.runtime_epoch !== reply.runtime_epoch || cursor.cache_generation !== reply.cache_generation) return null
   let next = previous, sequence = cursor.sequence
   for (const delta of reply.deltas) {
     if (delta.sequence <= sequence) continue

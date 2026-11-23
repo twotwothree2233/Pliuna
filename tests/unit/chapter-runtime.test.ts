@@ -212,10 +212,25 @@ test('holds a same-channel route while both shared network slots are in use', as
   await vi.waitFor(() => expect(turnStatus(s, progress)).toMatchObject({ state: 'started', run_state: 'completed' }))
   expect(s.complete.mock.calls[2]![0].id).toBe('other-channel-model')
   expect(turnStatus(s, queued).state).toBe('queued')
+  const flow = s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot
+  expect(flow.lanes.Router.items).toContainEqual(expect.objectContaining({ id: `request:${queued}`, state: 'waiting', reason: 'model_queue' }))
   s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Third reply.' }))
   first.resolve(answer({ kind: 'reply', text: 'First reply.' }))
   await vi.waitFor(() => expect(turnStatus(s, queued)).toMatchObject({ state: 'started', run_state: 'completed' }))
   second.resolve(answer({ kind: 'reply', text: 'Second reply.' }))
+})
+
+test('a follow-up reply can cite an earlier assistant message without changing its own reply target', async () => {
+  const s = setup(true)
+  const messages = () => (s.store.handle({ type: 'host.messages.page', task_id: s.task }) as TaskMessagePage).items
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'First answer.' }))
+  const first = sendTurn(s, 'First question')
+  await vi.waitFor(() => expect(turnStatus(s, first)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  const cited = messages().find(item => item.kind === 'conversation.reply')!
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Clarified answer.', references: cited.id }))
+  const follow = sendTurn(s, 'Explain your previous answer')
+  await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(messages()).toContainEqual(expect.objectContaining({ text: 'Clarified answer.', reply_to: turnMessage(s, follow), reference_message_id: cited.id }))
 })
 
 test('a dependent request waits after production ends and binds the committed publication version', async () => {
