@@ -80,6 +80,35 @@ it.each(['producer', 'lightweight', 'integrator'] as const)('normalizes a plain 
   expect(profile.parseResult(final('42'))).toEqual({ version: 1, complete: true, answer: '42', artifacts: [], requirement_ids: ['answer'], unresolved: [] })
 })
 
+it('guides an internal text handoff without borrowing the request’s final answer requirement', () => {
+  const input = artifactSource()
+  if (input.work.purpose !== 'production') throw Error('Expected production work')
+  input.work.requirement_ids = []
+  input.work.assignment = { instructions: 'Summarize the bound evidence for downstream work.', inputs: [], outputs: [{ output_key: 'evidence', kind: 'answer' }] }
+  const profile = createProducerProfile(input)
+  const text = 'Node.js 20 End: 2026-04-30. RISK-NODE20-EOL.'
+  expect(profile.system).toContain('Return the assigned text directly as plain text.')
+  expect(profile.resultCorrection).toContain('assigned requirement_ids []')
+  expect(profile.system).not.toContain('For artifact construction')
+  expect(profile.resultCorrection).not.toContain('complete draft JSON')
+  const accepted = { version: 1, complete: true, answer: text, artifacts: [], requirement_ids: [], unresolved: [] }
+  expect(profile.parseResult(final(text))).toEqual(accepted)
+  expect(() => profile.parseResult(final(JSON.stringify({ ...accepted, requirement_ids: ['answer'] })))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
+})
+
+it('guides a publishing assignment to return a card without chat text or display titles as resource keys', () => {
+  const input = artifactSource()
+  if (input.work.purpose !== 'production') throw Error('Expected production work')
+  input.work.requirement_ids = ['document']
+  input.work.assignment = { instructions: 'Publish the decision card.', inputs: [], outputs: [{ output_key: 'artifact', kind: 'artifact', exposure: 'publish' }] }
+  const profile = createProducerProfile(input)
+  expect(profile.system).toContain('Set answer to null.')
+  expect(profile.system).toContain('Use references:[] when no local resource is embedded.')
+  expect(profile.system).toContain('never display titles')
+  const accepted = result({ answer: null, requirement_ids: ['document'] })
+  expect(profile.parseResult(final(JSON.stringify(producerDraft(accepted))))).toEqual(accepted)
+})
+
 it('keeps artifact, content-check and provenance requirements unresolved for ordinary text', () => {
   const input = artifactSource('lightweight')
   input.goal.requirements.push({ requirement_id: 'check', kind: 'content_check', required: true, provenance_required: false }, { requirement_id: 'cited', kind: 'answer', required: true, provenance_required: true })
@@ -106,9 +135,16 @@ it('decodes one exact production result surrounded by prose or a JSON fence', ()
 
 it('preserves ordinary prose and unrelated JSON examples', () => {
   const profile = createProducerProfile(source())
-  for (const text of ['The managed-v1 resource ID is part of this explanation.', 'Example:\n```json\n{"version":1,"artifacts":[]}\n```']) {
+  for (const text of ['The managed-v1 resource ID is part of this explanation.', 'Example:\n```json\n{"version":1,"artifacts":[]}\n```', 'The marker `</｜DSML｜ calls>` ends a tool block.']) {
     expect(profile.parseResult(final(text)).answer).toBe(text)
     expect(containsProducerResult(text)).toBe(false)
+  }
+})
+
+it.each(['\n</｜DSML｜ calls>', '<|DSML| calls>\n</|DSML| calls>'])('rejects isolated tool protocol markup in both answer formats: %j', text => {
+  const profile = createProducerProfile(source())
+  for (const response of [text, JSON.stringify({ ...result(), answer: text, artifacts: [], requirement_ids: ['answer'] })]) {
+    expect(() => profile.parseResult(final(response))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
   }
 })
 
@@ -239,6 +275,15 @@ it.each(['producer', 'lightweight', 'integrator'] as const)('authorizes every do
   const input = JSON.parse(example.input_json)
   expect(validateProducerBundle(input.operations[0].bundle.bundle)).toMatchObject({ profile: 'managed-v1' })
   expect(representations[4]).toMatchObject({ draft: expect.stringContaining('number/integer fields are strings') })
+})
+
+it('provides a static card write example that passes the producer tool contract', () => {
+  const profile = createProducerProfile(artifactSource())
+  const example = profile.system.split('\n').find(line => line.startsWith('{"operation":"resource.create"'))
+  expect(example).toBeDefined()
+  const request = modelToolRequest('write', JSON.parse(example!))
+  expect(() => profile.authorize(request)).not.toThrow()
+  expect(profile.system).toContain('Cite public sources as visible plain text')
 })
 
 it('keeps resource and task-data operations while business reads and plugins require explicit grants', () => {

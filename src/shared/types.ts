@@ -49,7 +49,7 @@ export type RunnerFlowRole = 'Router' | 'Worker' | 'Collator' | 'Host'
 export const liveFlowPageSize = 8
 export type LiveFlowState = 'queued' | 'running' | 'waiting' | 'approval' | 'input' | 'unknown' | 'closing' | 'publishing'
 export interface LiveFlowSource { request_id?: string; message_id?: string; run_id?: string }
-export interface LiveFlowHandoff { sequence: number; from: RunnerFlowRole; kind: 'work' | 'indexes' | 'plan' }
+export interface LiveFlowHandoff { sequence: number; from: RunnerFlowRole; kind: 'work' | 'indexes' | 'plan' | 'output' | 'feedback' | 'missing_input' }
 export interface LiveFlowItem {
   id: string; role: RunnerFlowRole; kind: 'request' | 'run' | 'work' | 'batch' | 'chapter'
   state: LiveFlowState; reason?: string; work_role?: string; run_id?: string; sources: LiveFlowSource[]

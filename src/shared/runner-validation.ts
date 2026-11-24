@@ -1,7 +1,7 @@
 import type {
-  ArtifactCandidate, ArtifactIndex, ChapterDependency, ChapterInheritance, ChapterIntent, ChapterManifest, ChapterOwnership, ChapterProposal, ChapterPublication, ChapterRegion, ChapterReplacement, ChapterUpdate, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
+  ArtifactCandidate, ArtifactIndex, ChapterDependency, ChapterInheritance, ChapterIntent, ChapterManifest, ChapterOwnership, ChapterProposal, ChapterPublication, ChapterRegion, ChapterReplacement, ChapterUpdate, CollatorFeedback, CollatorIssue, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
   ExecutionAttempt, ExecutionScope, ContentPlan, InputEvent, LogicalWork, Outline, OutlineSection, OutcomeRequirement,
-  PresentationPlan, PublicationEntry, PublicationManifest, RunnerRun, WorkDependency, WorkOutputDeclaration
+  PresentationPlan, PublicationEntry, PublicationManifest, ReportMissingInput, RouteWork, RunnerRun, WorkDependency, WorkOutputDeclaration
 } from './contracts.generated'
 import { assertContract, ContractError } from './validation'
 import { assertIndexBytes, assertIndexTitle, assertRunnerId } from '../runtime/runner/limits'
@@ -15,6 +15,8 @@ export interface RunnerContractTypes {
   runner_work_dependency: WorkDependency
   runner_run: RunnerRun
   runner_logical_work: LogicalWork
+  runner_route_work: RouteWork
+  runner_report_missing_input: ReportMissingInput
   runner_execution_attempt: ExecutionAttempt
   runner_execution_scope: ExecutionScope
   runner_outline: Outline
@@ -25,6 +27,8 @@ export interface RunnerContractTypes {
   runner_contribution_inventory: ContributionInventory
   runner_contribution_inventory_ref: ContributionInventoryRef
   runner_presentation_plan: PresentationPlan
+  runner_collator_issue: CollatorIssue
+  runner_collator_feedback: CollatorFeedback
   runner_composition_scope: CompositionScope
   runner_composition_batch: CompositionBatch
   runner_delivery_record: DeliveryRecord

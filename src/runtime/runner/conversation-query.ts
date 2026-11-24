@@ -26,7 +26,7 @@ const publicationReceipt = `EXISTS (SELECT 1 FROM runner_chapter_publications p
   AND p.update_id=${field('update_id')} AND u.input_event_id=${field('input_event_id')}
   AND a.run_id=${field('run_id')} AND json_extract(a.source_json,'$.owner.attempt_id')=${field('owner.attempt_id')})`
 const visible = `(${conversationRecordKinds} OR (json_type(${payload},'$.text')='text' AND (
-  r.kind IN ('chapter.route.clarification','conversation.delivery') OR (r.kind='message.assistant.partial'
+  r.kind IN ('chapter.route.clarification','runner.input.clarification','conversation.delivery') OR (r.kind='message.assistant.partial'
     AND json_type(${payload},'$.owner') IS NULL AND json_type(${payload},'$.routing_operation_id') IS NULL))))
   AND (r.kind!='runner.answer' OR (${productionReceipt} OR ${publicationReceipt}))`
 const run = `(SELECT id FROM runs WHERE task_id=r.task_id AND id=${field('run_id')})`
@@ -173,7 +173,7 @@ export function conversationDependencyResult(db: Database.Database, task: string
   const row = db.prepare(`SELECT r.id,r.sequence,r.kind,${field('operation_id')} AS operation_id,COALESCE(substr(${text},1,${previewBytes}),X'') AS body,length(${text}) AS bytes FROM records r
     WHERE r.task_id=@task AND r.sequence<=@through AND ${chapter ? `r.kind='runner.answer' AND ${run}=@chapterRun` : `${request}=@requestId`}
     AND (@resultId IS NULL OR r.id=@resultId)
-    AND NOT (${user}) AND r.kind NOT IN ('chapter.route.clarification','message.assistant.partial') AND ${visible} AND ${replyTo}=@id ORDER BY r.sequence LIMIT 1`)
+    AND NOT (${user}) AND r.kind NOT IN ('chapter.route.clarification','runner.input.clarification','message.assistant.partial') AND ${visible} AND ${replyTo}=@id ORDER BY r.sequence LIMIT 1`)
     .get({ task, id: chapter?.message_id ?? id, requestId, chapterRun: chapter?.id ?? null, through, resultId: resultId ?? null }) as { id: string; sequence: number; kind: string; body: Buffer; bytes: number; operation_id: string | null } | undefined
   if (!row) return null
   const view = chapter && db.prepare(`SELECT h.id,h.view_id,h.view_revision,h.bundle_resource_id FROM runner_chapter_publications p

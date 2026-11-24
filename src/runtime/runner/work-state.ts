@@ -19,6 +19,17 @@ export interface QualifiedAttempt {
   task_id: string; runtime_epoch: string; run: RunnerRun; work: LogicalWork; attempt: ExecutionAttempt; goal?: ContentPlan
 }
 export type WorkCause = NonNullable<LogicalWork['root_cause']>
+export interface AssignmentSupplement {
+  work_id: string
+  attempt_id: string
+  request_id: string
+  run_id: string
+  previous_plan_revision: number
+  clarification_id: string
+  source_request_id: string
+  message_id: string
+  resource_ids: string[]
+}
 const stages: ConsumptionStage[] = ['received', 'routed', 'installed']
 const terminalWork = new Set<LogicalWork['state']>(['succeeded', 'failed', 'cancelled', 'invalidated', 'dependency_failed', 'dependency_cancelled'])
 const terminalAttempt = new Set<ExecutionAttempt['state']>(['succeeded', 'failed', 'cancelled', 'revoked'])
@@ -152,11 +163,10 @@ export class RunnerWorkState {
   }
 
   /** Only explicit deliverables contribute requirements. The installed plan is immutable. */
-  installContentPlan(input: InputEvent): ContentPlan {
+  installContentPlan(input: InputEvent, requirements: ContentPlan['requirements']): ContentPlan {
     const plan = validateRunnerContract('runner_content_plan', {
       task_id: input.task_id, request_id: input.request_id, input_event_id: input.input_event_id,
-      intent_revision: 1, state: 'active',
-      requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: false }]
+      intent_revision: 1, state: 'active', requirements
     })
     return this.db.transaction(() => {
       this.activeTask(input.task_id)
@@ -311,6 +321,7 @@ export class RunnerWorkState {
     }
     if (checking.has(work.work_id)) fail('RUNNER_DEPENDENCY_CYCLE', 'Logical work dependencies must form a DAG')
     checking.add(work.work_id)
+    if (work.current_attempt_id) this.checkHandoffs(work, work.current_attempt_id)
     this.dependenciesCurrent(work.dependencies, requireSuccess, proposed, checking)
     checking.delete(work.work_id)
   }
@@ -335,12 +346,45 @@ export class RunnerWorkState {
   }
 
   installPlan(raw: LogicalWork[]): LogicalWork[] {
+    return this.installWorkPlan(raw, false)
+  }
+
+  installAssignmentRevisions(raw: Extract<LogicalWork, { purpose: 'production' }>[], supplementId?: string): LogicalWork[] {
+    return this.db.transaction(() => {
+      const reply = supplementId ? this.assignmentSupplement(raw[0]?.task_id ?? '', supplementId) : undefined
+      if (reply && !raw.some(work => work.work_id === reply.work_id)) fail('RUNNER_PLAN_CONFLICT', 'Supplement must update its waiting assignment')
+      for (const next of raw) {
+        const previous = this.work(next.work_id)
+        if (previous.purpose !== 'production' || !previous.assignment || !next.assignment || previous.update_id || !['planned', 'waiting'].includes(previous.state)) fail('RUNNER_PLAN_CONFLICT', 'Only eligible pending assignments can be revised')
+        const authority = (work: typeof next) => {
+          const { plan_revision, assignment, dependencies, ...source } = planBinding(work) as typeof next
+          return { ...source, dependencies: dependencies.filter(dependency => dependency.kind !== 'work'), outputs: assignment?.outputs, final_answer: assignment?.final_answer, supplement_ids: assignment?.supplement_ids }
+        }
+        const authorized = authority(previous)
+        if (reply?.work_id === previous.work_id) {
+          if (previous.state !== 'waiting' || previous.run_id !== reply.run_id || previous.request_id !== reply.request_id || previous.current_attempt_id !== reply.attempt_id || previous.plan_revision !== reply.previous_plan_revision) fail('RUNNER_PLAN_CONFLICT', 'Supplement no longer matches the waiting attempt')
+          authorized.supplement_ids = [...authorized.supplement_ids ?? [], supplementId!]
+          for (const resource_id of reply.resource_ids) if (!authorized.dependencies.some(input => input.kind === 'resource' && input.resource_id === resource_id)) authorized.dependencies.push({ kind: 'resource', task_id: previous.task_id, resource_id })
+        }
+        if (next.plan_revision !== previous.plan_revision + 1 || !equivalent(authorized, authority(next))) fail('RUNNER_PLAN_CONFLICT', 'A revision must preserve request authority and work priority')
+      }
+      return this.installWorkPlan(raw, true)
+    }).immediate()
+  }
+
+  assignmentSupplement(task: string, supplementId: string): AssignmentSupplement {
+    const row = this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND id=? AND kind='runner.input.bound'").get(task, supplementId) as PayloadRow | undefined
+    if (!row) fail('RUNNER_PLAN_CONFLICT', 'Assignment supplement is not available in this Task')
+    return JSON.parse(row.payload_json) as AssignmentSupplement
+  }
+
+  private installWorkPlan(raw: LogicalWork[], assignmentRevisions: boolean): LogicalWork[] {
     if (!Array.isArray(raw) || !raw.length) fail('INVALID_RUNNER_CONTRACT', 'A work plan must contain logical work')
     const plan = raw.map(work => validateRunnerContract('runner_logical_work', work)), proposed = new Map(plan.map(work => [work.work_id, work]))
     if (proposed.size !== plan.length) fail('RUNNER_PLAN_CONFLICT', 'A work plan contains duplicate identities')
     return this.db.transaction(() => {
       const first = plan[0]!
-      if (plan.some(work => work.task_id !== first.task_id || work.run_id !== first.run_id || work.plan_revision !== first.plan_revision)) fail('RUNNER_PLAN_CONFLICT', 'A plan installation must have one Run and revision')
+      if (plan.some(work => work.task_id !== first.task_id || work.run_id !== first.run_id || !assignmentRevisions && work.plan_revision !== first.plan_revision)) fail('RUNNER_PLAN_CONFLICT', 'A plan installation must have one Run and a coherent revision')
       const run = this.run(first.run_id), goal = this.sourceCurrent(run), updates = new Set<string>()
       // Repeated plan bindings refer to their installed execution facts. A
       // raw planned snapshot must not hide an already accepted source result.
@@ -396,11 +440,31 @@ export class RunnerWorkState {
       this.dependenciesCurrent(attempt.input_versions, true)
       const previous = this.attempts(work.work_id).at(-1)
       if (attempt.attempt_number !== (previous?.attempt_number ?? 0) + 1 || attempt.attempt_number > work.max_attempts || attempt.previous_attempt_id !== previous?.attempt_id) fail('RUNNER_ATTEMPT_CONFLICT', 'Attempt must retain its predecessor and installed bound')
-      if (previous && (!terminalAttempt.has(previous.state) || previous.state === 'cancelled' || previous.dispatch_state === 'unknown' || previous.state === 'revoked' && previous.dispatch_state !== 'not_dispatched')) fail('RUNNER_ATTEMPT_CONFLICT', 'An unresolved or cancelled attempt cannot be replayed')
+      if (previous && (!terminalAttempt.has(previous.state) || previous.state === 'cancelled' || previous.dispatch_state === 'unknown' || previous.state === 'revoked' && previous.dispatch_state !== 'not_dispatched' && !this.assignmentWait(previous, work.plan_revision))) fail('RUNNER_ATTEMPT_CONFLICT', 'An unresolved or cancelled attempt cannot be replayed')
       if (work.current_attempt_id && work.current_attempt_id !== previous?.attempt_id) fail('RUNNER_ATTEMPT_CONFLICT', 'Logical work points to an inconsistent attempt')
       this.db.prepare('INSERT INTO runner_attempts(attempt_id,task_id,work_id,run_id,attempt_number,state,payload_json) VALUES (?,?,?,?,?,?,?)').run(attempt.attempt_id, attempt.task_id, attempt.work_id, attempt.run_id, attempt.attempt_number, attempt.state, json(attempt))
       this.saveWork({ ...work, current_attempt_id: attempt.attempt_id, state: 'queued' })
       return this.attempt(attempt.attempt_id)
+    }).immediate()
+  }
+
+  private assignmentWait(attempt: ExecutionAttempt, beforeRevision: number): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.assignment.waiting'
+      AND json_extract(payload_json,'$.attempt_id')=? AND json_extract(payload_json,'$.plan_revision')<? LIMIT 1`).get(attempt.task_id, attempt.attempt_id, beforeRevision)
+  }
+
+  suspendAssignment(attemptId: string, reportId: string, recordWait: (work: LogicalWork) => void): void {
+    this.db.transaction(() => {
+      const { attempt, work } = this.qualify(attemptId)
+      if (work.purpose !== 'production' || !work.assignment || !['running', 'waiting'].includes(attempt.state) || attempt.dispatch_state !== 'dispatched') fail('RUNNER_ATTEMPT_CONFLICT', 'Only an executing assignment can wait for missing input')
+      if (!this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND id=? AND kind='runner.input.reported'
+        AND json_extract(payload_json,'$.attempt_id')=? AND json_extract(payload_json,'$.report.wait')=1`).get(work.task_id, reportId, attemptId)) fail('RUNNER_PLAN_CONFLICT', 'Missing input must belong to the current attempt')
+      if (this.db.prepare(`SELECT 1 FROM actions WHERE run_id=? AND json_extract(source_json,'$.owner.attempt_id')=? AND (state!='ended' OR result='unknown')
+        UNION ALL SELECT 1 FROM calls WHERE run_id=? AND json_extract(limits_json,'$.owner.attempt_id')=? AND (state!='ended' OR execution='unknown') LIMIT 1`).get(work.run_id, attemptId, work.run_id, attemptId)) fail('RUNNER_ATTEMPT_CONFLICT', 'Wait cannot replace an unsettled operation')
+      this.saveWork({ ...work, state: 'waiting' })
+      this.db.prepare('UPDATE runner_attempts SET state=?,payload_json=? WHERE attempt_id=?').run('revoked', json({ ...attempt, state: 'revoked' }), attemptId)
+      recordWait(work)
+      if (!this.assignmentWait(attempt, work.plan_revision + 1)) fail('RUNNER_PLAN_CONFLICT', 'Assignment wait must retain its exact origin')
     }).immediate()
   }
 
@@ -409,7 +473,23 @@ export class RunnerWorkState {
     if (attempt.runtime_epoch !== this.epoch || work.current_attempt_id !== attemptId || work.run_id !== run.run_id || !sameSource(run, attempt) || !sameSource(work, attempt) || ['failed', 'cancelled', 'revoked', 'unknown'].includes(attempt.state) || terminalWork.has(work.state) && work.state !== 'succeeded' || !sameDependencies(work.dependencies, attempt.input_versions)) fail('RUNNER_OWNERSHIP_INVALID', 'Attempt no longer has current execution authority')
     if (mode === 'dispatch' && (attempt.dispatch_state !== 'not_dispatched' || !['registered', 'queued'].includes(attempt.state) || terminalWork.has(work.state))) fail('RUNNER_OWNERSHIP_INVALID', 'Attempt cannot be dispatched again')
     this.dependenciesCurrent(attempt.input_versions, true)
+    this.checkHandoffs(work, attemptId)
     return { task_id: run.task_id, runtime_epoch: this.epoch, run, work, attempt, ...(goal ? { goal } : {}) }
+  }
+
+  checkHandoffs(work: LogicalWork, attemptId: string): void {
+    if (work.purpose !== 'production' || !work.assignment?.inputs.length) return
+    const receipts = (this.db.prepare(`SELECT payload_json FROM records WHERE task_id=? AND kind='runner.output.handoff'
+      AND json_extract(payload_json,'$.consumer_attempt_id')=? ORDER BY sequence`).all(work.task_id, attemptId) as PayloadRow[]).map(row => JSON.parse(row.payload_json))
+    for (const input of work.assignment.inputs) {
+      const source = this.work(input.work_id)
+      const receipt = receipts.find(item => item.consumer_work_id === work.work_id && item.work_id === input.work_id && item.output_key === input.output_key && item.plan_revision === input.plan_revision)
+      if (!receipt || source.plan_revision !== input.plan_revision || source.result_revision !== receipt.result_revision || (input.result_revision !== undefined && input.result_revision !== receipt.result_revision)) fail('RUNNER_DEPENDENCY_INVALID', 'The bound output version is no longer current')
+      if (receipt.artifact_id !== undefined) {
+        const artifact = this.artifactSource({ kind: 'artifact', task_id: work.task_id, artifact_id: receipt.artifact_id, artifact_revision: receipt.artifact_revision })
+        if (!artifact?.current) fail('RUNNER_DEPENDENCY_INVALID', 'The bound artifact version is no longer current')
+      }
+    }
   }
 
   private saveWork(work: LogicalWork): void {
@@ -503,6 +583,12 @@ export class RunnerWorkState {
           try { this.productionPlan(work) } catch (error) {
             if (!(error instanceof ContractError)) throw error
             causes.push(this.cause(work, 'invalidation'))
+          }
+          if (work.current_attempt_id) {
+            try { this.checkHandoffs(work, work.current_attempt_id) } catch (error) {
+              if (!(error instanceof ContractError)) throw error
+              causes.push(this.cause(work, 'invalidation'))
+            }
           }
           if (work.update_id) {
             const chapters = new ChapterState(this.db), update = chapters.update(taskId, work.update_id)

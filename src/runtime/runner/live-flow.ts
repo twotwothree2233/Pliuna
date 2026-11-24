@@ -31,7 +31,7 @@ const approvalQuery = `SELECT a.id action_id,p.id approval_id,a.run_id,p.handlin
 type Approval = { action_id: string; approval_id: string; run_id: string | null; attempt_id: string | null; handling: string }
 type Request = { id: string; state: string; message_id: string | null; code: string | null; material_pending: number }
 type Run = { id: string; state: string; wait_reason: string | null; intended_terminal: string | null; commit_valid: number; runtime_epoch: string; request_id: string | null; message_id: string | null; purpose: string | null; chapter_update_id: string | null; unknown_result: number; cleanup_pending: number }
-type Work = { work_id: string; role: string; attempt_id: string | null; attempt_state: string | null; profile: string | null; wait_reason: string | null; input_sequence: number | null }
+type Work = { work_id: string; role: string; attempt_id: string | null; attempt_state: string | null; profile: string | null; wait_reason: string | null; input_sequence: number | null; output_sequence: number | null; feedback_sequence: number | null; report_sequence: number | null; route_sequence: number | null }
 type Params = { task: string; epoch: string; now: string }
 type Options = { checking?: (id: string) => boolean; compositionWaiting?: boolean; canCompose?: (artifact: string, revision: number) => boolean }
 
@@ -81,7 +81,8 @@ function executionItems(db: Database.Database, params: Params, options: Options,
     FROM requests q WHERE q.task_id=@task AND q.state IN ('queued','confirmation_required')
       AND json_extract(q.input_json,'$.epoch')=@epoch ORDER BY q.rowid`).all(params) as Request[]
   const runs = db.prepare(`${unsettledRuns} SELECT c.id,c.state,c.wait_reason,c.intended_terminal,c.commit_valid,c.runtime_epoch,c.request_id,
-    ${runMessage('c')} message_id,rr.purpose,c.chapter_update_id,
+    COALESCE(${runMessage('c')},(SELECT i.record_id FROM runner_content_plans g JOIN runner_inputs i ON i.task_id=g.task_id AND i.input_event_id=g.input_event_id
+      WHERE g.task_id=rr.task_id AND g.request_id=rr.request_id AND g.intent_revision=rr.intent_revision)) message_id,rr.purpose,c.chapter_update_id,
     COALESCE(c.id IN uncertain,0) unknown_result,COALESCE(c.id IN cleanup,0) cleanup_pending
     FROM runs c LEFT JOIN runner_runs rr ON rr.task_id=c.task_id AND rr.run_id=c.id
     WHERE c.task_id=@task AND (rr.purpose IS NULL OR rr.purpose='production') AND (
@@ -108,12 +109,35 @@ function executionItems(db: Database.Database, params: Params, options: Options,
     }
     const work = db.prepare(`SELECT w.work_id,json_extract(w.payload_json,'$.role') role,
       a.attempt_id,a.state attempt_state,json_extract(a.payload_json,'$.profile_id') profile,
-      CASE WHEN a.state='waiting' THEN (SELECT json_extract(r.payload_json,'$.reason') FROM records r
+      CASE WHEN w.state='waiting' THEN (SELECT json_extract(r.payload_json,'$.reason') FROM records r
         WHERE r.task_id=w.task_id AND r.kind='worker.state' AND json_extract(r.payload_json,'$.owner.attempt_id')=a.attempt_id
-        ORDER BY r.sequence DESC LIMIT 1) END wait_reason,
+        ORDER BY r.sequence DESC LIMIT 1)
+        WHEN w.state='planned' AND EXISTS(SELECT 1 FROM json_each(w.payload_json,'$.dependencies') d
+          JOIN runner_work upstream ON upstream.task_id=w.task_id AND upstream.work_id=json_extract(d.value,'$.work_id')
+          WHERE json_extract(d.value,'$.kind')='work' AND upstream.state!='succeeded') THEN 'dependency' END wait_reason,
       (SELECT r.sequence FROM records r WHERE r.task_id=w.task_id AND r.kind='worker.input'
+        AND json_type(w.payload_json,'$.assignment') IS NULL
         AND json_extract(r.payload_json,'$.owner.attempt_id')=a.attempt_id AND json_extract(r.payload_json,'$.owner.work_id')=w.work_id
-        AND json_extract(r.payload_json,'$.owner.run_id')=w.run_id ORDER BY r.sequence DESC LIMIT 1) input_sequence
+        AND json_extract(r.payload_json,'$.owner.run_id')=w.run_id ORDER BY r.sequence DESC LIMIT 1) input_sequence,
+      (SELECT MAX(r.sequence) FROM records r WHERE r.task_id=w.task_id AND r.kind='runner.output.handoff'
+        AND json_extract(r.payload_json,'$.consumer_attempt_id')=a.attempt_id AND json_extract(r.payload_json,'$.consumer_work_id')=w.work_id
+        AND json_extract(r.payload_json,'$.run_id')=w.run_id) output_sequence,
+      (SELECT MAX(f.sequence) FROM records r JOIN records f ON f.task_id=r.task_id AND f.kind='runner.repair.requested'
+        AND f.id=json_extract(r.payload_json,'$.request_record_id') AND json_extract(f.payload_json,'$.disposition')='eligible'
+        WHERE r.task_id=w.task_id AND json_extract(f.payload_json,'$.request_id')=json_extract(w.payload_json,'$.request_id')
+        AND (r.kind='runner.repair.routed' AND json_extract(r.payload_json,'$.work_id')=w.work_id
+          OR r.kind IN ('runner.repair.started','runner.repair.rebound') AND json_extract(r.payload_json,'$.repair_work_id')=w.work_id
+            AND json_extract(f.payload_json,'$.recipient.kind')='worker')) feedback_sequence,
+      (SELECT MAX(e.sequence) FROM records r JOIN records e ON e.task_id=r.task_id AND e.id=json_extract(r.payload_json,'$.report_id')
+        AND e.kind='runner.input.reported' WHERE r.task_id=w.task_id AND r.kind='runner.input.routed'
+        AND json_extract(r.payload_json,'$.work_id')=w.work_id AND json_extract(r.payload_json,'$.attempt_id')=a.attempt_id
+        AND json_extract(r.payload_json,'$.run_id')=w.run_id) report_sequence,
+      (SELECT MAX(r.sequence) FROM records r WHERE r.task_id=w.task_id AND json_extract(r.payload_json,'$.run_id')=w.run_id AND (
+        r.kind='runner.plan.installed' AND json_extract(r.payload_json,'$.routed')=1
+          AND json_extract(r.payload_json,'$.work_id')=w.work_id AND json_extract(r.payload_json,'$.plan_revision')=w.plan_revision
+        OR r.kind='runner.plan.revised' AND json_extract(r.payload_json,'$.owner.role')='router' AND EXISTS (
+          SELECT 1 FROM json_each(r.payload_json,'$.works') p WHERE json_extract(p.value,'$.work_id')=w.work_id
+            AND json_extract(p.value,'$.plan_revision')=w.plan_revision))) route_sequence
       FROM runner_work w LEFT JOIN runner_attempts a ON a.attempt_id=json_extract(w.payload_json,'$.current_attempt_id')
         AND a.task_id=w.task_id AND a.run_id=w.run_id AND a.work_id=w.work_id
       WHERE w.task_id=? AND w.run_id=? AND (w.state IN ('planned','queued','running','waiting') OR a.state='unknown') ORDER BY w.rowid`).all(params.task, run.id) as Work[]
@@ -124,12 +148,19 @@ function executionItems(db: Database.Database, params: Params, options: Options,
       // while the original attempt still says running.
       if (chapter?.role === 'Host' && row.profile === 'chapter-producer-v1' && row.attempt_state !== 'unknown') continue
       const approval = owned.find(value => value.attempt_id === row.attempt_id && row.attempt_id !== null)
-      const state = row.attempt_state === 'unknown' ? 'unknown' : row.attempt_state === 'waiting' ? waiting(row.wait_reason) :
+      const state = row.attempt_state === 'unknown' ? 'unknown' : row.attempt_state === 'waiting' || row.wait_reason ? waiting(row.wait_reason) :
         row.attempt_state === 'running' || row.attempt_state === 'dispatched' ? 'running' : 'queued'
-      items.push({ id: `work:${row.work_id}`, role: state === 'unknown' ? 'Host' : 'Worker', kind: 'work', work_role: reasonCode(row.role), state,
+      const role = state === 'unknown' ? 'Host' : row.role === 'router' ? 'Router' : 'Worker'
+      const handoff: LiveFlowItem['handoff'] = state === 'unknown' ? undefined
+        : row.feedback_sequence ? { sequence: row.feedback_sequence, from: 'Collator', kind: 'feedback' }
+        : row.report_sequence ? { sequence: row.report_sequence, from: 'Worker', kind: 'missing_input' }
+        : row.output_sequence ? { sequence: row.output_sequence, from: 'Worker', kind: 'output' }
+        : row.route_sequence ? { sequence: row.route_sequence, from: 'Router', kind: 'work' }
+        : row.input_sequence && role === 'Worker' ? { sequence: row.input_sequence, from: row.role === 'diagnostic' ? 'Host' : 'Router', kind: 'work' } : undefined
+      items.push({ id: `work:${row.work_id}`, role, kind: 'work', work_role: reasonCode(row.role), state,
         reason: reasonCode(row.wait_reason === 'approval' ? null : row.wait_reason), sources: [ref],
         ...(approval && state !== 'unknown' ? approvalState(approval) : {}),
-        ...(row.input_sequence && state !== 'unknown' ? { handoff: { sequence: row.input_sequence, from: row.role === 'diagnostic' ? 'Host' : 'Router', kind: 'work' } } : {}) })
+        ...(handoff ? { handoff } : {}) })
       shown = true
     }
     const approval = owned.find(value => value.attempt_id === null)

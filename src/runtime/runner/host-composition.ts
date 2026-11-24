@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import type { ArtifactIndex, Bundle, CompositionBatch, ExecutionScope, LogicalWork, PresentationPlan, PublicationEntry, PublicationManifest } from '../../shared/contracts.generated'
+import type { ArtifactIndex, Bundle, CollatorIssue, CompositionBatch, ExecutionScope, LogicalWork, PresentationPlan, PublicationEntry, PublicationManifest } from '../../shared/contracts.generated'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
@@ -15,6 +15,7 @@ import { RunnerPublicationState, type PublicationOperation, type PublicationResu
 import type { RunnerArtifactState } from './artifact-state'
 import type { RunnerCompositionState } from './composition-state'
 import type { RunnerWorkState } from './work-state'
+import { fragmentHasFeedback, requirementHasFeedback } from './repair-state'
 
 type Row = Record<string, any>
 const id = () => randomUUID()
@@ -47,7 +48,7 @@ export class RunnerHostComposition {
   private publishable(index: ArtifactIndex): boolean {
     try {
       this.composition.checkArtifact(index.task_id, index.artifact_id, index.artifact_revision)
-      return true
+      return this.composition.publicationArtifact(index)
     } catch (error) {
       if (error instanceof ContractError && ['RUNNER_DEPENDENCY_INVALID', 'RUNNER_OWNERSHIP_INVALID'].includes(error.code)) return false
       throw error
@@ -115,14 +116,31 @@ export class RunnerHostComposition {
     if (requested && (new Set(requested).size !== requested.length || requested.some(value => !all.some(index => index.artifact_id === value)))) fail('RUNNER_DEPENDENCY_INVALID', 'Requested composition fragments must be exact current accepted contributions')
     const occupied = new Set((this.db.prepare("SELECT b.payload_json FROM runner_batches b JOIN runs r ON r.id=json_extract(b.payload_json,'$.run_id') WHERE b.task_id=? AND r.state IN ('running','waiting')").all(task) as Row[]).flatMap(row => (JSON.parse(row.payload_json) as CompositionBatch).indexes.map(item => item.artifact_id)))
     const candidates = all.filter(index => requested ? requested.includes(index.artifact_id) : !occupied.has(index.artifact_id) && this.publications.mapping(task, index.artifact_id)?.artifact_revision !== index.artifact_revision)
-    const indexes = (requested ? candidates : candidates.filter(index => this.publishable(index))).slice(0, RUNNER_LIMITS.composition.batch_fragments)
+    if (requested && candidates.some(index => fragmentHasFeedback(this.db, task, index.artifact_id, index.artifact_revision))) fail('COMPOSITION_FEEDBACK_PENDING', 'Requested fragment has an unresolved structural defect')
+    const eligible = candidates.filter(index => !fragmentHasFeedback(this.db, task, index.artifact_id, index.artifact_revision))
+    const indexes = (requested ? eligible.filter(index => this.composition.publicationArtifact(index)) : eligible.filter(index => this.publishable(index))).slice(0, RUNNER_LIMITS.composition.batch_fragments)
+    if (requested && requested.some(artifact => !candidates.some(index => index.artifact_id === artifact && this.composition.publicationArtifact(index)))) fail('RUNNER_DEPENDENCY_INVALID', 'Requested fragment is not designated for publication')
     if (!indexes.length) fail('COMPOSITION_NOT_READY', 'No new accepted fragment is ready for composition')
     this.checkInputs(task, trigger, indexes, lease)
     const outline = this.outline(task), sections = outline.sections.filter(section => indexes.some(index => index.section_id === section.section_id))
     const targets = scope.targets.filter(target => target.request_id === trigger || indexes.some(index => index.request_id === target.request_id)).map(target => ({ task_id: task, request_id: target.request_id, intent_revision: target.intent_revision }))
     if (!targets.some(target => target.request_id === trigger)) fail('RUNNER_OWNERSHIP_INVALID', 'Composition trigger must be a current goal')
     const batch = validateRunnerContract('runner_composition_batch', { task_id: task, batch_id: id(), composition_version: scope.composition_version, run_id: id(), trigger_request_id: trigger, model_config_id: lease.id, model_config_revision: lease.revision, state: 'preparing', targets, indexes: indexes.map(index => ({ task_id: task, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision })), sections: sections.map(section => ({ section_id: section.section_id, position_revision: section.position_revision, order_key: section.order_key })), operation_id: id(), action_id: id(), ...(previous ? { previous_batch_id: previous.batch_id } : {}) })
-    const collator = createCollator({ batch, outline, indexes, currentLayout: null })
+    const issues: CollatorIssue[] = []
+    for (const [position, index] of indexes.entries()) {
+      const artifact = batch.indexes[position]!, mapping = this.publications.mapping(task, index.artifact_id)
+      const resource = this.db.prepare('SELECT byte_length FROM resources WHERE id=?').get(index.bundle_resource_id) as { byte_length: number } | undefined
+      if (mapping && mapping.section_id !== index.section_id) issues.push({ evidence_id: id(), kind: 'artifact_section_mismatch', artifact, expected_section_id: mapping.section_id })
+      else if (resource && resource.byte_length > defaults.surface.inline_bundle_bytes) issues.push({ evidence_id: id(), kind: 'artifact_size_limit', artifact, observed_bytes: resource.byte_length, max_bytes: defaults.surface.inline_bundle_bytes })
+    }
+    for (const requirement of scope.unresolved) {
+      if (issues.length >= RUNNER_LIMITS.composition.batch_fragments) break
+      if (targets.some(target => target.request_id === requirement.request_id && target.intent_revision === requirement.intent_revision)
+        && !requirementHasFeedback(this.db, requirement)
+        && scope.targets.some(target => target.request_id === requirement.request_id && target.contribution_inventory)
+        && this.work.goal(requirement.request_id).requirements.some(item => item.requirement_id === requirement.requirement_id && item.kind !== 'answer')) issues.push({ evidence_id: id(), kind: 'missing_requirement', requirement })
+    }
+    const collator = createCollator({ batch, outline, indexes, currentLayout: null, issues })
     const common = { task_id: task, run_id: batch.run_id, purpose: 'composition' as const, batch_id: batch.batch_id, composition_version: batch.composition_version, trigger_request_id: trigger }
     const dependencies = indexes.map(index => ({ kind: 'artifact' as const, task_id: task, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision }))
     const works: LogicalWork[] = [collator.profile.id, 'composition-host-publisher-v1'].map(() => ({ ...common, work_id: id(), plan_revision: 1, role: 'collator', required: true, requirement_ids: [], dependencies, state: 'planned', max_attempts: 1 }))
@@ -177,7 +195,10 @@ export class RunnerHostComposition {
     this.publications.register({ task_id: task, operation_id: operationId, batch_id: batchId, action_id: actionId, plan })
     const historyId = id(), manifestId = id(), deliveryId = id()
     let resources: { artifact_id: string; artifact_revision: number; source_bundle_resource_id: string; published_bundle_resource_id: string; view_id: string }[] = []
-    const check = () => { this.composition.checkBatch(task, batchId); this.work.qualify(owner.attempt_id) }
+    const check = () => {
+      this.composition.checkBatch(task, batchId); this.work.qualify(owner.attempt_id)
+      if (indexes.some(index => fragmentHasFeedback(this.db, task, index.artifact_id, index.artifact_revision))) fail('COMPOSITION_FEEDBACK_PENDING', 'The frozen batch contains a fragment with an unresolved structural defect')
+    }
     const hooks: CompositionPublicationHooks = {
       check,
       prepared: prepared => {

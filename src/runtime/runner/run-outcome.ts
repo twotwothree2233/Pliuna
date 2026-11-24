@@ -91,7 +91,7 @@ export function aggregateRunOutcome(input: RunOutcomeInput): RunOutcome {
       if (attempt.attempt_number >= work.max_attempts) result = 'failed'
       else { retry = true; runnable = true }
     } else if (attempt?.state === 'cancelled') result = 'cancelled'
-    else if (attempt?.state === 'revoked') wait('attempt_revoked')
+    else if (attempt?.state === 'revoked') wait((input.states ?? []).find(state => state.work_id === work.work_id && state.attempt_id === attempt.attempt_id && ['missing_input', 'input_required'].includes(state.reason ?? ''))?.reason ?? 'attempt_revoked')
     else {
       const states = (input.states ?? []).filter(state => state.work_id === work.work_id && state.attempt_id === work.current_attempt_id && !knownAttempt.has(attempt?.state ?? 'registered'))
       for (const state of states) if (state.state === 'waiting') waits.push({ work_id: work.work_id, attempt_id: state.attempt_id, reason: state.reason ?? 'work_waiting', ...(state.operation_id ? { operation_id: state.operation_id } : {}) })

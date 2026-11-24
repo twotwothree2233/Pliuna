@@ -19,6 +19,7 @@ export interface AgentHost {
   record(kind: string, payload: Record<string, unknown>): void
   tool(request: unknown, signal: AbortSignal): Promise<unknown>
   toolsSettled?(): void
+  yieldAfterTools?(): boolean
 }
 export interface ContextRecovery { overflow: true; partial?: string }
 export interface WorkerResultIssue {
@@ -186,14 +187,15 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
       if (host.context) await host.context(messages)
       return
     }
-    let failed = false
+    let failed = false, yielded = false
     for (const call of response.calls) {
       host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
       const errorCall = collator && !['list', 'read', 'write', 'call'].includes(call.function.name) ? { ...call, function: { ...call.function, name: 'unknown' } } : call
       let result: unknown
       let queryResultId: number | undefined
       let repeatedRejection = false
-      if (failed) result = toolError(errorCall, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
+      if (yielded) result = toolError(errorCall, 'WORKER_WAITING_INPUT', 'This attempt requested a wait; this call was not executed')
+      else if (failed) result = toolError(errorCall, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
       else {
         budget.tool(); host.budget(budget.state)
         let raw: unknown
@@ -210,6 +212,7 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
           result = modelToolResult(call.function.name, raw, delivered)
           const outcome = result as { execution?: string; delivery?: string } | null
           if ((outcome?.execution && outcome.execution !== 'success') || outcome?.delivery === 'failed') failed = true
+          yielded = host.yieldAfterTools?.() === true
         } catch (e) {
           host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
           failed = true
@@ -233,6 +236,7 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
       if (repeatedRejection) throw new ModelError('MODEL_TOOL_NO_PROGRESS')
     }
     host.toolsSettled?.()
+    if (yielded) return
   }
 }
 

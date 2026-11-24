@@ -6,8 +6,10 @@ Object.assign(names, {
   ProviderTokenUsage: 'provider_token_usage',
   InputEvent: 'runner_input_event', ConsumptionStage: 'runner_consumption_stage', OutcomeRequirement: 'runner_outcome_requirement',
   ContentPlan: 'runner_content_plan', WorkDependency: 'runner_work_dependency', RunnerRun: 'runner_run', LogicalWork: 'runner_logical_work',
+  RouteWork: 'runner_route_work', ReportMissingInput: 'runner_report_missing_input',
   ExecutionAttempt: 'runner_execution_attempt', ExecutionScope: 'runner_execution_scope', Outline: 'runner_outline', OutlineSection: 'runner_outline_section',
   ArtifactIndex: 'runner_artifact_index', ArtifactCandidate: 'runner_artifact_candidate', PresentationPlan: 'runner_presentation_plan',
+  CollatorIssue: 'runner_collator_issue', CollatorFeedback: 'runner_collator_feedback',
   CompositionScope: 'runner_composition_scope', CompositionBatch: 'runner_composition_batch', DeliveryRecord: 'runner_delivery_record',
   DeliveryQuery: 'runner_delivery_query', PublicationManifest: 'runner_publication_manifest', PublicationEntry: 'runner_publication_entry',
   WorkOutputDeclaration: 'runner_work_output_declaration', ContributionInventory: 'runner_contribution_inventory', ContributionInventoryRef: 'runner_contribution_inventory_ref',
@@ -25,7 +27,8 @@ for (const [name, definition] of Object.entries(names)) {
   const text = JSON.stringify(schema.$defs).replaceAll('#/$defs/', '#/definitions/' + prefix)
   const defs = Object.fromEntries(Object.entries(JSON.parse(text)).map(([key, value]) => [prefix + key, value]))
   output += await compile({ ...defs[prefix + definition], definitions: defs }, name, {
-    bannerComment: '', additionalProperties: false, unreachableDefinitions: false, format: false
+    bannerComment: '', additionalProperties: false, unreachableDefinitions: false, format: false,
+    ignoreMinAndMaxItems: name === 'RouteWork' || name === 'ReportMissingInput' || name === 'LogicalWork' || name === 'CollatorFeedback'
   })
 }
 await writeFile('src/shared/contracts.generated.ts', output)

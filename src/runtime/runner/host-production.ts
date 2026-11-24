@@ -10,6 +10,7 @@ import { RunnerCompositionState } from './composition-state'
 import { validateProducerDraft, validateProducerResult, type ProducerDraft, type ProducerResult } from './production-profile'
 import { bindProductionIdentities } from './production-identity'
 import { RunnerWorkState } from './work-state'
+import { artifactRepair, repairRoutingWork } from './repair-state'
 
 function fail(code: string, message: string): never { throw new ContractError(code, message) }
 type AcceptedProduction = { output: WorkOutputDeclaration; inventory: ContributionInventory | null; indexes: ArtifactIndex[] }
@@ -47,7 +48,7 @@ export class RunnerHostProduction {
       const evidence = row ? JSON.parse(row.payload_json) : null
       if (!row || canonical(evidence.owner) !== canonical(owner) || evidence.finish !== 'stop' || evidence.message?.content !== response.text || evidence.message?.tool_calls?.length || canonical(evidence.request_link ?? null) !== canonical(response.request_link ?? null)) fail('RUNNER_RESULT_INVALID', 'Draft identities require their original recorded model response')
       const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
-      const source = { owner, work, goal, sections }, draft = validateProducerDraft(raw, source)
+      const source = { owner, work, goal, sections, repair: !!artifactRepair(this.db, owner.task_id, work.work_id) }, draft = validateProducerDraft(raw, source)
       return bindProductionIdentities(this.db, draft, source, row!.id)
     }).immediate()
   }
@@ -59,9 +60,26 @@ export class RunnerHostProduction {
       return null
     }
     const source = this.work.work(previous.work_id)
-    if (work.purpose !== 'production' || source.purpose !== 'production' || source.request_id !== work.request_id || source.task_id !== work.task_id || previous.work_id !== work.work_id && source.intent_revision === work.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'A result cannot acquire another current work fragment without an installed reassignment')
+    const repair = artifactRepair(this.db, work.task_id, work.work_id)
+    const authorizedRepair = repair?.previous.artifact_id === candidate.artifact_id && repair.previous.artifact_revision === candidate.base_artifact_revision && repair.previous.work_id === previous.work_id && repair.repair_run_id === work.run_id
+    if (work.purpose !== 'production' || source.purpose !== 'production' || source.request_id !== work.request_id || source.task_id !== work.task_id || previous.work_id !== work.work_id && source.intent_revision === work.intent_revision && !authorizedRepair) fail('RUNNER_OWNERSHIP_INVALID', 'A result cannot acquire another current work fragment without an installed reassignment')
     if (previous.current_revision !== candidate.base_artifact_revision) fail('RUNNER_ARTIFACT_CONFLICT', 'Artifact accepted baseline is no longer current')
     return previous
+  }
+
+  private repairIssue(result: ProducerResult, work: LogicalWork): WorkerResultIssue | null {
+    const repair = artifactRepair(this.db, work.task_id, work.work_id)
+    if (!repair) return null
+    const { previous, issue } = repair, candidate = result.artifacts[0]
+    this.composition.checkArtifact(work.task_id, previous.artifact_id, previous.artifact_revision)
+    if (result.artifacts.length !== 1 || !candidate || result.answer !== null || candidate.artifact_id !== previous.artifact_id || candidate.base_artifact_revision !== previous.artifact_revision || work.requirement_ids.some(requirement => !candidate.requirement_ids.includes(requirement))) return {
+      code: 'REPAIR_SCOPE_INVALID', path: 'artifacts', value: [], message: 'Return only the exact scoped replacement. Retain the requested artifact identity, base revision and requirement coverage.'
+    }
+    const resource = this.db.prepare('SELECT r.byte_length FROM resources r JOIN task_resources t ON r.id=t.resource_id WHERE t.task_id=? AND r.id=?').get(work.task_id, candidate.bundle_resource_id) as { byte_length: number } | undefined
+    if (issue.kind === 'artifact_section_mismatch' ? candidate.section_id !== issue.expected_section_id : candidate.section_id !== previous.section_id || !resource || resource.byte_length > issue.max_bytes) return {
+      code: 'REPAIR_CONDITION_UNMET', path: 'artifacts[0]', value: null, message: 'The replacement does not meet the bound structural correction condition.'
+    }
+    return null
   }
 
   private receipt(owner: ExecutionScope): AcceptedProduction | null {
@@ -98,7 +116,7 @@ export class RunnerHostProduction {
     if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.task_id !== owner.task_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision || work.message_id !== owner.message_id) fail('RUNNER_OWNERSHIP_INVALID', 'Production preflight requires its current exact work owner')
     const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
     const result = validateProducerResult(raw, { owner, work, goal, sections })
-    const delivery = this.deliveryIssue(result, owner)
+    const delivery = this.repairIssue(result, work) ?? this.deliveryIssue(result, owner)
     if (delivery) return delivery
     for (const [index, candidate] of result.artifacts.entries()) {
       try { this.artifactSource(candidate, work) }
@@ -153,7 +171,7 @@ export class RunnerHostProduction {
       if (work.purpose !== 'production' || !qualified.goal || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.task_id !== owner.task_id || work.role !== owner.role) fail('RUNNER_OWNERSHIP_INVALID', 'Production result requires its current exact work owner')
       const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
       const result = validateProducerResult(raw, { owner, work, goal: qualified.goal, sections })
-      const delivery = this.deliveryIssue(result, owner)
+      const delivery = this.repairIssue(result, work) ?? this.deliveryIssue(result, owner)
       if (delivery) fail(delivery.code, delivery.message)
       const indexes = result.artifacts.map(candidate => {
         try {
@@ -200,7 +218,7 @@ export class RunnerHostProduction {
     try { attempt = this.work.qualify(planner.current_attempt_id).attempt }
     catch (error) { if (error instanceof ContractError) return null; throw error }
     if (!['running', 'waiting', 'succeeded'].includes(attempt.state)) return null
-    const required = this.work.taskWorks(work.task_id).filter(item => item.purpose === 'production' && item.request_id === goal.request_id && item.intent_revision === goal.intent_revision && item.required)
+    const required = this.work.taskWorks(work.task_id).filter(item => item.purpose === 'production' && item.request_id === goal.request_id && item.intent_revision === goal.intent_revision && item.required && !artifactRepair(this.db, item.task_id, item.work_id) && (item.role !== 'router' || !repairRoutingWork(this.db, item.task_id, item.work_id)))
     const outputs = required.map(item => item.result_revision === undefined ? null : this.composition.output(item.task_id, item.work_id, item.plan_revision, item.result_revision))
     if (outputs.some(output => output === null)) return null
     const final = outputs as WorkOutputDeclaration[]

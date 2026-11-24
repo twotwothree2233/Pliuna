@@ -12,6 +12,8 @@ import type { TaskRunnerStatusQuery } from './task-runner'
 import { RunnerWorkState } from './work-state'
 import { runnerFailureReason } from './failure-reason'
 import { containsProducerResult } from './production-result'
+import { requestDelivery } from './delivery-state'
+import { unresolvedDeliveryRequirements } from './repair-state'
 
 type Payload = { payload_json: string }
 type GoalRow = Payload & { position: number; request_id: string; intent_revision: number }
@@ -218,24 +220,27 @@ export class RunnerHostStatus {
   private accepted(goal: ContentPlan): ArtifactIndex[] {
     const rows = this.db.prepare("SELECT a.payload_json FROM runner_artifacts a JOIN runner_artifact_owners o ON o.task_id=a.task_id AND o.artifact_id=a.artifact_id AND o.current_revision=a.artifact_revision WHERE a.task_id=? AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=?").all(goal.task_id, goal.request_id, goal.intent_revision) as Payload[]
     return rows.map(row => validateRunnerContract('runner_artifact_index', JSON.parse(row.payload_json))).filter(index => {
-      try { this.composition.checkArtifact(goal.task_id, index.artifact_id, index.artifact_revision); return true }
+      try { this.composition.checkArtifact(goal.task_id, index.artifact_id, index.artifact_revision); return this.composition.publicationArtifact(index) }
       catch (error) { if (!(error instanceof ContractError)) throw error; return false }
     })
   }
 
   private goal(goal: ContentPlan): RunnerGoalProjection {
     const run = this.run(goal), reply = this.answer(goal), accepted = this.accepted(goal), published = this.published(goal.task_id, goal.request_id)
+    const settlement = requestDelivery(this.db, goal.task_id, goal.request_id, goal.intent_revision)
     let inventory = this.composition.inventory(goal.task_id, goal.request_id, goal.intent_revision)
     try { if (inventory) inventory = this.composition.checkInventory(goal.task_id, goal.request_id, goal.intent_revision, inventory.inventory_revision) } catch (error) { if (!(error instanceof ContractError)) throw error; inventory = null }
-    const covered = new Set(inventory?.requirement_ids ?? []), unresolved = new Set(inventory?.unresolved.map(item => item.requirement_id) ?? [])
+    const covered = new Set(inventory?.requirement_ids ?? []), unresolved = new Set(inventory ? unresolvedDeliveryRequirements(this.db, inventory).map(item => item.requirement_id) : [])
     const missingAnswer = !reply && goal.requirements.some(requirement => requirement.required && requirement.kind === 'answer')
     for (const requirement of goal.requirements) if (requirement.required && (!covered.has(requirement.requirement_id) || requirement.kind === 'answer' && !reply)) unresolved.add(requirement.requirement_id)
     const fragments = inventory ? this.composition.currentArtifacts(inventory) : []
     const delivered = !!inventory && !unresolved.size && fragments.every(fragment => published.some(entry => sameGoal(goal, entry) && entry.artifact_id === fragment.artifact_id && entry.artifact_revision === fragment.artifact_revision)) && (!goal.requirements.some(requirement => requirement.required && requirement.kind === 'answer') || !!reply)
     const stale = published.some(entry => !sameGoal(goal, entry) || !accepted.some(index => index.artifact_id === entry.artifact_id && index.artifact_revision === entry.artifact_revision))
-    const delivery = delivered ? 'published' : missingAnswer && inventory ? 'incomplete' : stale ? 'pending_update' : accepted.length ? 'accepted' : reply ? 'incomplete' : run && (failedRuns.has(run.state) || run.state === 'completed') || goal.state === 'withdrawn' ? 'incomplete' : 'pending'
+    const delivery = settlement?.state === 'complete' ? 'published' : settlement?.state === 'incomplete' ? 'incomplete'
+      : settlement?.state === 'open' ? stale ? 'pending_update' : accepted.length ? 'accepted' : 'pending'
+      : delivered ? 'published' : missingAnswer && inventory ? 'incomplete' : stale ? 'pending_update' : accepted.length ? 'accepted' : reply ? 'incomplete' : run && (failedRuns.has(run.state) || run.state === 'completed') || goal.state === 'withdrawn' ? 'incomplete' : 'pending'
     const artifact_count = new Set([...accepted, ...published.filter(entry => sameGoal(goal, entry))].map(entry => entry.artifact_id)).size
-    return { request_id: goal.request_id, intent_revision: goal.intent_revision, input_event_id: goal.input_event_id, title: this.goalTitle(goal), state: goal.state, run, waits: this.waits(goal, run, accepted, published), delivery, artifact_count, unresolved_count: unresolved.size, request: this.request(goal), reply }
+    return { request_id: goal.request_id, intent_revision: goal.intent_revision, input_event_id: goal.input_event_id, title: this.goalTitle(goal), state: goal.state, run, waits: this.waits(goal, run, accepted, published), delivery, artifact_count, unresolved_count: settlement?.state === 'incomplete' ? settlement.missing_requirement_ids.length : unresolved.size, request: this.request(goal), reply }
   }
 
   scope(task: string): RunnerScopeProjection | null {

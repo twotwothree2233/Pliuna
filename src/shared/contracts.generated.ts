@@ -1223,6 +1223,7 @@ root_cause?: LogicalWorkRunnerWorkCause
 result_revision?: number
 max_attempts: number
 purpose: "production"
+assignment?: LogicalWorkRunnerInstalledAssignment
 request_id: LogicalWorkRunnerId
 intent_revision: number
 message_id?: LogicalWorkRunnerId
@@ -1267,6 +1268,16 @@ kind: "resource"
 task_id: LogicalWorkRunnerId
 resource_id: LogicalWorkRunnerId
 } | LogicalWorkRunnerChapterDependency)
+export type LogicalWorkRunnerAssignmentText = string
+/**
+ * @minItems 1
+ * @maxItems 16
+ */
+export type LogicalWorkRunnerAssignmentOutputs = {
+output_key: LogicalWorkRunnerId
+kind: ("answer" | "artifact")
+exposure?: ("handoff" | "publish")
+}[]
 
 export interface LogicalWorkRunnerChapterDependency {
 kind: "chapter"
@@ -1280,6 +1291,109 @@ kind: ("failure" | "cancellation" | "invalidation")
 work_id: LogicalWorkRunnerId
 attempt_id?: LogicalWorkRunnerId
 operation_id?: LogicalWorkRunnerId
+}
+export interface LogicalWorkRunnerInstalledAssignment {
+instructions: LogicalWorkRunnerAssignmentText
+outputs: LogicalWorkRunnerAssignmentOutputs
+/**
+ * @maxItems 32
+ */
+inputs: LogicalWorkRunnerOutputBinding[]
+checkpoint_id?: LogicalWorkRunnerId
+/**
+ * @maxItems 16
+ */
+supplement_ids?: LogicalWorkRunnerId[]
+final_answer?: true
+}
+export interface LogicalWorkRunnerOutputBinding {
+work_id: LogicalWorkRunnerId
+plan_revision: number
+output_key: LogicalWorkRunnerId
+result_revision?: number
+}
+export type RouteWork = ({
+action: "dispatch"
+base_revision: RouteWorkRunnerPlanBase
+/**
+ * @minItems 1
+ * @maxItems 16
+ */
+assignments: RouteWorkRunnerWorkAssignment[]
+final_answer?: RouteWorkRunnerId
+} | {
+action: "bind"
+base_revision: RouteWorkRunnerPlanBase
+work_id: RouteWorkRunnerId
+input: RouteWorkRunnerOutputBinding
+} | {
+action: "revise"
+base_revision: RouteWorkRunnerPlanBase
+/**
+ * @minItems 1
+ * @maxItems 16
+ */
+changes: {
+work_id: RouteWorkRunnerId
+instructions?: RouteWorkRunnerAssignmentText
+inputs?: RouteWorkRunnerAssignmentInputs
+checkpoint_id?: (RouteWorkRunnerId | null)
+}[]
+})
+export type RouteWorkRunnerPlanBase = number
+export type RouteWorkRunnerId = string
+export type RouteWorkRunnerAssignmentText = string
+/**
+ * @minItems 1
+ * @maxItems 16
+ */
+export type RouteWorkRunnerAssignmentOutputs = {
+output_key: RouteWorkRunnerId
+kind: ("answer" | "artifact")
+exposure?: ("handoff" | "publish")
+}[]
+/**
+ * @maxItems 32
+ */
+export type RouteWorkRunnerAssignmentInputs = (RouteWorkRunnerOutputBinding | {
+assignment_key: RouteWorkRunnerId
+output_key: RouteWorkRunnerId
+})[]
+
+export interface RouteWorkRunnerWorkAssignment {
+assignment_key: RouteWorkRunnerId
+instructions: RouteWorkRunnerAssignmentText
+required: boolean
+/**
+ * @maxItems 32
+ */
+requirement_ids: RouteWorkRunnerId[]
+outputs: RouteWorkRunnerAssignmentOutputs
+inputs?: RouteWorkRunnerAssignmentInputs
+checkpoint_id?: RouteWorkRunnerId
+}
+export interface RouteWorkRunnerOutputBinding {
+work_id: RouteWorkRunnerId
+plan_revision: number
+output_key: RouteWorkRunnerId
+result_revision?: number
+}
+export type ReportMissingInputRunnerAssignmentText = string
+export type ReportMissingInputRunnerId = string
+
+export interface ReportMissingInput {
+missing: ReportMissingInputRunnerAssignmentText
+impact: ReportMissingInputRunnerAssignmentText
+wait: boolean
+/**
+ * @maxItems 16
+ */
+references?: ReportMissingInputRunnerProvenanceRef[]
+}
+export interface ReportMissingInputRunnerProvenanceRef {
+task_id: ReportMissingInputRunnerId
+kind: ("record" | "resource" | "action")
+id: ReportMissingInputRunnerId
 }
 export type ExecutionAttempt = ({
 attempt_id: ExecutionAttemptRunnerId
@@ -1530,6 +1644,57 @@ export interface PresentationPlanRunnerArtifactRef {
 task_id: PresentationPlanRunnerId
 artifact_id: PresentationPlanRunnerId
 artifact_revision: number
+}
+export type CollatorIssue = ({
+evidence_id: CollatorIssueRunnerId
+kind: "artifact_section_mismatch"
+artifact: CollatorIssueRunnerArtifactRef
+expected_section_id: CollatorIssueRunnerId
+} | {
+evidence_id: CollatorIssueRunnerId
+kind: "artifact_size_limit"
+artifact: CollatorIssueRunnerArtifactRef
+observed_bytes: number
+max_bytes: number
+} | {
+evidence_id: CollatorIssueRunnerId
+kind: "missing_requirement"
+requirement: CollatorIssueRunnerRequirementRef
+})
+export type CollatorIssueRunnerId = string
+
+export interface CollatorIssueRunnerArtifactRef {
+task_id: CollatorIssueRunnerId
+artifact_id: CollatorIssueRunnerId
+artifact_revision: number
+}
+export interface CollatorIssueRunnerRequirementRef {
+task_id: CollatorIssueRunnerId
+request_id: CollatorIssueRunnerId
+intent_revision: number
+requirement_id: CollatorIssueRunnerId
+}
+export type CollatorFeedbackRunnerId = string
+
+export interface CollatorFeedback {
+kind: "feedback"
+task_id: CollatorFeedbackRunnerId
+run_id: CollatorFeedbackRunnerId
+batch_id: CollatorFeedbackRunnerId
+composition_version: number
+/**
+ * @minItems 1
+ * @maxItems 16
+ */
+reports: {
+evidence_id: CollatorFeedbackRunnerId
+recipient: ({
+kind: "router"
+} | {
+kind: "worker"
+work_id: CollatorFeedbackRunnerId
+})
+}[]
 }
 export type CompositionScopeRunnerId = string
 

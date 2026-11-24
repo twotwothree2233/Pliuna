@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ArtifactIndex, ModelConfiguration, ModelRequest, Outline, PresentationPlan } from '../../src/shared/contracts.generated'
+import type { ArtifactIndex, CollatorFeedback, CollatorIssue, ModelConfiguration, ModelRequest, Outline, PresentationPlan } from '../../src/shared/contracts.generated'
 import { assertContract, ContractError, validateModel } from '../../src/shared/validation'
 import { validateRunnerContract } from '../../src/shared/runner-validation'
 import { ChatAdapter, ModelError, type ChatMessage, type Completion, type ToolCall, type ToolDefinition } from '../../src/runtime/model/adapter'
@@ -213,6 +213,56 @@ describe('PresentationPlan validation', () => {
     const collator = createCollator(fixture()), plan = collator.rulePlan(); change(plan)
     safeFailure(() => collator.validatePlan(plan))
     safeFailure(() => collator.profile.parseResult(completion(JSON.stringify(plan))))
+  })
+})
+
+describe('structural Collator feedback', () => {
+  function structuralFixture() {
+    const input = fixture(), artifact = input.batch.indexes[0]!, target = input.batch.targets[1]!
+    const issues: CollatorIssue[] = [
+      { evidence_id: 'oversize', kind: 'artifact_size_limit', artifact, observed_bytes: 200, max_bytes: 100 },
+      { evidence_id: 'missing', kind: 'missing_requirement', requirement: { ...target, requirement_id: 'required-slot' } }
+    ]
+    const { task_id, run_id, batch_id, composition_version } = input.batch
+    const result: CollatorFeedback = { kind: 'feedback', task_id, run_id, batch_id, composition_version, reports: [
+      { evidence_id: 'oversize', recipient: { kind: 'worker', work_id: input.indexes[0]!.work_id } },
+      { evidence_id: 'missing', recipient: { kind: 'router' } }
+    ] }
+    return { input: { ...input, issues }, issues, result }
+  }
+
+  it('accepts the exact structural evidence and keeps body access denied', async () => {
+    const { input, issues, result } = structuralFixture(), collator = createCollator(input), s = setup(collator)
+    s.complete.mockResolvedValueOnce(completion('', [tool('read', { kind: 'resource', id: 'SECRET BODY' })]))
+      .mockResolvedValueOnce(completion(JSON.stringify(result)))
+    await s.run()
+    expect(s.dispatch).not.toHaveBeenCalled()
+    expect(s.onResult).toHaveBeenCalledWith(result)
+    expect(collator.feedback(result)).toEqual({ result, issues })
+    expect(JSON.stringify(collator.initial())).toContain('structural_issues')
+    expect(JSON.stringify(s.sent[1]!.messages)).not.toContain('SECRET BODY')
+  })
+
+  it.each([
+    (value: CollatorFeedback) => { value.composition_version++ },
+    (value: CollatorFeedback) => { value.task_id = 'other-task' },
+    (value: CollatorFeedback) => { value.reports[0]!.evidence_id = 'invented' },
+    (value: CollatorFeedback) => { value.reports[0]!.recipient = { kind: 'worker', work_id: 'work-1' } },
+    (value: CollatorFeedback) => { value.reports[1]!.recipient = { kind: 'worker', work_id: 'work-1' } },
+    (value: CollatorFeedback) => { value.reports.push(value.reports[0]!) },
+    (value: CollatorFeedback) => { Object.assign(value.reports[0]!, { rewrite_body: 'SECRET BODY' }) }
+  ])('rejects invalid feedback without reflecting its payload: %#', change => {
+    const { input, result } = structuralFixture(), collator = createCollator(input)
+    change(result)
+    safeFailure(() => collator.profile.parseResult(completion(JSON.stringify(result))))
+  })
+
+  it('rejects obsolete and out-of-scope proof before showing it to the model', () => {
+    const { input } = structuralFixture(), issue = input.issues[0]!
+    if (issue.kind !== 'artifact_size_limit') throw Error('Invalid test fixture')
+    safeFailure(() => createCollator({ ...input, issues: [{ ...issue, artifact: { ...issue.artifact, artifact_revision: 1 } }] }))
+    safeFailure(() => createCollator({ ...input, issues: [{ ...issue, artifact: { ...issue.artifact, task_id: 'outside-task' } }] }))
+    safeFailure(() => createCollator({ ...input, issues: [{ ...issue, observed_bytes: 50 }] }))
   })
 })
 
