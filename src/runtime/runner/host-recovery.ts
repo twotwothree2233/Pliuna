@@ -64,7 +64,7 @@ function synchronous(value: unknown): void {
 function scope(attempt: ExecutionAttempt, work: LogicalWork): ExecutionScope {
   const identity = { task_id: attempt.task_id, run_id: attempt.run_id, work_id: attempt.work_id, attempt_id: attempt.attempt_id, role: work.role }
   return validateRunnerContract('runner_execution_scope', attempt.purpose === 'production'
-    ? { ...identity, purpose: 'production', request_id: attempt.request_id, intent_revision: attempt.intent_revision }
+    ? { ...identity, purpose: 'production', request_id: attempt.request_id, intent_revision: attempt.intent_revision, ...(attempt.update_id ? { update_id: attempt.update_id } : {}), ...(attempt.message_id ? { message_id: attempt.message_id } : {}) }
     : { ...identity, purpose: 'composition', batch_id: attempt.batch_id, composition_version: attempt.composition_version, trigger_request_id: attempt.trigger_request_id })
 }
 function owner(raw: string, task: string, run: string | null): ExecutionScope | undefined {

@@ -36,7 +36,7 @@ test('PDF bundled runtime with empty PATH, source navigation and isolated restar
     await openSettings(page, '插件与主流程'); const panel = page.getByRole('dialog', { name: '应用设置', exact: true })
     await panel.getByRole('button', { name: '从文件夹导入固定包' }).click(); await expect(panel).toContainText('pliuna.pdf-text')
     await panel.getByRole('button', { name: '核对代码信任' }).click(); await panel.getByRole('checkbox', { name: /我已核对固定包代码/ }).check(); await panel.getByRole('button', { name: '确认代码信任', exact: true }).click()
-    await panel.getByRole('button', { name: '核对启用依赖' }).click(); await panel.getByRole('button', { name: '确认共同启用' }).click(); await expect(panel).toContainText('当前可用'); await panel.getByRole('button', { name: /^返回工作区/ }).click()
+    await panel.getByRole('button', { name: '核对启用依赖' }).click(); await panel.getByRole('button', { name: '确认共同启用' }).click(); await expect(panel).toContainText('当前可用'); await panel.getByRole('button', { name: /^返回工作台/ }).click()
     capability = (await call({ type: 'task.query', task_id: task, query: { type: 'list', input: { kind: 'capability' } } })).items.find((item: any) => !item.id.startsWith('builtin:')).id
     const request = await call({ type: 'request.submit', task_id: task, text: 'Explicitly extract the synthetic PDF as pure text.', model_config_id: 'pdf-fixture', resource_ids: [resourceId], import_ids: [] })
     await expect.poll(async () => (await call({ type: 'request.status', task_id: task, request_id: request.request_id })).run_state).toBe('completed')
@@ -45,8 +45,9 @@ test('PDF bundled runtime with empty PATH, source navigation and isolated restar
     const output = original.data.result_data.data.resource_id
     expect(await readFile(join(root, 'resources', output), 'utf8')).toContain('Pliuna PDF text two'); expect(business).toBe(2)
     const beforeNavigation = server.exchanges.length
-    await page.getByRole('tab', { name: '资源', exact: true }).click()
-    const browser = page.getByRole('region', { name: '全部资源分页浏览', exact: true }); await browser.getByRole('button', { name: '刷新全部资源', exact: true }).click(); await browser.getByRole('button').filter({ hasText: output }).click()
+    await page.getByRole('tab', { name: '材料', exact: true }).click()
+    const browser = page.getByRole('region', { name: '全部资源分页浏览', exact: true }); await browser.getByRole('button', { name: '刷新全部资源', exact: true }).click(); await browser.getByLabel('搜索全部资源已加载记录').fill(output); await browser.locator('.material-list-row .record-row').click()
+    await browser.getByRole('button', { name: '来源与记录', exact: true }).click()
     await expect(browser.getByRole('region', { name: '派生材料来源', exact: true })).toContainText('页码和提取文字由工具报告')
     const sourcePanel = browser.getByRole('region', { name: '派生材料来源', exact: true })
     await expect(sourcePanel).toContainText('不代表语义完整或没有遗漏')

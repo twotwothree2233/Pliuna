@@ -5,7 +5,7 @@ export async function openSettings(page: Page, section: '外观'|'模型服务'|
   await page.getByRole('button',{name:section,exact:true}).click()
 }
 export async function closeSettings(page: Page) {
-  await page.getByRole('button',{name:/^返回工作区/}).click()
+  await page.getByRole('button',{name:/^返回工作台/}).click()
   await expect(page.getByRole('dialog',{name:'应用设置',exact:true})).toHaveCount(0)
 }
 export async function chooseModel(page: Page, id: string) { await openSettings(page); await page.getByLabel('本次模型',{exact:true}).selectOption(id);await closeSettings(page) }
@@ -39,9 +39,13 @@ export async function addModel(page: Page, input: { name: string; model: string;
   await expect(page.getByRole('dialog',{name:'添加模型',exact:true})).toHaveCount(0)
 }
 export async function testRole(page: Page, role: '主模型'|'审批模型'|'压缩模型', name?: string) {
-  const row=name?page.locator('.channel-model').filter({has:page.getByText(name,{exact:true})}):page.locator('.channel-model').first()
-  const details=row.locator('details');if(!await details.evaluate(el=>(el as HTMLDetailsElement).open))await details.locator('summary').click()
-  await row.getByRole('button',{name:'测试并启用'+role,exact:true}).click()
-  await page.getByRole('button',{name:'确认费用并开始测试',exact:true}).click()
-  await expect(row.locator('.badge')).toContainText(role)
+  const result = await page.evaluate(async ({ role, name }) => {
+    const state = await window.pliuna.request({ type: 'model.list' })
+    if (!state.ok) return state
+    const models = (state.data as { models: { id: string; display_name?: string; wire_model_id: string }[] }).models
+    const model = name ? models.find(m => (m.display_name ?? m.wire_model_id) === name) : models[0]
+    if (!model) throw Error('Missing model fixture')
+    return window.pliuna.request({ type: 'model.test', model_id: model.id, role, confirm_cost: true })
+  }, { role: ({ 主模型: 'main', 审批模型: 'approval', 压缩模型: 'compaction' } as const)[role], name })
+  expect(result.ok).toBe(true)
 }

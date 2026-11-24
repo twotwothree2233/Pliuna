@@ -1,5 +1,5 @@
-import { openPending } from '../helpers/agent-ui'
-import { chooseModel, openSettings, closeSettings, addChannel, addModel, testRole } from '../helpers/settings-ui'
+import { openTaskRecords } from '../helpers/workspace-ui'
+import { chooseModel, openSettings, closeSettings, addChannel, addModel } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,7 +8,7 @@ import { createRequire } from 'node:module'
 import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/model-server'
 const electronPath: string = createRequire(import.meta.url)('electron')
 
-test('desktop model test gate, general loop, manual approval, memory-only credentials', async () => {
+test('desktop uses an untested model, general loop, manual approval, memory-only credentials', async () => {
   let dataId = ''
   let correctedInvalidValue = false
   const server = await modelServer(({ body, url }, res) => {
@@ -45,7 +45,8 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
     await page.getByRole('button',{name:'关闭',exact:true}).click()
     await addModel(page,{name:'Main',model:'wire-model',context:1000000,output:1024})
     const mainId=await page.evaluate(async()=>{const r:any=await window.pliuna.request({type:'model.list'});return r.data.models[0].id as string})
-    await testRole(page,'主模型')
+    expect(server.exchanges).toHaveLength(1)
+    await expect(page.locator('.model-connection-state')).toHaveText('未测试')
     await closeSettings(page)
     await page.getByRole('button', { name: '创建第一个任务' }).click()
     await page.getByLabel('任务名称').fill('模型审批任务')
@@ -56,24 +57,34 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
     await expect(page.getByText('本机合成模型完成，无真实服务调用。', { exact: true })).toHaveCount(1)
     await expect(page.locator('.agent-status')).toContainText('已完成')
     expect(dataId).not.toBe('')
-    await page.getByRole('tab', { name: /^任务数据/ }).click();await page.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
+    await openTaskRecords(page, '任务数据');await page.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     await page.getByRole('button', { name: new RegExp(dataId) }).click()
     await expect(page.locator('.record-values')).toContainText('initial')
     await page.getByLabel('想从哪里开始？').fill('更新已有进度')
     await page.getByRole('button', { name: /发送消息/ }).click()
-    await openPending(page)
-    await expect(page.getByRole('button', { name: '批准本次动作' })).toBeVisible()
+    const conversation = () => page.getByRole('region', { name: '任务对话', exact: true })
+    const pendingApproval = () => conversation().getByRole('article', { name: '你的消息', exact: true }).filter({ hasText: '更新已有进度' })
+      .getByRole('article', { name: `更新任务数据：${dataId}`, exact: true })
+    const approval = pendingApproval()
+    await expect(approval).toBeVisible()
     expect(correctedInvalidValue).toBe(true)
-    await page.getByText('具体参数与版本').click()
-    await expect(page.locator('.approval-card pre').first()).toContainText('expected_revision')
-    await openPending(page)
-    await page.getByRole('button', { name: '批准本次动作' }).click()
-    await expect(page.locator('.agent-status')).toContainText('已完成');await page.getByRole('tab', { name: /^内容/ }).click();await expect(page.getByText('本机合成模型完成，无真实服务调用。', { exact: true })).toHaveCount(1)
-    await expect(page.locator('.agent-messages .approval-card')).toHaveCount(0)
-    await page.getByRole('tab', { name: /^任务数据/ }).click();await page.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
+    await expect(approval.locator('pre,details')).toHaveCount(0)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.setViewportSize({ width: 790, height: 700 })
+    const agentTab = page.getByRole('navigation', { name: '工作区视图' }).getByRole('button', { name: /^Agent/ })
+    await expect(agentTab).toContainText('1')
+    await agentTab.click()
+    await expect(approval.getByRole('button', { name: '批准', exact: true })).toBeVisible()
+    expect(await approval.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true)
+    await test.info().attach('Agent 审批', { body: await page.locator('#pane-right').screenshot(), contentType: 'image/png' })
+    await approval.getByRole('button', { name: '批准', exact: true }).click()
+    await page.setViewportSize({ width: 1200, height: 865 })
+    await expect(page.locator('.agent-status')).toContainText('已完成');await page.getByRole('tab', { name: /^内容/ }).click();await expect(conversation().getByText('本机合成模型完成，无真实服务调用。', { exact: true })).toHaveCount(2)
+    await expect(approval).toHaveCount(0)
+    await openTaskRecords(page, '任务数据');await page.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     await page.getByRole('button', { name: new RegExp(dataId) }).click()
     await expect(page.locator('.record-values')).toContainText('updated')
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     await expect(page.getByRole('region', { name: '原动作分页浏览', exact: true })).toContainText('success')
     expect(errors).toEqual([])
@@ -83,7 +94,7 @@ test('desktop model test gate, general loop, manual approval, memory-only creden
     app = await launch(); page = await app.firstWindow()
     await page.getByRole('button', { name: /模型审批任务/ }).click()
     await expect(page.locator('.agent-note')).toContainText('选择主模型后即可发送')
-    await expect(page.locator('.agent-messages .approval-card')).toHaveCount(0)
+    await expect(pendingApproval()).toHaveCount(0)
     expect(server.exchanges.every(e => e.authorization === 'Bearer desktop-secret-sentinel')).toBe(true)
   } finally { await app.close(); await server.close(); await rm(directory, { recursive: true, force: true }) }
 })
@@ -130,8 +141,10 @@ test('desktop real-API onboarding handles authentication, explicit cancellation 
     if (url === '/v1/models') { res.writeHead(404); res.end('unavailable catalogue'); return }
     tests++
     if (mode === 'auth') { res.writeHead(401); res.end('never-display-provider-secret'); return }
-    if (mode === 'hang') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders(); return }
-    synthetic(body, res)
+    if (mode === 'hang') { res.writeHead(200, { 'content-type': 'application/json' }); res.flushHeaders(); return }
+    expect(body).toMatchObject({ model: 'wire-model', stream: false, max_tokens: 16 })
+    expect(body).not.toHaveProperty('tools')
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"choices":[]}')
   })
   const directory = await mkdtemp(join(tmpdir(), 'pliuna-onboarding-'))
   const app = await electron.launch({ executablePath: electronPath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', PLIUNA_TEST_DATA: directory } })
@@ -142,24 +155,24 @@ test('desktop real-API onboarding handles authentication, explicit cancellation 
     await page.getByRole('button',{name:'发现模型',exact:true}).click()
     await expect(page.getByRole('status')).toContainText('MODEL_UNAVAILABLE')
     await addModel(page,{name:'Main',model:'wire-model',context:1000000,output:1024})
-    await page.locator('.channel-model summary').click()
-    const testMain = page.getByRole('button', { name: '测试并启用主模型', exact: true })
-    await testMain.click(); await expect(page.getByRole('dialog', { name: '确认模型角色测试' })).toContainText('最多两轮'); await page.getByRole('button', { name: '确认费用并开始测试', exact: true }).click()
+    const testMain = page.getByRole('button', { name: '测试连接', exact: true })
+    await testMain.click(); await expect(page.getByRole('dialog', { name: '测试模型连接' })).toContainText('一条简短请求'); await page.getByRole('button', { name: '开始测试', exact: true }).click()
     await expect(page.getByRole('status')).toContainText('MODEL_AUTHENTICATION')
     expect(tests).toBe(1)
-    await expect(page.locator('.model-entry')).toContainText('未验证')
+    await expect(page.locator('.model-connection-state')).toHaveText('连接失败')
     expect(await page.locator('body').innerText()).not.toContain('never-display-provider-secret')
+    await expect(page.getByLabel('本次模型').locator('option:checked')).toHaveText('Real ready / Main')
     mode = 'hang'
-    await testMain.click(); await expect(page.getByRole('dialog', { name: '确认模型角色测试' })).toContainText('最多两轮'); await page.getByRole('button', { name: '确认费用并开始测试', exact: true }).click()
+    await testMain.click(); await expect(page.getByRole('dialog', { name: '测试模型连接' })).toContainText('一条简短请求'); await page.getByRole('button', { name: '开始测试', exact: true }).click()
     await expect.poll(() => tests).toBe(2)
     await page.getByRole('button', { name: '取消当前连接或测试' }).click()
     await expect(page.getByRole('status')).toContainText('MODEL_CANCELLED')
     await expect(testMain).toBeEnabled()
-    await expect(page.locator('.model-entry')).toContainText('未验证')
+    await expect(page.locator('.model-connection-state')).toHaveText('连接失败')
     mode = 'ok'
-    await testMain.click(); await expect(page.getByRole('dialog', { name: '确认模型角色测试' })).toContainText('最多两轮'); await page.getByRole('button', { name: '确认费用并开始测试', exact: true }).click()
-    await expect(page.getByRole('status')).toContainText('主模型验证通过')
-    expect(tests).toBe(4)
+    await testMain.click(); await expect(page.getByRole('dialog', { name: '测试模型连接' })).toContainText('一条简短请求'); await page.getByRole('button', { name: '开始测试', exact: true }).click()
+    await expect(page.getByRole('status')).toContainText('连接成功')
+    expect(tests).toBe(3)
     for (const width of [390, 720, 1440]) {
       await page.setViewportSize({ width, height: 900 })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

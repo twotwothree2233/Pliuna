@@ -15,6 +15,7 @@ import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { loadConversation } from '../../src/runtime/runner/conversation'
 import { RuntimeStore } from '../../src/runtime/store'
 import { artifactDraft } from '../helpers/producer-draft'
+import type { LiveFlowSnapshot, TaskMessagePage } from '../../src/shared/types'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks() })
@@ -26,14 +27,21 @@ function deferred<T>() { let resolve!: (value: T) => void; return { promise: new
 function bundle(): Bundle {
   return { profile: 'managed-v1', html: '<section><h2 id="a-title">Alpha</h2><div id="a-body"><p>Alpha original</p><label for="a-input">Alpha input</label><input id="a-input"></div></section><section><h2 id="b-title">Beta</h2><div id="b-body"><p>Beta original</p><label for="b-input">Beta input</label><input id="b-input"></div></section>', css: '', state: { schema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, required: ['a', 'b'], additionalProperties: false }, initial: { a: '', b: '' }, compatibility_version: 'chapter-v1' }, forms: [], behaviors: [{ type: 'input', element_id: 'a-input', field: '/a', control: 'text' }, { type: 'input', element_id: 'b-input', field: '/b', control: 'text' }], references: [], export: [] }
 }
-function setup() {
+function setup(conversationRouting = false, context_tokens = 100000) {
   const directory = mkdtempSync(join(tmpdir(), 'pliuna-chapter-runtime-')), adapter = new ChatAdapter(), models = new ModelService(adapter)
-  const config: ModelConfiguration = { id: 'chapter-model', base_url: 'https://example.invalid/v1', wire_model_id: 'fixture', context_tokens: 100000, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }
+  const config: ModelConfiguration = { id: 'chapter-model', base_url: 'https://example.invalid/v1', wire_model_id: 'fixture', context_tokens, max_output_tokens: 8192, compatibility_profile: 'chat-max-tokens' }
   models.configure({ type: 'model.configure', configuration: config, api_key: 'fixture-key', confirm_memory_only: true })
-  vi.spyOn(models, 'acquire').mockImplementation((): ModelLease => ({ id: config.id, revision: 1, config, release: vi.fn() }))
+  const other = { ...config, id: 'other-channel-model', base_url: 'https://other.example.invalid/v1' }
+  const revisions: Record<string, number> = { [config.id]: 1, [other.id]: 1 }
+  models.configure({ type: 'model.configure', configuration: other, api_key: 'fixture-key', confirm_memory_only: true })
+  const reviseModel = async (id: string) => {
+    const revision = revisions[id] = revisions[id]! + 1
+    await models.configure({ type: 'model.configure', configuration: id === other.id ? other : config, api_key: `fixture-key-${revision}`, confirm_memory_only: true })
+  }
+  vi.spyOn(models, 'acquire').mockImplementation(id => ({ id, revision: revisions[id]!, config: id === other.id ? other : config, release: vi.fn() } satisfies ModelLease))
   vi.spyOn(models, 'acquireCompaction').mockReturnValue(undefined)
-  vi.spyOn(models, 'list').mockReturnValue([{ ...config, revision: 1, roles: ['main'], credential_missing: false }])
-  let store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule' } })
+  vi.spyOn(models, 'list').mockImplementation(() => [config, other].map(model => ({ ...model, revision: revisions[model.id]!, roles: ['main'], credential_missing: false })))
+  let store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting } })
   cleanups.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
   const internal = () => store as unknown as { db: Database.Database; epoch: string; features: { viewReplacement: boolean } }
   const task = store.create('Chapter runtime').task.id, complete = vi.spyOn(adapter, 'complete')
@@ -41,29 +49,30 @@ function setup() {
   const snapshot = () => store.snapshot(task)
   const status = (update_id: string) => store.handle({ type: 'chapter.status', task_id: task, update_id }) as ChapterUpdate
   const records = (kind: string) => (internal().db.prepare('SELECT payload_json FROM records WHERE task_id=? AND kind=? ORDER BY sequence').all(task, kind) as { payload_json: string }[]).map(row => JSON.parse(row.payload_json))
-  const restart = () => { store.close(); store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule' } }); return store }
-  return { get store() { return store }, internal, directory, task, complete, state, snapshot, status, records, restart }
+  const restart = () => { store.close(); store = new RuntimeStore(directory, models, { viewReplacement: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting } }); return store }
+  return { get store() { return store }, internal, directory, task, complete, state, snapshot, status, records, restart, conversationRouting, reviseModel }
 }
 type Fixture = ReturnType<typeof setup>
 
-async function approval(s: Fixture, actionId?: string) {
-  await vi.waitFor(() => expect(s.snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))).toBeDefined())
-  return s.snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))!
-}
-async function approve(s: Fixture, actionId?: string) {
-  const pending = await approval(s, actionId)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'approve' })
-  await vi.waitFor(() => expect(s.snapshot().surface_updates.find(item => item.action_id === pending.action_id)).toBeDefined())
-  return pending.action_id
+async function awaitHostCheck(s: Fixture, actionId?: string) {
+  const snapshot = () => s.snapshot()
+  const approval = () => snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))
+  const update = () => snapshot().surface_updates.find(item => !actionId || item.action_id === actionId)
+  await vi.waitFor(() => expect(approval() ?? update()).toBeDefined())
+  const pending = approval()
+  if (pending) await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'approve' })
+  await vi.waitFor(() => expect(update()).toBeDefined())
+  return update()!.action_id
 }
 async function publish(s: Fixture, actionId?: string) {
-  const action = await approve(s, actionId)
+  const action = await awaitHostCheck(s, actionId)
   try { await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false }) }
   catch (error) { throw new Error(String(error) + ': ' + JSON.stringify(s.internal().db.prepare('SELECT state,result,result_json FROM actions WHERE id=?').get(action)), { cause: error }) }
   return action
 }
 
-async function publishOriginal(s: Fixture, content = bundle()) {
+async function produceOriginal(s: Fixture, content: Bundle) {
+  if (s.conversationRouting) s.complete.mockResolvedValueOnce(answer({ kind: 'new' }))
   s.complete.mockResolvedValueOnce(create(content))
   s.complete.mockImplementationOnce(async (_config, _key, messages) => {
     const result = JSON.parse(messages.at(-1)!.content!)
@@ -74,16 +83,315 @@ async function publishOriginal(s: Fixture, content = bundle()) {
     const candidate: ArtifactCandidate = { candidate_id: 'original-candidate', task_id: s.task, request_id: producer.request_id, intent_revision: producer.intent_revision, run_id: producer.run_id, work_id: producer.work_id, attempt_id: producer.current_attempt_id!, artifact_id: 'original-artifact', base_artifact_revision: 0, plan_revision: producer.plan_revision, bundle_resource_id: result.data.id, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: { task_id: s.task, kind: 'record', id: s.state().input(goal.input_event_id).record_id }, requirement_ids: producer.requirement_ids, unresolved: [], dependencies: producer.dependencies }
     return answer({ version: 1, complete: true, answer: '正文已完成。', artifacts: [artifactDraft(candidate)], requirement_ids: producer.requirement_ids, unresolved: [] })
   })
-  const run = s.store.start(s.task, 'Create two independently editable chapters', 'chapter-model', [])
+  const text = 'Create two independently editable chapters'
+  let run: string
+  if (s.conversationRouting) {
+    const { request_id } = s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+    const status = () => s.store.handle({ type: 'request.status', task_id: s.task, request_id }) as { state: string; run_id: string }
+    await vi.waitFor(() => expect(status()).toMatchObject({ state: 'started', run_id: expect.any(String) }))
+    run = status().run_id
+    const message = s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='message.user' AND json_extract(payload_json,'$.request_id')=?").get(s.task, request_id) as { id: string }
+    expect(s.state().run(run)).toMatchObject({ message_id: message.id })
+    expect(s.state().consumption(`request:${request_id}`, 'installed')?.result).toMatchObject({ refs: [{ kind: 'run', id: run }] })
+  } else run = s.store.start(s.task, text, 'chapter-model', [])
   await vi.waitFor(() => expect(s.state().run(run).state).toBe('completed'))
+  return run
+}
+
+async function publishOriginal(s: Fixture, content = bundle(), beforePublish?: (run: string) => Promise<void>) {
+  const run = await produceOriginal(s, content)
+  await beforePublish?.(run)
   await publish(s)
   await vi.waitFor(() => expect(s.snapshot().views).toHaveLength(1))
   return s.snapshot().views[0]!
 }
+
+const sendTurn = (s: Fixture, text: string, model_config_id = 'chapter-model') => (s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id, resource_ids: [], import_ids: [] }) as { request_id: string }).request_id
+const turnStatus = (s: Fixture, request_id: string) => s.store.handle({ type: 'request.status', task_id: s.task, request_id }) as { state: string; code: string; run_id: string; run_state: string }
+const turnMessage = (s: Fixture, request: string) => (s.internal().db.prepare("SELECT json_extract(input_json,'$.user_record_id') AS id FROM requests WHERE task_id=? AND id=?").get(s.task, request) as { id: string }).id
+
+test('answers targeted progress while both production models are streaming and corrects only the selected request', async () => {
+  const s = setup(true), aHold = deferred<Completion>(), bHold = deferred<Completion>(), revisedHold = deferred<Completion>()
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => aHold.promise)
+  const a = sendTurn(s, 'Create a short museum guide in English.'), aMessage = turnMessage(s, a)
+  await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(2))
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => bHold.promise)
+  const b = sendTurn(s, 'Create a separate travel budget.', 'other-channel-model'), bMessage = turnMessage(s, b)
+  await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(4))
+  const aRun = turnStatus(s, a).run_id, bRun = turnStatus(s, b).run_id
+  s.complete.mockResolvedValueOnce(answer({ kind: 'progress', message_id: bMessage }))
+  const progress = sendTurn(s, 'How is the travel budget progressing?')
+  await vi.waitFor(() => expect(turnStatus(s, progress)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.records('conversation.reply')).toMatchObject([{ request_id: progress, reply_to: turnMessage(s, progress), reference_message_id: bMessage, text: '此请求：执行中。' }])
+  const messages = s.store.handle({ type: 'host.messages.page', task_id: s.task }) as TaskMessagePage
+  expect(messages.items.find(item => item.kind === 'conversation.reply')).toMatchObject({ reply_to: turnMessage(s, progress), reference_message_id: bMessage })
+  const bWork = s.state().taskWorks(s.task).find(work => work.run_id === bRun)
+  s.complete.mockResolvedValueOnce(answer({ kind: 'correct_pending', message_id: aMessage })).mockImplementationOnce(async (_c, _k, messages) => {
+    const input = JSON.parse(messages.find(message => message.role === 'user' && message.content?.includes('original_request'))!.content!)
+    expect(JSON.parse(input.request)).toEqual({ original_request: 'Create a short museum guide in English.', corrections: ['Make the museum guide bilingual instead.'] })
+    return revisedHold.promise
+  })
+  const correction = sendTurn(s, 'Make the museum guide bilingual instead.')
+  await vi.waitFor(() => expect(s.state().goal(a).intent_revision).toBe(2))
+  expect(s.state().goal(b).intent_revision).toBe(1)
+  expect(s.state().taskWorks(s.task).find(work => work.run_id === bRun)).toEqual(bWork)
+  aHold.resolve(answer({ version: 1, complete: true, answer: 'superseded', artifacts: [], requirement_ids: ['content'], unresolved: [] }))
+  await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(7))
+  expect(s.state().run(turnStatus(s, correction).run_id)).toMatchObject({ request_id: a, intent_revision: 2, message_id: turnMessage(s, correction) })
+  expect(s.state().run(aRun).state).toBe('interrupted')
+  expect(s.records('runner.answer').some(record => record.text === 'superseded')).toBe(false)
+  bHold.resolve(answer({ version: 1, complete: false, answer: null, artifacts: [], requirement_ids: [], unresolved: ['content'] }))
+  revisedHold.resolve(answer({ version: 1, complete: false, answer: null, artifacts: [], requirement_ids: [], unresolved: ['content'] }))
+})
+
+test.each([false, true])('returns a queued correction to normal admission (cancelled=%s)', async cancelled => {
+  const s = setup(true), aHold = deferred<Completion>(), bHold = deferred<Completion>(), corrected = deferred<Completion>()
+  const incomplete = answer({ version: 1, complete: false, answer: null, artifacts: [], requirement_ids: [], unresolved: ['content'] })
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => aHold.promise)
+  const a = sendTurn(s, 'Create a museum guide.')
+  await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(2))
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => bHold.promise)
+  const b = sendTurn(s, 'Create a travel budget.', 'other-channel-model')
+  await vi.waitFor(() => expect(s.complete.mock.calls).toHaveLength(4))
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' }))
+  const queued = sendTurn(s, 'Create a report about buses.')
+  await vi.waitFor(() => expect(turnStatus(s, queued)).toMatchObject({ state: 'queued', code: 'PRODUCTION_ADMISSION_PENDING' }))
+  await s.reviseModel('chapter-model')
+  s.complete.mockResolvedValueOnce(answer({ kind: 'correct_pending', message_id: turnMessage(s, queued) }))
+  const correction = sendTurn(s, 'Include trains in that report too.')
+  await vi.waitFor(() => expect(s.state().goal(queued).intent_revision).toBe(2))
+  expect(s.complete.mock.calls).toHaveLength(6)
+  expect(s.state().run(turnStatus(s, a).run_id).state).toBe('running')
+  expect(s.state().run(turnStatus(s, b).run_id).state).toBe('running')
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: turnMessage(s, correction) }))
+  const follow = sendTurn(s, 'Use the corrected report once it is published.')
+  await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' }))
+  // An independent message still routes. A fresh queue sweep must retain the waiting follow-up.
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Independent reply.' }))
+  const independent = sendTurn(s, 'Independent question.')
+  await vi.waitFor(() => expect(turnStatus(s, independent)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' })
+  if (cancelled) {
+    s.store.handle({ type: 'request.cancel', task_id: s.task, request_id: correction })
+    await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'rejected', code: 'CONVERSATION_DEPENDENCY_UNAVAILABLE' }))
+    expect(s.state().taskWorks(s.task).some(work => work.purpose === 'production' && work.request_id === queued)).toBe(false)
+    aHold.resolve(incomplete); bHold.resolve(incomplete)
+    return
+  }
+  await s.reviseModel('other-channel-model')
+  await s.reviseModel('chapter-model')
+  s.complete.mockImplementation(async (_config, _key, messages) => messages.some(message => message.content?.includes('original_request')) ? corrected.promise : incomplete)
+  aHold.resolve(incomplete)
+  await vi.waitFor(() => expect(turnStatus(s, correction)).toMatchObject({ state: 'confirmation_required', code: 'REQUEST_CONFIGURATION_CHANGED' }))
+  expect(s.state().taskWorks(s.task).some(work => work.purpose === 'production' && work.request_id === queued)).toBe(false)
+  s.store.handle({ type: 'request.resolve', task_id: s.task, request_id: correction, model_config_id: 'other-channel-model', use_successful: true, replacements: [], confirm: true })
+  await vi.waitFor(() => expect(s.state().run(turnStatus(s, correction).run_id)).toMatchObject({ request_id: queued, intent_revision: 2, message_id: turnMessage(s, correction) }))
+  await vi.waitFor(() => {
+    const calls = s.complete.mock.calls.filter(([, , messages]) => messages.some(message => message.role === 'user' && message.content?.includes('original_request')))
+    expect(calls).toHaveLength(1)
+    const [config, , messages] = calls[0]!
+    expect(config.id).toBe('other-channel-model')
+    const input = messages.find(message => message.role === 'user' && message.content?.includes('original_request'))!
+    expect(JSON.parse(JSON.parse(input.content!).request)).toEqual({ original_request: 'Create a report about buses.', corrections: ['Include trains in that report too.'] })
+  })
+  const work = s.state().taskWorks(s.task).find(item => item.run_id === turnStatus(s, correction).run_id)!
+  expect(s.state().attempt(work.current_attempt_id!)).toMatchObject({ model_config_id: 'other-channel-model', model_config_revision: 2 })
+  corrected.resolve(incomplete)
+  bHold.resolve(incomplete)
+})
+
+test('holds a same-channel route while both shared network slots are in use', async () => {
+  const s = setup(true), first = deferred<Completion>(), second = deferred<Completion>()
+  s.complete.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+    .mockResolvedValueOnce(answer({ kind: 'reply', text: 'Next reply.' }))
+  sendTurn(s, 'First question')
+  sendTurn(s, 'Second question')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(2))
+  const queued = sendTurn(s, 'Third question')
+  const progress = sendTurn(s, 'Independent question on another channel', 'other-channel-model')
+  await vi.waitFor(() => expect(turnStatus(s, progress)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.complete.mock.calls[2]![0].id).toBe('other-channel-model')
+  expect(turnStatus(s, queued).state).toBe('queued')
+  const flow = s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot
+  expect(flow.lanes.Router.items).toContainEqual(expect.objectContaining({ id: `request:${queued}`, state: 'waiting', reason: 'model_queue' }))
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Third reply.' }))
+  first.resolve(answer({ kind: 'reply', text: 'First reply.' }))
+  await vi.waitFor(() => expect(turnStatus(s, queued)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  second.resolve(answer({ kind: 'reply', text: 'Second reply.' }))
+})
+
+test('a follow-up reply can cite an earlier assistant message without changing its own reply target', async () => {
+  const s = setup(true)
+  const messages = () => (s.store.handle({ type: 'host.messages.page', task_id: s.task }) as TaskMessagePage).items
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'First answer.' }))
+  const first = sendTurn(s, 'First question')
+  await vi.waitFor(() => expect(turnStatus(s, first)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  const cited = messages().find(item => item.kind === 'conversation.reply')!
+  s.complete.mockResolvedValueOnce(answer({ kind: 'reply', text: 'Clarified answer.', references: cited.id }))
+  const follow = sendTurn(s, 'Explain your previous answer')
+  await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(messages()).toContainEqual(expect.objectContaining({ text: 'Clarified answer.', reply_to: turnMessage(s, follow), reference_message_id: cited.id }))
+})
+
+test('a dependent request waits after production ends and binds the committed publication version', async () => {
+  const s = setup(true)
+  let follow: string
+  const finalReply = 'The published work is ready.'
+  await publishOriginal(s, bundle(), async run => {
+    const source = s.state().run(run)
+    if (source.purpose !== 'production') throw Error('expected production')
+    const baseMessage = turnMessage(s, source.request_id)
+    s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: baseMessage })).mockImplementationOnce(async (_config, _key, messages) => {
+      expect(JSON.parse(messages.at(-1)!.content!).preceding_result).toMatchObject({ kind: 'conversation.delivery', publication: { operation_id: expect.any(String), surface_revision: 2, manifest_id: expect.any(String) }, views: [{ view_id: expect.any(String), history: { kind: 'view_history', id: expect.any(String), selection: { revision: 1 } }, content: { kind: 'resource', id: expect.any(String) } }] })
+      return answer({ kind: 'reply', text: finalReply })
+    })
+    follow = sendTurn(s, 'Continue only when the document is published.')
+    await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' }))
+    await vi.waitFor(() => expect(s.snapshot().approvals.some(item => item.decision === 'pending')).toBe(true), { timeout: 2500 })
+    expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' })
+    expect(s.records('conversation.reply')).toEqual([])
+  })
+  await vi.waitFor(() => expect(s.records('conversation.reply')).toMatchObject([{ request_id: follow, text: finalReply }]))
+})
+
+test('a follow-up can read the bound publication after the current View changes', async () => {
+  const s = setup(true), first = await original(s), model = chapterModel(s)
+  const update = start(s, first, 'Alpha', 'later-alpha')
+  await model.release(update.update_id, [['Alpha original', 'Alpha updated later']])
+  await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
+  await publish(s, s.status(update.update_id).action_id)
+  await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
+  await vi.waitFor(() => expect(s.state().run(s.status(update.update_id).source!.run_id).state).toBe('completed'))
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha updated later')
+  const latest = s.internal().db.prepare('SELECT id FROM view_history WHERE task_id=? AND view_id=? AND view_revision=?')
+    .get(s.task, first.view_id, first.view_revision + 1) as { id: string }
+  const read = (key: string, input: unknown) => ({ id: key, type: 'function' as const, function: { name: 'read', arguments: JSON.stringify(input) } })
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: turnMessage(s, first.request_id) }))
+    .mockResolvedValueOnce(answer({ kind: 'explanation' }))
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      const input = JSON.parse(messages.at(-1)!.content!)
+      expect(input).not.toHaveProperty('published_context')
+      const [view] = input.preceding_result.views
+      expect(view).toMatchObject({ view_id: first.view_id, history: { kind: 'view_history', selection: { revision: first.view_revision } }, content: { kind: 'resource', id: first.bundle_resource_id } })
+      return { finish: 'tool_calls', text: '', calls: [read('first-page', { ...view.content, max_chars: 160 })] }
+    })
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      const [view] = JSON.parse(messages.find(message => message.role === 'user' && message.content?.includes('preceding_result'))!.content!).preceding_result.views
+      const firstPage = JSON.parse(messages.at(-1)!.content!)
+      expect(firstPage).toMatchObject({ truncated: true, next_cursor: expect.any(String) })
+      return { finish: 'tool_calls', text: '', calls: [read('next-page', { kind: view.content.kind, id: view.content.id, cursor: firstPage.next_cursor }), read('bound-view', view.content), read('later-view', { ...view.history, id: latest.id, selection: { revision: first.view_revision + 1 } })] }
+    })
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      expect(JSON.parse(messages.find(message => message.tool_call_id === 'next-page')!.content!)).toMatchObject({ data: { text: expect.any(String) } })
+      const original = JSON.parse(messages.find(message => message.tool_call_id === 'bound-view')!.content!)
+      expect(JSON.stringify(original)).toContain('Alpha original')
+      expect(JSON.stringify(original)).not.toContain('Alpha updated later')
+      expect(JSON.parse(messages.find(message => message.tool_call_id === 'later-view')!.content!)).toMatchObject({ error: { code: 'WORKER_CAPABILITY_DENIED' } })
+      return { finish: 'stop', calls: [], text: 'I read the original publication.' }
+    })
+  const follow = sendTurn(s, 'Explain the original version of the published document.')
+  await vi.waitFor(() => expect(s.records('conversation.reply')).toMatchObject([{ request_id: follow, text: 'I read the original publication.' }]))
+})
+
+test('a dependent request stops waiting when the preceding publication is denied', async () => {
+  const s = setup(true), source = s.state().run(await produceOriginal(s, bundle()))
+  if (source.purpose !== 'production') throw Error('expected production')
+  const baseMessage = turnMessage(s, source.request_id)
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: baseMessage }))
+  const follow = sendTurn(s, 'Continue only when the document is published.')
+  await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' }))
+  await vi.waitFor(() => expect(s.snapshot().approvals.some(item => item.decision === 'pending')).toBe(true), { timeout: 2500 })
+  const { id: approval_id } = s.snapshot().approvals.find(item => item.decision === 'pending')!
+  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id, decision: 'deny' })
+  await vi.waitFor(() => expect(turnStatus(s, follow)).toMatchObject({ state: 'rejected', code: 'CONVERSATION_DEPENDENCY_UNAVAILABLE' }))
+  expect(s.snapshot().views).toEqual([])
+  expect(s.records('conversation.dependency.ended')).toMatchObject([{ request_id: follow, preceding_request_id: source.request_id, preceding_message_id: baseMessage }])
+  expect(s.complete.mock.calls).toHaveLength(4)
+})
+
+test('a short request fits long history and can page messages from the original boundary', async () => {
+  const s = setup(true, 11000), host = s.store as unknown as { record(task: string, kind: string, payload: unknown): string }
+  const history = Array.from({ length: 87 }, (_, n) => host.record(s.task, 'message.user', { text: `old-${n} ` + 'a'.repeat(3300) }))
+  const list = (cursor?: string): Completion => ({ text: '', finish: 'tool_calls', usage: { prompt_tokens: 60, completion_tokens: 10 }, calls: [{ id: cursor ? 'older-events' : 'recent-events', type: 'function', function: { name: 'list', arguments: JSON.stringify({ kind: 'event', ...(cursor ? { cursor } : {}) }) } }] })
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const fitted = JSON.parse(messages.at(-1)!.content!)
+    expect(fitted).toMatchObject({ request: 'Summarize the conversation.', conversation_truncated: true })
+    expect(fitted.prior_messages).toHaveLength(messages.length - 2)
+    expect(fitted.prior_messages.length).toBeLessThan(64)
+    return list()
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    const page = JSON.parse(messages.at(-1)!.content!).data
+    expect(page.items.at(-1).id).toBe(history.at(-1))
+    expect(page.next_cursor).toEqual(expect.any(String))
+    return list(page.next_cursor)
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    const page = JSON.parse(messages.at(-1)!.content!).data
+    expect(page.items.at(-1).id).toBe(history.at(-9))
+    return answer({ kind: 'reply', text: 'The saved history is available.' })
+  })
+  const short = sendTurn(s, 'Summarize the conversation.')
+  host.record(s.task, 'message.user', { text: 'later message outside the bound history' })
+  await vi.waitFor(() => expect(turnStatus(s, short)).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.complete.mock.calls).toHaveLength(3)
+})
 async function original(s: Fixture): Promise<ChapterManifest> {
   const view = await publishOriginal(s)
   return s.store.handle({ type: 'chapters.map', task_id: s.task, view_id: view.id, expected_view_revision: view.revision }) as ChapterManifest
 }
+
+test('a question about a published chapter leaves the production scope and View unchanged', async () => {
+  const s = setup(true), manifest = await original(s)
+  const snapshot = s.snapshot(), goals = s.store.runnerGoals({ task_id: s.task }).goals
+  const node = manifest.content_tree!.nodes.find(node => node.kind === 'paragraph')!
+  s.complete.mockResolvedValueOnce(answer({ kind: 'query', view_id: manifest.view_id, region_ids: [node.node_id] }))
+    .mockResolvedValueOnce({ text: '', finish: 'tool_calls', calls: [{ id: 'read-chapter', type: 'function', function: { name: 'read', arguments: JSON.stringify({ kind: 'content_node', id: node.node_id }) } }] })
+    .mockImplementationOnce(async (_config, _key, messages, tools) => {
+      expect(tools?.map(tool => tool.function.name)).toEqual(['list', 'read'])
+      expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'assistant', content: '正文已完成。' })]))
+      expect(messages.at(-1)?.content).toContain('Alpha original')
+      return { text: 'Alpha is the first section.', calls: [], finish: 'stop', usage: { prompt_tokens: 20, completion_tokens: 10 } }
+    })
+  const submitted = s.store.handle({ type: 'request.submit', task_id: s.task, text: 'Explain the first paragraph.', model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: submitted.request_id })).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.records('conversation.reply')).toEqual([expect.objectContaining({ request_id: submitted.request_id, text: 'Alpha is the first section.' })])
+  expect(s.store.runnerGoals({ task_id: s.task }).goals).toEqual(goals)
+  expect(s.snapshot().runner?.scope).toEqual(snapshot.runner?.scope)
+  expect(s.snapshot().views).toEqual(snapshot.views)
+})
+
+test('stopping preserves a missing requirement; removing it creates a scope without changing published content', async () => {
+  const s = setup(true), view = await publishOriginal(s)
+  const send = (text: string) => s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  const status = ({ request_id }: { request_id: string }) => s.store.handle({ type: 'request.status', task_id: s.task, request_id }) as { run_id: string; run_state: string; code: string }
+  const message = (request: string) => (s.internal().db.prepare("SELECT id FROM records WHERE task_id=? AND kind='message.user' AND json_extract(payload_json,'$.request_id')=?").get(s.task, request) as { id: string }).id
+  const hold = deferred<Completion>(), calls = s.complete.mock.calls.length
+  s.complete.mockResolvedValueOnce(answer({ kind: 'new' })).mockImplementationOnce(() => hold.promise)
+  const appendix = send('Create a separate appendix.')
+  await vi.waitFor(() => expect(s.complete.mock.calls.length).toBe(calls + 2))
+  const before = s.snapshot().runner!.scope!
+  expect(before).toMatchObject({ required_content_count: 2, unresolved_count: 1 })
+  s.store.handle({ type: 'run.cancel', task_id: s.task, run_id: status(appendix).run_id })
+  hold.resolve(answer({ version: 1, complete: true, answer: 'late answer', artifacts: [], requirement_ids: ['content'], unresolved: [] }))
+  await vi.waitFor(() => expect(status(appendix).run_state).toBe('cancelled'))
+  expect(s.snapshot().runner?.scope).toEqual(before)
+  expect(s.snapshot().views[0]).toEqual(view)
+  expect(s.records('runner.answer').some(record => record.text === 'late answer')).toBe(false)
+
+  s.complete.mockResolvedValueOnce(answer({ kind: 'remove_pending', message_id: message(appendix.request_id) }))
+  const removal = send('Drop the undelivered appendix.')
+  await vi.waitFor(() => expect(status(removal).run_state).toBe('completed'))
+  const after = s.snapshot().runner!.scope!
+  expect(after).toMatchObject({ composition_version: before.composition_version + 1, state: 'complete', required_content_count: 1, unresolved_count: 0 })
+  expect(s.snapshot().views[0]).toEqual(view)
+  expect(s.records('content.requirement.removed')).toEqual([expect.objectContaining({
+    message_id: message(removal.request_id), source_message_id: message(appendix.request_id), previous_version: before.composition_version, composition_version: after.composition_version
+  })])
+  s.complete.mockResolvedValueOnce(answer({ kind: 'remove_pending', message_id: message(view.chapter_manifest!.request_id) }))
+  const attempted = send('Drop the published document without editing it.')
+  await vi.waitFor(() => expect(status(attempted).code).toBe('CONTENT_ALREADY_PUBLISHED'))
+  expect(s.snapshot().runner!.scope).toEqual(after)
+  expect(s.snapshot().views[0]).toEqual(view)
+})
 function chapterModel(s: Fixture) {
   const pending = new Map<string, ReturnType<typeof deferred<Completion>>>()
   const ready = new Set<string>()
@@ -265,7 +573,7 @@ test('a tree installation failure rolls back the whole content publication', asy
   const update = start(s, mapped, 'Alpha', 'tree-install-failure')
   await model.release(update.update_id, [['Alpha original', 'Must roll back']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   vi.spyOn(ContentTreeState.prototype, 'install').mockImplementationOnce(() => { throw new Error('Injected tree installation failure') })
   await Promise.resolve(s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false })).catch(() => {})
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('failed'))
@@ -312,7 +620,7 @@ test('real chapter execution publishes only its selected body and preserves the 
   expect(begun.request_id).toBe(mapped.request_id)
   await model.release(begun.update_id, [['Alpha original', 'Alpha revised'], ['Beta original', 'Unrequested Beta replacement']])
   await vi.waitFor(() => expect(s.status(begun.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(begun.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(begun.update_id).action_id)
   const before = s.snapshot().views[0]!
   const saved = s.store.handle({ type: 'draft.save', task_id: s.task, view_id: before.id, view_revision: before.revision, expected_state_revision: before.state_revision, fields: [{ path: '/b', value: 'latest Beta draft' }] }) as { state_revision: number }
   await Promise.resolve(s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false })).catch(error => expect(error).toHaveProperty('code'))
@@ -331,7 +639,7 @@ test('real chapter execution publishes only its selected body and preserves the 
   expect(after.draft).toEqual({ a: '', b: 'latest Beta draft' })
   expect(after.state_revision).toBeGreaterThan(saved.state_revision)
   expect(s.records('runner.answer').filter(record => record.update_id === begun.update_id).map(record => record.text)).toEqual(['更新已完成。'])
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
 test.each(['boundaries', 'body container', 'shared CSS'])('a legacy candidate with invalid %s is corrected before accepting or publishing the chapter', async reason => {
@@ -379,10 +687,8 @@ test('independent content updates publish in reverse order using an immutable su
   const originalRequest = s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(alphaAction)
   await publish(s, s.status(beta.update_id).action_id)
   await vi.waitFor(() => expect(s.status(beta.update_id).state).toBe('succeeded'))
-  const oldApproval = await approval(s, alphaAction)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: oldApproval.id, decision: 'approve' })
-  await vi.waitFor(() => expect(s.snapshot().surface_updates.some(item => item.action_id === alphaAction) || s.status(alpha.update_id).action_id !== alphaAction).toBe(true))
-  if (s.snapshot().surface_updates.some(item => item.action_id === alphaAction)) await Promise.resolve(s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: alphaAction, proceed: true, confirm_discard: false })).catch(error => expect(error).toHaveProperty('code'))
+  const approval = s.snapshot().approvals.find(item => item.action_id === alphaAction && item.decision === 'pending')!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
   await vi.waitFor(() => expect(s.status(alpha.update_id).action_id).not.toBe(alphaAction))
   const successor = s.status(alpha.update_id)
   expect(s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(alphaAction)).toEqual(originalRequest)
@@ -682,7 +988,7 @@ test('restart settles the original pending publication without replaying or chan
   const update = start(s, mapped, 'Alpha', 'interrupted-publication')
   await model.release(update.update_id, [['Alpha original', 'Unconfirmed result']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   const pending = s.status(update.update_id), before = s.snapshot().views[0]!, calls = s.complete.mock.calls.length
   s.restart()
   const recovered = s.status(update.update_id)
@@ -695,8 +1001,8 @@ test('restart settles the original pending publication without replaying or chan
   expect(s.internal().db.prepare('SELECT state,result FROM actions WHERE id=?').get(action)).toEqual({ state: 'ended', result: 'not_executed' })
 })
 
-test('semantic update routing keeps the original user record and business goal', async () => {
-  const s = setup(), mapped = await original(s), model = chapterModel(s)
+test('a follow-up waits for the exact chapter update and uses its published reply', async () => {
+  const s = setup(true), mapped = await original(s), model = chapterModel(s)
   s.complete.mockResolvedValueOnce(answer({ kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] }))
   const routerIndex = s.complete.mock.calls.length
   const request = s.store.handle({ type: 'request.submit', task_id: s.task, text: 'Rewrite the first section using the earlier context.', model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
@@ -710,10 +1016,35 @@ test('semantic update routing keeps the original user record and business goal',
   expect(accepted.source_record_id).toBe(userRecords[0]!.id)
   expect(update.request_id).toBe(mapped.request_id)
   expect(update.source?.run_id).toBe(status().run_id)
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.state().run(status().run_id)).toMatchObject({ message_id: userRecords[0]!.id })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
   const routeCall = s.complete.mock.calls[routerIndex]!
   expect(routeCall[3]!.map(tool => tool.function.name)).toEqual(['list', 'read'])
   expect(routeCall[2].some(message => message.role === 'tool')).toBe(false)
+  const exactMessage = userRecords[0]!.id, followText = 'Follow up only after that chapter is updated.'
+  const admissions = vi.spyOn(s.store as unknown as { startQueuedRequest(...args: unknown[]): unknown }, 'startQueuedRequest')
+  const resumeChapter = s.complete.getMockImplementation()!
+  s.complete.mockResolvedValueOnce(answer({ kind: 'depends', message_id: exactMessage }))
+  s.complete.mockImplementation((...args) => {
+    const last = args[2].at(-1)?.content
+    if (!last?.includes(followText)) return resumeChapter(...args)
+    expect(JSON.parse(last).preceding_result).toMatchObject({ kind: 'runner.answer', text: '更新已完成。', views: [{ view_id: mapped.view_id, history: { kind: 'view_history', id: expect.any(String), selection: { revision: mapped.view_revision + 1 } } }] })
+    return Promise.resolve(answer({ kind: 'reply', text: 'I used the updated chapter result.' }))
+  })
+  const follow = s.store.handle({ type: 'request.submit', task_id: s.task, text: followText, model_config_id: 'chapter-model', resource_ids: [], import_ids: [] }) as { request_id: string }
+  const followStatus = () => s.store.handle({ type: 'request.status', task_id: s.task, request_id: follow.request_id })
+  await vi.waitFor(() => expect(admissions.mock.calls.filter(args => args[4] === follow.request_id).length).toBeGreaterThanOrEqual(2))
+  expect(followStatus()).toMatchObject({ state: 'queued', code: 'CONVERSATION_WAITING_FOR_RESULT' })
+  await model.release(update.update_id, [['Alpha original', 'Alpha revised from the conversation']])
+  await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
+  await publish(s, s.status(update.update_id).action_id)
+  await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
+  expect(s.snapshot().views).toHaveLength(1)
+  expect(s.snapshot().views[0]).toMatchObject({ id: mapped.view_id, revision: mapped.view_revision + 1 })
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha revised from the conversation')
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
+  await vi.waitFor(() => expect(followStatus()).toMatchObject({ state: 'started', run_state: 'completed' }))
+  expect(s.records('conversation.reply')).toMatchObject([{ request_id: follow.request_id, text: 'I used the updated chapter result.' }])
 })
 
 test('view-only routing lets the worker read before registering its precise target', async () => {
@@ -765,7 +1096,7 @@ test('the first modification of a structured legacy View installs a reliable cha
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('succeeded'))
   expect(s.snapshot().views[0]!.bundle.html).toContain('Legacy Alpha revised')
   expect(s.snapshot().views[0]!.bundle.html).toContain('Beta original')
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
 test('generic content receives a tree while ambiguous routing preserves the published content', async () => {
@@ -789,7 +1120,7 @@ test('generic content receives a tree while ambiguous routing preserves the publ
   expect(s.snapshot().runs).toHaveLength(runs)
   expect(s.complete).toHaveBeenCalledTimes(calls + 1)
   expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_chapter_updates WHERE task_id=?').get(s.task)).toEqual({ n: 0 })
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
 })
 
 test('ambiguous routing preserves the complete request, selection, materials and conversation for explicit scope', async () => {
@@ -819,7 +1150,49 @@ test('ambiguous routing preserves the complete request, selection, materials and
   const conversation = loadConversation(s.internal().db, s.task, originalInput.conversation)
   expect(workerInput.conversation_history.refs).toEqual(conversation.refs)
   expect(s.records('worker.conversation').filter(record => record.owner.update_id === chosen.update_id).map(record => ({ source: record.conversation_source, message: record.message }))).toEqual(conversation.messages)
-  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_goal_heads WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+  expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
+})
+
+test.each([false, true])('a clarification merges both attachments and validates them before starting (missing=%s)', async missing => {
+  const s = setup(true), mapped = await original(s), model = chapterModel(s)
+  const db = s.internal().db
+  const send = (text: string, resource_ids: string[] = []) => s.store.handle({ type: 'request.submit', task_id: s.task, text, model_config_id: 'chapter-model', resource_ids, import_ids: [] }) as { request_id: string }
+  const status = (request: { request_id: string }) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })
+  s.complete.mockResolvedValueOnce(answer({ kind: 'ambiguous' })).mockResolvedValueOnce(answer({ kind: 'ambiguous' }))
+  const originalRequest = send('Please revise the introduction.', [mapped.bundle_resource_id]), other = send('Please expand the comparison.')
+  await vi.waitFor(() => expect(status(originalRequest)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' }))
+  await vi.waitFor(() => expect(status(other)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' }))
+  const reply = db.prepare("SELECT id FROM records WHERE task_id=? AND kind='chapter.route.clarification' AND json_extract(payload_json,'$.request_id')=?").get(s.task, originalRequest.request_id) as { id: string }
+  const operation_id = (s.store.handle({ type: 'material.internal.register', task_id: s.task, items: [{ display_name: 'Clarification.txt', source: 'text' }] }) as { items: { operation_id: string }[] }).items[0]!.operation_id
+  const attachment = Buffer.from('Extra notes for the revised introduction.')
+  s.store.handle({ type: 'material.internal.begin', task_id: s.task, operation_id, byte_length: attachment.length, media_type: 'text/plain; charset=utf-8' })
+  s.store.handle({ type: 'material.internal.chunk', task_id: s.task, operation_id, offset: 0, data: attachment.toString('base64') })
+  const extra = (s.store.handle({ type: 'material.internal.finish', task_id: s.task, operation_id }) as { resource: { id: string } }).resource.id
+  s.complete.mockImplementationOnce(async () => {
+    if (missing) db.prepare('DELETE FROM task_resources WHERE task_id=? AND resource_id=?').run(s.task, extra)
+    return answer({ kind: 'clarify', message_id: reply.id, update: { kind: 'update', view_id: mapped.view_id, region_ids: [mapped.chapters[0]!.region_id] } })
+  })
+  const clarified = send('For the introduction request, revise only the Alpha section.', [mapped.bundle_resource_id, extra])
+  if (missing) {
+    await vi.waitFor(() => expect(status(clarified)).toMatchObject({ state: 'confirmation_required', code: 'NOT_FOUND' }))
+    expect(status(originalRequest)).toMatchObject({ state: 'confirmation_required', code: 'CHAPTER_SCOPE_REQUIRED' })
+    expect(s.records('chapter.input.received')).toEqual([])
+    return
+  }
+  const updateId = 'chapter-update:' + clarified.request_id
+  await vi.waitFor(() => expect(model.pending.has(updateId)).toBe(true))
+  expect(s.status(updateId).text).toContain('Please revise the introduction.')
+  expect(s.status(updateId).text).toContain('revise only the Alpha section')
+  expect(status(originalRequest)).toMatchObject({ state: 'started' })
+  expect(status(other)).toMatchObject({ state: 'confirmation_required' })
+  expect(s.records('chapter.input.received')).toMatchObject([{ material_resource_ids: [mapped.bundle_resource_id, extra] }])
+  expect(s.state().taskWorks(s.task).find(work => work.run_id === s.status(updateId).source?.run_id && work.role === 'producer')?.dependencies).toContainEqual({ kind: 'resource', task_id: s.task, resource_id: extra })
+  expect(s.internal().db.prepare("SELECT json_extract(input_json,'$.conversation_reference') AS reference FROM requests WHERE id=?").get(clarified.request_id)).toEqual({ reference: reply.id })
+  await model.release(updateId, [['Alpha original', 'Alpha revised after clarification']])
+  await vi.waitFor(() => expect(s.status(updateId).action_id).toBeDefined())
+  await publish(s, s.status(updateId).action_id)
+  await vi.waitFor(() => expect(s.status(updateId).state).toBe('succeeded'))
+  expect(s.snapshot().views[0]!.bundle.html).toContain('Alpha revised after clarification')
 })
 
 test('scoped explanation reads exact content without hiding or updating it', async () => {
@@ -862,19 +1235,20 @@ test('cancelling a pending semantic route prevents a late response from starting
   expect(s.records('chapter.route.resolved').some(record => record.request_id === request.request_id)).toBe(false)
 })
 
-test('a denied publication retains the original chapter and never creates a successor action', async () => {
+test('a cancelled host check retains the original chapter and never creates a successor action', async () => {
   const s = setup(), mapped = await original(s), model = chapterModel(s)
   const update = start(s, mapped, 'Alpha', 'denied-publication')
   await model.release(update.update_id, [['Alpha original', 'Denied replacement']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const before = s.status(update.update_id), pending = await approval(s, before.action_id)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'deny' })
+  const before = s.status(update.update_id), action = await awaitHostCheck(s, before.action_id)
+  expect(s.snapshot().approvals.find(item => item.action_id === action)).toMatchObject({ decision: 'approve' })
+  await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: false, confirm_discard: false })
   await vi.waitFor(() => expect(s.status(update.update_id).state).toBe('failed'))
   expect(s.status(update.update_id)).toMatchObject({ action_id: before.action_id, publication_operation_id: before.publication_operation_id })
   expect(s.snapshot().views[0]!.bundle.html).toBe(bundle().html)
   expect(s.snapshot().surface_updates).toEqual([])
   expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_chapter_publications WHERE update_id=?').get(update.update_id)).toEqual({ n: 1 })
-  expect(s.snapshot().approvals.filter(item => item.action_id === before.action_id)).toHaveLength(1)
+  expect(s.snapshot().approvals.filter(item => item.action_id === before.action_id)).toMatchObject([{ decision: 'approve', validity: 'revoked' }])
   expect(s.records('chapter.publication.rebased').some(record => record.update_id === update.update_id)).toBe(false)
 })
 
@@ -887,14 +1261,18 @@ test.each(['replace', 'move', 'delete'] as const)('an uncertain %s action remain
   const update = kind === 'replace' ? start(s, mapped, 'Alpha', 'unknown-publication') : startNodes(s, mapped, [tree.root_id], 'unknown-' + kind, [operation])
   await model.release(update.update_id, [['Alpha original', 'Uncertain replacement']], kind === 'replace' ? undefined : [operation])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   const pending = s.status(update.update_id), calls = s.complete.mock.calls.length
+  const live = () => (s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot).lanes
+  expect(live().Host.items).toMatchObject([{ id: `chapter:${update.update_id}`, handoff: { from: 'Worker', kind: 'plan' } }])
+  expect(live().Worker.items).toEqual([])
   const request = s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(action)
   const actionCount = s.internal().db.prepare('SELECT COUNT(*) n FROM actions WHERE task_id=?').get(s.task)
   // Emulate a persisted action whose transport closed without a known outcome.
   s.internal().db.prepare("UPDATE actions SET state='ended',result='unknown',result_json=?,commit_valid=0 WHERE id=?").run(JSON.stringify({ code: 'CONNECTION_LOST' }), action)
   s.restart()
   for (let query = 0; query < 2; query++) expect(s.status(update.update_id)).toMatchObject({ state: 'unknown', action_id: action, publication_operation_id: pending.publication_operation_id })
+  expect(live().Host.items).toMatchObject([{ id: `chapter:${update.update_id}`, state: 'unknown' }])
   expect(s.snapshot().views[0]!.bundle.html).toBe(bundle().html)
   expect(s.snapshot().views[0]!.chapter_manifest!.content_tree).toEqual(tree)
   expect(s.internal().db.prepare('SELECT request_json FROM actions WHERE id=?').get(action)).toEqual(request)

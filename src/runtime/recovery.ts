@@ -10,7 +10,7 @@ import type { PluginCopy } from './plugins/package'
 import { validatePluginProtection,verifyPluginProtection } from './plugins/protection'
 import { digest,resourceBody } from './resources'
 import { describeDatabase,flushFile,RestoreJournal,verifyDatabase } from './restore-journal'
-import { readBusinessSchema,upgradeCandidate,type BusinessSchema } from './schema-upgrade'
+import { assertCurrentBusinessFormat,readBusinessSchema,upgradeCandidate,type BusinessSchema } from './schema-upgrade'
 import { validateRunnerResourceReferences } from './runner/resource-references'
 
 type Row = Record<string, any>
@@ -45,7 +45,7 @@ export class RecoveryManager {
   private last: { token: string; outcome: string; point_id?: string } | null = null
   private operation?: Promise<unknown>
   private folder: string
-  constructor(private db: Database.Database, private root: string, private busy: () => boolean, private pause: (held: boolean) => void, private settings: () => Record<string, unknown>, private journal: RestoreJournal, private rebind: (file: string) => Database.Database, private pluginCopies: () => PluginCopy[] = () => [], private beforeRebind: () => Promise<void> = async () => {}) {
+  constructor(private db: Database.Database, private root: string, private busy: () => boolean, private pause: (held: boolean) => void, private settings: () => Record<string, unknown>, private journal: RestoreJournal, private rebind: (file: string) => Database.Database, private pluginCopies: () => PluginCopy[] = () => [], private beforeRebind: () => Promise<void> = async () => {}, private currentFormatOnly = false) {
     this.folder = join(root, 'recovery')
     try {
       if (existsSync(this.folder) && !lstatSync(this.folder).isDirectory()) throw new Error()
@@ -229,6 +229,10 @@ export class RecoveryManager {
     if (!this.state.active || this.state.active.id !== pointId || this.state.active.database_sha256 !== sha256) fail('RECOVERY_CHANGED', 'Refresh and personally confirm the current recovery point')
     if (this.state.active!.schema_version > readBusinessSchema(this.db)) fail('SCHEMA_VERSION', 'Enable the required business schema before restoring this newer recovery point')
     if (this.busy()) fail('MAINTENANCE_EXECUTION_ACTIVE', 'Wait for all executions before restoration')
+    if (this.currentFormatOnly) {
+      const backup = new Database(managedRegularFile(this.root, 'recovery', pointId + '.sqlite'), { readonly: true, fileMustExist: true })
+      try { assertCurrentBusinessFormat(backup) } finally { backup.close() }
+    }
     this.reservation!.phase = 'restoring'; clearTimeout(this.timer)
     this.operation = this.restorePoint(token)
     return this.operation

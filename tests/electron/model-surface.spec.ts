@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -51,7 +52,7 @@ test('HTTP model publishes an interactive View, user submits, next Run reads imm
     await page.getByLabel('什么是原子性？', { exact: true }).fill('事务全部成功或全部回滚。')
     await expect(page.getByRole('status').filter({ hasText: /^已保存$/ })).toBeVisible()
     await page.getByRole('button', { name: '提交练习', exact: true }).click()
-    await page.getByRole('tab', { name: /作答记录/ }).click()
+    await openTaskRecords(page, '作答记录')
     await page.getByText('第 1 次提交').click()
     await expect(page.locator('.history .record-values')).toContainText('事务全部成功或全部回滚。')
     await page.getByLabel('想从哪里开始？').fill('读取正式答案')
@@ -59,7 +60,7 @@ test('HTTP model publishes an interactive View, user submits, next Run reads imm
     await page.getByRole('tab', { name: /^内容/ }).click()
     await expect(page.getByText('本机合成服务读取正式答案：事务全部成功或全部回滚。', { exact: true })).toBeVisible()
     await expect(page.locator('.agent-status')).toContainText('已完成')
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     await expect(page.getByRole('region', { name: '原动作分页浏览', exact: true })).toContainText('success')
     await page.screenshot({ path: join(tmpdir(), 'pliuna-http-execution.png') })

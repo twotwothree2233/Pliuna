@@ -1,10 +1,9 @@
 import { expect, type Page } from '@playwright/test'
 
-export async function openPending(page: Page) {
-  const dialog = page.getByRole('dialog', { name: '待处理事项', exact: true })
-  if (!await dialog.isVisible()) await page.getByRole('button', { name: '查看并处理 →', exact: true }).click()
-  await expect(dialog).toBeVisible()
-  return dialog
+export async function pendingApprovals(page: Page) {
+  const region = page.getByRole('region', { name: '待审批操作', exact: true })
+  await expect(region).toBeVisible()
+  return region
 }
 
 export async function openRequestQueue(page: Page) {

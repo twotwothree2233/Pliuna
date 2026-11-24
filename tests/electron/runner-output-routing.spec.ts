@@ -6,12 +6,12 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, GoalRevision, HostRequest, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
 import { chooseModel, configureModel } from '../helpers/settings-ui'
 import { frame, modelServer, synthetic } from '../helpers/model-server'
 
 const executablePath: string = createRequire(import.meta.url)('electron')
-interface ProducerBinding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: GoalRevision; requirement_ids: string[]; sections: OutlineSection[] }
+interface ProducerBinding { owner: ExecutionScope; plan_revision: number; dependencies: WorkDependency[]; goal: ContentPlan; requirement_ids: string[]; sections: OutlineSection[] }
 interface CollatorBinding { batch: CompositionBatch; outline: Outline; indexes: ArtifactIndex[] }
 interface ProviderMessage { role: string; content: string | null; tool_calls?: unknown[] }
 

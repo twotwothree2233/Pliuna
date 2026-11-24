@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { chooseModel, openSettings } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises'
@@ -48,7 +49,7 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
     if (scenario === 'persisted-retry') {
       page.once('dialog', d => d.dismiss()); await collect.click(); await expect(collect).toBeEnabled()
       const seeded = await database(); expect(seeded.ops).toHaveLength(1)
-      await panel.getByRole('button', { name: /^返回工作区/ }).click(); await app.close()
+      await panel.getByRole('button', { name: /^返回工作台/ }).click(); await app.close()
       // Persisted retry UI fixture; actual unlink failures and durable backoff are tested in unit/fault tests.
       const op = seeded.ops[0]; op.authorized = true; op.phase = 'settled'; op.items[0].state = 'failed'; op.items[0].attempt = 1; op.items[0].reason = 'EIO'; op.items[0].next_retry_at = '2000-01-01T00:00:00.000Z'
       const bootstrap = await launch(); app = bootstrap
@@ -63,7 +64,7 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       await database('conflict')
       await page.getByLabel('你的想法').evaluate(inputElement => { const input = inputElement as HTMLTextAreaElement; input.value = '必须保留的冲突输入'; input.dispatchEvent(new Event('input', { bubbles: true })); Array.from(document.querySelectorAll('button')).find(b => b.textContent === '检查并回收暂存首批')!.click() })
       await expect(panel.getByRole('alert')).toContainText('VERSION_CONFLICT'); expect((await database()).ops).toHaveLength(0); expect(await readdir(join(directory, 'resources'))).toEqual(files)
-      await expect(page.getByLabel('你的想法')).toHaveValue('必须保留的冲突输入'); await panel.getByRole('button', { name: /^返回工作区/ }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
+      await expect(page.getByLabel('你的想法')).toHaveValue('必须保留的冲突输入'); await panel.getByRole('button', { name: /^返回工作台/ }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
     } else if (scenario !== 'active-run') {
       let confirmation = ''
       page.once('dialog', async dialog => { confirmation = dialog.message(); if (scenario === 'cancel') await dialog.dismiss(); else await dialog.accept() })
@@ -72,9 +73,9 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       expect((await readdir(join(directory, 'resources'))).length).toBe(scenario === 'cancel' ? 2 : 1)
       if (scenario === 'cancel') expect(after.ops[0].authorized).toBe(false)
       else { await expect(panel).toContainText('已确认删除 1 个'); expect(after.ops[0].phase).toBe('settled') }
-      await panel.getByRole('button', { name: /^返回工作区/ }).click(); await expect(page.getByLabel('想从哪里开始？')).toHaveValue('不能自动发送的消息')
+      await panel.getByRole('button', { name: /^返回工作台/ }).click(); await expect(page.getByLabel('想从哪里开始？')).toHaveValue('不能自动发送的消息')
       await app.close(); app = await launch(); page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message))
-      await page.getByRole('button', { name: /GC隔离验收/ }).click(); await expect(page.getByLabel('你的想法')).toHaveValue('保留的已保存草稿'); await page.getByRole('tab', { name: /作答记录/ }).click(); await expect(page.getByText('第 1 次提交')).toBeVisible()
+      await page.getByRole('button', { name: /GC隔离验收/ }).click(); await expect(page.getByLabel('你的想法')).toHaveValue('保留的已保存草稿'); await openTaskRecords(page, '作答记录'); await expect(page.getByText('第 1 次提交')).toBeVisible()
       expect((await database()).actions).toEqual(before.actions); expect((await database()).ops).toHaveLength(1)
     }
     expect(errors).toEqual([])

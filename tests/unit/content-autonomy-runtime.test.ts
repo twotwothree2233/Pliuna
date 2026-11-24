@@ -41,11 +41,13 @@ async function setup() {
   const snapshot = () => store.snapshot(task)
   const status = (id: string) => store.handle({ type: 'chapter.status', task_id: task, update_id: id }) as ChapterUpdate
   async function publish(action?: string) {
-    await vi.waitFor(() => expect(snapshot().approvals.find(item => item.validity === 'valid' && item.decision === 'pending' && (!action || item.action_id === action))).toBeDefined())
-    const approval = snapshot().approvals.find(item => item.validity === 'valid' && item.decision === 'pending' && (!action || item.action_id === action))!
-    await store.handle({ type: 'approval.decide', task_id: task, approval_id: approval.id, decision: 'approve' })
-    await vi.waitFor(() => expect(snapshot().surface_updates.find(item => item.action_id === approval.action_id)).toBeDefined())
-    await store.handle({ type: 'surface.respond', task_id: task, action_id: approval.action_id, proceed: true, confirm_discard: false })
+    const approval = () => snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!action || item.action_id === action))
+    const update = () => snapshot().surface_updates.find(item => !action || item.action_id === action)
+    await vi.waitFor(() => expect(approval() ?? update()).toBeDefined())
+    const pending = approval()
+    if (pending) await store.handle({ type: 'approval.decide', task_id: task, approval_id: pending.id, decision: 'approve' })
+    await vi.waitFor(() => expect(update()).toBeDefined())
+    await store.handle({ type: 'surface.respond', task_id: task, action_id: update()!.action_id, proceed: true, confirm_discard: false })
   }
   complete.mockResolvedValueOnce(tool('write', { operation: 'resource.create', input: { display_name: 'Original.json', content: { type: 'json', value: bundle() } } }))
   complete.mockImplementationOnce(async (_config, _key, messages) => {
@@ -313,7 +315,7 @@ test.each(['deny', 'cancel'] as const)('%s during publication cannot restore cor
   s.complete.mockImplementation(async (_config, _key, messages) => {
     if (messages.at(-1)!.role !== 'tool') return tool('read', { kind: 'content_node', id: target.node_id })
     const read = body(latest(messages))
-    return content({ operations: [{ type: 'replace', node_ids: [target.node_id], html: '<p>Disallowed change</p>' }], read_refs: [read.read_ref] })
+    return content({ operations: [mode === 'deny' ? { type: 'delete', node_ids: [target.node_id] } : { type: 'replace', node_ids: [target.node_id], html: '<p>Disallowed change</p>' }], read_refs: [read.read_ref] })
   })
   s.start(`ended-${mode}`)
   await vi.waitFor(() => expect(s.status(`ended-${mode}`)).toMatchObject({ action_id: expect.any(String) }))
@@ -322,6 +324,7 @@ test.each(['deny', 'cancel'] as const)('%s during publication cannot restore cor
   else {
     await vi.waitFor(() => expect(s.snapshot().approvals.find(item => item.action_id === update.action_id && item.decision === 'pending')).toBeDefined())
     const approval = s.snapshot().approvals.find(item => item.action_id === update.action_id && item.decision === 'pending')!
+    expect(approval.summary?.operations).toEqual(['content.delete'])
     await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'deny' })
   }
   await vi.waitFor(() => expect(['failed', 'cancelled']).toContain(s.status(update.update_id).state))

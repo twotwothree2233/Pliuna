@@ -43,6 +43,7 @@ it('reserves before dispatch and replaces the estimate with actual model usage o
     const settled = accounting.model(event('completed', { usage: { prompt_tokens: 11, completion_tokens: 9 } }))
     expect(settled).toMatchObject({ state: 'settled', usage: { model_requests: 1, tool_requests: 0, tokens: 20 } })
     expect(accounting.model(event('completed', { usage: { prompt_tokens: 11, completion_tokens: 9 } }))).toEqual(settled)
+    expect(accounting.model(event('completed', { usage: { prompt_tokens: 11, completion_tokens: 9, cached_prompt_tokens: 10 } }))).toEqual(settled)
     expect(ledger.snapshot('budget').total).toEqual({ model_requests: 1, tool_requests: 0, tokens: 20 })
   } finally { db.close() }
 })

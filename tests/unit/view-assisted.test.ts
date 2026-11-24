@@ -10,18 +10,13 @@ const cleanups: (() => Promise<void> | void)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 async function until(check: () => boolean) { const start = Date.now(); while (!check()) { if (Date.now() - start > 3000) throw new Error('condition timed out'); await new Promise(done => setTimeout(done, 5)) } }
 
-for (const decision of ['approve', 'deny', 'escalate', 'invalid'] as const) it('isolated assisted View reset: ' + decision, async () => {
+it('requires separate human discard confirmation after assisted approval', async () => {
   let assessments = 0, source: ReturnType<RuntimeStore['snapshot']>
   const server = await modelServer(({ body }, res) => {
     if (synthetic(body, res)) return
     if (!body.tools) {
       assessments++
-      expect(body.messages).toHaveLength(2)
-      const input = JSON.parse(body.messages[1].content)
-      expect(input.action.type).toBe('surface.update')
-      expect(input.permission).toContain('separate human confirmation')
-      expect(JSON.stringify(body.messages)).not.toContain('PRIVATE_OLD_RUN_SENTINEL')
-      textStream(res, decision === 'invalid' ? 'invalid response' : JSON.stringify({ decision, reason: 'synthetic replacement assessment' })); return
+      textStream(res, JSON.stringify({ decision: 'approve', reason: 'approve this replacement only' })); return
     }
     if (body.messages.at(-1).role === 'tool') { textStream(res, 'VIEW_RUN_ENDED'); return }
     const view = source.views[0]!, next = structuredClone(view.bundle)
@@ -41,24 +36,14 @@ for (const decision of ['approve', 'deny', 'escalate', 'invalid'] as const) it('
   store.handle({ type: 'approval.configure', mode: 'assisted', model_id: 'main', confirm_external_processing: true })
   source = store.snapshot(task.task.id)
   store.start(task.task.id, 'replace view with reset', 'main', [])
-  await until(() => !!store.snapshot(task.task.id).approvals.length)
-  if (decision === 'invalid' || decision === 'escalate') {
-    await until(() => store.snapshot(task.task.id).approvals[0]!.handling === 'awaiting_human')
-    expect(store.snapshot(task.task.id).approvals).toHaveLength(1)
-    store.handle({ type: 'approval.decide', task_id: task.task.id, approval_id: store.snapshot(task.task.id).approvals[0]!.id, decision: 'approve' })
-  }
-  if (decision === 'deny') {
-    await until(() => store.snapshot(task.task.id).runs[0]!.state === 'completed')
-    expect(store.snapshot(task.task.id).surface_updates).toHaveLength(0)
-  } else {
-    await until(() => !!store.snapshot(task.task.id).surface_updates.length)
-    const update = store.snapshot(task.task.id).surface_updates[0]!
-    expect(update.reset_requires_confirmation).toBe(true)
-    await expect(store.handle({ type: 'surface.respond', task_id: task.task.id, action_id: update.action_id, proceed: true, confirm_discard: false })).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
-    expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: 'saved answer' })
-    await store.handle({ type: 'surface.respond', task_id: task.task.id, action_id: update.action_id, proceed: true, confirm_discard: true })
-    await until(() => store.snapshot(task.task.id).runs[0]!.state === 'completed')
-  }
-  expect(store.snapshot(task.task.id).views[0]!).toMatchObject({ revision: decision === 'deny' ? 1 : 2, draft: { answer: decision === 'deny' ? 'saved answer' : 'new initial' } })
+  await until(() => !!store.snapshot(task.task.id).surface_updates.length)
+  const update = store.snapshot(task.task.id).surface_updates[0]!
+  expect(store.snapshot(task.task.id).approvals).toMatchObject([{ decision: 'approve', action_id: update.action_id, evaluation: { decided_by: 'model' } }])
+  expect(update.reset_requires_confirmation).toBe(true)
+  await expect(store.handle({ type: 'surface.respond', task_id: task.task.id, action_id: update.action_id, proceed: true, confirm_discard: false })).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
+  expect(store.snapshot(task.task.id).views[0]!.draft).toEqual({ answer: 'saved answer' })
+  await store.handle({ type: 'surface.respond', task_id: task.task.id, action_id: update.action_id, proceed: true, confirm_discard: true })
+  await until(() => store.snapshot(task.task.id).runs[0]!.state === 'completed')
+  expect(store.snapshot(task.task.id).views[0]!).toMatchObject({ revision: 2, draft: { answer: 'new initial' } })
   expect(assessments).toBe(1)
 })

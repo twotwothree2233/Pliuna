@@ -18,7 +18,7 @@ export function freezeExportComposition(db: Database.Database, epoch: string, ta
   return db.transaction(() => {
     const work = new RunnerWorkState(db, epoch), artifacts = new RunnerArtifactState(db, work), composition = new RunnerCompositionState(db, work, artifacts), publications = new RunnerPublicationState(db)
     const scope = composition.scope(taskId)
-    const goals = (db.prepare('SELECT request_id FROM runner_goal_heads WHERE task_id=? ORDER BY rowid').all(taskId) as { request_id: string }[]).map(row => work.goal(row.request_id)).filter(goal => goal.state === 'active')
+    const goals = work.contentPlans(taskId)
     if (!scope && !goals.length) return undefined
     const surface = db.prepare('SELECT id,revision FROM surfaces WHERE task_id=?').get(taskId) as { id: string; revision: number } | undefined
     if (!surface) throw new ContractError('EXPORT_COMPOSITION_INVALID', 'Published Task Surface is unavailable')

@@ -162,9 +162,11 @@ export class ChapterState {
   }
   private assertGoal(update: ChapterUpdate): void {
     if (!this.db.prepare("SELECT 1 FROM tasks WHERE id=? AND state='active'").get(update.task_id)) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter Task is not active')
-    const row = this.db.prepare('SELECT r.payload_json FROM runner_goal_heads h JOIN runner_goal_revisions r USING(request_id,intent_revision) WHERE h.task_id=? AND h.request_id=?').get(update.task_id, update.request_id) as Row | undefined
+    const row = this.db.prepare(`SELECT p.payload_json FROM runner_current_content_plans p
+      WHERE p.task_id=? AND p.request_id=? AND NOT EXISTS (SELECT 1 FROM runner_content_removals d
+        WHERE d.task_id=p.task_id AND d.request_id=p.request_id AND d.intent_revision=p.intent_revision)`).get(update.task_id, update.request_id) as Row | undefined
     if (!row) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter goal is unavailable')
-    const goal = validateRunnerContract('runner_goal_revision', JSON.parse(row.payload_json))
+    const goal = validateRunnerContract('runner_content_plan', JSON.parse(row.payload_json))
     if (goal.state !== 'active' || goal.intent_revision !== update.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'Chapter goal revision is no longer current')
   }
   dependencyCurrent(dependency: ChapterDependency): boolean {

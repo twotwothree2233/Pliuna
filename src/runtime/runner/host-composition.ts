@@ -25,6 +25,7 @@ export interface PreparedRunnerComposition { batch: CompositionBatch; run_id: st
 export interface PublishRunnerCompositionOptions { signal?: AbortSignal; reset_artifact_ids?: string[] }
 export interface CompositionSurfacePrepared { op: PresentationSurfaceWrite['input']['operations'][number]; viewId: string; resourceId: string }
 export interface CompositionPublicationHooks {
+  approvalOperations?: readonly ('content.delete' | 'content.move')[]
   check(): void
   prepared(prepared: CompositionSurfacePrepared[]): void
   committed(recordId: string, revision: number): unknown

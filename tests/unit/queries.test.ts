@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { RuntimeStore } from '../../src/runtime/store'
-import type { Snapshot } from '../../src/shared/types'
+import type { Snapshot, TaskListItem, TaskMessagePage, TaskMessageText } from '../../src/shared/types'
 let store: RuntimeStore, db: Database.Database, directory: string, task: Snapshot, other: Snapshot
 beforeEach(() => {
   vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'pliuna-query-')); store = new RuntimeStore(directory)
@@ -15,6 +15,20 @@ const query = (q: unknown, taskId = task.task.id): any => store.handle({ type: '
 const list = (kind: string, extra = {}): any => query({ type: 'list', input: { kind, ...extra } })
 const read = (kind: string, id: string, extra = {}): any => query({ type: 'read', input: { target: { kind, id }, ...extra } })
 function data(id: string, value: unknown) { db.prepare('INSERT INTO task_data (id,task_id,revision,schema_json,value_json,references_json) VALUES (?,?,1,?,?,?)').run(id, task.task.id, '{"type":"string"}', JSON.stringify(value), '[]') }
+
+it('organizes running tasks without changing execution, revision or approval', () => {
+  const task_id = task.task.id, run = store.start(task_id, 'held', 'fixture', [])
+  db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES ('hold',?,?,'mutation','waiting','{}','{}',1,'now')").run(task_id, run)
+  db.prepare("INSERT INTO approvals VALUES ('manual','hold','pending','valid','manual','awaiting_human','2099-01-01',NULL,'{}')").run()
+  const state = () => [db.prepare('SELECT * FROM tasks WHERE id=?').get(task_id), db.prepare('SELECT * FROM runs WHERE id=?').get(run), db.prepare('SELECT * FROM approvals WHERE id=?').get('manual')]
+  const before = state()
+  expect(store.handle({ type: 'host.task.organize', task_id, field: 'pinned', value: true })).toEqual({ task_id, pinned: true, archived: false })
+  expect(store.handle({ type: 'host.task.organize', task_id, field: 'archived', value: true })).toEqual({ task_id, pinned: true, archived: true })
+  expect(store.handle({ type: 'host.task.organize', task_id, field: 'archived', value: false })).toEqual({ task_id, pinned: true, archived: false })
+  expect(() => store.handle({ type: 'host.task.organize', task_id, field: 'pinned', value: 1 })).toThrow()
+  expect(() => store.modelTool(task_id, run, { type: 'write', input: { type: 'host.task.organize', task_id, field: 'pinned', value: false } })).toThrow()
+  expect(state()).toEqual(before)
+})
 
 it('pages 501 objects without gaps, with bounded signed cursors and no full snapshot', () => {
   for (let i = 0; i < 501; i++) data('data-' + i, 'x'.repeat(10000))
@@ -31,6 +45,45 @@ it('rejects cross-task, changed filter, forged and old-runtime cursors', () => {
   expect(() => store.handle({ type: 'host.tasks.page', input: { kind: 'task', cursor: tasks.next_cursor, filters: { name_query: '查询' } } })).toThrow('Cursor')
   store.close(); store = new RuntimeStore(directory)
   expect(() => list('task_data', { cursor })).toThrow('Cursor')
+})
+it('sorts the full filtered task list before paging and preserves pin order after restore', () => {
+  const first = store.create('Same title').task.id, second = store.create('Same title').task.id, third = store.create('Same title').task.id
+  const organize = (task_id: string, field: 'pinned' | 'archived', value: boolean) => store.handle({ type: 'host.task.organize', task_id, field, value })
+  const page = (cursor?: string, archived = false, name_query = 'same') => store.handle({ type: 'host.tasks.page', archived, input: { kind: 'task', limit: 1, filters: { name_query }, ...(cursor ? { cursor } : {}) } }) as { items: import('../../src/shared/types').TaskListItem[]; next_cursor: string | null }
+  expect(page().items[0]?.id).toBe(first)
+  organize(second, 'pinned', true); organize(third, 'pinned', true)
+  const pinned = page()
+  expect(pinned.items[0]).toMatchObject({ id: third, pinned: true, archived: false })
+  expect(() => page(pinned.next_cursor!, true)).toThrow(/Cursor/)
+  expect(() => page(pinned.next_cursor!, false, 'other')).toThrow(/Cursor/)
+  expect(page(pinned.next_cursor!).items[0]?.id).toBe(second)
+  expect(page(page(pinned.next_cursor!).next_cursor!).items[0]?.id).toBe(first)
+  organize(second, 'archived', true)
+  expect(() => page(pinned.next_cursor!)).toThrow(/Cursor/)
+  expect(page(undefined, true).items[0]).toMatchObject({ id: second, pinned: true, archived: true })
+  expect(page(page().next_cursor!).items[0]?.id).toBe(first)
+  organize(second, 'archived', false)
+  expect(page(page().next_cursor!).items[0]?.id).toBe(second)
+  organize(third, 'pinned', false); organize(second, 'pinned', false)
+  expect(page().items[0]?.id).toBe(first)
+  expect(page(page().next_cursor!).items[0]?.id).toBe(second)
+})
+it('orders archived tasks by recorded archive time across pages without replacing an existing timestamp', () => {
+  const first = task.task.id, second = other.task.id, legacy = store.create('旧任务').task.id
+  db.prepare('INSERT INTO task_organization (task_id,archived) VALUES (?,1)').run(legacy)
+  const organize = (task_id: string, value: boolean) => store.handle({ type: 'host.task.organize', task_id, field: 'archived', value })
+  const page = (cursor?: string) => store.handle({ type: 'host.tasks.page', archived: true, input: { kind: 'task', limit: 1, ...(cursor ? { cursor } : {}) } }) as { items: TaskListItem[]; next_cursor: string | null }
+  const oldest = Date.parse('2026-11-19T09:00:00Z'), newest = Date.parse('2026-11-20T09:00:00Z')
+  vi.setSystemTime(oldest); organize(first, true)
+  vi.setSystemTime(newest); organize(second, true); organize(first, true)
+  const top = page()
+  expect(top.items[0]).toMatchObject({ id: second, archived_at: newest })
+  const next = page(top.next_cursor!)
+  expect(next.items[0]).toMatchObject({ id: first, archived_at: oldest })
+  expect(page(next.next_cursor!).items[0]).toMatchObject({ id: legacy, archived_at: null })
+  vi.setSystemTime(newest + 1); organize(first, false); organize(first, true)
+  expect(page().items[0]).toMatchObject({ id: first, archived_at: newest + 1 })
+  expect(() => page(top.next_cursor!)).toThrow(/Cursor/)
 })
 it('binds model cursors to their Run and separates host cursors', () => {
   data('one', 'a'); data('two', 'b'); const first = store.start(task.task.id, 'first', 'fixture', [])
@@ -180,6 +233,55 @@ it('locates recent saved messages outside mixed-event windows without reading th
   expect(() => store.handle({ type: 'host.messages.latest', task_id: 'missing-task' })).toThrow()
 })
 
+it('pages old and new conversation messages independently and reads long originals within their task', () => {
+  const task_id = task.task.id, long = '🗒️汉\n\t\0'.repeat(24000)
+  const insert = db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)')
+  function append(n: number, text: string, kind = 'message.user') {
+    insert.run(`msg-${n}`, task_id, n, kind, JSON.stringify({ text }), '2026-01-01T00:00:00.000Z')
+    db.prepare('UPDATE tasks SET next_sequence=? WHERE id=?').run(n + 1, task_id)
+  }
+  const page = (opts = {}, id = task_id) => store.handle({ type: 'host.messages.page', task_id: id, ...opts }) as TaskMessagePage
+  const original = (message_id: string, cursor?: string, id = task_id) => store.handle({ type: 'host.messages.read', task_id: id, message_id, cursor }) as TaskMessageText
+  for (let n = 1; n <= 40; n++) append(n, n === 40 ? long : n === 38 ? '' : '\t'.repeat(1024))
+  const tail = page()
+  expect(tail.items.at(-1)).toMatchObject({ id: 'msg-40', truncated: true })
+  expect(long.startsWith(tail.items.at(-1)!.text)).toBe(true)
+  expect(original('msg-38')).toEqual({ text: '', next_cursor: null })
+  expect(Buffer.byteLength(JSON.stringify(tail))).toBeLessThan(64 * 1024)
+  expect(tail.older_cursor).toBeTruthy()
+  append(41, 'Tool internals', 'model.tool_result')
+  for (let n = 42; n <= 78; n++) append(n, `After ${n}`)
+  expect(() => page({ before: tail.older_cursor }, other.task.id)).toThrow(/Cursor/)
+  expect(() => page({ after: tail.update_cursor }, other.task.id)).toThrow(/Cursor/)
+  expect(() => page({ after: tail.older_cursor })).toThrow(/Cursor/)
+  expect(() => original('msg-40', undefined, other.task.id)).toThrow(/Message is unavailable/)
+  expect(() => original('msg-41')).toThrow(/Message is unavailable/)
+
+  let chunk = original('msg-40'), combined = chunk.text
+  expect(() => original('msg-39', chunk.next_cursor!)).toThrow(/Cursor/)
+  while (chunk.next_cursor) {
+    chunk = original('msg-40', chunk.next_cursor)
+    expect(Buffer.byteLength(chunk.text)).toBeLessThanOrEqual(8192)
+    combined += chunk.text
+  }
+  expect(combined).toBe(long)
+  const ids = tail.items.map(item => item.sequence)
+  let older = tail.older_cursor
+  while (older) {
+    const history = page({ before: older })
+    ids.unshift(...history.items.map(item => item.sequence)); older = history.older_cursor
+  }
+  let next = page({ after: tail.update_cursor })
+  expect(next.more_updates).toBe(true)
+  for (;;) {
+    ids.push(...next.items.map(item => item.sequence))
+    if (!next.more_updates) break
+    next = page({ after: next.update_cursor })
+  }
+  expect(ids).toEqual(Array.from({ length: 78 }, (_, n) => n + 1).filter(n => n !== 41))
+  expect(page({ after: next.update_cursor }).items).toEqual([])
+})
+
 function activityRecord(run: string, kind: string, payload: Record<string, unknown>) {
   const sequence = (db.prepare('SELECT next_sequence n FROM tasks WHERE id=?').get(task.task.id) as { n: number }).n
   db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?)').run('activity-' + sequence, task.task.id, sequence, kind, JSON.stringify({ ...payload, run_id: run }), '2026-11-06T00:00:00.000Z')
@@ -196,6 +298,7 @@ it('derives bounded run-specific activity beyond the mixed-event window without 
   toolRecord(run, 'write', { operation: 'task_data.create', input_json: JSON.stringify({ value: 'PRIVATE_ARGUMENT' }) }, { execution: 'success', delivery: 'delivered', data: { id: 'learning-progress', value: 'PRIVATE_RESULT' } })
   toolRecord(run, 'read', { kind: 'task_data', id: 'learning-progress' }, { execution: 'not_executed', delivery: 'delivered', error: { code: 'NOT_FOUND', message: 'PRIVATE_ERROR' } })
   activityRecord(run, 'message.assistant', { text: 'PRIVATE_REPLY'.repeat(20000) })
+  activityRecord(run, 'message.assistant.partial', { text: 'PRIVATE_ROUTING', routing_operation_id: run })
   for (let i = 0; i < 210; i++) activityRecord(run, 'test.event', {})
   const next = store.start(task.task.id, '下一个任务请求', 'fixture', [])
   store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: next })

@@ -31,7 +31,7 @@ test('keeps preflight responsive, cancels safely, saves a full document and forg
     // New synthetic credentials are never configured; no model endpoint is involved.
     expect(await call({ type: 'model.list' })).toMatchObject({ models: [] })
     await page.getByRole('button', { name: /Async export acceptance synthetic/ }).click()
-    await page.getByRole('button', { name: '导出', exact: true }).click()
+    await page.getByRole('button', { name: '导出内容', exact: true }).click()
     const ui: number[] = []
     for (let i = 0; i < 20; i++) {
       const start = Date.now()

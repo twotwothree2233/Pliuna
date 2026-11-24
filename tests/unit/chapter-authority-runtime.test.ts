@@ -46,18 +46,18 @@ function setup() {
 }
 type Fixture = ReturnType<typeof setup>
 
-async function approval(s: Fixture, actionId?: string) {
-  await vi.waitFor(() => expect(s.snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))).toBeDefined())
-  return s.snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))!
-}
-async function approve(s: Fixture, actionId?: string) {
-  const pending = await approval(s, actionId)
-  await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'approve' })
-  await vi.waitFor(() => expect(s.snapshot().surface_updates.find(item => item.action_id === pending.action_id)).toBeDefined())
-  return pending.action_id
+async function awaitHostCheck(s: Fixture, actionId?: string) {
+  const snapshot = () => s.snapshot()
+  const approval = () => snapshot().approvals.find(item => item.decision === 'pending' && item.validity === 'valid' && (!actionId || item.action_id === actionId))
+  const update = () => snapshot().surface_updates.find(item => !actionId || item.action_id === actionId)
+  await vi.waitFor(() => expect(approval() ?? update()).toBeDefined())
+  const pending = approval()
+  if (pending) await s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: pending.id, decision: 'approve' })
+  await vi.waitFor(() => expect(update()).toBeDefined())
+  return update()!.action_id
 }
 async function publish(s: Fixture, actionId?: string) {
-  const action = await approve(s, actionId)
+  const action = await awaitHostCheck(s, actionId)
   try { await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: false }) }
   catch (error) { throw new Error(String(error) + ': ' + JSON.stringify(s.internal().db.prepare('SELECT state,result,result_json FROM actions WHERE id=?').get(action)), { cause: error }) }
   return action
@@ -200,7 +200,7 @@ test('approved View deletion revokes chapter authority and late results cannot r
   const run = s.store.start(s.task, 'fixture held for deterministic removal', 'fixture', [])
   clearTimeout(s.internal().timers.get(run)); s.internal().timers.delete(run)
   const removal = s.store.agentTool(s.task, run, { type: 'write', input: { type: 'surface.update', surface_id: before.surface.id, expected_revision: before.surface.revision, operations: [{ type: 'view.remove', view_id: view.id, expected_view_revision: view.revision, expected_state_revision: view.state_revision }] } }, new AbortController().signal).then(value => ({ value, error: undefined }), error => ({ value: undefined, error }))
-  const action = await approve(s)
+  const action = await awaitHostCheck(s)
   await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: action, proceed: true, confirm_discard: true })
   expect((await removal).error).toBeUndefined()
   expect(s.snapshot().views).toHaveLength(0)
@@ -442,7 +442,7 @@ test('formal saved exports keep the published chapter during generation and conf
 
   await model.release(update.update_id, [['Alpha original', 'Alpha committed revision']])
   await vi.waitFor(() => expect(s.status(update.update_id).action_id).toBeDefined())
-  const action = await approve(s, s.status(update.update_id).action_id)
+  const action = await awaitHostCheck(s, s.status(update.update_id).action_id)
   expect(s.snapshot().surface_updates.find(item => item.action_id === action)).toBeDefined()
   expect(s.snapshot().views[0]!.bundle).toEqual(before.bundle)
   expectNoChapterPresentation(s.snapshot().views[0]!.bundle)

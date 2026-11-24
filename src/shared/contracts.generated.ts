@@ -157,6 +157,7 @@ title: string
 } | {
 type: "task.snapshot"
 task_id: string
+view_offset?: IpcRequestViewPageOffset
 } | {
 type: "task.submit"
 task_id: string
@@ -209,9 +210,12 @@ form_id: string
 } | {
 type: "sync.subscribe"
 task_id: string
+view_offset?: IpcRequestViewPageOffset
 after?: {
 runtime_epoch: string
+cache_generation: number
 sequence: number
+view_offset?: IpcRequestViewPageOffset
 }
 } | {
 type: "operation.list"
@@ -243,7 +247,13 @@ type: "read"
 input: IpcRequestRead
 })
 } | {
+type: "host.task.organize"
+task_id: string
+field: ("pinned" | "archived")
+value: boolean
+} | {
 type: "host.tasks.page"
+archived?: boolean
 input: (IpcRequestList & {
 kind?: "task"
 })
@@ -397,9 +407,15 @@ type: "material.cancel"
 task_id: string
 operation_id: string
 } | {
+type: "material.delete"
+task_id: string
+resource_id: string
+confirm: true
+} | {
 type: "material.read"
 task_id: string
 resource_id: string
+representation?: "preview"
 offset?: number
 } | {
 type: "material.internal.register"
@@ -519,6 +535,7 @@ type: "chapter.status"
 task_id: IpcRequestRunnerId
 update_id: IpcRequestRunnerId
 })
+export type IpcRequestViewPageOffset = number
 export type IpcRequestJsonPointer = string
 export type IpcRequestRead = ({
 [k: string]: unknown
@@ -929,7 +946,7 @@ confirm_history_processing?: true
 } | {
 type: "model.test"
 model_id: string
-role: ("main" | "approval" | "compaction")
+role?: ("main" | "approval" | "compaction")
 confirm_cost: true
 operation_id?: string
 } | {
@@ -1081,6 +1098,11 @@ digest: string
 contribution_id: string
 offset?: number
 })
+export interface ProviderTokenUsage {
+prompt_tokens: number
+completion_tokens: number
+cached_prompt_tokens?: number
+}
 export type InputEventRunnerId = string
 export type InputEventRunnerConsumptionStage = ("received" | "routed" | "installed")
 
@@ -1113,19 +1135,19 @@ kind: ("answer" | "artifact" | "content_check")
 required: boolean
 provenance_required: boolean
 }
-export type GoalRevisionRunnerId = string
+export type ContentPlanRunnerId = string
 
-export interface GoalRevision {
-task_id: GoalRevisionRunnerId
-request_id: GoalRevisionRunnerId
+export interface ContentPlan {
+task_id: ContentPlanRunnerId
+request_id: ContentPlanRunnerId
 intent_revision: number
-input_event_id: GoalRevisionRunnerId
+input_event_id: ContentPlanRunnerId
 state: ("active" | "withdrawn")
-requirements: GoalRevisionRunnerOutcomeRequirement[]
+requirements: ContentPlanRunnerOutcomeRequirement[]
 previous_revision?: number
 }
-export interface GoalRevisionRunnerOutcomeRequirement {
-requirement_id: GoalRevisionRunnerId
+export interface ContentPlanRunnerOutcomeRequirement {
+requirement_id: ContentPlanRunnerId
 kind: ("answer" | "artifact" | "content_check")
 required: boolean
 provenance_required: boolean
@@ -1170,6 +1192,7 @@ previous_run_id?: RunnerRunRunnerId
 purpose: "production"
 request_id: RunnerRunRunnerId
 intent_revision: number
+message_id?: RunnerRunRunnerId
 update_id?: RunnerRunRunnerId
 } | {
 run_id: RunnerRunRunnerId
@@ -1202,6 +1225,7 @@ max_attempts: number
 purpose: "production"
 request_id: LogicalWorkRunnerId
 intent_revision: number
+message_id?: LogicalWorkRunnerId
 update_id?: LogicalWorkRunnerId
 } | {
 work_id: LogicalWorkRunnerId
@@ -1277,6 +1301,7 @@ usage_refs: ExecutionAttemptRunnerId[]
 purpose: "production"
 request_id: ExecutionAttemptRunnerId
 intent_revision: number
+message_id?: ExecutionAttemptRunnerId
 update_id?: ExecutionAttemptRunnerId
 } | {
 attempt_id: ExecutionAttemptRunnerId
@@ -1343,6 +1368,7 @@ role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diag
 purpose: "production"
 request_id: ExecutionScopeRunnerId
 intent_revision: number
+message_id?: ExecutionScopeRunnerId
 update_id?: ExecutionScopeRunnerId
 } | {
 task_id: ExecutionScopeRunnerId
@@ -1948,6 +1974,7 @@ role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diag
 purpose: "production"
 request_id: ChapterUpdateRunnerId
 intent_revision: number
+message_id?: ChapterUpdateRunnerId
 update_id?: ChapterUpdateRunnerId
 } | {
 task_id: ChapterUpdateRunnerId
@@ -2047,6 +2074,7 @@ role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diag
 purpose: "production"
 request_id: ChapterProposalRunnerId
 intent_revision: number
+message_id?: ChapterProposalRunnerId
 update_id?: ChapterProposalRunnerId
 } | {
 task_id: ChapterProposalRunnerId
@@ -2460,6 +2488,7 @@ role: ("router" | "producer" | "lightweight" | "integrator" | "collator" | "diag
 purpose: "production"
 request_id: ContentScopeRevisionRunnerId
 intent_revision: number
+message_id?: ContentScopeRevisionRunnerId
 update_id?: ContentScopeRevisionRunnerId
 } | {
 task_id: ContentScopeRevisionRunnerId

@@ -53,7 +53,7 @@ async function plugin(effect = 'read', name = 'fixture.calls', global = false): 
  const source=join(root,name);await mkdir(source)
  await writeFile(join(source,'backend.cjs'),backend)
  await writeFile(join(source,'tool.json'),JSON.stringify({id:'echo',description:'fixture',when_to_use:'tests',input_schema:{type:'object',required:['value']},output_schema:{type:'object',required:['value']},effect,timeout_ms:2000,errors:[],examples:[]}))
- await writeFile(join(source,'manifest.json'),JSON.stringify({manifest_version:'0.1',protocol_version:'0.1',id:name,version:'1.0.0',access_level:global?'global':'task',contributes:[{id:'echo',kind:'tool',entry:'tool.json',description:'fixture'}],backend:{command:process.execPath,args:['backend.cjs'],entry:'backend.cjs'}}))
+ await writeFile(join(source,'manifest.json'),JSON.stringify({manifest_version:'0.1',protocol_version:'0.1',id:name,version:'1.0.0',access_level:global?'global':'task',contributes:[{id:'echo',kind:'tool',entry:'tool.json',description:'fixture'}],backend:{command:process.versions.electron ? 'node' : process.execPath,args:['backend.cjs'],entry:'backend.cjs'}}))
  const p=await call('plugin.internal.install',{source});await call('plugin.trust',{digest:p.digest,confirm_local_code:true,confirm_cross_task:global})
  const plan=await call('plugin.plan',{task_id:task,digest:p.digest});await call('plugin.enable',{task_id:task,digest:p.digest,fingerprint:plan.fingerprint,confirm_cross_task:global})
  return {digest:p.digest,capability:pluginCapabilityId(p.digest,'echo')}

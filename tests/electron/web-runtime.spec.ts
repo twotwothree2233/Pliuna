@@ -7,9 +7,9 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, HostRequest, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, HostRequest, LiveFlowSnapshot, Outline, OutlineSection, Snapshot, WorkDependency } from '../../src/shared/types'
 import { chooseModel, configureModel } from '../helpers/settings-ui'
-import { frame, modelServer, synthetic } from '../helpers/model-server'
+import { frame, modelServer, synthetic, textStream } from '../helpers/model-server'
 
 const executablePath: string = createRequire(import.meta.url)('electron')
 interface ProviderMessage { role: string; content: string | null; tool_calls?: unknown[] }
@@ -21,6 +21,97 @@ async function unusedPort(): Promise<number> {
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
   return port
 }
+
+test('desktop and Web share task history when launched together', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-shared-web-'))
+  const server = await modelServer(({ body }, response) => {
+    if (synthetic(body, response)) return
+    const input = body.messages.findLast((message: ProviderMessage) => message.role === 'user')
+    textStream(response, JSON.stringify({ kind: 'reply', text: `收到：${JSON.parse(input.content).request}` }))
+  })
+  let app: ElectronApplication | undefined
+  try {
+    const port = await unusedPort(), origin = `http://127.0.0.1:${port}`, env = { ...process.env }
+    delete env.PLIUNA_TEST_RUNNER; delete env.TRELLIS_TEST_RUNNER
+    app = await electron.launch({ executablePath, args: ['.'], env: { ...env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory, PLIUNA_WEB: 'desktop', PLIUNA_WEB_PORT: String(port) } })
+    const desktop = await app.firstWindow()
+    await expect(desktop.getByRole('button', { name: '创建第一个任务', exact: true })).toBeVisible()
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some(window => window.isVisible()))).toBe(true)
+    const web = (request: HostRequest) => fetch(`${origin}/_pliuna/request`, {
+      method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+      body: JSON.stringify(request)
+    }).then(response => response.json())
+    const created = await web({ type: 'task.create', title: 'Web 与桌面共用任务' })
+    expect(created).toMatchObject({ ok: true, data: { task: { title: 'Web 与桌面共用任务' } } })
+    const task = created.data.task.id
+    const snapshot = await desktop.evaluate(task_id => window.pliuna.request({ type: 'task.snapshot', task_id }), task)
+    expect(snapshot).toMatchObject({ ok: true, data: { runtime_epoch: created.data.runtime_epoch, task: created.data.task } })
+    const model = 'shared-history'
+    await configureModel(desktop, { id: model, url: server.url, key: 'isolated-shared-key', model: 'shared-wire', context: 100000, output: 2048 })
+    await chooseModel(desktop, model)
+    const submit = (text: string): HostRequest => ({ type: 'request.submit', task_id: task, model_config_id: model, text, resource_ids: [], import_ids: [] })
+    const messages: HostRequest = { type: 'host.messages.page', task_id: task }
+    expect(await desktop.evaluate(request => window.pliuna.request(request), submit('来自桌面'))).toMatchObject({ ok: true })
+    const webHistory = async () => (await web(messages)).data?.items.map((item: { text: string }) => item.text)
+    await expect.poll(webHistory).toEqual(['来自桌面', '收到：来自桌面'])
+    expect(await web(submit('来自网页'))).toMatchObject({ ok: true })
+    await expect.poll(webHistory).toEqual(['来自桌面', '收到：来自桌面', '来自网页', '收到：来自网页'])
+    const fromDesktop = await desktop.evaluate(request => window.pliuna.request(request), messages)
+    expect(fromDesktop).toMatchObject({ ok: true, data: { items: (await web(messages)).data.items } })
+
+    const row = (page: Page) => page.locator('.task-row').filter({ hasText: 'Web 与桌面共用任务' })
+    const draft = desktop.locator('.agent-composer textarea')
+    await row(desktop).click()
+    await draft.fill('跨端归档前未发送的草稿')
+    const webWindow = app.waitForEvent('window')
+    await app.evaluate(({ BrowserWindow }, url) => {
+      const window = new BrowserWindow({ show: false, width: 1200, height: 850, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
+      void window.loadURL(url)
+    }, origin)
+    const browser = await webWindow
+    await browser.getByRole('group', { name: '任务操作：Web 与桌面共用任务' }).getByRole('button', { name: '归档', exact: true }).click()
+    await expect(row(browser)).toHaveCount(0)
+    await expect(desktop.getByRole('heading', { name: '尚无任务', exact: true })).toBeVisible()
+    await expect(draft).toHaveCount(0)
+    await desktop.getByRole('button', { name: '已归档', exact: true }).click()
+    await row(desktop).click()
+    await expect(draft).toHaveValue('跨端归档前未发送的草稿')
+
+    expect(await web({ type: 'task.create', title: '等待归档的草稿' })).toMatchObject({ ok: true })
+    await browser.reload()
+    const pendingRow = browser.locator('.task-row').filter({ hasText: '等待归档的草稿' })
+    const webDraft = browser.locator('.agent-composer textarea')
+    await pendingRow.click()
+    await webDraft.fill('归档前的文字')
+    await browser.evaluate(() => {
+      const original = window.fetch.bind(window)
+      window.fetch = async (input, init) => {
+        if (input === '/_pliuna/request' && typeof init?.body === 'string' && JSON.parse(init.body).type === 'host.task.organize') {
+          // Deliver a final edit in the same event turn, before the workspace becomes inert.
+          const draft = document.querySelector<HTMLTextAreaElement>('.agent-composer textarea')!
+          draft.setRangeText('归档开始时收到的文字', 0, draft.value.length)
+          draft.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText' }))
+          document.body.dataset.archivePending = 'true'
+          await new Promise<void>(resolve => window.addEventListener('test:release-archive', () => resolve(), { once: true }))
+          window.fetch = original
+        }
+        return original(input, init)
+      }
+    })
+    await browser.getByRole('group', { name: '任务操作：等待归档的草稿' }).getByRole('button', { name: '归档', exact: true }).click()
+    await expect(browser.locator('body')).toHaveAttribute('data-archive-pending', 'true')
+    await expect(browser.locator('#pane-slot-right')).toHaveJSProperty('inert', true)
+    await browser.evaluate(() => window.dispatchEvent(new Event('test:release-archive')))
+    await expect(pendingRow).toHaveCount(0)
+    await browser.getByRole('button', { name: '已归档', exact: true }).click()
+    await pendingRow.click()
+    await expect(webDraft).toHaveValue('归档开始时收到的文字')
+  } finally {
+    await app?.close()
+    await server.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 test('Web mode serves a browser bridge and continues a real Task conversation', async () => {
   test.setTimeout(90000)
@@ -42,7 +133,7 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
       captured.push(structuredClone(messages))
       if (request === firstInput) await firstCompletion
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.end(frame({ role: 'assistant', content: reply }) + `data: ${JSON.stringify({
+      response.end(frame({ role: 'assistant', content: JSON.stringify({ kind: 'reply', text: reply }) }) + `data: ${JSON.stringify({
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 80, completion_tokens: 20 }
       })}\n\n` + 'data: [DONE]\n\n')
     } catch (error) {
@@ -55,6 +146,8 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
   delete env.PLIUNA_TEST_RUNNER; delete env.TRELLIS_TEST_RUNNER
   delete env.PLIUNA_TEST_RUNNER_COLLATOR; delete env.TRELLIS_TEST_RUNNER_COLLATOR
   let app: ElectronApplication | undefined, page!: Page
+  let releaseFlow: () => void = () => {}, heldFlow = Promise.resolve()
+  const holdNextFlow = () => { heldFlow = new Promise<void>(resolve => { releaseFlow = resolve }) }
   const call = async <T = unknown,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
     const response = await window.pliuna.request(request)
     if (!response.ok) throw Error(`${response.error.code}: ${response.error.message}`)
@@ -89,17 +182,39 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     const task = (await call<{ id: string }[]>({ type: 'host.tasks' }))[0]!.id
     const snapshot = () => call<Snapshot>({ type: 'task.snapshot', task_id: task })
-    const badge = page.getByRole('navigation', { name: '当前任务工具栏' }).locator('.badge')
+    const badge = page.locator('.task-heading .task-phase')
     const taskRow = (title: string) => page.locator('.task-row').filter({ has: page.getByText(title, { exact: true }) })
     await expect(badge).toHaveText('就绪')
-    await expect(taskRow(firstTitle).getByLabel('就绪', { exact: true })).toBeVisible()
+    await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('就绪')
     const empty = await snapshot()
     expect(empty.runs).toHaveLength(0)
     expect(empty.runner?.goals ?? []).toHaveLength(0)
+    const flowTab = page.getByRole('tab', { name: '执行流程', exact: true })
+    const flow = page.getByRole('region', { name: '实时执行流程', exact: true })
+    const emptyMessage = flow.getByText('当前没有正在执行的工作')
+    const flowRequest = { type: 'host.runner.flow', task_id: task } as const
+    let flowMode: 'hold' | 'fail' | 'old' | 'live' = 'hold', intercepted = 0
+    holdNextFlow()
+    await page.route(`${webUrl}_pliuna/request`, async route => {
+      const body = route.request().postDataJSON() as HostRequest
+      if (body.type !== 'host.runner.flow') return route.continue()
+      intercepted++
+      if (flowMode === 'hold') {
+        const gate = heldFlow, response = await route.fetch()
+        await gate
+        return route.fulfill({ response })
+      }
+      if (flowMode === 'fail') return route.fulfill({ json: { ok: false, error: { code: 'TRANSPORT_UNAVAILABLE', message: 'Fixture outage' } } })
+      if (flowMode === 'old') {
+        const response = await route.fetch(), result = await response.json()
+        return route.fulfill({ response, json: { ...result, data: { ...result.data, runtime_epoch: 'old-epoch' } } })
+      }
+      return route.continue()
+    })
     const send = async (text: string, reply: string, count: number) => {
       await page.getByLabel('想从哪里开始？').fill(text)
       await page.getByRole('button', { name: '发送消息', exact: true }).click()
-      await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText(reply)
+      await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText(reply)
       await expect.poll(async () => (await snapshot()).runs.filter(run => run.state === 'completed').length).toBe(count)
       await expect(badge).toHaveText('就绪')
       await expect(page.getByRole('main')).not.toContainText(reply)
@@ -110,29 +225,60 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     await page.getByRole('button', { name: '发送消息', exact: true }).click()
     await expect.poll(() => captured.length).toBe(1)
     await expect(badge).toHaveText('执行中')
-    await expect(taskRow(firstTitle).getByLabel('执行中', { exact: true })).toBeVisible()
+    await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('执行中')
     expect((await snapshot()).runs.some(run => run.state === 'running')).toBe(true)
+    expect(intercepted).toBe(0)
+    await flowTab.click()
+    await expect.poll(() => intercepted).toBe(1)
+    await expect(flow.getByText('正在读取执行状态…')).toBeVisible()
+    await expect(emptyMessage).toHaveCount(0)
+    flowMode = 'live'; releaseFlow()
+    await expect(flow.getByRole('region', { name: 'Router', exact: true }).locator('.flow-card')).toContainText('路由中')
+    expect((await call<LiveFlowSnapshot>(flowRequest)).lanes.Router.total).toBe(1)
+    flowMode = 'fail'
+    await expect(flow.getByText('状态暂不可用')).toBeVisible()
+    await expect(emptyMessage).toHaveCount(0)
+    flowMode = 'old'
+    const beforeRetry = intercepted
+    await flow.getByRole('button', { name: '重试' }).click()
+    await expect.poll(() => intercepted).toBeGreaterThan(beforeRetry)
+    await expect(flow.getByText('状态暂不可用')).toBeVisible()
+    flowMode = 'live'
+    await expect(flow.locator('.flow-card')).toHaveCount(1)
+    await expect(flow.locator('.flow-packet')).toHaveCount(0)
 
-    await page.getByRole('button', { name: '＋ 新建', exact: true }).click()
+    const beforeSwitch = intercepted
+    flowMode = 'hold'; holdNextFlow()
+    await expect.poll(() => intercepted).toBeGreaterThan(beforeSwitch)
+    await page.getByRole('button', { name: '＋ 新建任务', exact: true }).click()
     await page.getByLabel('任务名称').fill(idleTitle)
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await expect(badge).toHaveText('就绪')
-    await expect(taskRow(firstTitle).getByLabel('已开启', { exact: true })).toBeVisible()
-    await expect(taskRow(idleTitle).getByLabel('就绪', { exact: true })).toBeVisible()
+    await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('执行中')
+    await expect(taskRow(idleTitle).locator('.task-phase')).toHaveText('就绪')
+    flowMode = 'live'
+    await flowTab.click()
+    await expect(emptyMessage).toBeVisible()
+    releaseFlow()
+    await expect(flow.locator('.flow-card')).toHaveCount(0)
     await taskRow(firstTitle).click()
     await expect(badge).toHaveText('执行中')
-    await expect(taskRow(idleTitle).getByLabel('已开启', { exact: true })).toBeVisible()
+    await expect(taskRow(idleTitle).locator('.task-phase')).toHaveText('就绪')
     await taskRow(idleTitle).click()
     await expect(badge).toHaveText('就绪')
 
     releaseFirst()
     await expect.poll(async () => (await snapshot()).runs.filter(run => run.state === 'completed').length).toBe(1)
     await expect(badge).toHaveText('就绪')
-    await expect(taskRow(firstTitle).getByLabel('已开启', { exact: true })).toBeVisible()
+    await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('就绪')
     await taskRow(firstTitle).click()
-    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText(firstReply)
+    await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText(firstReply)
     await expect(badge).toHaveText('就绪')
-    await expect(taskRow(firstTitle).getByLabel('就绪', { exact: true })).toBeVisible()
+    await expect(taskRow(firstTitle).locator('.task-phase')).toHaveText('就绪')
+    await flowTab.click()
+    await expect(emptyMessage).toBeVisible()
+    await expect(flow.locator('.flow-card')).toHaveCount(0)
+    await page.getByRole('tab', { name: '内容', exact: true }).click()
     await send(followup, secondReply, 2)
     expect(captured).toHaveLength(2)
     const history = captured[1]!.filter(message => message.role !== 'system')
@@ -145,6 +291,7 @@ test('Web mode serves a browser bridge and continues a real Task conversation', 
     expect(bridgeRequests.filter(request => request.type === 'request.submit')).toHaveLength(2)
     expect(serverErrors).toEqual([]); expect(pageErrors).toEqual([])
   } finally {
+    releaseFlow()
     releaseFirst()
     if (app) {
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {})
@@ -192,7 +339,8 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
         }) }) }); return
       }
       const current = [...messages].reverse().find(message => message.role === 'user')
-      if (JSON.parse(current?.content ?? '').request !== initial || !system.includes('Bound data: ')) throw Error('Unexpected managed resource recovery input')
+      if (JSON.parse(current?.content ?? '').request !== initial) throw Error('Unexpected managed resource recovery input')
+      if (!system.includes('Bound data: ')) { complete(response, { content: JSON.stringify({ kind: 'new' }) }); return }
       const binding = JSON.parse(system.slice(system.indexOf('Bound data: ') + 'Bound data: '.length)) as ProducerBinding
       if (binding.owner.purpose !== 'production') throw Error('Expected production Worker')
       bindings.push(binding)
@@ -255,8 +403,8 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
     await page.getByRole('button', { name: '发送消息', exact: true }).click()
     await expect.poll(() => Boolean(rejection), { timeout: 15000 }).toBe(true)
     const rejected = await snapshot()
-    expect(rejected.runs).toHaveLength(1)
-    expect(['running', 'waiting']).toContain(rejected.runs[0]!.state)
+    expect(rejected.runs).toHaveLength(2)
+    expect(['running', 'waiting']).toContain(rejected.runs.find(run => run.id === bindings[0]!.owner.run_id)?.state)
     expect(rejected.views).toHaveLength(0)
     expect((await resources()).items.some(resource => resource.display_name === invalidName)).toBe(false)
     releaseCorrection()
@@ -268,11 +416,11 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
     const center = page.getByRole('main')
     await expect(center.getByRole('heading', { name: 'RAW_DRAFT_RECOVERED', exact: true })).toBeVisible()
     await expect(center.getByRole('textbox', { name: '学习次数', exact: true })).toHaveValue('0')
-    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).toContainText('任务已完成，内容已发布。')
-    await expect(page.locator('#pane-right').getByRole('region', { name: '任务回复', exact: true })).not.toContainText(reply)
-    await expect.poll(async () => (await snapshot()).runner?.goals[0]?.run?.state).toBe('completed')
+    await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText('内容已发布。')
+    await expect(page.locator('#pane-right').getByRole('region', { name: '任务对话', exact: true })).toContainText(reply)
+    await expect.poll(async () => (await snapshot()).runner?.scope?.state).toBe('complete')
     const published = await snapshot()
-    expect(published.runner?.goals[0]?.delivery).toBe('published')
+    expect(published.runner?.scope).toMatchObject({ state: 'complete', published_count: 1 })
     expect(published.views[0]!.bundle.state.initial).toEqual({ count: '0' })
     expect(published.views[0]!.draft).toEqual({ count: '0' })
     expect(bindings).toHaveLength(3)
@@ -289,6 +437,41 @@ test('Web mode corrects an invalid managed resource in the same Worker before pu
       await app.close().catch(() => {})
     }
     await server.close(); await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('desktop and Web shut down normally on a launcher IPC request', async () => {
+  const port = await unusedPort(), origin = `http://127.0.0.1:${port}`
+  const directory = await mkdtemp(join(tmpdir(), 'pliuna-web-quit-'))
+  const child = spawn(executablePath, ['.'], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory, PLIUNA_WEB: 'desktop', PLIUNA_WEB_PORT: String(port) }
+  })
+  let output = '', timedOut = false
+  child.stdout?.on('data', chunk => { output += chunk.toString() })
+  child.stderr?.on('data', chunk => { output += chunk.toString() })
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => resolve({ code, signal }))
+  })
+  const deadline = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 20000)
+  try {
+    await expect.poll(async () => {
+      const response = await fetch(`${origin}/_pliuna/request`, {
+        method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'host.tasks' }), signal: AbortSignal.timeout(1000)
+      }).catch(() => null)
+      return response?.ok ? (await response.json()).ok : false
+    }, { timeout: 10000 }).toBe(true)
+    await new Promise<void>((resolve, reject) => child.send('pliuna:web:quit', error => error ? reject(error) : resolve()))
+    const result = await closed
+    expect(timedOut, output).toBe(false)
+    expect(result, output).toEqual({ code: 0, signal: null })
+  } finally {
+    clearTimeout(deadline)
+    if (child.pid && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await closed.catch(() => {})
+    await rm(directory, { recursive: true, force: true })
   }
 })
 

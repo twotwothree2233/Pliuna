@@ -4,6 +4,11 @@ import { hostRequest } from './ModelSettings'
 import { modelErrorMessage } from './model-errors'
 import { RunOutcome } from './RunOutcome'
 import { ContentReader } from './ContentReader'
+import { isPlainTextMaterial, MaterialTextPreview } from './MaterialTextPreview'
+import { MaterialBinaryPreview } from './MaterialBinaryPreview'
+import { binaryPreviewType } from '../../shared/material-formats'
+import { WorkspaceIcon } from './WorkspaceIcon'
+import { DialogFocus } from './Dialog'
 import type { ModelRequest } from '../../shared/contracts.generated'
 import { extractionCoverage, sourceFacts, sourceFieldLocations, type Provenance } from './source-facts'
 
@@ -11,7 +16,7 @@ type Kind = Extract<ModelRequest, { type: 'list' }>['input']['kind']
 type Item = { id: string; display_name?: string; revision?: number; state?: string; result?: string; decision?: string; kind?: string; created_at?: string; media_type?: string; byte_length?: number }
 type DerivedResults = { items: { resource_id: string; call_id: string; partial: boolean; plugin_version: string }[]; truncated: boolean }
 type ReadResult = { data: unknown; metadata?: { provenance?: Provenance | null; derived_results?: DerivedResults }; representation?: string; next_cursor: string | null; truncated: boolean; content_version?: string }
-export function RecordBrowser({ taskId, kind, label, initialId, initialRevision, followReferences = true, onComplete, onReturnToContent, onContinue, continueDisabled = false, answers }: { taskId: string; kind: Kind; label: string; initialId?: string; initialRevision?: number; followReferences?: boolean; onComplete?(id: string): void; onReturnToContent?(): void; onContinue?(id: string): void; continueDisabled?: boolean; answers?: Snapshot['answers'] }) {
+export function RecordBrowser({ taskId, kind, label, initialId, initialRevision, followReferences = true, onComplete, onReturnToContent, onContinue, continueDisabled = false, answers, materials }: { taskId: string; kind: Kind; label: string; initialId?: string; initialRevision?: number; followReferences?: boolean; onComplete?(id: string): void; onReturnToContent?(): void; onContinue?(id: string): void; continueDisabled?: boolean; answers?: Snapshot['answers']; materials?: { version: number; onRefresh(): void } }) {
   const [items, setItems] = useState<Item[]>([]), [cursor, setCursor] = useState<string | null>(null)
   const [selection, setSelection] = useState<Item | null>(null), [detail, setDetail] = useState(''), [readCursor, setReadCursor] = useState<string | null>(null)
   const [error, setError] = useState(''), [busy, setBusy] = useState(false)
@@ -22,10 +27,18 @@ export function RecordBrowser({ taskId, kind, label, initialId, initialRevision,
   const [loaded, setLoaded] = useState(false)
   const [linkedTarget, setLinkedTarget] = useState<{ kind: 'resource' | 'task_data'; id: string; revision?: number } | null>(null)
   const [query, setQuery] = useState(''), [status, setStatus] = useState('all'), [detailTab, setDetailTab] = useState('value')
+  const [removal, setRemoval] = useState<Item | null>(null), [removing, setRemoving] = useState(false), [removeError, setRemoveError] = useState('')
+  const materialSearch = useRef<HTMLInputElement>(null)
   useEffect(() => { if (initialId) void read({ id: initialId, revision: initialRevision }); else void load() }, [taskId, kind, initialId, initialRevision])
   const textWindow = useRef('')
   const generation = useRef(0)
   useEffect(() => { return () => { generation.current++ } }, [])
+  const listVersion = useRef(materials?.version)
+  useEffect(() => {
+    if (!materials || listVersion.current === materials.version || selection || busy) return
+    listVersion.current = materials.version
+    void load()
+  }, [materials?.version, selection, busy])
   async function load(more = false) {
     onComplete?.('')
     const current = ++generation.current; setBusy(true); setError('')
@@ -38,10 +51,33 @@ export function RecordBrowser({ taskId, kind, label, initialId, initialRevision,
     } catch (e) { if (current === generation.current) setError(String(e)) }
     finally { if (current === generation.current) setBusy(false) }
   }
-  async function read(item: Item, more = false) {
+  async function removeMaterial() {
+    if (!materials || !removal || removing) return
+    setRemoving(true); setRemoveError('')
+    try {
+      await hostRequest({ type: 'material.delete', task_id: taskId, resource_id: removal.id, confirm: true })
+      if (selection?.id === removal.id) { setSelection(null); setDetail('') }
+      setItems(current => current.filter(item => item.id !== removal.id))
+      setRemoval(null)
+      materialSearch.current?.focus()
+      materials.onRefresh()
+      void load()
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      setRemoveError(code === 'IMPORT_NOT_FOUND' ? '此材料已不在当前任务。' : '未能确认删除。请重试，或刷新列表查看结果。')
+    } finally { setRemoving(false) }
+  }
+  function selectItem(item: Item, tab = 'value') {
+    setSelection(item); setDetailTab(tab); textWindow.current = ''; setWindowed(false); setDetail(''); setReadCursor(null); setLinkedTarget(null); setProvenance(null); setOriginalCall(null); setDerivedResults(null)
+  }
+  function openItem(item: Item) {
+    if (materials && (isPlainTextMaterial(item.media_type) || binaryPreviewType(item.display_name, item.media_type))) { setError(''); selectItem(item) }
+    else void read(item)
+  }
+  async function read(item: Item, more = false, tab = 'value') {
     onComplete?.('')
     const current = ++generation.current; setBusy(true); setError('')
-    if (!more) { setSelection(item); setDetailTab('value'); textWindow.current = ''; setWindowed(false); setDetail(''); setReadCursor(null); setLinkedTarget(null); setProvenance(null); setOriginalCall(null); setDerivedResults(null) }
+    if (!more) selectItem(item, tab)
     try {
       const result = await hostRequest<ReadResult>({ type: 'task.query', task_id: taskId, query: { type: 'read', input: { target: { kind, id: item.id, ...(item.revision ? { expected_revision: item.revision } : {}) }, ...(more && readCursor ? { cursor: readCursor } : {}) } } })
       if (current !== generation.current) return
@@ -70,9 +106,31 @@ export function RecordBrowser({ taskId, kind, label, initialId, initialRevision,
   const rawRecord = <pre>{detail}</pre>
   const answerIndex = answers?.findIndex(answer => answer.id === selection?.id) ?? -1
   const previousAnswer = answerIndex > 0 ? answers?.[answerIndex - 1] : undefined
-  const recordDetail = selection && <article className="record-detail" aria-label={label + '全文'}>
-    <header className="record-detail-heading"><h4>{selection.display_name ?? (kind === 'task_data' ? '数据值' : recordTitle(kind))}{selection.revision ? ` · r${selection.revision}` : ''}</h4><span className="mono">{selection.id}</span></header>
-    {parsed && kind === 'task_data' ? <>
+  const textMaterial = !!materials && isPlainTextMaterial(selection?.media_type)
+  const binaryPreview = materials && selection && binaryPreviewType(selection.display_name, selection.media_type)
+  const showOriginal = !materials || detailTab === 'source'
+  const recordDetail = selection && <article className={'record-detail' + (materials ? ' material-detail' : '')} aria-label={materials ? '材料详情' : label + '全文'}>
+    {!materials && <header className="record-detail-heading"><h4>{selection.display_name ?? (kind === 'task_data' ? '数据值' : recordTitle(kind))}{selection.revision ? ` · r${selection.revision}` : ''}</h4><span className="mono">{selection.id}</span></header>}
+    {materials ? <>
+      <nav className="record-detail-tabs" aria-label="材料详情视图">
+        <button aria-pressed={detailTab === 'value'} onClick={() => setDetailTab('value')}>正文</button>
+        <button aria-pressed={detailTab === 'source'} disabled={busy} onClick={() => { if ((textMaterial || binaryPreview) && !detail) void read(selection, false, 'source'); else setDetailTab('source') }}>来源与记录</button>
+      </nav>
+      <div className="material-preview-body" hidden={detailTab !== 'value'}>
+        {textMaterial ? <MaterialTextPreview key={selection.id} taskId={taskId} resourceId={selection.id} name={selection.display_name} />
+          : binaryPreview && selection.byte_length !== undefined ? <MaterialBinaryPreview key={selection.id} taskId={taskId} resourceId={selection.id} name={selection.display_name!} mime={binaryPreview} byteLength={selection.byte_length} />
+          : busy ? <p role="status" className="record-caption">正在读取正文…</p>
+          : parsed?.content?.type === 'json' ? <RecordValue value={parsed.content.value} />
+          : !error && <p className="muted">此文件暂不支持正文预览。</p>}
+      </div>
+      {detailTab === 'source' && <>
+        <RecordValue value={{ 格式: selection.media_type ?? '未知', 大小: selection.byte_length === undefined ? '未知' : formatBytes(selection.byte_length), 保存时间: formatTime(selection.created_at), 资源身份: selection.id }} />
+        {!!detail && <details className="record-raw"><summary>只读原记录</summary>{rawRecord}
+          {windowed && <p className="record-caption">只显示最近读取的记录片段。</p>}
+          {readCursor && <button disabled={busy} onClick={() => void read(selection, true)}>继续读取原记录</button>}
+        </details>}
+      </>}
+    </> : parsed && kind === 'task_data' ? <>
       <nav className="record-detail-tabs" aria-label="数据展示方式">{[['value', '数据值'], ['raw', '原始 JSON'], ['schema', '结构']].map(([id, title]) => <button key={id} aria-pressed={detailTab === id} onClick={() => setDetailTab(id!)}>{title}</button>)}</nav>
       {detailTab === 'value' ? <><RecordValue value={parsed.value} /><details className="record-raw"><summary>只读原记录</summary>{rawRecord}</details></> : detailTab === 'schema' ? <pre>{JSON.stringify(parsed.schema, null, 2)}</pre> : rawRecord}
       <p className="muted">当前读取版本 r{parsed.revision} · 修改数据仍需授权。</p>
@@ -91,29 +149,55 @@ export function RecordBrowser({ taskId, kind, label, initialId, initialRevision,
       </>}
     </> : parsed && kind === 'run' ? <><dl className="run-facts"><div><dt>状态</dt><dd>{stateLabel(String(parsed.state))}</dd></div><div><dt>开始</dt><dd>{formatTime(parsed.created_at)}</dd></div><div><dt>结束</dt><dd>{formatTime(parsed.ended_at) || '尚未结束'}</dd></div></dl><div className="run-reading-outcome"><h4>运行结果</h4><p>{parsed.primary_reason === 'fixture_complete' ? '开发夹具已结束；内容来自本机示例。' : parsed.primary_reason === 'model_stop' ? '模型已交还控制权。具体动作与交付结果可在下方核对。' : modelErrorMessage(parsed.primary_reason ?? parsed.wait_reason ?? '运行中')}</p><small className="mono">{parsed.primary_reason ?? parsed.wait_reason}</small></div><ReadDisclosure title="动作结果与用量"><RunOutcome taskId={taskId} run={{ id: selection.id, state: String(parsed.state ?? ''), primary_reason: parsed.primary_reason, wait_reason: parsed.wait_reason, budget_json: JSON.stringify(parsed.budget ?? {}) }} /></ReadDisclosure><details className="record-raw"><summary>只读原记录</summary>{rawRecord}</details></> : rawRecord}
     {kind === 'answer' && (onReturnToContent || onContinue) && <div className="inline-actions">{onReturnToContent && <button onClick={onReturnToContent}>回到当前内容</button>}{onContinue && <button disabled={continueDisabled} onClick={() => onContinue(selection.id)}>基于已保存作答继续</button>}</div>}
-    {windowed && <p className="notice">为限制内存，仅显示末尾 256K 字符；旧片段已读但不再显示，可重新查询原记录。</p>}
+    {!materials && <>{windowed && <p className="notice">为限制内存，仅显示末尾 256K 字符；旧片段已读但不再显示，可重新查询原记录。</p>}
     {readCursor ? <><p className="muted">当前为 JSON 文本片段，不是完整对象。</p><button disabled={busy} onClick={() => void read(selection, true)}>继续读取全文</button></> : detail && <p role="status" className="record-caption">全文读取完成</p>}
-    <div className="inline-actions"><button disabled={busy} onClick={() => void read(selection)}>重新查询原记录</button>{!initialId && <button disabled={busy} onClick={() => { generation.current++; setSelection(null); setDetail(''); onComplete?.('') }}>收起详情</button>}{initialRevision !== undefined && <button disabled={busy} onClick={() => void read({ id: selection.id })}>查看当前版本（不更新引用）</button>}</div>
+    <div className="inline-actions"><button disabled={busy} onClick={() => void read(selection)}>重新查询原记录</button>{!initialId && <button disabled={busy} onClick={() => { generation.current++; setSelection(null); setDetail(''); onComplete?.('') }}>收起详情</button>}{initialRevision !== undefined && <button disabled={busy} onClick={() => void read({ id: selection.id })}>查看当前版本（不更新引用）</button>}</div></>}
+    {materials && detailTab === 'source' && error && <button disabled={busy} onClick={() => void read(selection, false, 'source')}>重新读取原记录</button>}
     {references.filter(reference => reference.target.kind === 'resource' || reference.target.kind === 'task_data').map(reference => <button key={reference.name} disabled={busy} onClick={() => setLinkedTarget({ kind: reference.target.kind as 'resource' | 'task_data', id: reference.target.id, revision: reference.target.expected_revision })}>查看引用{reference.target.kind === 'resource' ? '资源' : '数据'}：{reference.name}{reference.target.expected_revision !== undefined ? ` · 绑定 r${reference.target.expected_revision}` : ''}</button>)}
-    {followReferences && provenance && <section aria-label="派生材料来源"><h4>派生材料来源</h4><details><summary>来源绑定说明</summary><p className="muted">原件身份与原 Call 已按保存事实核对。这是保存的来源绑定，不是本次重新提取或对原件语义的认证。页码和提取文字由工具报告，不代表内容已核实；仅导航，不自动读取、重新解析或启动模型。</p></details><p>插件版本 {provenance.plugin_version} · {provenance.pages.length} 个页面索引 · {extractionCoverage(provenance.partial)}</p>{provenance.notice && <p role="status">{provenance.notice}</p>}<details><summary>宿主登记的来源事实</summary><dl>{sourceFacts(provenance).map(row => <div key={row.label}><dt>{row.label}</dt><dd className="mono">{row.value}</dd></div>)}</dl><p>这里只展示来源导航返回的字段；派发、执行与交付状态请查看原 Call，不从来源摘要推导全部业务已完成。</p></details><details><summary>各项来源字段在哪里</summary><dl>{sourceFieldLocations.map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.location}</dd></div>)}</dl><p>字段未返回不等于事实矛盾；尚未读取不能声称已经核对。精确参数在执行记录的 material.derived 原事件中按原 ID 查询。</p></details><button disabled={busy} onClick={() => setLinkedTarget({ kind: 'resource', id: provenance.input.id })}>查看派生原件</button><button disabled={busy} onClick={() => setOriginalCall(provenance.call_id)}>查看派生原 Call</button><details><summary>工具报告的页面字节索引</summary><p>start / end 为提取文本的 UTF-8 字节范围 [start, end)，不是原 PDF 的字节偏移。页码与文本语义均为工具报告，宿主只核对结构、边界及来源绑定。</p><pre>{JSON.stringify(provenance.pages, null, 2)}</pre></details></section>}
-    {followReferences && !!derivedResults?.items.length && <section aria-label="已有派生结果"><h4>已有派生结果（最近 20 项）</h4><details><summary>派生结果说明</summary><p className="muted">每次解析是独立结果，不覆盖旧结果。选择只读查看不会重新解析或调用模型。未标记部分结果也不保证语义完整；是否适合当前问题仍需读取结果判断。</p></details>{derivedResults.items.map((item, index) => <button key={item.resource_id} disabled={busy} onClick={() => setLinkedTarget({ kind: 'resource', id: item.resource_id })}>查看派生结果 {index + 1} · {item.partial ? '部分结果' : '工具未标记部分'} · v{item.plugin_version}</button>)}{derivedResults.truncated && <p>还有更早结果，请在事件记录中查询 material.derived；这里只显示最近 20 项。</p>}</section>}
-    {selection && kind === 'resource' && <ReadDisclosure title="正文分段读取"><ContentReader key={selection.id} taskId={taskId} resourceId={selection.id} hasPages={!!provenance?.pages.length} /></ReadDisclosure>}
-    {linkedTarget && <RecordBrowser key={`${linkedTarget.kind}:${linkedTarget.id}:${linkedTarget.revision}`} taskId={taskId} kind={linkedTarget.kind} label={linkedTarget.kind === 'resource' ? '引用资源' : '引用数据'} initialId={linkedTarget.id} initialRevision={linkedTarget.revision} followReferences={false} />}
-    {originalCall && <RecordBrowser key={originalCall} taskId={taskId} kind="call" label="派生原 Call" initialId={originalCall} followReferences={false} />}
+    {showOriginal && followReferences && provenance && <section aria-label="派生材料来源"><h4>派生材料来源</h4><details><summary>来源绑定说明</summary><p className="muted">原件身份与原 Call 已按保存事实核对。这是保存的来源绑定，不是本次重新提取或对原件语义的认证。页码和提取文字由工具报告，不代表内容已核实；仅导航，不自动读取、重新解析或启动模型。</p></details><p>插件版本 {provenance.plugin_version} · {provenance.pages.length} 个页面索引 · {extractionCoverage(provenance.partial)}</p>{provenance.notice && <p role="status">{provenance.notice}</p>}<details><summary>宿主登记的来源事实</summary><dl>{sourceFacts(provenance).map(row => <div key={row.label}><dt>{row.label}</dt><dd className="mono">{row.value}</dd></div>)}</dl><p>这里只展示来源导航返回的字段；派发、执行与交付状态请查看原 Call，不从来源摘要推导全部业务已完成。</p></details><details><summary>各项来源字段在哪里</summary><dl>{sourceFieldLocations.map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.location}</dd></div>)}</dl><p>字段未返回不等于事实矛盾；尚未读取不能声称已经核对。精确参数在执行记录的 material.derived 原事件中按原 ID 查询。</p></details><button disabled={busy} onClick={() => setLinkedTarget({ kind: 'resource', id: provenance.input.id })}>查看派生原件</button><button disabled={busy} onClick={() => setOriginalCall(provenance.call_id)}>查看派生原 Call</button><details><summary>工具报告的页面字节索引</summary><p>start / end 为提取文本的 UTF-8 字节范围 [start, end)，不是原 PDF 的字节偏移。页码与文本语义均为工具报告，宿主只核对结构、边界及来源绑定。</p><pre>{JSON.stringify(provenance.pages, null, 2)}</pre></details></section>}
+    {showOriginal && followReferences && !!derivedResults?.items.length && <section aria-label="已有派生结果"><h4>已有派生结果（最近 20 项）</h4><details><summary>派生结果说明</summary><p className="muted">每次解析是独立结果，不覆盖旧结果。选择只读查看不会重新解析或调用模型。未标记部分结果也不保证语义完整；是否适合当前问题仍需读取结果判断。</p></details>{derivedResults.items.map((item, index) => <button key={item.resource_id} disabled={busy} onClick={() => setLinkedTarget({ kind: 'resource', id: item.resource_id })}>查看派生结果 {index + 1} · {item.partial ? '部分结果' : '工具未标记部分'} · v{item.plugin_version}</button>)}{derivedResults.truncated && <p>还有更早结果，请在事件记录中查询 material.derived；这里只显示最近 20 项。</p>}</section>}
+    {kind === 'resource' && (!materials || (textMaterial && showOriginal)) && <ReadDisclosure title="正文分段读取"><ContentReader key={selection.id} taskId={taskId} resourceId={selection.id} hasPages={!!provenance?.pages.length} /></ReadDisclosure>}
+    {showOriginal && linkedTarget && <RecordBrowser key={`${linkedTarget.kind}:${linkedTarget.id}:${linkedTarget.revision}`} taskId={taskId} kind={linkedTarget.kind} label={linkedTarget.kind === 'resource' ? '引用资源' : '引用数据'} initialId={linkedTarget.id} initialRevision={linkedTarget.revision} followReferences={false} />}
+    {showOriginal && originalCall && <RecordBrowser key={originalCall} taskId={taskId} kind="call" label="派生原 Call" initialId={originalCall} followReferences={false} />}
   </article>
-  return <section aria-label={label + '分页浏览'} className="record-browser">
-    <header className="section-heading"><h3>{label}</h3><button disabled={busy} onClick={() => void load()}>刷新{label}</button></header>
-    {!initialId && <div className="record-tools"><input type="search" aria-label={`搜索${label}已加载记录`} placeholder="搜索已加载记录…" value={query} onChange={e => setQuery(e.target.value)} />{statuses.length > 1 && <select aria-label={`${label}状态筛选`} value={status} onChange={e => setStatus(e.target.value)}><option value="all">全部状态</option>{statuses.map(value => <option key={value} value={value}>{stateLabel(value)}</option>)}</select>}</div>}
-    <details className="record-help"><summary>读取范围与记录说明</summary><p>每页最多 50 条，按创建顺序读取；无时间字段按保存顺序。列表为实时结果，最多保留最近加载的 200 项。搜索与状态筛选只覆盖已加载记录，查看不会执行或批准操作。</p>{['view_history', 'answer'].includes(kind) && <p>发布时保存的依据不代表材料已核实。未声明数据和可变引用目标不会递归冻结，不以当前数据替代历史。</p>}</details>
+  const listSearch = <input ref={materials ? materialSearch : undefined} type="search" aria-label={`搜索${label}已加载记录`} placeholder={materials ? '搜索已加载材料…' : '搜索已加载记录…'} value={query} onChange={event => setQuery(event.target.value)} />
+  return <section aria-label={label + '分页浏览'} className={materials ? 'record-browser material-list' : 'record-browser'}>
+    {materials ? <div className="record-tools material-list-tools">
+      <div className="material-search"><WorkspaceIcon name="search" />{listSearch}</div>
+      <button aria-label={`刷新${label}`} disabled={busy} onClick={() => { listVersion.current = materials.version; materials.onRefresh(); void load() }}>刷新列表</button>
+    </div> : <>
+      <header className="section-heading"><h3>{label}</h3><button disabled={busy} onClick={() => void load()}>刷新{label}</button></header>
+      {!initialId && <div className="record-tools">{listSearch}{statuses.length > 1 && <select aria-label={`${label}状态筛选`} value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option>{statuses.map(value => <option key={value} value={value}>{stateLabel(value)}</option>)}</select>}</div>}
+      <details className="record-help"><summary>读取范围与记录说明</summary><p>每页最多 50 条，按创建顺序读取；无时间字段按保存顺序。列表为实时结果，最多保留最近加载的 200 项。搜索与状态筛选只覆盖已加载记录，查看不会执行或批准操作。</p>{['view_history', 'answer'].includes(kind) && <p>发布时保存的依据不代表材料已核实。未声明数据和可变引用目标不会递归冻结，不以当前数据替代历史。</p>}</details>
+    </>}
     {initialRevision !== undefined && <p className="notice">引用绑定版本 r{initialRevision}；不自动跟随或保存旧版全文。查看当前版本不会修改引用。</p>}
     {error && <p role="alert" className="error">{error}。内容变化时请刷新列表并重新读取，不能拼接旧片段。</p>}
-    <div className="object-list record-rows">{filtered.map(item => <Fragment key={item.id}><button className="record-row" disabled={busy} aria-expanded={selection?.id === item.id} onClick={() => { if (selection?.id === item.id) { setSelection(null); setDetail(''); onComplete?.('') } else void read(item) }}><span className="record-row-main"><strong>{item.display_name ?? (kind === 'answer' ? `第 ${listedTotal - items.length + items.indexOf(item) + 1} 次提交` : item.kind ?? recordTitle(kind))}</strong><small className="mono">{item.id}</small></span><span className="record-row-meta">{formatTime(item.created_at)}{item.revision ? ` · r${item.revision}` : ''}{item.byte_length !== undefined ? ` · ${formatBytes(item.byte_length)}` : ''}<small>{stateLabel(item.state ?? item.decision ?? '')}{item.result ? ` · ${item.result}` : ''}</small></span><span aria-hidden="true" className="record-chevron">{selection?.id === item.id ? '⌄' : '›'}</span></button>{selection?.id === item.id && recordDetail}</Fragment>)}</div>
+    <div className="object-list record-rows">{filtered.map(item => {
+      const row = <button className="record-row" disabled={busy} aria-expanded={selection?.id === item.id} onClick={() => { if (selection?.id === item.id) { setSelection(null); setDetail(''); onComplete?.('') } else openItem(item) }}>
+        {materials && <WorkspaceIcon name="doc" />}
+        <span className="record-row-main"><strong>{item.display_name ?? (kind === 'answer' ? `第 ${listedTotal - items.length + items.indexOf(item) + 1} 次提交` : item.kind ?? recordTitle(kind))}</strong>{!materials && <small className="mono">{item.id}</small>}</span>
+        <span className="record-row-meta">{[formatTime(item.created_at), item.revision ? `r${item.revision}` : '', item.byte_length === undefined ? '' : formatBytes(item.byte_length)].filter(Boolean).join(' · ')}{!materials && <small>{stateLabel(item.state ?? item.decision ?? '')}{item.result ? ` · ${item.result}` : ''}</small>}</span>
+        <span aria-hidden="true" className="record-chevron">{selection?.id === item.id ? '⌄' : '›'}</span>
+      </button>
+      return <Fragment key={item.id}>
+        {materials ? <div className="material-list-row" role="group" aria-label={item.display_name ?? '材料'}>
+          {row}<button className="material-delete-button" disabled={busy} onClick={() => { setRemoveError(''); setRemoval(item) }}>删除</button>
+        </div> : row}
+        {selection?.id === item.id && recordDetail}
+      </Fragment>
+    })}</div>
+    {removal && <DialogFocus><div className="overlay"><section className="modal material-delete-dialog" role="dialog" aria-modal="true" aria-label="删除材料" onKeyDown={event => { if (event.key === 'Escape' && !removing) { event.stopPropagation(); setRemoval(null) } }}>
+      <h2>删除材料？</h2>
+      <p><strong>{removal.display_name ?? '此材料'}</strong>将从任务材料中移除。新请求不会再附带它，历史引用仍可查看。</p>
+      {removeError && <p role="alert" className="error">{removeError}</p>}
+      <div className="inline-actions"><button disabled={removing} onClick={() => setRemoval(null)}>取消</button><button className="material-delete-confirm" disabled={removing} onClick={() => void removeMaterial()}>{removing ? '正在删除…' : '确认删除'}</button></div>
+    </section></div></DialogFocus>}
     {initialId && !filtered.some(item => item.id === selection?.id) && recordDetail}
     {busy && !detail && <p className="record-caption">正在读取…</p>}
     {!busy && !filtered.length && !!items.length && <p role="status" className="muted">已加载记录中没有匹配项。</p>}
-    {cursor && <button className="record-more" disabled={busy} onClick={() => void load(true)}>加载更多{label}</button>}
-    {loaded && !items.length && <p role="status" className="muted">没有可用的{label}记录</p>}
-    {!!items.length && !cursor && <p role="status" className="record-caption">{label}已加载到底 · 已遍历 {listedTotal} 条，当前显示 {items.length} 条</p>}
+    {cursor && <button className="record-more" disabled={busy} onClick={() => void load(true)}>{materials ? '加载更多材料' : `加载更多${label}`}</button>}
+    {loaded && !items.length && <p role="status" className={materials ? 'material-empty' : 'muted'}>{materials ? '暂无材料' : `没有可用的${label}记录`}</p>}
+    {!materials && !!items.length && !cursor && <p role="status" className="record-caption">{label}已加载到底 · 已遍历 {listedTotal} 条，当前显示 {items.length} 条</p>}
   </section>
 }
 

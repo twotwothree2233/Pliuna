@@ -1,8 +1,8 @@
-import { openPending } from '../helpers/agent-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createServer } from 'node:net'
 import { createRequire } from 'node:module'
 import { modelServer, synthetic, textStream, hostToolStream } from '../helpers/model-server'
 import type { Bundle } from '../../src/shared/contracts.generated'
@@ -30,7 +30,7 @@ test('fixed preview, explicit answers, controlled overwrite, offline document an
     await expect(page.locator('.managed svg circle')).toHaveAttribute('r', '12'); await expect(page.locator('.managed math')).toBeVisible()
     await page.getByLabel('Private answer', { exact: true }).fill('PRIVATE_DRAFT_NEVER_EXPORT'); await expect(page.locator('.managed').getByRole('status')).toHaveText('已保存')
     const count = server.exchanges.length
-    await page.getByRole('button', { name: '导出', exact: true }).click(); await page.getByRole('button', { name: '固定快照并预览', exact: true }).click()
+    await page.getByRole('button', { name: '导出内容', exact: true }).click(); await page.getByRole('button', { name: '固定快照并预览', exact: true }).click()
     const preview = page.frameLocator('iframe[title="固定快照离线预览"]'); await expect(preview.getByText('OFFLINE_LEARNING', { exact: true })).toBeVisible(); await expect(preview.locator('textarea,input,button')).toHaveCount(0)
     const current = (await call({ type: 'export.list', task_id: task.id }))[0]
     expect((await call({ type: 'maintenance.status' })).phase).toBe('idle')
@@ -52,7 +52,7 @@ test('fixed preview, explicit answers, controlled overwrite, offline document an
   } finally { await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach(window => window.destroy())).catch(() => {}); await app.close().catch(() => {}); await server.close(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('View paging saves input; layout and removal retain history across restart', async () => {
+test('View paging is local to each client and saves input across layout changes and restart', async () => {
  let mode: 'create'|'layout'|'remove'='create', source:any, ids:string[]=[]
  const server=await modelServer(({body},res)=>{
   if(synthetic(body,res))return
@@ -63,7 +63,12 @@ test('View paging saves input; layout and removal retain history across restart'
   const operations=mode==='create'?Array.from({length:12},(_,index)=>({type:'view.create',client_ref:'lesson-'+index,slot_id:'main',bundle:{type:'inline',bundle:{...bundle,html:bundle.html.replace('OFFLINE_LEARNING','Lesson '+index)}}})):mode==='layout'?[{type:'layout.set',layout:{slots:[{slot_id:'main',groups:[{id:'reordered',mode:'responsive_columns',views:[...ids].reverse().map(view_id=>({type:'existing',view_id})),gap:'large',align:'start'}]}]}}]:[{type:'view.remove',view_id:source.views[0].id,expected_view_revision:source.views[0].revision,expected_state_revision:source.views[0].state_revision}]
   hostToolStream(res,'write',{type:'surface.update',surface_id:source.surface.id,expected_revision:source.surface.revision,operations})
  })
- const root=await mkdtemp(join(tmpdir(),'pliuna-daily-surface-')),launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_VIEW_REPLACEMENT:'1'}})
+ const listener = createServer()
+ await new Promise<void>((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve) })
+ const port = (listener.address() as { port: number }).port
+ await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()))
+ const webUrl = `http://127.0.0.1:${port}/`
+ const root=await mkdtemp(join(tmpdir(),'pliuna-daily-surface-')),launch=()=>electron.launch({executablePath,args:['.'],env:{...process.env,ELECTRON_RUN_AS_NODE:'',ELECTRON_RENDERER_URL:'',PLIUNA_TEST_DATA:root,PLIUNA_ENABLE_VIEW_REPLACEMENT:'1',PLIUNA_WEB:'desktop',PLIUNA_WEB_PORT:String(port)}})
  let app=await launch()
  try{
   let page=await app.firstWindow();const call=(request:unknown)=>page.evaluate(async r=>{const response=await window.pliuna.request(r as any);if(!response.ok)throw Error(response.error.code);return response.data as any},request)
@@ -72,11 +77,26 @@ test('View paging saves input; layout and removal retain history across restart'
   const task=(await call({type:'host.tasks'}))[0],snapshot=()=>call({type:'task.snapshot',task_id:task.id});source=await snapshot()
   await call({type:'task.submit',task_id:task.id,text:'Create twelve lessons',model_config_id:'daily',attachments:[]});await expect(page.getByText('DAILY_CREATE_ENDED',{exact:true})).toBeVisible();await expect(page.locator('.managed')).toHaveCount(10)
   await page.getByRole('button',{name:'下一页内容',exact:true}).click();await expect(page.locator('.managed')).toHaveCount(2);await expect(page.getByRole('heading',{name:'Lesson 10',exact:true})).toBeVisible()
+  await expect.poll(() => fetch(webUrl).then(response => response.status).catch(() => 0)).toBe(200)
+  const webWindow = app.waitForEvent('window')
+  await app.evaluate(({ BrowserWindow }, url) => { const window = new BrowserWindow({ show: false, width: 1440, height: 960, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } }); void window.loadURL(url) }, webUrl)
+  const web = await webWindow
+  await web.getByRole('button', { name: /Paged daily task/ }).click()
+  await expect(web.locator('.managed')).toHaveCount(10)
+  await web.getByRole('button', { name: '下一页内容', exact: true }).click()
+  await expect(web.locator('.managed')).toHaveCount(2)
   await page.locator('.managed').first().getByLabel('Private answer').fill('PAGE_TWO_SAVED');await page.getByRole('button',{name:'上一页内容',exact:true}).click();await expect(page.locator('.managed')).toHaveCount(10)
-  await page.getByRole('button',{name:'下一页内容',exact:true}).click();await expect(page.locator('.managed').first().getByLabel('Private answer')).toHaveValue('PAGE_TWO_SAVED');await page.getByRole('button',{name:'上一页内容',exact:true}).click()
-  mode='layout';source=await snapshot();await call({type:'task.submit',task_id:task.id,text:'Reorder lessons',model_config_id:'daily',attachments:[]});await openPending(page);await page.getByRole('button',{name:'批准本次动作',exact:true}).click();await openPending(page);await page.getByRole('button',{name:'保存输入并检查替换',exact:true}).click();await expect(page.getByText('DAILY_LAYOUT_ENDED',{exact:true})).toBeVisible();await expect(page.locator('.managed').first().getByRole('heading')).toHaveText('Lesson 11')
-  mode='remove';source=await snapshot();await call({type:'task.submit',task_id:task.id,text:'Remove the first View',model_config_id:'daily',attachments:[]});await openPending(page);await page.getByRole('button',{name:'批准本次动作',exact:true}).click();page.once('dialog',dialog=>dialog.dismiss());await openPending(page);await page.getByRole('button',{name:'保存输入并检查替换',exact:true}).click();await expect(page.getByText('DAILY_REMOVE_ENDED',{exact:true})).toBeVisible();expect((await snapshot()).view_page.total).toBe(12)
-  source=await snapshot();await call({type:'task.submit',task_id:task.id,text:'Explicit new request: remove the first View',model_config_id:'daily',attachments:[]});await openPending(page);await page.getByRole('button',{name:'批准本次动作',exact:true}).click();page.once('dialog',dialog=>dialog.accept());await openPending(page);await page.getByRole('button',{name:'保存输入并检查替换',exact:true}).click();await expect.poll(async()=>(await snapshot()).view_page.total).toBe(11);await expect(page.locator('.managed').first().getByRole('heading')).toHaveText('Lesson 10');await expect(page.locator('.managed').first().getByLabel('Private answer')).toHaveValue('PAGE_TWO_SAVED')
+  await expect(web.locator('.managed').first().getByLabel('Private answer')).toHaveValue('PAGE_TWO_SAVED')
+  await (await app.browserWindow(web)).evaluate(window => window.destroy())
+  await page.getByRole('button',{name:'下一页内容',exact:true}).click();await expect(page.locator('.managed').first().getByLabel('Private answer')).toHaveValue('PAGE_TWO_SAVED')
+  const approve = () => page.getByRole('button', { name: '批准', exact: true }).click()
+  const discard = page.getByRole('region', { name: '待确认草稿' })
+  mode='layout';source=await snapshot();await call({type:'task.submit',task_id:task.id,text:'Reorder lessons',model_config_id:'daily',attachments:[]});
+  await approve();await expect(page.getByText('DAILY_LAYOUT_ENDED',{exact:true})).toBeVisible();await expect(page.locator('.managed').first().getByRole('heading')).toHaveText('Lesson 1')
+  await page.getByRole('button',{name:'上一页内容',exact:true}).click();await expect(page.locator('.managed').first().getByRole('heading')).toHaveText('Lesson 11')
+  mode='remove';source=await snapshot();await call({type:'task.submit',task_id:task.id,text:'Remove the first View',model_config_id:'daily',attachments:[]});await approve();await discard.getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByText('DAILY_REMOVE_ENDED',{exact:true})).toBeVisible();expect((await snapshot()).view_page.total).toBe(12)
+  source=await snapshot();await call({type:'task.submit',task_id:task.id,text:'Explicit new request: remove the first View',model_config_id:'daily',attachments:[]});await approve();await discard.getByRole('button',{name:'确认清空',exact:true}).click();await expect.poll(async()=>(await snapshot()).view_page.total).toBe(11);await expect(page.locator('.managed').first().getByRole('heading')).toHaveText('Lesson 10');await expect(page.locator('.managed').first().getByLabel('Private answer')).toHaveValue('PAGE_TWO_SAVED')
+  await expect.poll(async () => (await snapshot()).runs[0]?.state).toBe('completed')
   const history=await call({type:'task.query',task_id:task.id,query:{type:'list',input:{kind:'view_history',limit:50}}});expect(history.items).toHaveLength(12)
   const count=server.exchanges.length;await app.close();app=await launch();page=await app.firstWindow();await page.getByRole('button',{name:/Paged daily task/}).click();await expect(page.locator('.managed').first().getByRole('heading')).toHaveText('Lesson 10');await expect(page.locator('.managed').first().getByLabel('Private answer')).toHaveValue('PAGE_TWO_SAVED');expect(server.exchanges).toHaveLength(count)
  }finally{await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().forEach(window=>window.destroy())).catch(()=>{});await app.close().catch(()=>{});await server.close();await rm(root,{recursive:true,force:true})}

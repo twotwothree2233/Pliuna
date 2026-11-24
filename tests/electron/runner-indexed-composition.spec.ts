@@ -5,19 +5,18 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { configureModel, chooseTheme } from '../helpers/settings-ui'
 import { frame, modelInputFromHost, modelServer, synthetic } from '../helpers/model-server'
 import type { Bundle } from '../../src/shared/contracts.generated'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, GoalRevision, HostRequest, Outline, OutlineSection, RunnerProjection, Snapshot, WorkDependency } from '../../src/shared/types'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, HostRequest, Outline, OutlineSection, LiveFlowSnapshot, RunnerProjection, Snapshot, WorkDependency } from '../../src/shared/types'
 
 const require = createRequire(import.meta.url), executablePath: string = require('electron')
 type RunnerLimits = typeof import('../../src/runtime/runner/limits').RUNNER_LIMITS
 
-function complete(response: ServerResponse, delta: object, finish: 'stop' | 'tool_calls') {
+function complete(response: ServerResponse, delta: object, finish: 'stop' | 'tool_calls', cached?: number) {
   response.writeHead(200, { 'content-type': 'text/event-stream' })
-  response.end(frame({ role: 'assistant', ...delta }) + `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finish }], usage: { prompt_tokens: 400, completion_tokens: 80 } })}\n\n` + 'data: [DONE]\n\n')
+  response.end(frame({ role: 'assistant', ...delta }) + `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finish }], usage: { prompt_tokens: 400, completion_tokens: 80, ...(cached === undefined ? {} : { prompt_tokens_details: { cached_tokens: cached } }) } })}\n\n` + 'data: [DONE]\n\n')
 }
-function textStream(response: ServerResponse, text: string) { complete(response, { content: text }, 'stop') }
+function textStream(response: ServerResponse, text: string, cached?: number) { complete(response, { content: text }, 'stop', cached) }
 function hostToolStream(response: ServerResponse, name: 'write', input: unknown, text = '', id = 'wire-call-1') {
   complete(response, { content: text, tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(modelInputFromHost(name, input)) } }] }, 'tool_calls')
 }
@@ -32,194 +31,11 @@ async function runnerLimits(): Promise<RunnerLimits> {
   return loaded.exports.RUNNER_LIMITS
 }
 
-test('controlled dual goals keep approval, final answers and immutable input reconciliation separate', async () => {
-  test.setTimeout(90000)
-  let alphaData = ''
-  const toolResults: unknown[] = []
-  const held: { beta: ServerResponse | null; corrected: ServerResponse | null } = { beta: null, corrected: null }
-  const server = await modelServer(({ body }, response) => {
-    if (synthetic(body, response)) return
-    const messages = JSON.stringify(body.messages)
-    if (messages.includes('BETA_CORRECTED')) { held.corrected = response; return }
-    if (messages.includes('GOAL_BETA')) { held.beta = response; return }
-    if (messages.includes('GOAL_ALPHA')) {
-      const last = body.messages.at(-1)
-      if (last.role === 'tool') toolResults.push({ id: last.tool_call_id, result: JSON.parse(last.content) })
-      if (last.role !== 'tool') {
-        hostToolStream(response, 'write', { type: 'task_data.create', data: { schema: { type: 'string' }, value: 'ALPHA_SAVED_ORIGINAL', references: [] } }, '', 'alpha-create')
-      } else if (last.tool_call_id === 'alpha-create') {
-        const result = JSON.parse(last.content)
-        expect(result).toMatchObject({ execution: 'success', data: { id: expect.any(String) } })
-        alphaData = result.data.id
-        hostToolStream(response, 'write', { type: 'task_data.remove', id: alphaData, expected_revision: 1 }, '', 'alpha-remove')
-      } else textStream(response, 'ALPHA_FINAL_AFTER_APPROVAL')
-      return
-    }
-    response.writeHead(400); response.end('Unexpected isolated runner input')
-  })
-  const directory = await mkdtemp(join(tmpdir(), 'pliuna-runner-desktop-'))
-  const app = await electron.launch({ executablePath, args: ['.'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '', ELECTRON_RENDERER_URL: '', PLIUNA_TEST_DATA: directory, PLIUNA_TEST_RUNNER: 'dual' } })
-  try {
-    const page = await app.firstWindow(), errors: string[] = []
-    page.on('pageerror', error => errors.push(error.message))
-    await page.setViewportSize({ width: 1440, height: 960 })
-    const agent = page.locator('#pane-right'), center = page.getByRole('main')
-    const call = async <T,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
-      const response = await window.pliuna.request(request)
-      if (!response.ok) throw Error(response.error.code)
-      return response.data as T
-    }, request)
-    await configureModel(page, { id: 'runner-main', url: server.url, key: 'isolated-runner-key', model: 'runner-wire', context: 100000, output: 4096 })
-    await call({ type: 'model.test', model_id: 'runner-main', role: 'main', confirm_cost: true })
-    await page.getByRole('button', { name: '创建第一个任务' }).click()
-    await page.getByLabel('任务名称').fill('并行目标实际归属验收')
-    await page.getByRole('button', { name: '创建任务', exact: true }).click()
-    const task = (await call<{ id: string }[]>({ type: 'host.tasks' }))[0]!.id
-    const input = page.getByLabel('想从哪里开始？'), send = page.getByRole('button', { name: '发送消息', exact: true })
-    await input.fill('GOAL_ALPHA：申请删除刚创建的研究记录，保留审批。'); await send.click()
-    const goals = agent.getByRole('region', { name: '各目标状态' })
-    await expect(goals).toContainText('等待你批准').catch(async error => {
-      await test.info().attach('runner-initial-state', { body: JSON.stringify({ snapshot: await call<Snapshot>({ type: 'task.snapshot', task_id: task }), toolResults }, null, 2), contentType: 'application/json' })
-      throw error
-    })
-    await input.fill('GOAL_BETA：整理独立结论。'); await send.click()
-    await expect.poll(() => Boolean(held.beta)).toBe(true)
-    let status = await call<RunnerProjection>({ type: 'host.runner.status', task_id: task, limit: 16 })
-    expect(status.goals).toHaveLength(2)
-    const alpha = status.goals.find(goal => goal.title.includes('GOAL_ALPHA'))!, beta = status.goals.find(goal => goal.title.includes('GOAL_BETA'))!
-    expect(alpha.waits).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'approval', approval_id: expect.any(String) })]))
-    expect(['running', 'waiting']).toContain(beta.run?.state)
-    expect(beta.waits.every(wait => wait.reason !== 'approval')).toBe(true)
-    const alphaRow = goals.locator(':scope > ul > li').filter({ hasText: 'GOAL_ALPHA' }), betaRow = goals.locator(':scope > ul > li').filter({ hasText: 'GOAL_BETA' })
-    await expect(betaRow).toContainText('正在执行')
-    await alphaRow.getByRole('button', { name: '查看并处理', exact: true }).click()
-    await expect(page.getByRole('dialog', { name: '待处理事项' })).toContainText('移除任务数据')
-    await page.getByRole('button', { name: '关闭弹窗', exact: true }).click()
-    textStream(held.beta!, 'BETA_FINAL_FIRST：A 等待批准时，B 的结论可提前阅读。'); held.beta = null
-    const reply = agent.getByRole('region', { name: '任务回复' })
-    await expect(reply).toContainText('BETA_FINAL_FIRST')
-    await expect(center).not.toContainText('BETA_FINAL_FIRST')
-    await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
-    await expect(center.getByRole('heading', { name: '尚无已发布内容', exact: true })).toBeVisible()
-    await expect(center.locator('.managed')).toHaveCount(0)
-    expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals.find(goal => goal.request_id === alpha.request_id)?.run?.state).toBe('waiting')
-    const beforeQuery = server.exchanges.length
-    await betaRow.getByRole('button', { name: '查看状态', exact: true }).click()
-    status = await call<RunnerProjection>({ type: 'host.runner.status', task_id: task, request_id: beta.request_id, limit: 1 })
-    expect(status.goals[0]!.intent_revision).toBe(1)
-    expect(server.exchanges).toHaveLength(beforeQuery)
-    await app.evaluate(({ ipcMain }) => {
-      const handlers = (ipcMain as any)._invokeHandlers, original = handlers.get('pliuna:request')
-      const state = { inputs: [] as unknown[], rejected: false }; (globalThis as any).__runnerCorrectionRejection = state
-      handlers.set('pliuna:request', async (event: unknown, request: HostRequest) => {
-        if (request.type === 'host.runner.input' && request.kind === 'correction') {
-          state.inputs.push(structuredClone(request))
-          if (!state.rejected) {
-            state.rejected = true
-            return { ok: false, error: { code: 'INVALID_INPUT', message: 'Correction input requires nonempty bounded text' } }
-          }
-        }
-        return original(event, request)
-      })
-    })
-    await betaRow.getByRole('button', { name: '纠正目标', exact: true }).click()
-    const correction = betaRow.getByLabel('修改此目标的要求')
-    await correction.fill('汉'.repeat(90000))
-    await betaRow.getByRole('button', { name: '保存目标修改', exact: true }).click()
-    await expect(betaRow).toContainText('目标修改过长，请缩短后再提交')
-    await expect(correction).toBeEnabled()
-    await expect(betaRow.getByRole('button', { name: '返回', exact: true })).toBeVisible()
-    expect(await page.evaluate(({ task, request }) => localStorage.getItem(`pliuna.runner-input:${task}:${request}`), { task, request: beta.request_id })).toBeNull()
-    expect(await app.evaluate(() => (globalThis as any).__runnerCorrectionRejection.inputs.length)).toBe(0)
-    expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task, request_id: beta.request_id, limit: 1 })).goals[0]!.intent_revision).toBe(1)
-    await correction.fill('BETA_CORRECTED：增加事实年份。')
-    await betaRow.getByRole('button', { name: '保存目标修改', exact: true }).click()
-    await expect(betaRow).toContainText('操作尚未接收。请修改后重新提交。')
-    await expect(correction).toBeEnabled()
-    await expect(correction).toHaveValue('BETA_CORRECTED：增加事实年份。')
-    await expect(betaRow.getByRole('button', { name: '返回', exact: true })).toBeVisible()
-    expect(await page.evaluate(({ task, request }) => localStorage.getItem(`pliuna.runner-input:${task}:${request}`), { task, request: beta.request_id })).toBeNull()
-    expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task, request_id: beta.request_id, limit: 1 })).goals[0]!.intent_revision).toBe(1)
-    await correction.fill('BETA_CORRECTED：增加事实年份与来源。')
-    await betaRow.getByRole('button', { name: '保存目标修改', exact: true }).click()
-    await expect.poll(() => Boolean(held.corrected)).toBe(true)
-    const corrections = await app.evaluate(() => (globalThis as any).__runnerCorrectionRejection.inputs) as Extract<HostRequest, { type: 'host.runner.input' }>[]
-    expect(corrections).toHaveLength(2)
-    expect(corrections[0]!.input_event_id).not.toBe(corrections[1]!.input_event_id)
-    await expect(reply).not.toContainText('BETA_FINAL_FIRST')
-    status = await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })
-    expect(status.goals.find(goal => goal.request_id === alpha.request_id)).toMatchObject({ intent_revision: 1, run: { id: alpha.run!.id, state: 'waiting' } })
-    expect(status.goals.find(goal => goal.request_id === beta.request_id)).toMatchObject({ intent_revision: 2 })
-    textStream(held.corrected!, 'BETA_FINAL_CORRECTED：当前修订的最终结论。'); held.corrected = null
-    await expect(reply).toContainText('BETA_FINAL_CORRECTED')
-    await expect(center).not.toContainText('BETA_FINAL_CORRECTED')
-    const currentBeta = (await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals.find(goal => goal.request_id === beta.request_id)!
-    const saved = await call<{ data: { payload: { purpose: string; text: string; request_id: string; intent_revision: number } } }>({ type: 'task.query', task_id: task, query: { type: 'read', input: { target: { kind: 'event', id: currentBeta.reply!.id } } } })
-    expect(saved.data.payload).toMatchObject({ purpose: 'final_answer', request_id: beta.request_id, intent_revision: 2, text: 'BETA_FINAL_CORRECTED：当前修订的最终结论。' })
-    // Lose the first accepted cancellation receipt at the real Electron IPC boundary.
-    await app.evaluate(({ ipcMain }) => {
-      const handlers = (ipcMain as any)._invokeHandlers, original = handlers.get('pliuna:request')
-      const state = { inputs: [] as unknown[], lost: false }; (globalThis as any).__runnerInputReconciliation = state
-      handlers.set('pliuna:request', async (event: unknown, request: HostRequest) => {
-        if (request.type === 'host.runner.input') state.inputs.push(structuredClone(request))
-        const result = await original(event, request)
-        if (request.type === 'host.runner.input' && request.kind === 'cancel_run' && result.ok && !state.lost) {
-          state.lost = true
-          return { ok: false, error: { code: 'CONNECTION_LOST', message: 'Isolated accepted input receipt was lost' } }
-        }
-        return result
-      })
-    })
-    await alphaRow.getByRole('button', { name: '停止此目标', exact: true }).click()
-    await alphaRow.getByRole('button', { name: '确认停止此目标', exact: true }).click()
-    await expect(alphaRow.getByRole('button', { name: '核对原操作', exact: true })).toBeVisible()
-    await alphaRow.getByRole('button', { name: '核对原操作', exact: true }).click()
-    await expect(alphaRow).toContainText('执行已停止')
-    const cancellations = await app.evaluate(() => (globalThis as any).__runnerInputReconciliation.inputs) as Extract<HostRequest, { type: 'host.runner.input' }>[]
-    expect(cancellations).toHaveLength(2)
-    expect(cancellations[0]).toEqual(cancellations[1])
-    expect(cancellations[0]).toMatchObject({ kind: 'cancel_run', task_id: task, request_id: alpha.request_id, run_id: alpha.run!.id })
-    expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals.find(goal => goal.request_id === beta.request_id)?.reply?.id).toBe(currentBeta.reply!.id)
-    await alphaRow.getByRole('button', { name: '撤回目标', exact: true }).click()
-    await expect(alphaRow).toContainText('已发布内容继续保留')
-    expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals.find(goal => goal.request_id === alpha.request_id)?.state).toBe('active')
-    await alphaRow.getByRole('button', { name: '确认撤回目标', exact: true }).click()
-    await expect(alphaRow).toContainText('已退出当前成稿范围')
-    const snapshot = await call<Snapshot>({ type: 'task.snapshot', task_id: task })
-    expect(snapshot.runner?.scope?.required_goal_count).toBe(1)
-    expect(snapshot.task_data.total).toBe(1)
-    await expect(reply).toContainText('BETA_FINAL_CORRECTED')
-    for (const theme of ['graphite', 'midnight']) {
-      await chooseTheme(page, theme)
-      for (const width of [1440, 390]) {
-        await page.setViewportSize({ width, height: 960 })
-        // ResizeObserver must install the new docking state before we decide
-        // whether the Agent drawer needs to be opened.
-        const rightDock = page.locator('[role="separator"][aria-controls="pane-right"]')
-        if (width === 1440) await expect(rightDock).toBeVisible()
-        else await expect(rightDock).toBeHidden()
-        if (await page.locator('#pane-right').isHidden()) await page.locator('#toggle-right').click()
-        await expect(goals).toBeVisible()
-        await expect(reply).toContainText('BETA_FINAL_CORRECTED')
-        await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-        expect(await page.locator('.agent').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-      }
-      await page.setViewportSize({ width: 1440, height: 960 })
-    }
-    await page.screenshot({ path: test.info().outputPath('runner-goals-actual-store.png') })
-    expect(errors).toEqual([])
-  } finally {
-    held.beta?.destroy(); held.corrected?.destroy()
-    await app.close(); await server.close(); await rm(directory, { recursive: true, force: true })
-  }
-})
-
 interface ProducerBinding {
   owner: ExecutionScope
   plan_revision: number
   dependencies: WorkDependency[]
-  goal: GoalRevision
+  goal: ContentPlan
   requirement_ids: string[]
   sections: OutlineSection[]
 }
@@ -251,6 +67,7 @@ test('real resources reach the working copy through bounded model Collators whil
     expect(bytes).toBeLessThan(256 * 1024)
   }
   const held: { alpha: ServerResponse | null; beta: ServerResponse | null } = { alpha: null, beta: null }
+  let alphaLayout: { response: ServerResponse; complete: () => void } | undefined
   const collators: { request: string; snapshot: CollatorSnapshot }[] = []
   const sourceResources = new Map<string, string>()
   const createResource = (response: ServerResponse, name: 'ALPHA' | 'BETA') => hostToolStream(response, 'write', {
@@ -269,7 +86,10 @@ test('real resources reach the working copy through bounded model Collators whil
           return { artifact: { task_id: index.task_id, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision }, section_id: section.section_id, section_position_revision: section.position_revision, order_key: section.order_key, slot_id: 'main', layout_mode: 'column', width_constraint: index.width_constraint }
         })
       }
-      textStream(response, JSON.stringify(plan)); return
+      if (collators.length === 1) {
+        alphaLayout = { response, complete: () => textStream(response, JSON.stringify(plan)) }
+      } else textStream(response, JSON.stringify(plan))
+      return
     }
     const current = [...body.messages].reverse().find((message: any) => message.role === 'user')
     const request = JSON.parse(current.content).request as string
@@ -278,6 +98,10 @@ test('real resources reach the working copy through bounded model Collators whil
     const last = body.messages.at(-1)
     if (last.role !== 'tool') { held[name === 'ALPHA' ? 'alpha' : 'beta'] = response; return }
     const result = JSON.parse(last.content)
+    if (last.tool_call_id === 'beta-create') {
+      hostToolStream(response, 'write', { type: 'task_data.remove', id: result.data.id, expected_revision: 1 }, '', 'beta-remove'); return
+    }
+    if (last.tool_call_id === 'beta-remove') { createResource(response, 'BETA'); return }
     expect(result).toMatchObject({ execution: 'success', data: { id: expect.any(String) } })
     const resource = result.data.id as string
     const system = body.messages.find((message: any) => message.role === 'system' && message.content.includes('Bound data: ')).content as string
@@ -302,7 +126,7 @@ test('real resources reach the working copy through bounded model Collators whil
     await page.setViewportSize({ width: 1440, height: 960 })
     const agent = page.locator('#pane-right'), center = page.getByRole('main')
     const workingCopy = agent.getByRole('region', { name: '当前成稿状态' })
-    const reply = agent.getByRole('region', { name: '任务回复' })
+    const reply = agent.getByRole('region', { name: '任务对话' })
     const call = async <T,>(request: HostRequest): Promise<T> => page.evaluate(async request => {
       const response = await window.pliuna.request(request)
       if (!response.ok) throw Error(response.error.code)
@@ -320,35 +144,99 @@ test('real resources reach the working copy through bounded model Collators whil
     await input.fill('RESOURCE_BETA：独立完成第二章，稍后发布。'); await send.click()
     await expect.poll(() => Boolean(held.beta)).toBe(true)
     expect((await call<RunnerProjection>({ type: 'host.runner.status', task_id: task })).goals).toHaveLength(2)
+    const flowTab = page.getByRole('tab', { name: '执行流程', exact: true }), contentTab = page.getByRole('tab', { name: /^内容/ })
+    const graph = page.getByRole('region', { name: '实时执行流程', exact: true })
+    const workerLane = graph.getByRole('region', { name: 'Worker', exact: true })
+    const collatorLane = graph.getByRole('region', { name: 'Collator', exact: true })
+    const message = (name: string) => reply.getByRole('article', { name: '你的消息' }).filter({ hasText: name })
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    const agentTabs = agent.getByRole('navigation', { name: 'Agent 视图' })
+    const agentRecords = () => agentTabs.getByRole('button', { name: '执行记录', exact: true }).click()
+    const agentChat = () => agentTabs.getByRole('button', { name: '对话', exact: true }).click()
+    await message('RESOURCE_ALPHA').getByRole('button', { name: '执行详情' }).press('Enter')
+    await page.getByRole('dialog', { name: '本次请求详情' }).getByRole('button', { name: '查看此执行流程' }).press('Enter')
+    await expect(flowTab).toHaveAttribute('aria-selected', 'true')
+    await expect(workerLane.locator('.flow-card')).toHaveCount(2)
+    await expect(workerLane.locator('.flow-card[aria-pressed=true]')).toBeFocused()
+    await expect(graph.locator('.flow-packet')).toHaveCount(0)
+    await graph.evaluate(element => {
+      document.body.dataset.flowEmissions = '[]'
+      new MutationObserver(changes => {
+        const ids = JSON.parse(document.body.dataset.flowEmissions ?? '[]') as string[]
+        for (const change of changes) for (const added of change.addedNodes) if (added instanceof Element) {
+          const packets = added.matches('.flow-packet') ? [added] : [...added.querySelectorAll('.flow-packet')]
+          for (const packet of packets) ids.push(packet.closest<HTMLElement>('[data-kind]')?.dataset.kind ?? '')
+        }
+        document.body.dataset.flowEmissions = JSON.stringify(ids)
+      }).observe(element, { childList: true, subtree: true })
+    })
+    await page.setViewportSize({ width: 575, height: 760 })
+    await expect(graph).toBeVisible()
+    await expect(page.getByRole('navigation', { name: '工作区视图' })).toBeVisible()
+    expect(await graph.evaluate(el => [...el.querySelectorAll('.flow-lane')].every(node => node.getBoundingClientRect().left === el.querySelector('.flow-lane')!.getBoundingClientRect().left))).toBe(true)
     createResource(held.alpha!, 'ALPHA'); held.alpha = null
+    await expect.poll(() => Boolean(alphaLayout)).toBe(true)
+    const alphaBatch = collators[0]!.snapshot.batch
+    const alphaCard = graph.locator(`[data-flow-id="batch:${alphaBatch.batch_id}"].flow-card`)
+    await expect(collatorLane.locator('.flow-card')).toHaveCount(1)
+    await expect(alphaCard).toContainText('排版中')
+    await expect(alphaCard).toContainText('Worker → Collator')
+    await expect(graph.getByRole('heading', { name: '实时执行流程' })).toBeFocused()
+    hostToolStream(held.beta!, 'write', { type: 'task_data.create', data: { schema: { type: 'string' }, value: 'BETA_PENDING_APPROVAL', references: [] } }, '', 'beta-create')
+    held.beta = null
+    const betaCard = workerLane.locator('.flow-card[data-state="approval"]')
+    await expect(betaCard).toBeVisible()
+    const betaKey = await betaCard.getAttribute('data-flow-id')
+    const beta = workerLane.locator(`[data-flow-id="${betaKey}"]`)
+    await beta.focus()
+    await expect(alphaCard).toContainText('排版中')
+    await expect(beta).toBeFocused()
+    await page.screenshot({ path: test.info().outputPath('runner-flow-concurrent.png') })
+    alphaLayout!.complete()
+    await expect(graph.getByRole('region', { name: 'Host', exact: true }).locator('.flow-card')).toContainText('Collator → Host')
+    await expect(beta).toBeFocused()
     const snapshot = () => call<Snapshot>({ type: 'task.snapshot', task_id: task })
-    const publishThroughHost = async (count: number) => {
+    const publishThroughHost = async (count: number, actionId?: string) => {
       await expect.poll(async () => {
         const current = await snapshot()
-        for (const approval of current.approvals.filter(approval => approval.decision === 'pending' && approval.validity === 'valid')) {
+        for (const approval of current.approvals.filter(approval => approval.decision === 'pending' && approval.validity === 'valid' && (!actionId || approval.action_id === actionId))) {
           await call({ type: 'approval.decide', task_id: task, approval_id: approval.id, decision: 'approve' })
         }
-        for (const update of (await snapshot()).surface_updates) {
+        for (const update of (await snapshot()).surface_updates.filter(update => !actionId || update.action_id === actionId)) {
           await call({ type: 'surface.respond', task_id: task, action_id: update.action_id, proceed: true, confirm_discard: false })
         }
         return (await snapshot()).views.length
       }, { timeout: 30000, intervals: [100, 200, 500] }).toBe(count)
       return snapshot()
     }
-    const first = await publishThroughHost(1), alpha = first.views[0]!
+    const first = await publishThroughHost(1, alphaBatch.action_id), alpha = first.views[0]!
+    await expect(alphaCard).toHaveCount(0)
+    await expect(beta).toContainText('待审批')
+    await expect(beta).toBeFocused()
+    await expect(graph.locator('.flow-packet')).toHaveCount(0)
+    const emissions = await page.evaluate(() => JSON.parse(document.body.dataset.flowEmissions ?? '[]'))
+    expect(emissions.filter((kind: string) => kind === 'indexes')).toHaveLength(1)
+    expect(emissions.filter((kind: string) => kind === 'plan')).toHaveLength(1)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await contentTab.click(); await flowTab.click()
+    await expect(beta).toContainText('Router → Worker')
+    await expect(graph.locator('.flow-packet')).toHaveCount(0)
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await contentTab.click()
     await expect(center.getByRole('heading', { name: 'ALPHA_PUBLISHED', exact: true })).toBeVisible()
     await expect(center.getByRole('heading', { name: 'BETA_PUBLISHED', exact: true })).toHaveCount(0)
     await expect(center.getByRole('heading', { name: '尚无已发布内容', exact: true })).toHaveCount(0)
+    await agentRecords()
     await expect(workingCopy).toContainText('渐进工作版')
-    await reply.getByRole('combobox', { name: '选择目标' }).selectOption(first.runner!.goals.find(goal => goal.title.startsWith('RESOURCE_ALPHA'))!.request_id)
-    await expect(reply).toContainText('任务已完成，内容已发布。')
-    await expect(reply).not.toContainText('ALPHA_FINAL_ANSWER')
+    await agentChat()
+    await expect(reply).toContainText('内容已发布。')
+    await expect(reply).toContainText('ALPHA_FINAL_ANSWER')
     await expect(center).not.toContainText('ALPHA_FINAL_ANSWER')
     await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
-    expect(first.runner?.scope).toMatchObject({ required_goal_count: 2, published_count: 1 })
+    expect(first.runner?.scope).toMatchObject({ required_content_count: 2, published_count: 1 })
     expect(first.runner!.scope!.unresolved_count).toBeGreaterThan(0)
     expect(first.runner!.scope!.state).not.toBe('complete')
-    expect(held.beta).not.toBeNull()
+    await expect(message('RESOURCE_BETA').locator('.approval-card')).toContainText('移除任务数据')
     const beforeExport = server.exchanges.length
     const operation = await call<{ id: string }>({ type: 'export.prepare', task_id: task, answer_ids: [], view_ids: [alpha.id], expected_revision: first.surface.revision })
     await expect.poll(async () => (await call<{ phase: string }>({ type: 'export.status', task_id: task, operation_id: operation.id })).phase).toBe('preview')
@@ -360,21 +248,21 @@ test('real resources reach the working copy through bounded model Collators whil
     expect(frozen.selection).toMatchObject({ state: 'partial', target_count: 2, published_count: 1, surface_revision: first.surface.revision })
     expect(frozen.selection.unresolved_count).toBeGreaterThan(0)
     expect(server.exchanges).toHaveLength(beforeExport)
-    createResource(held.beta!, 'BETA'); held.beta = null
+    await message('RESOURCE_BETA').getByRole('button', { name: '批准', exact: true }).click()
     const complete = await publishThroughHost(2)
     await expect(center.getByRole('heading', { name: 'BETA_PUBLISHED', exact: true })).toBeVisible()
     await expect(center.getByRole('heading', { name: 'ALPHA_PUBLISHED', exact: true })).toBeVisible()
+    await agentRecords()
     await expect(workingCopy).toContainText('当前成稿已完整')
-    const beta = complete.runner!.goals.find(goal => goal.title.startsWith('RESOURCE_BETA'))!
-    await reply.getByRole('combobox', { name: '选择目标' }).selectOption(beta.request_id)
-    await expect(reply).toContainText('任务已完成，内容已发布。')
-    await expect(reply).not.toContainText('BETA_FINAL_ANSWER')
+    await agentChat()
+    await expect(reply).toContainText('内容已发布。')
+    await expect(reply).toContainText('BETA_FINAL_ANSWER')
     await expect(center).not.toContainText('BETA_FINAL_ANSWER')
     await expect(center.locator('.task-reply, .runner-working-copy, .runner-goals')).toHaveCount(0)
     expect(complete.surface.id).toBe(first.surface.id)
     expect(complete.surface.revision).toBeGreaterThan(first.surface.revision)
     expect(complete.views.find(view => view.id === alpha.id)).toMatchObject({ id: alpha.id, revision: alpha.revision, state_revision: alpha.state_revision, bundle: alpha.bundle })
-    expect(complete.runner?.scope).toMatchObject({ state: 'complete', required_goal_count: 2, unresolved_count: 0, pending_update_count: 0, published_count: 2 })
+    expect(complete.runner?.scope).toMatchObject({ state: 'complete', required_content_count: 2, unresolved_count: 0, pending_update_count: 0, published_count: 2 })
     expect(complete.runner!.scope!.composition_version).toBeGreaterThan(first.runner!.scope!.composition_version)
     const afterProduction = server.exchanges.length
     const retained = await call<ExportPreview>({ type: 'export.preview', task_id: task, operation_id: operation.id })
@@ -392,9 +280,14 @@ test('real resources reach the working copy through bounded model Collators whil
       for (const index of snapshot.indexes) expect(index.bundle_resource_id).toBe(sourceResources.get(index.work_id))
     }
     await page.screenshot({ path: test.info().outputPath('runner-resource-composition-actual-store.png') })
+    const live = await call<LiveFlowSnapshot>({ type: 'host.runner.flow', task_id: task })
+    expect(Object.values(live.lanes).every(lane => lane.total === 0)).toBe(true)
+    await flowTab.click()
+    await expect(graph.getByText('当前没有正在执行的工作')).toBeVisible()
+    await expect(graph.locator('.flow-card')).toHaveCount(0)
     expect(errors).toEqual([])
   } finally {
-    held.alpha?.destroy(); held.beta?.destroy()
+    held.alpha?.destroy(); held.beta?.destroy(); alphaLayout?.response.destroy()
     await app.close(); await server.close(); await rm(directory, { recursive: true, force: true })
   }
 })

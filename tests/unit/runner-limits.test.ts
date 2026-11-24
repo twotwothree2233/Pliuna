@@ -90,7 +90,7 @@ it('bounds batch size and merges while the first publishable fragment is schedul
 it('bounds progress observation, evidence and diagnostic frequency overrides', () => {
   expect(progressObservationConfig()).toEqual(RUNNER_LIMITS.progress)
   expect(progressObservationConfig({ window_ms: 1000, diagnosis_interval_ms: 10000 })).toMatchObject({ window_ms: 1000, diagnosis_interval_ms: 10000 })
-  for (const overrides of [{ window_ms: 300001 }, { diagnosis_interval_ms: 9999 }, { diagnosis_per_window: 9 }, { evidence_max_calls: 257 }, { stalled_success_threshold: 65 }, { repeated_failure_threshold: 1 }]) {
+  for (const overrides of [{ window_ms: 300001 }, { diagnosis_interval_ms: 9999 }, { diagnosis_per_window: 9 }, { evidence_max_calls: 257 }, { stalled_repeat_threshold: 64 }, { repeated_failure_threshold: 1 }]) {
     expect(() => progressObservationConfig(overrides)).toThrow(expect.objectContaining({ code: 'INVALID_REQUEST' }))
   }
   expect(Object.isFrozen(progressObservationConfig())).toBe(true)

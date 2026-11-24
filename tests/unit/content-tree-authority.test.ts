@@ -17,8 +17,7 @@ function setup(html = '<h2>A</h2><p>First</p><p>Second</p><h2>B</h2><p>Outside</
   db.pragma('foreign_keys=ON'); db.exec(coreSql); db.exec(runnerSql)
   db.exec("INSERT INTO tasks(id,title,state,revision) VALUES ('task','Task','active',1); INSERT INTO requests VALUES ('goal','task','started','{}','{}','time'); INSERT INTO records VALUES ('record','task',1,'message.user','{}','time'); INSERT INTO runner_inputs VALUES ('input','task','record','request','{}','time')")
   const goal = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [] }
-  db.prepare('INSERT INTO runner_goal_revisions VALUES (?,?,?,?,?)').run('task', 'goal', 1, 'input', JSON.stringify(goal))
-  db.exec("INSERT INTO runner_goal_heads VALUES ('task','goal',1)")
+  db.prepare('INSERT INTO runner_content_plans VALUES (?,?,?,?,?)').run('task', 'goal', 1, 'input', JSON.stringify(goal))
   for (const id of ['original', 'candidate', 'assembled', 'published-2']) {
     db.prepare("INSERT INTO resources VALUES (?,?,'fixture',0,'application/json','Body','time')").run(id, id)
     db.prepare("INSERT INTO task_resources VALUES ('task',?)").run(id)

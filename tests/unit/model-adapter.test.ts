@@ -14,6 +14,12 @@ afterEach(async () => { for (const close of cleanups.splice(0)) await close() })
 const config = (url: string): ModelConfiguration => ({ id: 'configured', base_url: url, wire_model_id: 'exact-model-id', context_tokens: 100000, max_output_tokens: 1024, compatibility_profile: 'chat-max-tokens' })
 const tool = [{ type: 'function' as const, function: { name: 'list', description: 'list', parameters: { type: 'object' } } }]
 describe('Chat Completions wire adapter via real HTTP', () => {
+  it.each([0, 10, undefined, -1, 21, 1.5, '10'])('retains only valid reported cached input (%s)', async cached => {
+    const usage = { prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: cached }, cached_tokens: 18 }
+    const adapter = new ChatAdapter(async () => new Response(frame({ content: 'ok' }, 'stop') + `data: ${JSON.stringify({ choices: [], usage })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } }))
+    const response = await adapter.complete(config('https://example.invalid'), '', [], undefined, new AbortController().signal)
+    expect(response.usage).toEqual({ prompt_tokens: 20, completion_tokens: 4, ...(cached === 0 || cached === 10 ? { cached_prompt_tokens: cached } : {}) })
+  })
   it('reports safe outer JSON coordinates without dispatching or exposing input', async () => {
     const payload = '{\n"private":"PRIVATE_SENTINEL",\n"x": }'
     const adapter = new ChatAdapter(async () => new Response(frame({ tool_calls: [{ index: 0, id: 'c', type: 'function', function: { name: 'write', arguments: payload } }] }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
@@ -111,7 +117,7 @@ describe('Chat Completions wire adapter via real HTTP', () => {
   it('explains classified errors without suggesting insecure TLS or automatic retries', () => {
     expect(modelErrorMessage(new Error('MODEL_AUTHENTICATION: Runtime operation failed'))).toContain('检查 API Key')
     expect(modelErrorMessage(new Error('MODEL_NETWORK_ERROR: failure'))).toContain('不要关闭 TLS')
-    expect(modelErrorMessage(new Error('MODEL_CANCELLED'))).toContain('未启用')
+    expect(modelErrorMessage(new Error('MODEL_CANCELLED'))).toContain('请求已取消')
   })
   it('assembles UTF-8 and fragmented indexed tool calls only after terminal response', async () => {
     const server = await modelServer((_x, res) => {
@@ -152,15 +158,21 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     const result = new ChatAdapter().complete(config(server.url), '', [], undefined, controller.signal, () => controller.abort())
     await expect(result).rejects.toMatchObject({ code: 'MODEL_CANCELLED', partial: true })
   })
-  it('does not enable a configuration before explicit role tests', async () => {
-    const server = await modelServer(({ body }, res) => { synthetic(body, res) }); cleanups.push(server.close)
+  it('keeps connectivity optional for normal use and requires an approval role result', async () => {
+    const server = await modelServer(({ body }, res) => { if (!synthetic(body, res)) res.end(JSON.stringify({ choices: [] })) }); cleanups.push(server.close)
     const service = new ModelService(); service.configure({ type: 'model.configure', configuration: config(server.url), api_key: 'secret-sentinel', confirm_memory_only: true })
-    expect(() => service.acquire('configured', 'main')).toThrow('explicit synthetic test')
-    await service.test('configured', 'main'); const lease = service.acquire('configured', 'main')
+    const lease = service.acquire('configured', 'main')
     expect(() => service.remove('configured')).toThrow('occupied')
     expect(JSON.stringify(service.list())).not.toContain('secret-sentinel')
-    expect(() => service.acquire('configured', 'approval')).toThrow()
-    lease.release(); service.remove('configured'); service.close()
+    service.acquire('configured', 'compaction').release()
+    expect(() => service.acquire('configured', 'approval')).toThrow(expect.objectContaining({ code: 'APPROVAL_MODEL_UNVERIFIED' }))
+    expect(server.exchanges).toHaveLength(0)
+    lease.release()
+    await service.testConnection('configured')
+    expect(() => service.acquire('configured', 'approval')).toThrow(expect.objectContaining({ code: 'APPROVAL_MODEL_UNVERIFIED' }))
+    await service.test('configured', 'approval')
+    service.acquire('configured', 'approval').release()
+    service.remove('configured'); service.close()
   })
   it('keeps max_completion_tokens mapping explicit and does not guess from model name', async () => {
     const server = await modelServer((_x, res) => textStream(res, 'ok')); cleanups.push(server.close)
@@ -209,7 +221,7 @@ describe('real API connection onboarding and cancellable role tests', () => {
       expect(server.exchanges.every(e => e.body.max_tokens === config(server.url).max_output_tokens)).toBe(true)
     } finally { service.close() }
   })
-  for (const failure of ['text-command', 'wrong-target', 'wrong-approval']) it('leaves the role closed for ' + failure, async () => {
+  for (const failure of ['text-command', 'wrong-target', 'wrong-approval']) it('does not record a capability sample for ' + failure, async () => {
     const server = await modelServer((_x, res) => {
       if (failure === 'text-command') textStream(res, 'PLIUNA_OK list({"kind":"capability"})')
       else if (failure === 'wrong-target') hostToolStream(res, 'list', { kind: 'task' })
@@ -219,7 +231,9 @@ describe('real API connection onboarding and cancellable role tests', () => {
     try {
       service.configure({ type: 'model.configure', configuration: config(server.url), api_key: '', confirm_memory_only: true })
       await expect(service.test('configured', role)).rejects.toBeDefined()
-      expect(() => service.acquire('configured', role)).toThrow('explicit synthetic test')
+      expect(service.list()).toMatchObject([{ roles: [] }])
+      if (role === 'approval') expect(() => service.acquire('configured', role)).toThrow(expect.objectContaining({ code: 'APPROVAL_MODEL_UNVERIFIED' }))
+      else service.acquire('configured', role).release()
       expect(server.exchanges).toHaveLength(1)
     } finally { service.close() }
   })
@@ -234,7 +248,8 @@ describe('real API connection onboarding and cancellable role tests', () => {
       service.cancel('cancel-test')
       expect(() => service.remove('configured')).toThrow('occupied')
       await expect(testing).rejects.toMatchObject({ code: 'MODEL_CANCELLED' })
-      expect(() => service.acquire('configured', 'main')).toThrow('explicit synthetic test')
+      expect(service.list()).toMatchObject([{ roles: [] }])
+      service.acquire('configured', 'main').release()
       hanging = false; await service.test('configured', 'main', 'cancel-test')
       expect(() => service.cancel('cancel-test')).toThrow('already ended')
     } finally { service.close() }
@@ -245,7 +260,8 @@ describe('real API connection onboarding and cancellable role tests', () => {
     try {
       service.configure({ type: 'model.configure', configuration: { ...config(server.url), limits: { request_timeout_ms: 30 } }, api_key: '', confirm_memory_only: true })
       await expect(service.test('configured', 'main', 'timeout')).rejects.toMatchObject({ code: 'MODEL_TIMEOUT' })
-      expect(() => service.acquire('configured', 'main')).toThrow('explicit synthetic test')
+      expect(service.list()).toMatchObject([{ roles: [] }])
+      service.acquire('configured', 'main').release()
     } finally { service.close() }
   })
   it('rejects whitespace credentials before sending and never silently truncates a large directory', async () => {
@@ -298,14 +314,15 @@ describe('configuration locks and role capability invalidation', () => {
     for (const release of releases) release(); await Promise.all(blockers)
     expect(server.exchanges).toHaveLength(count); lease.release()
   })
-  it('allows an idle unshared configuration to change its channel and requires a fresh role test', async () => {
+  it('allows editing idle connections without requiring a fresh capability sample', async () => {
     const server = await modelServer(({ body }, res) => { synthetic(body, res) }); cleanups.push(server.close)
     const service = new ModelService(), c = config(server.url)
     try {
       service.configure({ type: 'model.configure', configuration: c, api_key: 'old-key', confirm_memory_only: true })
       await service.test(c.id, 'main')
       expect(() => service.configure({ type: 'model.configure', configuration: { ...c, compatibility_profile: 'chat-max-completion-tokens' }, api_key: 'new-key', confirm_memory_only: true })).not.toThrow()
-      expect(() => service.acquire(c.id, 'main')).toThrow('explicit synthetic test')
+      expect(service.list()).toMatchObject([{ roles: [] }])
+      service.acquire(c.id, 'main').release()
       await service.test(c.id, 'main')
       expect(server.exchanges.at(-1)!.authorization).toBe('Bearer new-key')
     } finally { service.close() }
@@ -325,7 +342,7 @@ describe('configuration locks and role capability invalidation', () => {
     const service = new ModelService(), c = config(server.url)
     service.configure({ type: 'model.configure', configuration: c, api_key: '', confirm_memory_only: true }); await service.test(c.id, 'main')
     service.configure({ type: 'model.configure', configuration: { ...c, wire_model_id: 'changed-model' }, api_key: '', confirm_memory_only: true })
-    expect(() => service.acquire(c.id, 'main')).toThrow('explicit synthetic test'); service.close()
+    expect(service.list()).toMatchObject([{ roles: [] }]); service.acquire(c.id, 'main').release(); service.close()
   })
 })
 

@@ -35,6 +35,12 @@ export function decodeModelInput(text: string, layer = 'input_json'): unknown {
 // Presentation options are ephemeral; the validated execution contract stays unchanged.
 export function modelToolRequest(name: string, raw: unknown): ModelRequest {
   if (Buffer.byteLength(JSON.stringify(raw) ?? '') > defaults.transport.rpc_message_bytes) fail('Model wire exceeds transport limit')
+  // Some providers serialize the resource's structured input as JSON text.
+  // Route exactly that representation through the existing encoded-input validator.
+  if (name === 'write' && object(raw) && raw.operation === 'resource.create' && typeof raw.input === 'string' && !Object.hasOwn(raw, 'input_json')) {
+    const { input, ...rest } = raw
+    raw = { ...rest, input_json: input }
+  }
   const check = validators.get(name)
   if (!check || !check(raw)) fail(check ? inputDiagnostic(check.errors, raw, check.schema) : 'Unknown tool')
   const value = raw as Record<string, any>

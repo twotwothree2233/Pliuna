@@ -17,8 +17,7 @@ function setup(mapped = true) {
   db.pragma('foreign_keys=ON'); db.exec(coreSql); db.exec(runnerSql)
   db.exec("INSERT INTO tasks(id,title,state,revision,next_sequence) VALUES ('task','Task','active',1,2); INSERT INTO requests VALUES ('goal','task','started','{}','{}','time'); INSERT INTO records VALUES ('record','task',1,'message.user','{}','time'); INSERT INTO runner_inputs VALUES ('input','task','record','request','{}','time')")
   const goal = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [] }
-  db.prepare('INSERT INTO runner_goal_revisions VALUES (?,?,?,?,?)').run('task', 'goal', 1, 'input', JSON.stringify(goal))
-  db.exec("INSERT INTO runner_goal_heads VALUES ('task','goal',1)")
+  db.prepare('INSERT INTO runner_content_plans VALUES (?,?,?,?,?)').run('task', 'goal', 1, 'input', JSON.stringify(goal))
   for (const id of ['original', 'candidate', 'assembled']) {
     db.prepare("INSERT INTO resources VALUES (?,?,'fixture',0,'application/json','Body','time')").run(id, id)
     db.prepare("INSERT INTO task_resources VALUES ('task',?)").run(id)
@@ -121,8 +120,7 @@ describe('chapter host admission and recovery', () => {
 
   it('does not bind an older published artifact to a newer goal revision', () => {
     const { db, host, goal } = setup(false); publishedSource(db)
-    db.prepare("INSERT INTO runner_goal_revisions VALUES ('task','goal',2,'input',?)").run(JSON.stringify({ ...goal, intent_revision: 2, previous_revision: 1 }))
-    db.exec("UPDATE runner_goal_heads SET intent_revision=2 WHERE request_id='goal'")
+    db.prepare("INSERT INTO runner_content_plans VALUES ('task','goal',2,'input',?)").run(JSON.stringify({ ...goal, intent_revision: 2, previous_revision: 1 }))
     expect(() => host.map('task', 'view', 1)).toThrow(expect.objectContaining({ code: 'CHAPTER_MAPPING_REQUIRED' }))
     expect(host.state.manifest('task', 'view')).toBeNull()
   })

@@ -4,12 +4,15 @@ import defaults from '../shared/contracts/development-defaults.json'
 import type { ModelRequest } from '../shared/contracts.generated'
 import { ContractError } from '../shared/validation'
 import { readPluginResource, readResourceContent } from './plugins/resource-reader'
-import { accountingPage, readRequestAccounting } from './model/accounting-query'
+import { accountingPage, readRequestAccounting, usagePosition, usageSummary } from './model/accounting-query'
+import type { RunUsageSummary, TaskListItem, TaskUsageSummary } from '../shared/types'
 import { operationContract, operationDirectory, contractRepresentation } from './model/operation-contracts'
 import { modelReadOptions } from './model/tool-input'
 import { readTextSelection } from './plugins/text-selection'
 import { RepresentationPager } from './model/representation'
 import { runnerFailureReason } from './runner/failure-reason'
+import { materialRemoved } from './material-removals'
+import { conversationPage, conversationText } from './runner/conversation-query'
 
 type Row = Record<string, any>
 type Query = Extract<ModelRequest, { type: 'list' | 'read' }>
@@ -34,8 +37,10 @@ const directories: Record<string, { from: string; scope: string; time?: string; 
 export class ObjectQueries {
   private secret = randomBytes(32)
   private pager = new RepresentationPager()
+  private organizationVersion = 0
+  private usage = new Map<string, TaskUsageSummary>()
   constructor(private db: Database.Database, private readView: (row: Row) => Row, private definition: (id: string) => Row | undefined, private readResource: (row: Row) => Row, private readHistory: (row: Row) => Row, private readText?: (row: Row, offset: number) => Row, private pluginRoot?: string, private checkPluginResource?: (row: Row) => void, private provenance?: (task: string, resource: string) => Row | null, private derivedResults?: (task: string, resource: string) => Row, private exportCheck?: (task: string, row: Row) => Row) {}
-  rebind(db: Database.Database): void { this.db = db; this.secret = randomBytes(32); this.pager.reset() }
+  rebind(db: Database.Database): void { this.db = db; this.secret = randomBytes(32); this.pager.reset(); this.usage.clear() }
   private token(binding: string, position: unknown): string {
     const body = Buffer.from(JSON.stringify([binding, position])).toString('base64url')
     return body + '.' + createHmac('sha256', this.secret).update(body).digest('base64url')
@@ -65,16 +70,79 @@ export class ObjectQueries {
     const page = accountingPage(this.db, task, run, through, previous?.[1] ?? 0)
     return { version: 1, consistency: 'snapshot', through_sequence: through, requests: page.requests, next_cursor: page.next_after === null ? null : this.token(binding, [through, page.next_after, anchor]), complete: page.next_after === null, notice: 'Only this fixed snapshot is covered. Refresh for new requests or late usage. Missing usage is unknown, never zero; no automatic retry.' }
   }
-  query(taskId: string, source: string, request: Query, globalTasks = false, signal?: AbortSignal): unknown {
+  runUsage(task: string, run: string): RunUsageSummary {
+    if (!this.db.prepare('SELECT id FROM runs WHERE task_id=? AND id=?').get(task, run)) fail('NOT_FOUND', 'Run unavailable within current task')
+    return { ...this.usageFor(task, run), run_id: run }
+  }
+  taskUsage(task: string): TaskUsageSummary { return this.usageFor(task) }
+  private usageFor(task: string, run?: string): TaskUsageSummary {
+    const key = JSON.stringify([task, run]), through = usagePosition(this.db, task, run), previous = this.usage.get(key)
+    if (previous?.through_sequence === through) return previous
+    const next = usageSummary(this.db, task, through, run)
+    if (this.usage.size >= 64) this.usage.delete(this.usage.keys().next().value!)
+    this.usage.set(key, next)
+    return next
+  }
+  taskOrganizationChanged(): void { this.organizationVersion++ }
+  messages(task: string, before?: string, after?: string, through?: number, limit?: number) {
+    return conversationPage(this.db, task, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, before, after, through, limit)
+  }
+  messageText(task: string, id: string, cursor?: string) {
+    return conversationText(this.db, task, id, { read: (binding, value) => this.position(value, binding), write: (binding, value) => this.token(binding, value) }, cursor)
+  }
+  taskPage(input: Extract<Query, { type: 'list' }>['input'], archived: boolean, discardActions: readonly string[]): unknown {
+    const { status, name_query } = input.filters ?? {}
+    if (Object.keys(input.filters ?? {}).some(key => !['status', 'name_query'].includes(key))) fail('UNSUPPORTED_FILTER', 'Filter is not defined for the task directory')
+    const limit = input.limit ?? defaults.list.default_items
+    const binding = hash(['host-task-page', archived, name_query, status, limit, this.organizationVersion]).slice(0, 22)
+    const from = 'tasks t LEFT JOIN task_organization o ON o.task_id=t.id'
+    const withDiscardActions = 'WITH discard_actions AS (SELECT value AS id FROM json_each(?))'
+    const sortKey = archived ? 'COALESCE(o.archived_at,0)' : 'COALESCE(o.pin_order,0)'
+    let where = "t.state!='deleting' AND COALESCE(o.archived,0)=?"
+    const args: unknown[] = [JSON.stringify(discardActions), Number(archived)]
+    if (name_query !== undefined) { where += ' AND instr(lower(t.title),lower(?))>0'; args.push(name_query) }
+    const phase = `CASE WHEN t.state!='active' THEN 'ready'
+      WHEN EXISTS(SELECT 1 FROM requests q WHERE q.task_id=t.id AND q.state='confirmation_required')
+        OR EXISTS(SELECT 1 FROM approvals a JOIN actions ac ON ac.id=a.action_id
+          WHERE ac.task_id=t.id AND a.decision='pending' AND a.validity='valid' AND a.handling='awaiting_human')
+        OR EXISTS(SELECT 1 FROM discard_actions d JOIN actions ac ON ac.id=d.id
+          WHERE ac.task_id=t.id AND ac.state='waiting' AND ac.wait_reason='surface_host' AND ac.commit_valid=1) THEN 'review'
+      WHEN EXISTS(SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.state IN ('running','waiting'))
+        OR EXISTS(SELECT 1 FROM requests q WHERE q.task_id=t.id AND q.state='queued') THEN 'running'
+      ELSE 'ready' END`
+    if (status === 'workspace_review' || status === 'workspace_running') {
+      where += ` AND (${phase})=?`; args.push(status.slice('workspace_'.length))
+    } else if (status !== undefined) { where += ' AND t.state=?'; args.push(status) }
+    if (input.cursor) {
+      const [rowid, id, order] = this.position(input.cursor, binding)
+      const anchor = this.db.prepare(`${withDiscardActions} SELECT t.id,${sortKey} AS sort_key FROM ${from} WHERE ${where} AND t.rowid=?`).get(...args, rowid) as { id: string; sort_key: number } | undefined
+      if (!anchor || anchor.id !== id || anchor.sort_key !== order) fail('INVALID_CURSOR', 'Task page anchor changed; restart this query')
+      where += ` AND (${sortKey}<? OR (${sortKey}=? AND t.rowid>?))`; args.push(order, order, rowid)
+    }
+    const rows = this.db.prepare(`${withDiscardActions} SELECT t.id,t.title,t.state,t.revision,t.rowid AS rowid,${sortKey} AS sort_key,o.pin_order IS NOT NULL AS pinned,o.archived_at,(${phase}) AS phase,
+      (SELECT created_at FROM records WHERE task_id=t.id ORDER BY sequence DESC LIMIT 1) AS last_activity_at
+      FROM ${from} WHERE ${where} ORDER BY sort_key DESC,t.rowid LIMIT ?`).all(...args, limit + 1) as (Omit<TaskListItem, 'archived' | 'pinned'> & { rowid: number; sort_key: number; pinned: number })[]
+    const items: TaskListItem[] = []
+    let bytes = 0
+    for (const { rowid: _rowid, sort_key: _sortKey, pinned, ...row } of rows.slice(0, limit)) {
+      const item = { ...row, pinned: pinned === 1, archived }, size = Buffer.byteLength(JSON.stringify(item))
+      if (items.length && bytes + size > defaults.read.text_bytes / 2) break
+      bytes += size; items.push(item)
+    }
+    const last = rows[items.length - 1]
+    return { items, next_cursor: last && rows.length > items.length ? this.token(binding, [last.rowid, last.id, last.sort_key]) : null, consistency: 'live' }
+  }
+  query(taskId: string, source: string, request: Query, signal?: AbortSignal): unknown {
     if (signal?.aborted) fail('MODEL_CANCELLED', 'Read cancelled; no write was performed')
     const kind = request.type === 'list' ? request.input.kind : request.input.target.kind
     const descriptor = directories[kind]
     if (!descriptor && !['object_type', 'plugin', 'capability', 'summary'].includes(kind)) fail('UNSUPPORTED_QUERY', 'Object directory is not enabled')
-    const binding = hash([source, taskId, request.type, kind, request.type === 'list' ? request.input.filters ?? {} : request.input.target, globalTasks]).slice(0, 22)
-    let where = globalTasks ? "o.state!='deleting'" : descriptor?.scope ?? ''
-    const args: unknown[] = globalTasks ? [] : [taskId]
+    const binding = hash([source, taskId, request.type, kind, request.type === 'list' ? request.input.filters ?? {} : request.input.target]).slice(0, 22)
+    let where = descriptor?.scope ?? ''
+    const args: unknown[] = [taskId]
     if (descriptor?.extra) where += ' AND ' + descriptor.extra
     if (request.type === 'list') {
+      if (kind === 'resource') where += ' AND NOT ' + materialRemoved('t.task_id', 'o.id')
       const filters = request.input.filters ?? {}
       for (const [key, value] of Object.entries(filters)) {
         if (key === 'status' && descriptor?.status) { where += ` AND ${descriptor.status}=?`; args.push(value) }

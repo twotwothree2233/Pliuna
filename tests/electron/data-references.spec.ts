@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { _electron as electron, expect, test } from '@playwright/test'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -52,7 +53,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
       await expect(page.getByText(text === '创建版本引用' ? '版本引用已保存' : new RegExp('^' + text + '结果：'), { exact: true })).toBeVisible()
     }
     await send('创建版本引用')
-    await page.getByRole('tab', { name: /任务数据/ }).click()
+    await openTaskRecords(page, '任务数据')
     const data = page.getByRole('region', { name: '全部任务数据分页浏览' })
     const openSource = async () => { await data.getByRole('button', { name: '刷新全部任务数据', exact: true }).click(); await data.getByRole('button', { name: new RegExp(source) }).click(); await data.getByRole('button', { name: '查看引用数据：依据 · 绑定 r1', exact: true }).click() }
     await openSource()
@@ -69,7 +70,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     expect(JSON.parse((await data.locator(':scope > .record-rows > article > .record-raw > pre').textContent())!).references[0].target.expected_revision).toBe(1)
     await send('尝试受保护移除')
     expect(blockedCode).toBe('OBJECT_REFERENCED')
-    await expect(page.getByRole('button', { name: '批准本次动作', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '批准', exact: true })).toHaveCount(0)
     await send('解除引用', '批准')
     await send('拒绝移除', '拒绝')
     await data.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
@@ -82,7 +83,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     const requests = server.exchanges.length
     await app.close(); app = await launch(); page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message))
     await page.getByRole('button', { name: /版本引用与安全移除/ }).click()
-    await page.getByRole('tab', { name: /执行记录/ }).click()
+    await openTaskRecords(page, '执行记录')
     await page.locator('.execution-category > summary').filter({ hasText: /^原动作$/ }).click()
     const actions = page.getByRole('region', { name: '原动作分页浏览' })
     await actions.getByRole('button', { name: '刷新原动作', exact: true }).click()
@@ -90,7 +91,7 @@ test('versioned data references: stale navigation, blocked removal, unlink/deny/
     await expect(actions.locator('pre')).toContainText('"removed": true')
     await actions.getByRole('button', { name: '重新查询原记录', exact: true }).click()
     await expect(actions.locator('pre')).toContainText('"removed_revision": 2')
-    await page.getByRole('tab', { name: /任务数据/ }).click()
+    await openTaskRecords(page, '任务数据')
     const restored = page.getByRole('region', { name: '全部任务数据分页浏览' })
     await restored.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     await expect(restored.getByRole('button', { name: new RegExp(target) })).toHaveCount(0)

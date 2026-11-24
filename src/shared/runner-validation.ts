@@ -1,6 +1,6 @@
 import type {
   ArtifactCandidate, ArtifactIndex, ChapterDependency, ChapterInheritance, ChapterIntent, ChapterManifest, ChapterOwnership, ChapterProposal, ChapterPublication, ChapterRegion, ChapterReplacement, ChapterUpdate, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
-  ExecutionAttempt, ExecutionScope, GoalRevision, InputEvent, LogicalWork, Outline, OutlineSection, OutcomeRequirement,
+  ExecutionAttempt, ExecutionScope, ContentPlan, InputEvent, LogicalWork, Outline, OutlineSection, OutcomeRequirement,
   PresentationPlan, PublicationEntry, PublicationManifest, RunnerRun, WorkDependency, WorkOutputDeclaration
 } from './contracts.generated'
 import { assertContract, ContractError } from './validation'
@@ -11,7 +11,7 @@ export interface RunnerContractTypes {
   runner_input_event: InputEvent
   runner_consumption_stage: ConsumptionStage
   runner_outcome_requirement: OutcomeRequirement
-  runner_goal_revision: GoalRevision
+  runner_content_plan: ContentPlan
   runner_work_dependency: WorkDependency
   runner_run: RunnerRun
   runner_logical_work: LogicalWork
@@ -54,7 +54,7 @@ function invalid(message: string): never { throw new ContractError('INVALID_RUNN
 function ownership(): never { throw new ContractError('RUNNER_OWNERSHIP_INVALID', 'Execution source, task, goal or exact input version is no longer valid') }
 const unique = (values: string[], field: string): void => { if (new Set(values).size !== values.length) invalid(`Duplicate ${field}`) }
 
-type GoalIdentity = Pick<GoalRevision, 'task_id' | 'request_id' | 'intent_revision'>
+type GoalIdentity = Pick<ContentPlan, 'task_id' | 'request_id' | 'intent_revision'>
 function sameGoal(owner: GoalIdentity, reference: GoalIdentity): void {
   if (owner.task_id !== reference.task_id || owner.request_id !== reference.request_id || owner.intent_revision !== reference.intent_revision) ownership()
 }
@@ -121,7 +121,7 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
   if ('dependencies' in object) unique(object.dependencies.map(dependencyKey), 'work dependencies')
   if ('input_versions' in object) unique(object.input_versions.map(dependencyKey), 'attempt inputs')
   if ('requirement_ids' in object) unique(object.requirement_ids, 'requirements')
-  if (definition === 'runner_goal_revision') {
+  if (definition === 'runner_content_plan') {
     unique(object.requirements.map((item: OutcomeRequirement) => item.requirement_id), 'requirements')
     if (object.previous_revision !== undefined && object.previous_revision >= object.intent_revision) invalid('Goal revision must advance its predecessor')
   }
@@ -303,7 +303,7 @@ function contentTree(tree: ContentTree): void {
 export interface ArtifactAcceptanceContext {
   task_id: string
   runtime_epoch: string
-  goal: GoalRevision
+  goal: ContentPlan
   run: RunnerRun
   work: LogicalWork
   attempt: ExecutionAttempt
@@ -314,7 +314,7 @@ export interface ArtifactAcceptanceContext {
 
 export function validateArtifactCandidate(value: unknown, context: ArtifactAcceptanceContext): ArtifactCandidate {
   const candidate = validateRunnerContract('runner_artifact_candidate', value)
-  const goal = validateRunnerContract('runner_goal_revision', context.goal)
+  const goal = validateRunnerContract('runner_content_plan', context.goal)
   const run = validateRunnerContract('runner_run', context.run)
   const work = validateRunnerContract('runner_logical_work', context.work)
   const attempt = validateRunnerContract('runner_execution_attempt', context.attempt)

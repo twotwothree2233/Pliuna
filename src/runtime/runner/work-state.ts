@@ -1,6 +1,6 @@
 import { types } from 'node:util'
 import type Database from 'better-sqlite3'
-import type { ConsumptionStage, ExecutionAttempt, GoalRevision, InputEvent, LogicalWork, RunnerRun, WorkDependency } from '../../shared/contracts.generated'
+import type { ConsumptionStage, ExecutionAttempt, ContentPlan, InputEvent, LogicalWork, RunnerRun, WorkDependency } from '../../shared/contracts.generated'
 import { sameDependencies, validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { RunnerBudgetLedger } from './budget'
@@ -16,7 +16,7 @@ export interface InputConsumption<T = unknown> {
   input_event_id: string; task_id: string; stage: ConsumptionStage; result: T; installed_at: string
 }
 export interface QualifiedAttempt {
-  task_id: string; runtime_epoch: string; run: RunnerRun; work: LogicalWork; attempt: ExecutionAttempt; goal?: GoalRevision
+  task_id: string; runtime_epoch: string; run: RunnerRun; work: LogicalWork; attempt: ExecutionAttempt; goal?: ContentPlan
 }
 export type WorkCause = NonNullable<LogicalWork['root_cause']>
 const stages: ConsumptionStage[] = ['received', 'routed', 'installed']
@@ -52,7 +52,7 @@ function equivalent(left: unknown, right: unknown): boolean {
 }
 function sameSource(left: RunnerRun | LogicalWork | ExecutionAttempt, right: RunnerRun | LogicalWork | ExecutionAttempt): boolean {
   return left.task_id === right.task_id && left.purpose === right.purpose && (left.purpose === 'production' && right.purpose === 'production'
-    ? left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.update_id === right.update_id
+    ? left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.update_id === right.update_id && left.message_id === right.message_id
     : left.purpose === 'composition' && right.purpose === 'composition' && left.batch_id === right.batch_id && left.composition_version === right.composition_version && left.trigger_request_id === right.trigger_request_id)
 }
 function attemptBinding(value: ExecutionAttempt): unknown {
@@ -73,7 +73,7 @@ export class RunnerWorkState {
     assertRunnerId(epoch, 'runtime_epoch')
   }
 
-  private payload<K extends 'runner_input_event' | 'runner_goal_revision' | 'runner_run' | 'runner_logical_work' | 'runner_execution_attempt'>(definition: K, row: PayloadRow | undefined) {
+  private payload<K extends 'runner_input_event' | 'runner_content_plan' | 'runner_run' | 'runner_logical_work' | 'runner_execution_attempt'>(definition: K, row: PayloadRow | undefined) {
     if (!row) fail('RUNNER_NOT_FOUND', 'Runner state does not exist')
     return validateRunnerContract(definition, JSON.parse(row.payload_json))
   }
@@ -142,30 +142,74 @@ export class RunnerWorkState {
     }).immediate()
   }
 
-  goal(requestId: string, revision?: number): GoalRevision {
-    const row = revision === undefined
-      ? this.db.prepare('SELECT r.payload_json FROM runner_goal_heads h JOIN runner_goal_revisions r ON r.request_id=h.request_id AND r.intent_revision=h.intent_revision WHERE h.request_id=?').get(requestId)
-      : this.db.prepare('SELECT payload_json FROM runner_goal_revisions WHERE request_id=? AND intent_revision=?').get(requestId, revision)
-    return this.payload('runner_goal_revision', row as PayloadRow | undefined)
+  goal(requestId: string, revision?: number): ContentPlan {
+    const query = revision === undefined ? 'runner_current_content_plans' : 'runner_content_plans'
+    const row = this.db.prepare(`SELECT p.payload_json FROM ${query} p WHERE p.request_id=?
+      ${revision === undefined ? '' : 'AND p.intent_revision=?'} AND NOT EXISTS (
+        SELECT 1 FROM runner_content_removals d WHERE d.task_id=p.task_id AND d.request_id=p.request_id AND d.intent_revision=p.intent_revision
+      )`).get(requestId, ...(revision === undefined ? [] : [revision]))
+    return this.payload('runner_content_plan', row as PayloadRow | undefined)
   }
 
-  installGoal(raw: GoalRevision, expectedRevision: number | null = raw.previous_revision ?? null): GoalRevision {
-    const goal = validateRunnerContract('runner_goal_revision', raw)
+  /** Only explicit deliverables contribute requirements. The installed plan is immutable. */
+  installContentPlan(input: InputEvent): ContentPlan {
+    const plan = validateRunnerContract('runner_content_plan', {
+      task_id: input.task_id, request_id: input.request_id, input_event_id: input.input_event_id,
+      intent_revision: 1, state: 'active',
+      requirements: [{ requirement_id: 'content', kind: 'artifact', required: true, provenance_required: false }]
+    })
     return this.db.transaction(() => {
-      const existing = this.db.prepare('SELECT payload_json FROM runner_goal_revisions WHERE request_id=? AND intent_revision=?').get(goal.request_id, goal.intent_revision) as PayloadRow | undefined
+      this.activeTask(input.task_id)
+      const source = this.input(input.input_event_id)
+      const message = this.db.prepare(`SELECT r.id FROM requests q JOIN records r ON r.task_id=q.task_id AND r.id=json_extract(q.input_json,'$.user_record_id')
+        WHERE q.task_id=? AND q.id=? AND q.state='started' AND json_extract(q.input_json,'$.content_plan')=1
+          AND r.kind='message.user' AND json_extract(r.payload_json,'$.request_id')=q.id`).get(input.task_id, plan.request_id) as { id: string } | undefined
+      if (source.kind !== 'request' || source.task_id !== plan.task_id || source.request_id !== plan.request_id || source.record_id !== message?.id) fail('RUNNER_OWNERSHIP_INVALID', 'Content plan requires the accepted production message')
+      const previous = this.db.prepare('SELECT payload_json FROM runner_content_plans WHERE task_id=? AND request_id=? AND intent_revision=1').get(plan.task_id, plan.request_id) as PayloadRow | undefined
+      if (previous && !equivalent(JSON.parse(previous.payload_json), plan)) fail('RUNNER_PLAN_CONFLICT', 'An installed content plan is immutable')
+      if (!previous) this.db.prepare('INSERT INTO runner_content_plans(task_id,request_id,intent_revision,input_event_id,payload_json) VALUES (?,?,?,?,?)').run(plan.task_id, plan.request_id, plan.intent_revision, plan.input_event_id, json(plan))
+      return plan
+    }).immediate()
+  }
+
+  contentPlans(task: string): ContentPlan[] {
+    return (this.db.prepare(`SELECT p.payload_json FROM runner_current_content_plans p
+      WHERE p.task_id=? AND NOT EXISTS (SELECT 1 FROM runner_content_removals d
+        WHERE d.task_id=p.task_id AND d.request_id=p.request_id AND d.intent_revision=p.intent_revision)
+      ORDER BY p.position`).all(task) as PayloadRow[]).map(row => this.payload('runner_content_plan', row)).filter(plan => plan.state === 'active')
+  }
+
+  private productionPlan(source: Extract<RunnerRun | LogicalWork, { purpose: 'production' }>): ContentPlan {
+    // Run/work authority uses its accepted message and exact plan version.
+    // A chapter update is identified by the update's separate authorization.
+    const plan = this.goal(source.request_id, source.update_id ? source.intent_revision : undefined)
+    if (plan.task_id !== source.task_id || plan.intent_revision !== source.intent_revision || plan.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production plan revision is no longer current')
+    if (source.message_id) {
+      const update = source.update_id ? new ChapterState(this.db).update(source.task_id, source.update_id) : null
+      const input = update ? this.db.prepare("SELECT COALESCE(json_extract(payload_json,'$.source_record_id'),id) AS id FROM records WHERE task_id=? AND id=?").get(source.task_id, update.record_id) as { id: string } | undefined : null
+      const message = source.update_id ? input?.id : this.input(plan.input_event_id).record_id
+      if (message !== source.message_id) fail('RUNNER_OWNERSHIP_INVALID', 'Production work does not match its originating message')
+      this.recordOwner(source.task_id, source.message_id)
+    }
+    return plan
+  }
+
+  installGoal(raw: ContentPlan, expectedRevision: number | null = raw.previous_revision ?? null): ContentPlan {
+    const goal = validateRunnerContract('runner_content_plan', raw)
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT payload_json FROM runner_content_plans WHERE request_id=? AND intent_revision=?').get(goal.request_id, goal.intent_revision) as PayloadRow | undefined
       if (existing) {
         if (!equivalent(JSON.parse(existing.payload_json), goal)) fail('RUNNER_GOAL_CONFLICT', 'A goal revision cannot be overwritten')
-        return this.payload('runner_goal_revision', existing)
+        return this.payload('runner_content_plan', existing)
       }
       this.activeTask(goal.task_id); this.requestOwner(goal.task_id, goal.request_id)
       const input = this.input(goal.input_event_id)
       if (input.task_id !== goal.task_id || input.request_id !== goal.request_id || !['request', 'correction', 'withdraw_goal'].includes(input.kind)) fail('RUNNER_OWNERSHIP_INVALID', 'Goal revision requires an explicitly targeted goal input')
-      const head = this.db.prepare('SELECT intent_revision FROM runner_goal_heads WHERE request_id=?').get(goal.request_id) as { intent_revision: number } | undefined
+      const head = this.db.prepare('SELECT intent_revision FROM runner_current_content_plans WHERE request_id=?').get(goal.request_id) as { intent_revision: number } | undefined
       if ((head?.intent_revision ?? null) !== expectedRevision || goal.intent_revision !== (head?.intent_revision ?? 0) + 1 || goal.previous_revision !== head?.intent_revision) fail('RUNNER_GOAL_CONFLICT', 'Goal revision does not match its current predecessor')
       if (head && this.goal(goal.request_id).state === 'withdrawn') fail('RUNNER_GOAL_CONFLICT', 'A withdrawn goal cannot be revived by a correction')
       if (!head && input.kind !== 'request' || head && input.kind === 'request' || goal.state === 'withdrawn' && input.kind !== 'withdraw_goal' || input.kind === 'withdraw_goal' && goal.state !== 'withdrawn') fail('RUNNER_GOAL_CONFLICT', 'Goal input kind does not match the revision transition')
-      this.db.prepare('INSERT INTO runner_goal_revisions(task_id,request_id,intent_revision,input_event_id,payload_json) VALUES (?,?,?,?,?)').run(goal.task_id, goal.request_id, goal.intent_revision, goal.input_event_id, json(goal))
-      this.db.prepare('INSERT INTO runner_goal_heads(task_id,request_id,intent_revision) VALUES (?,?,?) ON CONFLICT(request_id) DO UPDATE SET intent_revision=excluded.intent_revision').run(goal.task_id, goal.request_id, goal.intent_revision)
+      this.db.prepare('INSERT INTO runner_content_plans(task_id,request_id,intent_revision,input_event_id,payload_json) VALUES (?,?,?,?,?)').run(goal.task_id, goal.request_id, goal.intent_revision, goal.input_event_id, json(goal))
       return this.goal(goal.request_id)
     }).immediate()
   }
@@ -190,8 +234,8 @@ export class RunnerWorkState {
       const core = this.db.prepare('SELECT * FROM runs WHERE id=?').get(run.run_id) as CoreRun | undefined
       if (!core || core.task_id !== run.task_id || core.runtime_epoch !== run.runtime_epoch || run.runtime_epoch !== this.epoch || core.commit_valid !== Number(run.commit_valid) || (terminalRun.has(run.state) ? core.state !== run.state : !['running', 'waiting'].includes(core.state))) fail('RUNNER_OWNERSHIP_INVALID', 'Run does not match its original runtime record')
       if (run.purpose === 'production') {
-        const goal = this.goal(run.request_id)
-        if (core.request_id !== run.request_id || goal.task_id !== run.task_id || goal.intent_revision !== run.intent_revision || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production Run does not match the current goal')
+        this.productionPlan(run)
+        if (core.request_id !== run.request_id) fail('RUNNER_OWNERSHIP_INVALID', 'Production Run does not match its request')
         if (run.update_id) new ChapterState(this.db).assertLive(run.task_id, run.update_id)
         const active = this.db.prepare("SELECT c.id FROM runs c LEFT JOIN runner_runs r ON r.run_id=c.id WHERE c.request_id=? AND c.id<>? AND c.state IN ('running','waiting') AND COALESCE(json_extract(r.payload_json,'$.update_id'),'')=?").get(run.request_id, run.run_id, run.update_id ?? '')
         if (active) fail('RUNNER_RUN_CONFLICT', 'A request already owns an active production Run')
@@ -224,12 +268,11 @@ export class RunnerWorkState {
     return (this.db.prepare('SELECT payload_json FROM runner_attempts WHERE work_id=? ORDER BY attempt_number').all(workId) as PayloadRow[]).map(row => this.payload('runner_execution_attempt', row))
   }
 
-  private sourceCurrent(run: RunnerRun): GoalRevision | undefined {
+  private sourceCurrent(run: RunnerRun): ContentPlan | undefined {
     this.activeTask(run.task_id)
     if (!run.commit_valid || run.runtime_epoch !== this.epoch || !['queued', 'running', 'waiting'].includes(run.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Run no longer permits new work or commits')
     if (run.purpose === 'production') {
-      const goal = this.goal(run.request_id)
-      if (goal.task_id !== run.task_id || goal.intent_revision !== run.intent_revision || goal.state !== 'active') fail('RUNNER_OWNERSHIP_INVALID', 'Production goal revision is no longer current')
+      const goal = this.productionPlan(run)
       if (run.update_id) new ChapterState(this.db).assertLive(run.task_id, run.update_id)
       return goal
     }
@@ -260,8 +303,10 @@ export class RunnerWorkState {
 
   private sourceDependenciesCurrent(work: LogicalWork, requireSuccess: boolean, proposed: Map<string, LogicalWork>, checking: Set<string>): void {
     if (work.purpose === 'production') {
-      const goal = this.goal(work.request_id)
-      if (goal.intent_revision !== work.intent_revision || goal.state !== 'active') fail('RUNNER_DEPENDENCY_INVALID', 'Work dependency belongs to an obsolete goal revision')
+      try { this.productionPlan(work) } catch (error) {
+        if (!(error instanceof ContractError)) throw error
+        fail('RUNNER_DEPENDENCY_INVALID', 'Work dependency has an obsolete production source')
+      }
       if (work.update_id) new ChapterState(this.db).assertLive(work.task_id, work.update_id)
     }
     if (checking.has(work.work_id)) fail('RUNNER_DEPENDENCY_CYCLE', 'Logical work dependencies must form a DAG')
@@ -455,8 +500,10 @@ export class RunnerWorkState {
         checking.add(work.work_id)
         const causes: WorkCause[] = []
         if (work.purpose === 'production') {
-          const goal = this.goal(work.request_id)
-          if (goal.task_id !== taskId || goal.intent_revision !== work.intent_revision || goal.state !== 'active') causes.push(this.cause(work, 'invalidation'))
+          try { this.productionPlan(work) } catch (error) {
+            if (!(error instanceof ContractError)) throw error
+            causes.push(this.cause(work, 'invalidation'))
+          }
           if (work.update_id) {
             const chapters = new ChapterState(this.db), update = chapters.update(taskId, work.update_id)
             const published = update?.state === 'succeeded' && update.publication_operation_id && chapters.publication(taskId, update.publication_operation_id)?.operation.state === 'published'

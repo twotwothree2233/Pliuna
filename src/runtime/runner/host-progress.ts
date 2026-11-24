@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import type { ExecutionAttempt, ExecutionScope, GoalRevision, LogicalWork } from '../../shared/contracts.generated'
+import type { ExecutionAttempt, ExecutionScope, ContentPlan, LogicalWork } from '../../shared/contracts.generated'
 import { sameDependencies, validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { RunnerArtifactState } from './artifact-state'
@@ -10,7 +10,7 @@ import { RunnerWorkState } from './work-state'
 
 type ProductionWork = Extract<LogicalWork, { purpose: 'production' }>
 type RecordRow = { id: string; sequence: number; created_at: string; owner_json: string | null; plan_revision: number | null }
-type CallRow = RecordRow & { call_id: string; pattern: string | null; execution: string | null; delivery: string | null; error_source: string | null; call_owner_json?: string | null }
+type CallRow = RecordRow & { call_id: string; pattern: string | null; execution: string | null; delivery: string | null; error_source: string | null; call_owner_json?: string | null; query_result_id?: number | null }
 type StateRow = RecordRow & { state: string; reason: string | null }
 type ActiveCallRow = RecordRow & { operation_id: string; call_owner_json: string }
 export interface HostProgressPermission { capability_allowed: boolean }
@@ -20,10 +20,10 @@ function stable(value: unknown, fallback: string): string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$/.test(value) && Buffer.byteLength(value) <= RUNNER_LIMITS.index.id_bytes ? value : fallback
 }
 function sameOwner(left: ExecutionScope, right: ExecutionScope): boolean {
-  return left.purpose === 'production' && right.purpose === 'production' && left.task_id === right.task_id && left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.update_id === right.update_id && left.run_id === right.run_id && left.work_id === right.work_id && left.attempt_id === right.attempt_id && left.role === right.role
+  return left.purpose === 'production' && right.purpose === 'production' && left.task_id === right.task_id && left.request_id === right.request_id && left.intent_revision === right.intent_revision && left.update_id === right.update_id && left.message_id === right.message_id && left.run_id === right.run_id && left.work_id === right.work_id && left.attempt_id === right.attempt_id && left.role === right.role
 }
 function owner(work: ProductionWork, attempt: ExecutionAttempt): ExecutionScope {
-  return { purpose: 'production', task_id: work.task_id, request_id: work.request_id, intent_revision: work.intent_revision, ...(work.update_id ? { update_id: work.update_id } : {}), run_id: work.run_id, work_id: work.work_id, attempt_id: attempt.attempt_id, role: work.role }
+  return { purpose: 'production', task_id: work.task_id, request_id: work.request_id, intent_revision: work.intent_revision, ...(work.message_id ? { message_id: work.message_id } : {}), ...(work.update_id ? { update_id: work.update_id } : {}), run_id: work.run_id, work_id: work.work_id, attempt_id: attempt.attempt_id, role: work.role }
 }
 function outcome(execution: string | null, delivery: string | null): ProgressCallFact['outcome'] | null {
   if (execution === 'success') return delivery === 'failed' ? 'failure' : 'success'
@@ -66,7 +66,7 @@ export class RunnerHostProgress {
           if (!stored) return null
           attempt = validateRunnerContract('runner_execution_attempt', JSON.parse(stored.payload_json)); attempts.set(source.attempt_id, attempt)
         }
-        if (attempt.runtime_epoch !== this.epoch || attempt.task_id !== work.task_id || attempt.run_id !== work.run_id || attempt.work_id !== work.work_id || attempt.purpose !== 'production' || attempt.request_id !== work.request_id || attempt.intent_revision !== work.intent_revision || attempt.update_id !== work.update_id || !sameOwner(source, owner(work, attempt)) || !sameDependencies(attempt.input_versions, work.dependencies)) return null
+        if (attempt.runtime_epoch !== this.epoch || attempt.task_id !== work.task_id || attempt.run_id !== work.run_id || attempt.work_id !== work.work_id || attempt.purpose !== 'production' || attempt.request_id !== work.request_id || attempt.intent_revision !== work.intent_revision || attempt.update_id !== work.update_id || attempt.message_id !== work.message_id || !sameOwner(source, owner(work, attempt)) || !sameDependencies(attempt.input_versions, work.dependencies)) return null
         let plan = row.plan_revision
         if (plan === null) {
           if (!bindings.has(attempt.attempt_id)) {
@@ -100,20 +100,21 @@ export class RunnerHostProgress {
   private calls(task: string, request: string, revision: number, at: number, config: Readonly<ProgressObservationConfig>, reference: (row: RecordRow) => ProgressRecordRef | null): ProgressCallFact[] {
     const common = `r.id,r.sequence,r.created_at,CASE WHEN length(CAST(json_extract(r.payload_json,'$.owner') AS BLOB))<=4096 THEN json_extract(r.payload_json,'$.owner') END owner_json,json_extract(r.payload_json,'$.plan_revision') plan_revision`
     const operationRows = this.db.prepare(`SELECT ${common},c.id call_id,c.capability_id pattern,c.execution,c.delivery,json_extract(c.result_json,'$.error.code') error_source,CASE WHEN length(CAST(json_extract(c.limits_json,'$.owner') AS BLOB))<=4096 THEN json_extract(c.limits_json,'$.owner') END call_owner_json FROM records r JOIN calls c ON c.id=json_extract(r.payload_json,'$.call_id') AND c.task_id=r.task_id AND c.run_id=json_extract(r.payload_json,'$.owner.run_id') WHERE r.task_id=? AND r.kind IN ('plugin.call.ended','monty.call.ended') AND json_extract(r.payload_json,'$.owner.request_id')=? AND json_extract(r.payload_json,'$.owner.intent_revision')=? AND r.created_at>? AND r.created_at<=? AND json_extract(c.limits_json,'$.owner.attempt_id')=json_extract(r.payload_json,'$.owner.attempt_id') ORDER BY r.sequence DESC LIMIT ?`).all(task, request, revision, new Date(Math.max(0, at - config.window_ms)).toISOString(), new Date(at).toISOString(), config.evidence_max_calls) as CallRow[]
-    const modelRows = this.db.prepare(`WITH metadata AS (SELECT ${common},CASE WHEN json_valid(json_extract(r.payload_json,'$.message.content')) THEN json_extract(r.payload_json,'$.message.content') ELSE '{}' END result FROM records r WHERE r.task_id=? AND r.kind='model.tool_result' AND json_extract(r.payload_json,'$.owner.request_id')=? AND json_extract(r.payload_json,'$.owner.intent_revision')=? AND r.created_at>? AND r.created_at<=? ORDER BY r.sequence DESC LIMIT ?) SELECT id,sequence,created_at,owner_json,plan_revision,COALESCE(json_extract(result,'$.operation_id'),id) call_id,json_extract(result,'$.request_type') pattern,json_extract(result,'$.execution') execution,json_extract(result,'$.delivery') delivery,json_extract(result,'$.error.code') error_source FROM metadata WHERE NOT EXISTS (SELECT 1 FROM calls c WHERE c.task_id=? AND c.id=json_extract(result,'$.operation_id'))`).all(task, request, revision, new Date(Math.max(0, at - config.window_ms)).toISOString(), new Date(at).toISOString(), config.evidence_max_calls, task) as CallRow[]
+    const modelRows = this.db.prepare(`WITH metadata AS (SELECT ${common},json_extract(r.payload_json,'$.query_result_id') query_result_id,CASE WHEN json_valid(json_extract(r.payload_json,'$.message.content')) THEN json_extract(r.payload_json,'$.message.content') ELSE '{}' END result FROM records r WHERE r.task_id=? AND r.kind='model.tool_result' AND json_extract(r.payload_json,'$.owner.request_id')=? AND json_extract(r.payload_json,'$.owner.intent_revision')=? AND r.created_at>? AND r.created_at<=? ORDER BY r.sequence DESC LIMIT ?) SELECT id,sequence,created_at,owner_json,plan_revision,query_result_id,COALESCE(json_extract(result,'$.operation_id'),id) call_id,json_extract(result,'$.request_type') pattern,json_extract(result,'$.execution') execution,json_extract(result,'$.delivery') delivery,json_extract(result,'$.error.code') error_source FROM metadata WHERE NOT EXISTS (SELECT 1 FROM calls c WHERE c.task_id=? AND c.id=json_extract(result,'$.operation_id'))`).all(task, request, revision, new Date(Math.max(0, at - config.window_ms)).toISOString(), new Date(at).toISOString(), config.evidence_max_calls, task) as CallRow[]
     const facts: ProgressCallFact[] = []
     for (const row of [...operationRows, ...modelRows].sort((left, right) => right.sequence - left.sequence)) {
       const source = reference(row), result = outcome(row.execution, row.delivery)
       if (!source || !result) continue
       if ('call_owner_json' in row && (!row.call_owner_json || !sameOwner(validateRunnerContract('runner_execution_scope', JSON.parse(row.call_owner_json)), source.owner))) continue
       assertRunnerId(row.call_id, 'call_id')
-      facts.push({ ...source, call_id: row.call_id, pattern: stable(row.pattern, 'tool.operation'), outcome: result, ...(result === 'failure' ? { error_source: stable(row.error_source, row.delivery === 'failed' ? 'DELIVERY_FAILED' : 'CALL_FAILED') } : {}) })
+      const queryId = row.query_result_id
+      facts.push({ ...source, call_id: row.call_id, pattern: stable(row.pattern, 'tool.operation'), outcome: result, ...(result === 'failure' ? { error_source: stable(row.error_source, row.delivery === 'failed' ? 'DELIVERY_FAILED' : 'CALL_FAILED') } : {}), ...(result === 'success' && row.delivery === 'delivered' && (row.pattern === 'read' || row.pattern === 'list') && typeof queryId === 'number' && Number.isSafeInteger(queryId) && queryId > 0 ? { query_result_id: queryId } : {}) })
       if (facts.length >= config.evidence_max_calls) break
     }
     return facts
   }
 
-  private artifacts(goal: GoalRevision, works: ProductionWork[], state: RunnerWorkState, at: number, config: Readonly<ProgressObservationConfig>): EffectiveProgressFact[] {
+  private artifacts(goal: ContentPlan, works: ProductionWork[], state: RunnerWorkState, at: number, config: Readonly<ProgressObservationConfig>): EffectiveProgressFact[] {
     const artifacts = new RunnerArtifactState(this.db, state), facts: EffectiveProgressFact[] = []
     for (const work of works) {
       if (!['running', 'waiting', 'succeeded'].includes(work.state) || !work.current_attempt_id) continue
@@ -148,7 +149,7 @@ export class RunnerHostProgress {
     return facts
   }
 
-  private acceptedOutput(goal: GoalRevision, work: ProductionWork, attempt: ExecutionAttempt, source: ExecutionScope, at: number, config: Readonly<ProgressObservationConfig>): EffectiveProgressFact | null {
+  private acceptedOutput(goal: ContentPlan, work: ProductionWork, attempt: ExecutionAttempt, source: ExecutionScope, at: number, config: Readonly<ProgressObservationConfig>): EffectiveProgressFact | null {
     if (work.state !== 'succeeded' || attempt.state !== 'succeeded' || work.result_revision === undefined || !attempt.result_ref) return null
     const row = this.db.prepare(`SELECT r.id,r.sequence,r.created_at,json_extract(r.payload_json,'$.owner') owner_json,CASE WHEN length(CAST(o.payload_json AS BLOB))<=? THEN o.payload_json END payload_json FROM records r JOIN runner_work_outputs o ON o.task_id=r.task_id AND o.work_id=json_extract(r.payload_json,'$.owner.work_id') AND o.plan_revision=json_extract(r.payload_json,'$.plan_revision') AND o.result_revision=json_extract(r.payload_json,'$.result_revision') WHERE r.task_id=? AND r.kind='runner.output.accepted' AND o.request_id=? AND o.intent_revision=? AND o.work_id=? AND o.plan_revision=? AND o.result_revision=? AND json_extract(r.payload_json,'$.run_id')=json_extract(o.payload_json,'$.run_id') AND json_extract(r.payload_json,'$.requirement_ids')=json_extract(o.payload_json,'$.requirement_ids') AND json_extract(r.payload_json,'$.artifacts')=json_extract(o.payload_json,'$.artifacts') ORDER BY r.sequence LIMIT 1`).get(RUNNER_LIMITS.index.page_bytes, goal.task_id, goal.request_id, goal.intent_revision, work.work_id, work.plan_revision, work.result_revision) as { id: string; sequence: number; created_at: string; owner_json: string | null; payload_json: string | null } | undefined
     if (!row?.owner_json || !row.payload_json || !sameOwner(validateRunnerContract('runner_execution_scope', JSON.parse(row.owner_json)), source)) return null

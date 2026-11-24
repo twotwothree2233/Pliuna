@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it } from 'vitest'
-import type { ExecutionAttempt, GoalRevision, InputEvent, LogicalWork, RunnerRun } from '../../src/shared/contracts.generated'
+import type { ExecutionAttempt, ContentPlan, InputEvent, LogicalWork, RunnerRun } from '../../src/shared/contracts.generated'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
@@ -10,7 +10,7 @@ const coreSql = readFileSync(new URL('../../src/shared/contracts/001-core.sql', 
 const runnerSql = readFileSync(new URL('../../src/shared/contracts/002-runner.sql', import.meta.url), 'utf8')
 const databases: Database.Database[] = []
 afterEach(() => { for (const db of databases.splice(0)) db.close() })
-const goal: GoalRevision = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
+const goal: ContentPlan = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
 const input: InputEvent = { input_event_id: 'input', task_id: 'task', kind: 'request', record_id: 'record', request_id: 'goal', stage: 'received' }
 function setup(install = true) {
   const db = new Database(':memory:'); databases.push(db)
@@ -70,7 +70,7 @@ it('installs each input stage and business mutation atomically and repeats the o
   expect(routed).toEqual({ route: 'direct', request_id: 'goal' })
   expect(() => state.consume('input', 'installed', () => { state.installGoal(goal); throw Error('interrupted') })).toThrow('interrupted')
   expect(state.consumption('input', 'installed')).toBeNull()
-  expect(db.prepare('SELECT * FROM runner_goal_revisions').all()).toHaveLength(0)
+  expect(db.prepare('SELECT * FROM runner_content_plans').all()).toHaveLength(0)
   const restarted = new RunnerWorkState(db, 'new-epoch', () => 2000)
   expect(restarted.input('input').stage).toBe('routed')
   const result = restarted.consume('input', 'installed', () => { installs++; restarted.installGoal(goal); return { request_id: 'goal', intent_revision: 1 } })
@@ -78,7 +78,7 @@ it('installs each input stage and business mutation atomically and repeats the o
   expect(restarted.consume('input', 'routed', () => { routes++; return null })).toEqual(routed)
   expect([routes, installs]).toEqual([1, 1])
   expect(restarted.receive(input).stage).toBe('installed')
-  expect(db.prepare('SELECT * FROM runner_goal_revisions').all()).toHaveLength(1)
+  expect(db.prepare('SELECT * FROM runner_content_plans').all()).toHaveLength(1)
   expect(db.prepare('SELECT * FROM runner_consumptions').all()).toHaveLength(3)
 })
 
@@ -88,7 +88,7 @@ it('rolls back an installation whose acknowledgement is not synchronous finite J
   const invalidResults: unknown[] = [undefined, { bad: NaN }, Promise.resolve('later')]
   for (const result of invalidResults) {
     expect(() => state.consume('input', 'installed', () => { state.installGoal(goal); return result })).toThrow(/JSON/)
-    expect(db.prepare('SELECT * FROM runner_goal_revisions').all()).toHaveLength(0)
+    expect(db.prepare('SELECT * FROM runner_content_plans').all()).toHaveLength(0)
     expect(state.consumption('input', 'installed')).toBeNull()
   }
 })
@@ -109,7 +109,7 @@ it('rejects async installers before they start and excludes Promise and PromiseL
   await Promise.resolve()
   expect(started).toBe(false)
   expect(state.consumption('input', 'installed')).toBeNull()
-  expect(db.prepare('SELECT * FROM runner_goal_revisions').all()).toHaveLength(0)
+  expect(db.prepare('SELECT * FROM runner_content_plans').all()).toHaveLength(0)
   expect(() => {
     // @ts-expect-error A normal function returning a Promise is also an invalid installer.
     state.consume('input', 'installed', () => Promise.resolve(null))
@@ -121,7 +121,7 @@ it('rejects async installers before they start and excludes Promise and PromiseL
     state.consume('input', 'installed', () => thenable)
   }).toThrow(/JSON/)
   expect(state.consumption('input', 'installed')).toBeNull()
-  expect(db.prepare('SELECT * FROM runner_goal_revisions').all()).toHaveLength(0)
+  expect(db.prepare('SELECT * FROM runner_content_plans').all()).toHaveLength(0)
 })
 
 it('preserves original input ownership and immutable identities', () => {
@@ -137,7 +137,7 @@ it('preserves original input ownership and immutable identities', () => {
 it('uses exact goal CAS while retaining history and rejecting query-driven revisions', () => {
   const { db, state } = setup()
   nextInput(db, state)
-  const second: GoalRevision = { ...goal, intent_revision: 2, previous_revision: 1, input_event_id: 'correction' }
+  const second: ContentPlan = { ...goal, intent_revision: 2, previous_revision: 1, input_event_id: 'correction' }
   expect(() => state.installGoal(second, 0)).toThrow(/predecessor/)
   expect(state.installGoal(second, 1)).toEqual(second)
   expect(state.installGoal(goal)).toEqual(goal)

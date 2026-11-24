@@ -12,8 +12,9 @@ let root:string,store:RuntimeStore,db:Database.Database,task:string,run:string
 const config={id:'isolated',base_url:'https://example.invalid',wire_model_id:'synthetic',context_tokens:1000000,max_output_tokens:1024,compatibility_profile:'chat-max-tokens' as const}
 beforeEach(()=>{vi.useFakeTimers();root=mkdtempSync(join(tmpdir(),'pliuna-accounting-runtime-'));store=new RuntimeStore(root);db=new Database(join(root,'pliuna.sqlite'));task=store.create('synthetic').task.id;run=store.start(task,'synthetic','fixture',[])})
 afterEach(()=>{vi.restoreAllMocks();store.close();db.close();vi.useRealTimers()})
-const read=():any=>store.handle({type:'task.query',task_id:task,query:{type:'read',input:{target:{kind:'run',id:run}}}})
+const read=(runId=run):any=>store.handle({type:'task.query',task_id:task,query:{type:'read',input:{target:{kind:'run',id:runId}}}})
 const page=(cursor?:string):any=>store.handle({type:'host.run.accounting',task_id:task,run_id:run,...(cursor?{cursor}:{})})
+const summary=(task_id=task,run_id=run)=>store.handle({type:'host.run.usage',task_id,run_id})
 function lease(){const value:ModelLease={id:config.id,revision:1,config,release(){}};(store as any).accountLease(task,run,value);return value}
 it('persists strict versioned facts, shows incomplete dispatch unknown and restores without replay',()=>{
  const l=lease(),record=requestAccounting(l,[],undefined,1024,'main');record('reserved');record('dispatched')
@@ -51,6 +52,14 @@ it('reads unchanged v1 alongside v2 service-default records and preserves them a
  store.close();store=new RuntimeStore(root);expect(read().data.accounting.requests).toHaveLength(2)
  expect(db.prepare("SELECT payload_json FROM records WHERE kind='model.request.accounting' ORDER BY sequence").all()).toEqual(before)
 })
+it('round trips reported zero cache hits without filling cache for unreported usage', () => {
+ const l=lease()
+ for(const value of [0,undefined]){
+  const r=requestAccounting(l,[],undefined,1024,'main');r('reserved');r('dispatched');r('completed',{prompt_tokens:10,completion_tokens:2,...(value===undefined?{}:{cached_prompt_tokens:value})})
+ }
+ store.close();store=new RuntimeStore(root)
+ expect(page().requests.map((r:any)=>r.usage)).toEqual([{prompt_tokens:10,completion_tokens:2,cached_prompt_tokens:0},{prompt_tokens:10,completion_tokens:2}])
+})
 it.each(['transition','identity','composition','date','usage'])('rejects inconsistent stored accounting %s rather than inventing totals', mode => {
  const record=requestAccounting(lease(),[],undefined,1024,'main');record('reserved');record('dispatched');record('completed',{prompt_tokens:10,completion_tokens:2})
  const rows=db.prepare("SELECT id,payload_json FROM records WHERE kind='model.request.accounting' ORDER BY sequence").all() as any[]
@@ -71,6 +80,7 @@ it('pages 225 accounting events without loss, keeps each request complete and pr
  do{const result=page(cursor);expect(result.requests.length).toBeLessThanOrEqual(20);expect(result.consistency).toBe('snapshot');requests.push(...result.requests);cursor=result.next_cursor??undefined;pages++}while(cursor)
  expect(pages).toBe(4);expect(requests).toHaveLength(75);expect(new Set(requests.map(r=>r.request_id)).size).toBe(75)
  expect(requests.reduce((n,r)=>n+r.usage.prompt_tokens,0)).toBe(2775)
+ expect(summary()).toMatchObject({dispatched_requests:75,reported_requests:75,input_tokens:2775,output_tokens:150,cache_hit_ratio:null})
  expect(db.prepare("SELECT * FROM records WHERE kind='model.request.accounting' ORDER BY sequence").all()).toEqual(before)
 })
 it('excludes late usage and new requests from a fixed snapshot until an explicit refresh',()=>{
@@ -96,9 +106,61 @@ it('validates malformed stage chains even beyond the former inline window',()=>{
  let result=page();for(let n=0;n<2;n++)result=page(result.next_cursor)
  expect(()=>page(result.next_cursor)).toThrow('inconsistent')
 })
-it('keeps a 1000-request ledger page bounded without adding a persistent index',()=>{
+it('keeps a 1000-request ledger page and the Run summary bounded',()=>{
  const l=lease();db.transaction(()=>{for(let n=0;n<1000;n++){const emit=requestAccounting(l,[],undefined,1024,'main');emit('reserved');emit('dispatched');emit('completed',{prompt_tokens:1,completion_tokens:1})}})()
  const start=realPerformance.now(),result=page(),elapsed=realPerformance.now()-start
  expect(result.requests).toHaveLength(20);expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(32768)
+ expect(summary()).toMatchObject({dispatched_requests:1000,reported_requests:1000,input_tokens:1000,output_tokens:1000})
  console.info('accounting baseline: 1000 requests / 3000 events, first page ms='+elapsed.toFixed(2)+', bytes='+Buffer.byteLength(JSON.stringify(result)))
+})
+it('isolates Run summaries, deduplicates settled facts, and distinguishes incomplete and zero cache usage',()=>{
+ const l=lease(),first=requestAccounting(l,[],undefined,1024,'main'),late=requestAccounting(l,[],undefined,1024,'approval');
+ const other=store.create('Other concurrent task').task.id,otherRun=store.start(other,'other','fixture',[])
+ const otherLease:ModelLease={id:config.id,revision:1,config,release(){}};(store as any).accountLease(other,otherRun,otherLease)
+ const background=requestAccounting(otherLease,[],undefined,1024,'main');background('reserved');background('dispatched');background('completed',{prompt_tokens:100,completion_tokens:20,cached_prompt_tokens:90})
+ const routing:ModelLease={...l,accounting(event){db.prepare("INSERT INTO records VALUES ('routing',?,?, 'model.request.accounting',?,?)").run(task,2000,JSON.stringify({...event,routing_operation_id:'op'}),event.at)}}
+ requestAccounting(routing,[],undefined,1024,'main')('completed',{prompt_tokens:500,completion_tokens:10,cached_prompt_tokens:300})
+ requestAccounting(l,[],undefined,1024,'main')('reserved')
+ expect(summary()).toMatchObject({dispatched_requests:0,reported_requests:0,cache_hit_ratio:null})
+ first('reserved');first('dispatched');first('completed',{prompt_tokens:0,completion_tokens:2,cached_prompt_tokens:0})
+ expect(summary()).toMatchObject({dispatched_requests:1,reported_requests:1,input_tokens:0,output_tokens:2,cache_hit_ratio:null})
+ late('reserved');late('dispatched')
+ expect(summary()).toMatchObject({dispatched_requests:2,reported_requests:1,input_tokens:0,output_tokens:2,cache_hit_ratio:null})
+ late('completed',{prompt_tokens:20,completion_tokens:4,cached_prompt_tokens:0})
+ late('completed',{prompt_tokens:96,completion_tokens:5,cached_prompt_tokens:80})
+ expect(summary()).toMatchObject({dispatched_requests:2,reported_requests:2,input_tokens:20,output_tokens:6,cache_hit_ratio:0})
+ const cached=requestAccounting(l,[],undefined,1024,'summary');cached('reserved');cached('dispatched');cached('completed',{prompt_tokens:60,completion_tokens:4,cached_prompt_tokens:40})
+ expect(summary()).toMatchObject({dispatched_requests:3,reported_requests:3,input_tokens:80,output_tokens:10,cache_hit_ratio:0.5})
+ expect(summary(other,otherRun)).toMatchObject({dispatched_requests:1,input_tokens:100,cache_hit_ratio:0.9})
+ expect(()=>summary(other,run)).toThrow(/unavailable/)
+})
+
+it('totals a task across historical Runs and pre-Run routing without mixing other tasks',()=>{
+ const taskUsage=(task_id=task)=>store.handle({type:'host.task.usage',task_id})
+ const report=(value:ModelLease,input:number,output:number,cached:number,phase:'completed'|'unknown'='completed')=>{
+  const emit=requestAccounting(value,[],undefined,1024,'main');emit('reserved');emit('dispatched')
+  emit(phase,{prompt_tokens:input,completion_tokens:output,cached_prompt_tokens:cached},phase==='unknown'?'MODEL_TIMEOUT':null)
+ }
+ report(lease(),100,10,80)
+ store.handle({type:'run.cancel',task_id:task,run_id:run})
+ const latest=store.start(task,'second','fixture',[]),latestLease:ModelLease={id:config.id,revision:1,config,release(){}}
+ ;(store as any).accountLease(task,latest,latestLease)
+ report(latestLease,300,30,60,'unknown')
+ const reported = { phase: 'unknown', dispatched: true, usage: { prompt_tokens: 300, completion_tokens: 30, cached_prompt_tokens: 60 } }
+ expect(summary(task,latest)).toMatchObject({dispatched_requests:1,reported_requests:1,input_tokens:300,output_tokens:30,cache_hit_ratio:0.2})
+ expect(store.handle({type:'host.run.accounting',task_id:task,run_id:latest})).toMatchObject({requests:[reported]})
+ expect(read(latest)).toMatchObject({data:{accounting:{requests:[reported]}}})
+ const other=store.create('other').task.id
+ const routingLease=(taskId:string):ModelLease=>({...latestLease,accounting:event=>(store as any).record(taskId,'model.request.accounting',{...event,routing_operation_id:'route'})})
+ expect(taskUsage(other)).toMatchObject({reported_requests:0,cache_hit_ratio:null})
+ report(routingLease(other),500,50,400)
+ expect(taskUsage()).toMatchObject({task_id:task,dispatched_requests:2,reported_requests:2,input_tokens:400,output_tokens:40,cached_input_tokens:140,cache_hit_ratio:0.35})
+ report(routingLease(task),600,60,360)
+ expect(taskUsage()).toMatchObject({dispatched_requests:3,reported_requests:3,input_tokens:1000,output_tokens:100,cached_input_tokens:500,cache_hit_ratio:0.5})
+ const late=requestAccounting(latestLease,[],undefined,1024,'main');late('reserved');late('dispatched')
+ expect(taskUsage()).toMatchObject({dispatched_requests:4,reported_requests:3,input_tokens:1000,cache_hit_ratio:null})
+ late('completed',{prompt_tokens:1000,completion_tokens:20,cached_prompt_tokens:0})
+ expect(taskUsage()).toMatchObject({dispatched_requests:4,reported_requests:4,input_tokens:2000,output_tokens:120,cache_hit_ratio:0.25})
+ expect(summary()).toMatchObject({dispatched_requests:1,input_tokens:100,cache_hit_ratio:0.8})
+ expect(taskUsage(other)).toMatchObject({reported_requests:1,input_tokens:500,cache_hit_ratio:0.8})
 })

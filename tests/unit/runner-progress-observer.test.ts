@@ -20,9 +20,9 @@ function ref(input: RunnerProgressInput, sequence: number, work = input.works[0]
   return { record_id: `record-${sequence}`, sequence, at: input.now - 100, owner: owner(work), plan_revision: work.plan_revision }
 }
 function call(input: RunnerProgressInput, sequence: number, outcome: ProgressCallFact['outcome'] = 'success', work = input.works[0]!): ProgressCallFact {
-  return { ...ref(input, sequence, work), call_id: `call-${sequence}`, pattern: 'plugin:lookup', outcome, ...(outcome === 'failure' ? { error_source: 'LOOKUP_FAILED' } : {}) }
+  return { ...ref(input, sequence, work), call_id: `call-${sequence}`, pattern: outcome === 'success' ? 'read' : 'plugin:lookup', outcome, ...(outcome === 'success' ? { query_result_id: 1 } : outcome === 'failure' ? { error_source: 'LOOKUP_FAILED' } : {}) }
 }
-function activity(input: RunnerProgressInput, count: number = RUNNER_LIMITS.progress.stalled_success_threshold, outcome: ProgressCallFact['outcome'] = 'success'): RunnerProgressInput {
+function activity(input: RunnerProgressInput, count: number = RUNNER_LIMITS.progress.stalled_repeat_threshold + 1, outcome: ProgressCallFact['outcome'] = 'success'): RunnerProgressInput {
   input.calls = Array.from({ length: count }, (_, i) => call(input, i + 1, outcome))
   return input
 }
@@ -38,26 +38,41 @@ describe('deterministic runner progress observation', () => {
     const input = activity(fixture()), result = observeRunnerProgress(input)
     expect(result.works[0]!.disposition).toBe('suspected_stall')
     expect(result.diagnoses).toHaveLength(1)
-    expect(result.diagnoses[0]).toMatchObject({ task_id: 'task', request_id: 'goal', intent_revision: 2, work_id: 'work', plan_revision: 3, reason: 'suspected_stall', pattern: 'plugin:lookup', through_sequence: 8, model_diagnosis: 'eligible', required_role: 'diagnostic', automatic_replay: false, execution_permission: false, recovery_permission: false })
+    expect(result.diagnoses[0]).toMatchObject({ task_id: 'task', request_id: 'goal', intent_revision: 2, work_id: 'work', plan_revision: 3, reason: 'suspected_stall', pattern: 'read', through_sequence: 9, model_diagnosis: 'eligible', required_role: 'diagnostic', automatic_replay: false, execution_permission: false, recovery_permission: false })
     expect(result.diagnoses[0]!.calls.map(call => call.record_id)).toEqual(input.calls.map(call => call.record_id))
     expect(result.diagnoses[0]!.calls[0]!.owner).toEqual(owner(input.works[0]!))
     expect(result.checkpoint.reservations).toHaveLength(1)
   })
 
   it('requires the configured number of distinct calls in the bounded window', () => {
-    const input = activity(fixture(), RUNNER_LIMITS.progress.stalled_success_threshold - 1)
+    const input = activity(fixture(), RUNNER_LIMITS.progress.stalled_repeat_threshold)
     expect(observeRunnerProgress(input).diagnoses).toEqual([])
-    input.calls.push(call(input, 8))
+    input.calls.push(call(input, 9))
     input.calls[0]!.at = input.now - RUNNER_LIMITS.progress.window_ms
     expect(observeRunnerProgress(input).diagnoses).toEqual([])
     input.calls[0]!.at++
     expect(observeRunnerProgress(input).diagnoses[0]!.reason).toBe('suspected_stall')
   })
 
-  it('recognizes mixed successful operation patterns without treating success as goal progress', () => {
-    const input = activity(fixture())
-    for (let i = 0; i < input.calls.length; i++) input.calls[i]!.pattern = i % 2 ? 'read:directory' : 'read:status'
+  it('recognizes a loop alternating between known read and list results', () => {
+    const input = activity(fixture(), RUNNER_LIMITS.progress.stalled_repeat_threshold + 2)
+    for (let i = 0; i < input.calls.length; i++) input.calls[i]!.pattern = i % 2 ? 'read' : 'list'
     expect(observeRunnerProgress(input).diagnoses[0]).toMatchObject({ reason: 'suspected_stall', pattern: 'mixed_operations' })
+  })
+
+  it('does not count successful calls as a loop when results are first seen or opaque', () => {
+    const input = activity(fixture(), 12)
+    input.calls.forEach((call, index) => { call.query_result_id = index < 10 ? index + 1 : undefined })
+    expect(observeRunnerProgress(input).diagnoses).toEqual([])
+  })
+
+  it('starts a new streak after receiving a new result and keeps evidence in the current attempt', () => {
+    const input = activity(fixture(), 8)
+    input.calls.push({ ...call(input, 9), query_result_id: 2 }, call(input, 10), call(input, 11))
+    expect(observeRunnerProgress(input).diagnoses).toEqual([])
+    input.calls[8]!.owner.attempt_id = 'previous-attempt'
+    input.calls.slice(0, 8).forEach(call => { call.owner.attempt_id = 'previous-attempt' })
+    expect(observeRunnerProgress(input).diagnoses).toEqual([])
   })
 
   it.each(['requirement_covered', 'work_advanced', 'artifact_accepted', 'input_consumed'] as const)('accepts verified goal progress before anything is published: %s', kind => {
@@ -131,9 +146,10 @@ describe('deterministic runner progress observation', () => {
     for (const value of input.calls) value.call_id = 'same-call'
     expect(observeRunnerProgress(input).diagnoses).toEqual([])
     input.calls[0]!.outcome = 'unknown'
+    delete input.calls[0]!.query_result_id
     expect(observeRunnerProgress(input).works[0]!.disposition).toBe('active')
     const result = observeRunnerProgress(input)
-    expect(result.works[0]!.evidence.calls.map(value => value.sequence)).toEqual([8])
+    expect(result.works[0]!.evidence.calls.map(value => value.sequence)).toEqual([9])
   })
 
   it('groups repeated identifiable failures by work, goal revision, operation and error source', () => {
@@ -184,7 +200,7 @@ describe('persistent bounded diagnosis reservations', () => {
 
   it('enforces the task-wide frequency cap when new evidence or a new goal revision arrives', () => {
     const input = activity(fixture()), first = observeRunnerProgress(input)
-    input.now += 10000; input.calls.push(call(input, 9))
+    input.now += 10000; input.calls.push(call(input, 10))
     expect(observeRunnerProgress(input, first.checkpoint).diagnoses[0]!.model_diagnosis).toBe('rate_limited')
     input.goal.intent_revision = 3; input.goal.previous_revision = 2
     const work = input.works[0]!

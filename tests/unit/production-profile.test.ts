@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import type { ArtifactCandidate, Bundle, GoalRevision, Outline } from '../../src/shared/contracts.generated'
+import type { ArtifactCandidate, Bundle, ContentPlan, Outline } from '../../src/shared/contracts.generated'
 import defaults from '../../src/shared/contracts/development-defaults.json'
 import type { ChatMessage, Completion } from '../../src/runtime/model/adapter'
 import { RunBudget, runAgent, type AgentHost } from '../../src/runtime/model/agent'
@@ -17,7 +17,7 @@ function createProducerProfile(input: ProducerProfileInput) {
 }
 
 function source(role: ProductionResultBinding['work']['role'] = 'producer'): ProductionResultBinding {
-  const goal: GoalRevision = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
+  const goal: ContentPlan = { task_id: 'task', request_id: 'goal', intent_revision: 1, input_event_id: 'input', state: 'active', requirements: [{ requirement_id: 'answer', kind: 'answer', required: true, provenance_required: false }] }
   return {
     goal,
     owner: { task_id: 'task', request_id: 'goal', intent_revision: 1, purpose: 'production', run_id: 'run', work_id: 'work', attempt_id: 'attempt', role },

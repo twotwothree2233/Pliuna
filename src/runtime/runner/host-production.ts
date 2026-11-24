@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import type { ArtifactCandidate, ArtifactIndex, ContributionInventory, ExecutionAttempt, ExecutionScope, GoalRevision, LogicalWork, WorkOutputDeclaration } from '../../shared/contracts.generated'
+import type { ArtifactCandidate, ArtifactIndex, ContributionInventory, ExecutionAttempt, ExecutionScope, ContentPlan, LogicalWork, WorkOutputDeclaration } from '../../shared/contracts.generated'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import type { WorkerResultIssue } from '../model/agent'
@@ -39,7 +39,7 @@ export class RunnerHostProduction {
   normalize(raw: ProducerDraft, rawOwner: ExecutionScope, response: Completion): ProducerResult {
     return this.db.transaction(() => {
       const owner = validateRunnerContract('runner_execution_scope', rawOwner), { work, goal } = this.work.qualify(owner.attempt_id)
-      if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.task_id !== owner.task_id || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'Draft normalization requires its current exact production source')
+      if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.task_id !== owner.task_id || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision || work.message_id !== owner.message_id) fail('RUNNER_OWNERSHIP_INVALID', 'Draft normalization requires its current exact production source')
       const lookup = "SELECT id,payload_json FROM records WHERE task_id=? AND kind='model.response' AND json_extract(payload_json,'$.owner.attempt_id')=?"
       const row = (response.request_link
         ? this.db.prepare(lookup + " AND json_extract(payload_json,'$.request_link.request_id')=? AND json_extract(payload_json,'$.request_link.evidence_event_id')=? ORDER BY sequence DESC LIMIT 1").get(owner.task_id, owner.attempt_id, response.request_link.request_id, response.request_link.evidence_event_id)
@@ -95,7 +95,7 @@ export class RunnerHostProduction {
   preflight(raw: ProducerResult, rawOwner: ExecutionScope, sources: readonly ArtifactCandidate['provenance_ref'][] = []): WorkerResultIssue | null {
     const owner = validateRunnerContract('runner_execution_scope', rawOwner)
     const qualified = this.work.qualify(owner.attempt_id), { work, goal } = qualified
-    if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.task_id !== owner.task_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision) fail('RUNNER_OWNERSHIP_INVALID', 'Production preflight requires its current exact work owner')
+    if (!goal || owner.purpose !== 'production' || work.purpose !== 'production' || work.work_id !== owner.work_id || work.run_id !== owner.run_id || work.task_id !== owner.task_id || work.role !== owner.role || work.request_id !== owner.request_id || work.intent_revision !== owner.intent_revision || work.message_id !== owner.message_id) fail('RUNNER_OWNERSHIP_INVALID', 'Production preflight requires its current exact work owner')
     const sections = this.artifacts.outline(owner.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
     const result = validateProducerResult(raw, { owner, work, goal, sections })
     const delivery = this.deliveryIssue(result, owner)
@@ -189,7 +189,7 @@ export class RunnerHostProduction {
     }
   }
 
-  private sealIfReady(work: LogicalWork, goal: GoalRevision): ContributionInventory | null {
+  private sealIfReady(work: LogicalWork, goal: ContentPlan): ContributionInventory | null {
     const source = this.composition.source(work.task_id, goal.request_id, goal.intent_revision)
     if (!source) return null
     const planner = this.work.work(source.work_id)

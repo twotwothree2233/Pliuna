@@ -1,3 +1,4 @@
+import { openTaskRecords } from '../helpers/workspace-ui'
 import { closeSettings, configureModel, openSettings, testRole } from '../helpers/settings-ui'
 import { modelInputFromHost } from '../helpers/model-server'
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
@@ -68,13 +69,13 @@ test('immutable resources: HTTP Agent, desktop continuation/reference/approval, 
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await send(page, '创建资源与引用')
     await expect(page.getByText('资源与引用已保存并读回。', { exact: true })).toBeVisible()
-    await page.getByRole('tab', { name: /资源/ }).click()
+    await page.getByRole('tab', { name: '材料' }).click()
     await fullText(page)
     const resources = page.getByRole('region', { name: '全部资源分页浏览' })
     await resources.getByRole('button', { name: /JSON材料/ }).click()
     await expect(resources.locator('pre')).toContainText('来源JSON')
     expect(JSON.parse((await resources.locator('pre').textContent())!).content.value).toEqual({ title: '来源JSON', values: [1, true, null] })
-    await page.getByRole('tab', { name: /任务数据/ }).click()
+    await openTaskRecords(page, '任务数据')
     const data = page.getByRole('region', { name: '全部任务数据分页浏览' })
     await data.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     await data.getByRole('button', { name: new RegExp(dataId) }).click()
@@ -96,8 +97,8 @@ test('immutable resources: HTTP Agent, desktop continuation/reference/approval, 
     const requests = server.exchanges.length
     await app.close(); app = await launch(); page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message))
     await page.getByRole('button', { name: /资源闭环验收/ }).click()
-    await page.getByRole('tab', { name: /资源/ }).click(); await fullText(page)
-    await page.getByRole('tab', { name: /任务数据/ }).click()
+    await page.getByRole('tab', { name: '材料' }).click(); await fullText(page)
+    await openTaskRecords(page, '任务数据')
     const restored = page.getByRole('region', { name: '全部任务数据分页浏览' })
     await restored.getByRole('button', { name: '刷新全部任务数据', exact: true }).click()
     await restored.getByRole('button', { name: new RegExp(dataId) }).click()

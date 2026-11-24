@@ -15,17 +15,25 @@ CREATE TABLE runner_consumptions (
  result_json TEXT NOT NULL CHECK(json_valid(result_json)), installed_at TEXT NOT NULL,
  PRIMARY KEY(input_event_id,stage)
 );
-CREATE TABLE runner_goal_revisions (
+CREATE TABLE runner_content_plans (
  task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT NOT NULL REFERENCES requests(id),
  intent_revision INTEGER NOT NULL CHECK(intent_revision>=1),
  input_event_id TEXT NOT NULL REFERENCES runner_inputs(input_event_id),
  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
  PRIMARY KEY(request_id,intent_revision)
 );
-CREATE TABLE runner_goal_heads (
- task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT PRIMARY KEY REFERENCES requests(id),
- intent_revision INTEGER NOT NULL,
- FOREIGN KEY(request_id,intent_revision) REFERENCES runner_goal_revisions(request_id,intent_revision)
+CREATE INDEX runner_content_plans_by_task ON runner_content_plans(task_id,request_id,intent_revision);
+CREATE VIEW runner_current_content_plans AS
+ SELECT (SELECT first.rowid FROM runner_content_plans first WHERE first.request_id=p.request_id ORDER BY first.intent_revision LIMIT 1) AS position,
+        p.task_id,p.request_id,p.intent_revision,p.input_event_id,p.payload_json
+ FROM runner_content_plans p WHERE NOT EXISTS (
+   SELECT 1 FROM runner_content_plans n WHERE n.task_id=p.task_id AND n.request_id=p.request_id AND n.intent_revision>p.intent_revision
+ );
+CREATE TABLE runner_content_removals (
+ task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT NOT NULL,
+ intent_revision INTEGER NOT NULL, message_id TEXT NOT NULL REFERENCES records(id),
+ PRIMARY KEY(request_id,intent_revision),
+ FOREIGN KEY(request_id,intent_revision) REFERENCES runner_content_plans(request_id,intent_revision)
 );
 CREATE TABLE runner_budgets (
  budget_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -92,20 +100,20 @@ CREATE TABLE runner_inventory_sources (
  intent_revision INTEGER NOT NULL CHECK(intent_revision>=1),
  work_id TEXT NOT NULL REFERENCES runner_work(work_id), plan_revision INTEGER NOT NULL CHECK(plan_revision>=1),
  PRIMARY KEY(request_id,intent_revision),
- FOREIGN KEY(request_id,intent_revision) REFERENCES runner_goal_revisions(request_id,intent_revision)
+ FOREIGN KEY(request_id,intent_revision) REFERENCES runner_content_plans(request_id,intent_revision)
 );
 CREATE TABLE runner_work_outputs (
  task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT NOT NULL REFERENCES requests(id),
  intent_revision INTEGER NOT NULL CHECK(intent_revision>=1), work_id TEXT NOT NULL REFERENCES runner_work(work_id),
  plan_revision INTEGER NOT NULL CHECK(plan_revision>=1), result_revision INTEGER NOT NULL CHECK(result_revision>=1),
  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), PRIMARY KEY(work_id,plan_revision,result_revision),
- FOREIGN KEY(request_id,intent_revision) REFERENCES runner_goal_revisions(request_id,intent_revision)
+ FOREIGN KEY(request_id,intent_revision) REFERENCES runner_content_plans(request_id,intent_revision)
 );
 CREATE TABLE runner_contribution_inventories (
  task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT NOT NULL REFERENCES requests(id),
  intent_revision INTEGER NOT NULL CHECK(intent_revision>=1), inventory_revision INTEGER NOT NULL CHECK(inventory_revision>=1),
  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), PRIMARY KEY(request_id,intent_revision,inventory_revision),
- FOREIGN KEY(request_id,intent_revision) REFERENCES runner_goal_revisions(request_id,intent_revision)
+ FOREIGN KEY(request_id,intent_revision) REFERENCES runner_content_plans(request_id,intent_revision)
 );
 CREATE TABLE runner_scopes (
  task_id TEXT NOT NULL REFERENCES tasks(id), composition_version INTEGER NOT NULL CHECK(composition_version>=1),

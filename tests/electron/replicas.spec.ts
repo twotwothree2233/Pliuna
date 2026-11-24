@@ -65,10 +65,10 @@ for (const scenario of ['confirm', 'cancel', 'input-conflict', 'response-lost', 
       await app.evaluate((_electron, root) => { const Database = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('better-sqlite3'), db = new Database(root + '/pliuna.sqlite'); db.exec('UPDATE views SET state_revision=state_revision+1'); db.close() }, directory)
       await page.getByLabel('你的想法').evaluate(inputElement => { const input = inputElement as HTMLTextAreaElement; input.value = '冲突输入不能丢'; input.dispatchEvent(new Event('input', { bubbles: true })); Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent === '核验并退役此副本' && !b.disabled)!.click() })
       await expect(panel.getByRole('alert').last()).toContainText('VERSION_CONFLICT'); expect((await inspect()).journal.retirements).toHaveLength(0); await expect(page.getByLabel('你的想法')).toHaveValue('冲突输入不能丢')
-      await panel.getByRole('button', { name: /^返回工作区/ }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
+      await panel.getByRole('button', { name: /^返回工作台/ }).click(); page.once('dialog', d => d.accept()); await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
     } else {
       let message = ''; page.once('dialog', async d => { message = d.message(); if (scenario === 'cancel') await d.dismiss(); else await d.accept() }); await enabled.click()
-      await expect(panel.getByRole('button', { name: /^返回工作区/ })).toBeEnabled(); expect(message).toContain('永远不可再选择或恢复'); expect(message).toContain('不删除正式资源')
+      await expect(panel.getByRole('button', { name: /^返回工作台/ })).toBeEnabled(); expect(message).toContain('永远不可再选择或恢复'); expect(message).toContain('不删除正式资源')
       if (scenario === 'cancel') { expect((await inspect()).journal.retirements.every((r: any) => r.phase === 'preview')).toBe(true); expect((await readdir(join(directory, 'recovery'))).some(f => f === old.id + '.sqlite')).toBe(true) }
       else { await expect(section).toContainText('PROTECTION_RELEASED'); const r = (await inspect()).journal.retirements.find((r: any) => r.phase === 'released'); expect(r).toBeTruthy(); expect((await call({ type: 'maintenance.status' })).active.id).toBe(active.id); await app.close(); app = await launch(); page = await app.firstWindow(); expect((await call({ type: 'maintenance.replica.status', operation_id: r.id })).phase).toBe('released') }
     }

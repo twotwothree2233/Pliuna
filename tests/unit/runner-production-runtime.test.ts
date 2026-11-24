@@ -48,6 +48,9 @@ function setup(runner: { productionRuns: 1 | 2; collator?: 'rule' | 'model' } | 
 function content(text: string): Bundle {
   return { profile: 'managed-v1', html: `<section><p>${text}</p></section>`, css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'v1' }, forms: [], behaviors: [], references: [], export: [] }
 }
+function quizBundle(category: 'answer' | 'learning'): Bundle {
+  return { ...content('Practice question'), html: '<section id="quiz"><p>Practice question</p></section>', export: [{ id: 'quiz', category, source: { type: 'element', element_id: 'quiz' } }] }
+}
 function provenanceResult(s: ReturnType<typeof setup>, bundle_resource_id: string, provenance_ref: ArtifactCandidate['provenance_ref'], candidate_id: string): ProducerResult {
   const work = s.state.taskWorks(s.task).find(item => item.role === 'producer')
   if (!work || work.purpose !== 'production') throw Error('Expected producer')
@@ -405,14 +408,35 @@ it('lets a Producer discover contracts and create an accepted JSON bundle throug
   expect(new RunnerArtifactState(s.db, s.state).artifact(s.task, slotId(s, 'bandit-lecture'))).toMatchObject({ artifact_revision: 1 })
 })
 
-it.each(['invalid raw draft', 'cross-task image'] as const)('returns %s bundle errors during resource creation and accepts a corrected tool round', async failure => {
-  const s = setup({ productionRuns: 2, collator: 'rule' }), invalid = content('Corrected artifact')
-  let expectedError = { code: 'UNSUPPORTED_BUNDLE', message: 'Invalid raw draft types' }
+it.each(['invalid raw draft', 'invalid initial selection', 'invalid numeric input binding', 'cross-task image', 'unbound quiz'] as const)('returns %s bundle errors during resource creation and accepts a corrected tool round', async failure => {
+  const s = setup({ productionRuns: 2, collator: 'rule' }), invalid = failure === 'unbound quiz' ? quizBundle('answer') : content('Corrected artifact')
+  let expectedError = { code: 'UNSUPPORTED_BUNDLE', message: expect.stringContaining('state.initial/doneCount') }
   if (failure === 'invalid raw draft') {
     invalid.html = '<section><p id="count">Completed items</p></section>'
     invalid.state.schema.properties = { doneCount: { type: 'integer' } }
     invalid.state.initial = { doneCount: 0 }
     invalid.behaviors = [{ type: 'text', element_id: 'count', field: '/doneCount' }]
+  } else if (failure === 'invalid initial selection') {
+    invalid.html = '<section><label for="priority">Priority</label><select id="priority"><option value="">Choose</option><option value="high">High</option></select></section>'
+    invalid.state.schema.properties = { priority: { type: 'string', enum: ['high'] } }
+    invalid.state.initial = { priority: '' }
+    invalid.behaviors = [{ type: 'input', element_id: 'priority', control: 'select', field: '/priority' }]
+    expectedError.message = expect.stringMatching(/state\.initial\/priority.*empty placeholder.*enum/)
+    const corrected = structuredClone(invalid)
+    corrected.state.schema.properties!.priority!.enum = ['', 'high']
+    return runRecovery(corrected)
+  } else if (failure === 'invalid numeric input binding') {
+    invalid.html = '<section><input id="weight" type="number" aria-label="Weight"></section>'
+    invalid.state.schema.properties = { weight: { type: 'number' } }
+    invalid.state.initial = { weight: '1.5' }
+    invalid.behaviors = [{ type: 'input', element_id: 'weight', control: 'number', field: '/weight' }]
+    expectedError.message = expect.stringMatching(/behaviors\[0\].*weight.*<input type="text">/)
+    const corrected = structuredClone(invalid)
+    corrected.html = invalid.html.replace('type="number"', 'type="text"')
+    return runRecovery(corrected)
+  } else if (failure === 'unbound quiz') {
+    expectedError = { code: 'PERSONAL_BINDING_REQUIRED', message: expect.stringContaining('export[0].personal_binding') }
+    return runRecovery(quizBundle('learning'))
   } else {
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/Z1sAAAAASUVORK5CYII=', 'base64')
     const importImage = (task_id: string): string => {
@@ -470,7 +494,34 @@ it.each(['invalid raw draft', 'cross-task image'] as const)('returns %s bundle e
     await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: approval.action_id, proceed: true, confirm_discard: false })
     await vi.waitFor(() => expect(s.store.snapshot(s.task).views).toHaveLength(1))
     if (failure === 'cross-task image') expect(s.store.snapshot(s.task).views[0]!.presentation.html).toContain('src="data:image/png;base64,')
+    if (failure === 'unbound quiz') expect(s.store.snapshot(s.task).views[0]!.bundle.export).toEqual(quizBundle('learning').export)
+    if (failure.startsWith('invalid')) expect(s.store.snapshot(s.task).views[0]!.bundle.behaviors).toEqual(corrected.behaviors)
   }
+})
+
+it('lets the same producer replace a saved unpublishable quiz candidate before accepting it', async () => {
+  const s = setup({ productionRuns: 1, collator: 'rule' })
+  let savedId = ''
+  const result = (resourceId: string) => productionAnswer(provenanceResult(s, resourceId, { task_id: s.task, kind: 'resource', id: resourceId }, 'quiz-candidate'))
+  s.complete.mockImplementationOnce(async () => {
+    const work = s.state.taskWorks(s.task).find(work => work.role === 'producer')!
+    const saved = await s.store.modelTool(s.task, work.run_id, { type: 'write', input: { type: 'resource.create', display_name: 'Saved draft', content: { type: 'json', value: quizBundle('answer') } } }) as { data: { id: string } }
+    savedId = saved.data.id
+    return result(savedId)
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    expect(messages[0]?.content).toContain('PERSONAL_BINDING_REQUIRED')
+    expect(messages[0]?.content).toContain('artifacts[0].bundle_resource_id')
+    expect(s.records('worker.result')).toEqual([])
+    return resourceCompletion('corrected-quiz', { type: 'json', value: quizBundle('learning') })
+  }).mockImplementationOnce(async (_config, _key, messages) => result(JSON.parse(messages.at(-1)!.content!).data.id))
+  const run = s.store.start(s.task, 'Publish an existing practice quiz', 'production', [])
+  await vi.waitFor(() => expect(s.state.run(run).state).toBe('completed'))
+  expect(s.complete).toHaveBeenCalledTimes(3)
+  const rejection = s.records('worker.result.rejected')[0]!
+  const accepted = s.records('worker.result')[0]!
+  expect(rejection).toMatchObject({ code: 'PERSONAL_BINDING_REQUIRED', path: 'artifacts[0].bundle_resource_id', value: savedId })
+  expect(accepted.value.artifacts[0].bundle_resource_id).not.toBe(savedId)
+  expect(s.records('worker.ended')).toMatchObject([{ state: 'succeeded', owner: accepted.owner }])
 })
 
 it('keeps ordinary JSON resource creation available to production workers', async () => {

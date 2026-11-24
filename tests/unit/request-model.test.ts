@@ -18,13 +18,20 @@ async function setup(handler:(x:Exchange,r:ServerResponse)=>void){
  const submit=(extra={})=>call('request.submit',{text:'synthetic request',model_config_id:'main',resource_ids:[],import_ids:[],...extra})
  return {store,models,configuration,call,submit,task,server}
 }
-it('waiting import uses no lease or HTTP and mutation requires explicit revalidation',async()=>{
- let traffic=0;const {store,models,configuration,call,submit}=await setup((_x,r)=>{traffic++;textStream(r,'done')})
+it('waiting import uses no lease or HTTP and a changed model requires explicit rebinding',async()=>{
+ const traffic:string[]=[];const {store,models,configuration,call,submit}=await setup((x,r)=>{traffic.push(x.body.model);textStream(r,'done')})
  const id=call('material.internal.register',{items:[{display_name:'synthetic.txt',source:'text'}]}).items[0].operation_id,r=submit({import_ids:[id]})
- expect(r.state).toBe('queued');expect(models.busy()).toBe(false);expect(traffic).toBe(0)
+ expect(r.state).toBe('queued');expect(models.busy()).toBe(false);expect(traffic).toHaveLength(0)
  await store.handle({type:'model.configure',configuration:{...configuration,wire_model_id:'updated-wire'},api_key:'synthetic',confirm_memory_only:true})
- expect(call('request.status',{request_id:r.request_id}).state).toBe('confirmation_required');expect(traffic).toBe(0);expect((models.list() as any[])[0].roles).toEqual([])
- expect(()=>call('request.resolve',{request_id:r.request_id,model_config_id:'main',use_successful:false,replacements:[],confirm:true})).toThrow()
+ expect(call('request.status',{request_id:r.request_id}).state).toBe('confirmation_required');expect(traffic).toHaveLength(0);expect((models.list() as any[])[0].roles).toEqual([])
+ const resolve={request_id:r.request_id,model_config_id:'main',use_successful:false,replacements:[]}
+ expect(()=>call('request.resolve',{...resolve,confirm:false})).toThrow()
+ expect(call('request.resolve',{...resolve,confirm:true})).toMatchObject({state:'queued',model_selection:{wire_model_id:'updated-wire'},materials:[{operation_id:id,state:'waiting'}]})
+ expect(models.busy()).toBe(false);expect(traffic).toHaveLength(0)
+ const body=Buffer.from('ready material')
+ call('material.internal.begin',{operation_id:id,byte_length:body.length,media_type:'text/plain; charset=utf-8'});call('material.internal.chunk',{operation_id:id,offset:0,data:body.toString('base64')});call('material.internal.finish',{operation_id:id})
+ await until(()=>call('request.status',{request_id:r.request_id}).run_state==='completed')
+ expect(traffic).toEqual(['updated-wire'])
 })
 it('actual wire receives selected metadata but never automatically receives material body',async()=>{
  let input:any;const {store,call,submit,task}=await setup((x,r)=>{input=JSON.parse(x.body.messages.at(-1).content);textStream(r,'done')})

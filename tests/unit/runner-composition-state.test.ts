@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it } from 'vitest'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, CompositionScope, ContributionInventory, ExecutionAttempt, GoalRevision, LogicalWork, WorkDependency, WorkOutputDeclaration } from '../../src/shared/contracts.generated'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, CompositionScope, ContributionInventory, ExecutionAttempt, ContentPlan, LogicalWork, WorkDependency, WorkOutputDeclaration } from '../../src/shared/contracts.generated'
 import { validateRunnerContract } from '../../src/shared/runner-validation'
 import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
@@ -23,7 +23,7 @@ function record(ctx: Harness, id: string): void {
   const row = ctx.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 sequence FROM records WHERE task_id=?').get('task') as { sequence: number }
   ctx.db.prepare("INSERT INTO records(id,task_id,sequence,kind,payload_json,created_at) VALUES (?,'task',?,'message.user','{}','time')").run(id, row.sequence)
 }
-function addGoal(ctx: Harness, requestId: string, review = false): GoalRevision {
+function addGoal(ctx: Harness, requestId: string, review = false): ContentPlan {
   ctx.db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,'task','started','{}','{}','time')").run(requestId)
   record(ctx, `record-${requestId}`)
   ctx.work.receive({ input_event_id: `input-${requestId}`, task_id: 'task', kind: 'request', record_id: `record-${requestId}`, request_id: requestId, stage: 'received' })

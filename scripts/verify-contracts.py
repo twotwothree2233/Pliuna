@@ -62,7 +62,7 @@ else:
 con.commit()
 # v2 preserves legacy attribution and limits active production by request.
 con.executescript((BASE / '002-runner.sql').read_text(encoding='utf-8'))
-assert not con.execute('SELECT * FROM runner_goal_revisions').fetchall()
+assert not con.execute('SELECT * FROM runner_content_plans').fetchall()
 assert not con.execute('SELECT * FROM runner_runs').fetchall()
 for number in (1, 2):
     con.execute('INSERT INTO requests VALUES (?,?,?,?,?,?)',

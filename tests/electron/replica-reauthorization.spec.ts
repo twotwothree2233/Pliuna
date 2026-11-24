@@ -118,7 +118,7 @@ for (const scenario of ['confirm', 'cancel', 'response-lost', 'input-conflict', 
       })
       await expect(panel.getByRole('alert').last()).toContainText('VERSION_CONFLICT')
       await expect(page.getByLabel('你的想法')).toHaveValue('冲突输入保留')
-      await panel.getByRole('button', { name: /^返回工作区/ }).click()
+      await panel.getByRole('button', { name: /^返回工作台/ }).click()
       page.once('dialog', dialog => dialog.accept())
       await page.getByRole('button', { name: '放弃本地输入并重新加载', exact: true }).click()
     } else {
@@ -126,7 +126,7 @@ for (const scenario of ['confirm', 'cancel', 'response-lost', 'input-conflict', 
       let message = ''
       page.once('dialog', async dialog => { message = dialog.message(); if (scenario === 'cancel') await dialog.dismiss(); else await dialog.accept() })
       await renew.click()
-      await expect(panel.getByRole('button', { name: /^返回工作区/ })).toBeEnabled()
+      await expect(panel.getByRole('button', { name: /^返回工作台/ })).toBeEnabled()
       expect(message).toContain('副本清理重新授权')
       expect(message).toContain(`本次剩余 ${remainingPaths.length} 个数据库文件`)
       expect(message).toContain('累计 1 次尝试')

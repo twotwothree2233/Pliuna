@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it } from 'vitest'
-import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, GoalRevision, LogicalWork, PublicationEntry, WorkOutputDeclaration } from '../../src/shared/contracts.generated'
+import type { ArtifactCandidate, ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, LogicalWork, PublicationEntry, WorkOutputDeclaration } from '../../src/shared/contracts.generated'
+import { installChapterSchema } from '../../src/runtime/runner/chapter-state'
 import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerCompositionState } from '../../src/runtime/runner/composition-state'
@@ -9,13 +10,14 @@ import { RunnerHostRecovery } from '../../src/runtime/runner/host-recovery'
 import { RunnerHostStatus } from '../../src/runtime/runner/host-status'
 import { RUNNER_LIMITS } from '../../src/runtime/runner/limits'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
+import { liveRunnerFlow } from '../../src/runtime/runner/live-flow'
 
 const coreSql = readFileSync(new URL('../../src/shared/contracts/001-core.sql', import.meta.url), 'utf8')
 const runnerSql = readFileSync(new URL('../../src/shared/contracts/002-runner.sql', import.meta.url), 'utf8')
 const databases: Database.Database[] = []
 afterEach(() => { for (const db of databases.splice(0)) db.close() })
 function fixture() {
-  const db = new Database(':memory:'); databases.push(db); db.exec(coreSql); db.exec(runnerSql)
+  const db = new Database(':memory:'); databases.push(db); db.exec(coreSql); db.exec(runnerSql); installChapterSchema(db)
   db.prepare('UPDATE schema_version SET version=2').run()
   db.prepare("INSERT INTO tasks(id,title,state,revision) VALUES ('task','Task','active',1),('other','Other','active',1)").run()
   db.prepare("INSERT INTO surfaces VALUES ('surface','task',1,?)").run(JSON.stringify({ slots: [{ id: 'main', groups: [] }] }))
@@ -23,19 +25,20 @@ function fixture() {
   const record = (id: string, kind: string, payload: unknown) => {
     const sequence = (db.prepare("SELECT COALESCE(MAX(sequence),0)+1 n FROM records WHERE task_id='task'").get() as { n: number }).n
     db.prepare("INSERT INTO records VALUES (?,'task',?,?,?,'time')").run(id, sequence, kind, JSON.stringify(payload))
+    db.prepare("UPDATE tasks SET next_sequence=? WHERE id='task'").run(sequence + 1)
   }
-  const goal = (id: string, text = id, kind: 'answer' | 'artifact' = 'answer'): GoalRevision => {
+  const goal = (id: string, text = id, kind: 'answer' | 'artifact' = 'answer'): ContentPlan => {
     db.prepare("INSERT INTO requests VALUES (?,'task','started','{}','{}','time')").run(id)
     record(`request-${id}`, 'message.user', { text })
     work.receive({ input_event_id: `input-${id}`, task_id: 'task', kind: 'request', record_id: `request-${id}`, request_id: id, stage: 'received' })
     return work.installGoal({ task_id: 'task', request_id: id, intent_revision: 1, input_event_id: `input-${id}`, state: 'active', requirements: [{ requirement_id: 'result', kind, required: true, provenance_required: false }] })
   }
-  const revise = (original: GoalRevision): GoalRevision => {
+  const revise = (original: ContentPlan): ContentPlan => {
     record(`correction-${original.request_id}`, 'message.user', { text: 'Corrected request text' })
     work.receive({ input_event_id: `correction-${original.request_id}`, task_id: 'task', kind: 'correction', record_id: `correction-${original.request_id}`, request_id: original.request_id, stage: 'received' })
     return work.installGoal({ ...original, intent_revision: original.intent_revision + 1, previous_revision: original.intent_revision, input_event_id: `correction-${original.request_id}` })
   }
-  const start = (value: GoalRevision) => {
+  const start = (value: ContentPlan) => {
     const run = `run-${value.request_id}-${value.intent_revision}`, workId = `work-${value.request_id}-${value.intent_revision}`, attemptId = `attempt-${value.request_id}-${value.intent_revision}`
     new RunnerBudgetLedger(db).create({ budget_id: `budget-${value.request_id}`, task_id: 'task', purpose: 'production', request_id: value.request_id, limits: { model_requests: 10, tool_requests: 10, tokens: 1000, wall_ms: 60000 } })
     db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,'task',?,'running','epoch','{}','{}','time')").run(run, value.request_id)
@@ -49,7 +52,7 @@ function fixture() {
     composition.designateSource({ task_id: 'task', request_id: value.request_id, intent_revision: value.intent_revision, work_id: workId, plan_revision: 1 })
     return owner
   }
-  const finish = (value: GoalRevision, owner: ExecutionScope, fragments: ArtifactIndex[] = [], answerText = 'PRIVATE FINAL ANSWER') => {
+  const finish = (value: ContentPlan, owner: ExecutionScope, fragments: ArtifactIndex[] = [], answerText = 'PRIVATE FINAL ANSWER') => {
     const result_ref = { task_id: 'task', kind: 'record' as const, id: `result-${owner.work_id}` }
     record(result_ref.id, 'worker.reply', { owner, text: 'PRIVATE WORKER BODY' })
     work.updateAttempt({ ...work.attempt(owner.attempt_id), state: 'succeeded', result_ref })
@@ -64,7 +67,7 @@ function fixture() {
     db.prepare("INSERT INTO resources VALUES (?,?,?,2,'application/json','Body','time')").run(id, id, 'a'.repeat(64))
     db.prepare("INSERT INTO task_resources VALUES ('task',?)").run(id)
   }
-  const fragment = (value: GoalRevision, owner: ExecutionScope): ArtifactIndex => {
+  const fragment = (value: ContentPlan, owner: ExecutionScope): ArtifactIndex => {
     resource('source'); resource('published')
     artifacts.installOutline({ task_id: 'task', outline_revision: 1, base_outline_revision: 0, sections: [{ section_id: 'section', request_id: value.request_id, intent_revision: value.intent_revision, order_key: 'a', position_revision: 1, title: 'Section' }] })
     artifacts.assign([{ task_id: 'task', artifact_id: 'artifact', section_id: 'section', work_id: owner.work_id, plan_revision: 1, base_artifact_revision: 0 }])
@@ -73,11 +76,11 @@ function fixture() {
     if (decision.state !== 'accepted') throw Error(decision.code)
     return decision.index
   }
-  const scope = (value: GoalRevision, inventory = composition.inventory('task', value.request_id, value.intent_revision)): void => {
+  const scope = (value: ContentPlan, inventory = composition.inventory('task', value.request_id, value.intent_revision)): void => {
     const previous = composition.scope('task')
     composition.installScope({ task_id: 'task', composition_version: (previous?.composition_version ?? 0) + 1, ...(previous ? { previous_version: previous.composition_version } : {}), state: 'working', targets: [{ request_id: value.request_id, intent_revision: value.intent_revision, required: true, requirement_ids: ['result'], ...(inventory ? { contribution_inventory: { task_id: 'task', request_id: value.request_id, intent_revision: value.intent_revision, inventory_revision: inventory.inventory_revision } } : {}) }], unresolved: [] })
   }
-  const publish = (value: GoalRevision): void => {
+  const publish = (value: ContentPlan): void => {
     const entry: PublicationEntry = { task_id: 'task', batch_id: 'batch', request_id: value.request_id, intent_revision: value.intent_revision, artifact_id: 'artifact', artifact_revision: 1, section_id: 'section', source_bundle_resource_id: 'source', published_bundle_resource_id: 'published', view_id: 'view', view_revision: 1, state_revision: 1, surface_history_id: 'surface-history' }
     db.prepare("INSERT INTO runner_batches VALUES ('batch','task',1,'{}')").run()
     db.prepare("INSERT INTO views VALUES ('view','surface',1,'published',1,'{}','v1',NULL,0)").run()
@@ -87,7 +90,7 @@ function fixture() {
     db.prepare("INSERT INTO runner_surface_history VALUES ('surface-history','task','surface',1,'publish',?)").run(JSON.stringify({ task_id: 'task', surface_id: 'surface', surface_revision: 1, action_id: 'publish', layout: { slots: [] }, views: [{ view_id: 'view', view_revision: 1, state_revision: 1, view_history_id: 'view-history' }] }))
     db.prepare("INSERT INTO runner_view_mappings VALUES ('task','artifact',1,'batch','view',1,'source','published',?)").run(JSON.stringify(entry))
   }
-  const batch = (value: GoalRevision, fragment: ArtifactIndex, id: string, state: CompositionBatch['state'], reason?: string, extraTargets: GoalRevision[] = []) => {
+  const batch = (value: ContentPlan, fragment: ArtifactIndex, id: string, state: CompositionBatch['state'], reason?: string, extraTargets: ContentPlan[] = []) => {
     const result: CompositionBatch = { task_id: 'task', batch_id: id, run_id: `run-${id}`, composition_version: composition.scope('task')!.composition_version, trigger_request_id: value.request_id, model_config_id: 'model', model_config_revision: 1, state, targets: [value, ...extraTargets].map(target => ({ task_id: 'task', request_id: target.request_id, intent_revision: target.intent_revision })), indexes: [{ task_id: 'task', artifact_id: fragment.artifact_id, artifact_revision: fragment.artifact_revision }], sections: [{ section_id: fragment.section_id, position_revision: 1, order_key: fragment.order_key }], operation_id: `operation-${id}`, action_id: `action-${id}` }
     db.prepare('INSERT INTO runner_batches VALUES (?,?,?,?)').run(id, 'task', result.composition_version, JSON.stringify(result))
     db.prepare("INSERT INTO runs(id,task_id,state,runtime_epoch,limits_json,budget_json,created_at,wait_reason) VALUES (?,'task',?,'epoch','{}','{}','time',?)").run(result.run_id, state === 'failed' ? 'failed' : 'waiting', state === 'failed' ? null : reason ?? 'model_queue')
@@ -96,6 +99,63 @@ function fixture() {
   }
   return { db, work, composition, status, record, goal, revise, start, finish, fragment, scope, publish, batch }
 }
+
+it('projects queued requests, routing and independent live work without borrowing expired approvals', () => {
+  const s = fixture(), a = s.start(s.goal('alpha')), b = s.start(s.goal('beta'))
+  s.db.prepare("INSERT INTO requests VALUES ('queued','task','queued','{}',?,'time'),('routing','task','queued','{}',?,'time')")
+    .run(JSON.stringify({ epoch: 'epoch', text: 'Queued input' }), JSON.stringify({ epoch: 'epoch', text: 'Routing input' }))
+  s.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES ('router','task','routing','running','epoch','{}','{}','time'),('foreign','other',NULL,'running','epoch','{}','{}','time')").run()
+  const another = { ...s.work.work(a.work_id), work_id: 'second-work', state: 'queued' }
+  s.db.prepare("INSERT INTO runner_work VALUES ('second-work','task',?,1,'queued',?)").run(a.run_id, JSON.stringify(another))
+  s.work.updateAttempt({ ...s.work.attempt(b.attempt_id), state: 'waiting' })
+  s.record('waiting', 'worker.state', { owner: b, reason: 'approval' })
+  s.db.prepare("INSERT INTO actions(id,task_id,run_id,kind,state,source_json,request_json,commit_valid,created_at) VALUES ('action','task',?,'mutation','waiting',?,'{}',1,'time')").run(b.run_id, JSON.stringify({ owner: b }))
+  s.db.prepare("INSERT INTO approvals VALUES ('approval','action','pending','valid','manual','awaiting_human','2000-01-01',NULL,?)").run(JSON.stringify({ runtime_epoch: 'epoch' }))
+  const read = (task_id = 'task') => liveRunnerFlow(s.db, { task_id }, 'epoch')
+  expect(read().lanes.Router.items).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'request:queued', state: 'queued' }),
+    expect.objectContaining({ id: 'request:routing', state: 'running', sources: [{ request_id: 'routing', run_id: 'router' }] })
+  ]))
+  expect(read().lanes.Worker.items).toMatchObject([
+    { id: `work:${a.work_id}`, state: 'running' }, { id: 'work:second-work', state: 'queued' }, { id: `work:${b.work_id}`, state: 'waiting' }
+  ])
+  s.db.prepare("UPDATE approvals SET expires_at='2999-01-01'").run()
+  expect(read().lanes.Worker.items.at(-1)).toMatchObject({ state: 'approval', approval_id: 'approval' })
+  expect(read('other').lanes.Worker.items).toMatchObject([{ id: 'run:foreign' }])
+  expect(() => read('missing')).toThrow('Task unavailable')
+  expect(() => liveRunnerFlow(s.db, { task_id: 'task', scope: { run_id: a.run_id } }, 'epoch')).toThrow('Invalid live flow lookup')
+})
+
+it('pages only active work and exposes verified handoff references without bodies', () => {
+  const s = fixture(), live = s.start(s.goal('live', 'PRIVATE REQUEST')), old = s.start(s.goal('old'))
+  s.db.prepare("UPDATE runs SET state='completed',commit_valid=0 WHERE id=?").run(old.run_id)
+  s.record('handoff', 'worker.input', { owner: live, text: 'PRIVATE WORKER BODY' })
+  s.record('wrong-owner', 'worker.input', { owner: { ...live, work_id: 'different' }, text: 'PRIVATE WORKER BODY' })
+  const insert = s.db.prepare("INSERT INTO runner_work VALUES (?,'task',?,1,'queued','{}')")
+  for (let i = 0; i < 20; i++) insert.run(`live-${i}`, live.run_id)
+  insert.run('dead-work', old.run_id)
+  const read = (page = 0, focus_run_id?: string) => liveRunnerFlow(s.db, { task_id: 'task', pages: { Worker: page }, ...(focus_run_id ? { focus_run_id } : {}) }, 'epoch')
+  const first = read()
+  expect(first.lanes.Worker).toMatchObject({ total: 21, page: 0 })
+  expect(first.lanes.Worker.items).toHaveLength(8)
+  expect(first.lanes.Worker.items[0]).toMatchObject({ handoff: { from: 'Router', kind: 'work', sequence: 3 } })
+  expect(JSON.stringify(first)).not.toContain('PRIVATE')
+  expect(read(2).lanes.Worker.items.map(item => item.id)).toEqual(['work:live-15', 'work:live-16', 'work:live-17', 'work:live-18', 'work:live-19'])
+  expect(read(2, live.run_id)).toMatchObject({ focus: { role: 'Worker', id: `work:${live.work_id}` }, lanes: { Worker: { page: 0 } } })
+  expect(read(2, old.run_id).focus).toBeUndefined()
+})
+
+it('retains unknown outcomes and cleanup until the original operations settle', () => {
+  const s = fixture(), cleanup = s.start(s.goal('cleanup')), pending = s.start(s.goal('pending'))
+  s.db.prepare("UPDATE runs SET state='waiting',runtime_epoch='previous',commit_valid=0,intended_terminal='cancelled',wait_reason='ending_cleanup' WHERE id=?").run(cleanup.run_id)
+  s.db.prepare("UPDATE runs SET state='interrupted',runtime_epoch='previous',commit_valid=0 WHERE id=?").run(pending.run_id)
+  s.db.prepare("INSERT INTO calls(id,task_id,run_id,capability_id,state,dispatch,execution,delivery,input_json,limits_json,commit_valid,created_at) VALUES ('call','task',?,'test','ended','unknown','unknown','not_applicable','{}','{}',0,'time')").run(pending.run_id)
+  const read = () => liveRunnerFlow(s.db, { task_id: 'task' }, 'epoch').lanes.Host.items
+  expect(read()).toMatchObject([{ id: `run:${cleanup.run_id}`, state: 'closing' }, { id: `run:${pending.run_id}`, state: 'unknown' }])
+  s.db.prepare("UPDATE runs SET state='cancelled' WHERE id=?").run(cleanup.run_id)
+  s.db.prepare("UPDATE calls SET execution='failure' WHERE id='call'").run()
+  expect(read()).toEqual([])
+})
 
 it.each([
   '已生成讲义。\n```json\n{"version":1,"complete":true,"answer":"讲义说明","artifacts":[],"requirement_ids":["result"],"unresolved":[]}\n```',
@@ -113,7 +173,7 @@ it.each([
   const page = s.status.page({ task_id: 'task', limit: 1 })
   expect(page.goals).toMatchObject([{ request_id: 'visible', delivery: 'published', reply: { id: 'answer-visible' } }])
   expect(page.next_cursor).not.toBeNull()
-  expect(page.scope).toMatchObject({ state: 'partial', required_goal_count: 2, unresolved_count: 1, published_count: 0 })
+  expect(page.scope).toMatchObject({ state: 'partial', required_content_count: 2, unresolved_count: 1, published_count: 0 })
   const current = s.status.page({ task_id: 'task', request_id: 'polluted' })
   expect(current.goals).toMatchObject([{ request_id: 'polluted', delivery: 'incomplete', unresolved_count: 1, reply: null }])
   expect(current.scope).toEqual(page.scope)
@@ -286,7 +346,7 @@ it('distinguishes accepted unpublished fragments from exact delivered contributi
   s.finish(goal, owner, [fragment]); s.scope(goal)
   expect(s.status.page({ task_id: 'task' })).toMatchObject({ goals: [{ delivery: 'accepted', reply: null }], scope: { state: 'partial', published_count: 0 } })
   s.publish(goal)
-  expect(s.status.page({ task_id: 'task' })).toMatchObject({ goals: [{ delivery: 'published' }], scope: { state: 'complete', required_goal_count: 1, unresolved_count: 0, pending_update_count: 0, published_count: 1 } })
+  expect(s.status.page({ task_id: 'task' })).toMatchObject({ goals: [{ delivery: 'published' }], scope: { state: 'complete', required_content_count: 1, unresolved_count: 0, pending_update_count: 0, published_count: 1 } })
 })
 
 it('keeps old published Views visible and marks them pending update after a correction', () => {

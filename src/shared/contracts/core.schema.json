@@ -3,6 +3,12 @@
   "$id": "https://pliuna.local/contracts/0.1/core.schema.json",
   "title": "Pliuna core contract draft 0.1",
   "$defs": {
+    "view_page_offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "multipleOf": 10
+    },
     "target": {
       "type": "object",
       "properties": {
@@ -2144,6 +2150,9 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 200
+            },
+            "view_offset": {
+              "$ref": "#/$defs/view_page_offset"
             }
           },
           "required": [
@@ -2408,6 +2417,9 @@
               "minLength": 1,
               "maxLength": 200
             },
+            "view_offset": {
+              "$ref": "#/$defs/view_page_offset"
+            },
             "after": {
               "type": "object",
               "properties": {
@@ -2416,13 +2428,21 @@
                   "minLength": 1,
                   "maxLength": 200
                 },
+                "cache_generation": {
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "sequence": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "view_offset": {
+                  "$ref": "#/$defs/view_page_offset"
                 }
               },
               "required": [
                 "runtime_epoch",
+                "cache_generation",
                 "sequence"
               ],
               "additionalProperties": false
@@ -2602,7 +2622,31 @@
           "type": "object",
           "properties": {
             "type": {
+              "const": "host.task.organize"
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "field": {
+              "enum": ["pinned", "archived"]
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": ["type", "task_id", "field", "value"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
               "const": "host.tasks.page"
+            },
+            "archived": {
+              "type": "boolean"
             },
             "input": {
               "allOf": [
@@ -3395,6 +3439,25 @@
           "type": "object",
           "properties": {
             "type": {
+              "const": "material.delete"
+            },
+            "task_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "resource_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "confirm": { "const": true }
+          },
+          "required": ["type", "task_id", "resource_id", "confirm"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
               "const": "material.read"
             },
             "task_id": {
@@ -3404,6 +3467,9 @@
             "resource_id": {
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "representation": {
+              "const": "preview"
             },
             "offset": {
               "type": "integer",
@@ -4132,7 +4198,6 @@
           "required": [
             "type",
             "model_id",
-            "role",
             "confirm_cost"
           ],
           "additionalProperties": false
@@ -5653,27 +5718,8 @@
         },
         "usage": {
           "anyOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "object",
-              "properties": {
-                "prompt_tokens": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "completion_tokens": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              },
-              "required": [
-                "prompt_tokens",
-                "completion_tokens"
-              ],
-              "additionalProperties": false
-            }
+            { "type": "null" },
+            { "$ref": "#/$defs/provider_token_usage" }
           ]
         },
         "error": {
@@ -5707,6 +5753,16 @@
         "error",
         "output_policy"
       ],
+      "additionalProperties": false
+    },
+    "provider_token_usage": {
+      "type": "object",
+      "properties": {
+        "prompt_tokens": { "type": "integer", "minimum": 0 },
+        "completion_tokens": { "type": "integer", "minimum": 0 },
+        "cached_prompt_tokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      },
+      "required": ["prompt_tokens", "completion_tokens"],
       "additionalProperties": false
     },
     "monty_result": {
@@ -6501,7 +6557,7 @@
       ],
       "additionalProperties": false
     },
-    "runner_goal_revision": {
+    "runner_content_plan": {
       "type": "object",
       "properties": {
         "task_id": {
@@ -6771,6 +6827,9 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
+            "message_id": {
+              "$ref": "#/$defs/runner_id"
+            },
             "update_id": {
               "$ref": "#/$defs/runner_id"
             }
@@ -6963,6 +7022,9 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
+            "message_id": {
+              "$ref": "#/$defs/runner_id"
+            },
             "update_id": {
               "$ref": "#/$defs/runner_id"
             }
@@ -7129,6 +7191,9 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
+            "message_id": {
+              "$ref": "#/$defs/runner_id"
+            },
             "update_id": {
               "$ref": "#/$defs/runner_id"
             }
@@ -7288,6 +7353,9 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
+            },
+            "message_id": {
+              "$ref": "#/$defs/runner_id"
             },
             "update_id": {
               "$ref": "#/$defs/runner_id"

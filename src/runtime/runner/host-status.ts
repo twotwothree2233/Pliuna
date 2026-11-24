@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import type { ArtifactIndex, CompositionBatch, ExecutionScope, GoalRevision, PublicationEntry, WorkOutputDeclaration } from '../../shared/contracts.generated'
+import type { ArtifactIndex, CompositionBatch, ExecutionScope, ContentPlan, PublicationEntry, WorkOutputDeclaration } from '../../shared/contracts.generated'
 import type { Run, RunnerFinalAnswer, RunnerGoalProjection, RunnerProjection, RunnerScopeProjection } from '../../shared/types'
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
@@ -28,7 +28,7 @@ function title(value: string): string {
   for (const character of value) { const next = Buffer.byteLength(character); if (size + next > 256) break; result += character; size += next }
   return result
 }
-function sameGoal(goal: GoalRevision, value: { task_id: string; request_id: string; intent_revision: number }): boolean {
+function sameGoal(goal: ContentPlan, value: { task_id: string; request_id: string; intent_revision: number }): boolean {
   return goal.task_id === value.task_id && goal.request_id === value.request_id && goal.intent_revision === value.intent_revision
 }
 function sameReference(left: WorkOutputDeclaration['result_ref'], right: WorkOutputDeclaration['result_ref']): boolean {
@@ -57,11 +57,11 @@ export class RunnerHostStatus {
     if (!this.db.prepare('SELECT 1 FROM tasks WHERE id=?').get(query.task_id)) throw new ContractError('RUNNER_NOT_FOUND', 'Runner status Task is unavailable')
     return this.db.transaction(() => {
       const saved = query.cursor === undefined ? null : this.cursor(query)
-      const through = saved?.through ?? (this.db.prepare('SELECT COALESCE(MAX(rowid),0) value FROM runner_goal_heads WHERE task_id=?').get(query.task_id) as { value: number }).value
-      const rows = this.db.prepare('SELECT h.rowid position,h.request_id,h.intent_revision,g.payload_json FROM runner_goal_heads h JOIN runner_goal_revisions g ON g.request_id=h.request_id AND g.intent_revision=h.intent_revision AND g.task_id=h.task_id WHERE h.task_id=? AND (? IS NULL OR h.request_id=?) AND h.rowid>? AND h.rowid<=? ORDER BY h.rowid LIMIT ?').all(query.task_id, query.request_id ?? null, query.request_id ?? null, saved?.after ?? 0, through, limit + 1) as GoalRow[]
+      const through = saved?.through ?? (this.db.prepare('SELECT COALESCE(MAX(position),0) value FROM runner_current_content_plans WHERE task_id=?').get(query.task_id) as { value: number }).value
+      const rows = this.db.prepare('SELECT h.position position,h.request_id,h.intent_revision,h.payload_json FROM runner_current_content_plans h WHERE h.task_id=? AND (? IS NULL OR h.request_id=?) AND h.position>? AND h.position<=? ORDER BY h.position LIMIT ?').all(query.task_id, query.request_id ?? null, query.request_id ?? null, saved?.after ?? 0, through, limit + 1) as GoalRow[]
       const scope = this.scope(query.task_id), goals: RunnerGoalProjection[] = []
       for (const row of rows.slice(0, limit)) {
-        const goal = validateRunnerContract('runner_goal_revision', JSON.parse(row.payload_json))
+        const goal = validateRunnerContract('runner_content_plan', JSON.parse(row.payload_json))
         if (goal.task_id !== query.task_id || goal.request_id !== row.request_id || goal.intent_revision !== row.intent_revision) fail()
         const item = this.goal(goal)
         while (bytes(item) > RUNNER_LIMITS.index.item_bytes && item.waits.length) item.waits.pop()
@@ -87,7 +87,7 @@ export class RunnerHostStatus {
     const token = randomUUID(); saved.set(token, value); return token
   }
 
-  private run(goal: GoalRevision): Run | null {
+  private run(goal: ContentPlan): Run | null {
     const row = this.db.prepare("SELECT r.run_id,c.primary_reason,c.wait_reason FROM runner_runs r JOIN runs c ON c.id=r.run_id AND c.task_id=r.task_id WHERE r.task_id=? AND r.request_id=? AND r.intent_revision=? AND r.purpose='production' ORDER BY r.rowid DESC LIMIT 1").get(goal.task_id, goal.request_id, goal.intent_revision) as { run_id: string; primary_reason: string | null; wait_reason: string | null } | undefined
     if (!row) return null
     const source = this.work.run(row.run_id)
@@ -96,19 +96,19 @@ export class RunnerHostStatus {
     return { id: source.run_id, state: source.state, primary_reason: reason === null ? null : code(reason, 'execution_ended'), ...(row.wait_reason === null ? {} : { wait_reason: code(row.wait_reason, 'work_waiting') }), source }
   }
 
-  private request(goal: GoalRevision): RecordMetadata | null {
+  private request(goal: ContentPlan): RecordMetadata | null {
     const row = this.db.prepare('SELECT r.id,r.kind,r.created_at FROM runner_inputs i JOIN records r ON r.id=i.record_id AND r.task_id=i.task_id WHERE i.task_id=? AND i.input_event_id=?').get(goal.task_id, goal.input_event_id) as RecordMetadata | undefined
     if (!row) return null
     assertRunnerId(row.id, 'record_id')
     if (row.created_at.length > 64 || code(row.kind, '') !== row.kind) fail()
     return row
   }
-  private goalTitle(goal: GoalRevision): string {
-    const row = this.db.prepare("SELECT substr(json_extract(r.payload_json,'$.text'),1,256) text FROM runner_goal_revisions g JOIN runner_inputs i ON i.input_event_id=g.input_event_id AND i.task_id=g.task_id JOIN records r ON r.id=i.record_id AND r.task_id=g.task_id WHERE g.task_id=? AND g.request_id=? ORDER BY g.intent_revision LIMIT 1").get(goal.task_id, goal.request_id) as { text: unknown } | undefined
+  private goalTitle(goal: ContentPlan): string {
+    const row = this.db.prepare("SELECT substr(json_extract(r.payload_json,'$.text'),1,256) text FROM runner_content_plans g JOIN runner_inputs i ON i.input_event_id=g.input_event_id AND i.task_id=g.task_id JOIN records r ON r.id=i.record_id AND r.task_id=g.task_id WHERE g.task_id=? AND g.request_id=? ORDER BY g.intent_revision LIMIT 1").get(goal.task_id, goal.request_id) as { text: unknown } | undefined
     return title(typeof row?.text === 'string' ? row.text : '')
   }
 
-  private answer(goal: GoalRevision): RunnerFinalAnswer | null {
+  private answer(goal: ContentPlan): RunnerFinalAnswer | null {
     if (goal.state !== 'active') return null
     const rows = this.db.prepare("SELECT r.id,r.created_at,json_extract(r.payload_json,'$.owner') owner_json,json_extract(r.payload_json,'$.result_ref') result_ref_json FROM records r JOIN runner_work w ON w.work_id=json_extract(r.payload_json,'$.owner.work_id') AND w.task_id=r.task_id JOIN runner_attempts a ON a.attempt_id=json_extract(r.payload_json,'$.owner.attempt_id') AND a.work_id=w.work_id AND a.task_id=w.task_id AND a.run_id=w.run_id JOIN runner_runs n ON n.run_id=w.run_id AND n.task_id=w.task_id WHERE r.task_id=? AND r.kind='runner.answer' AND json_extract(r.payload_json,'$.purpose')='final_answer' AND json_extract(r.payload_json,'$.request_id')=? AND json_extract(r.payload_json,'$.intent_revision')=? AND json_extract(r.payload_json,'$.input_event_id')=? AND json_extract(r.payload_json,'$.run_id')=n.run_id AND json_extract(r.payload_json,'$.owner.run_id')=n.run_id AND json_extract(r.payload_json,'$.owner.task_id')=r.task_id AND json_extract(r.payload_json,'$.owner.purpose')='production' AND json_extract(r.payload_json,'$.owner.request_id')=n.request_id AND json_extract(r.payload_json,'$.owner.intent_revision')=n.intent_revision AND n.purpose='production' AND n.request_id=? AND n.intent_revision=? AND w.state='succeeded' AND a.state='succeeded' AND json_extract(w.payload_json,'$.current_attempt_id')=a.attempt_id ORDER BY r.sequence DESC LIMIT 16").all(goal.task_id, goal.request_id, goal.intent_revision, goal.input_event_id, goal.request_id, goal.intent_revision) as { id: string; created_at: string; owner_json: string; result_ref_json: string | null }[]
     for (const row of rows) {
@@ -140,7 +140,7 @@ export class RunnerHostStatus {
     return safe
   }
 
-  private compositionWaits(goal: GoalRevision, accepted: ArtifactIndex[], published: PublicationEntry[], limit: number): RunnerGoalProjection['waits'] {
+  private compositionWaits(goal: ContentPlan, accepted: ArtifactIndex[], published: PublicationEntry[], limit: number): RunnerGoalProjection['waits'] {
     if (goal.state !== 'active' || !limit) return []
     const pending = accepted.filter(index => !published.some(entry => sameGoal(goal, entry) && entry.artifact_id === index.artifact_id && entry.artifact_revision === index.artifact_revision)).map(index => ({ artifact_id: index.artifact_id, artifact_revision: index.artifact_revision }))
     if (!pending.length) return []
@@ -194,7 +194,7 @@ export class RunnerHostStatus {
     return rows.map(row => ({ reason: 'usage_unknown', run_id: run.id, work_id: row.work_id, operation_id: row.operation_id }))
   }
 
-  private waits(goal: GoalRevision, run: Run | null, accepted: ArtifactIndex[], published: PublicationEntry[]): RunnerGoalProjection['waits'] {
+  private waits(goal: ContentPlan, run: Run | null, accepted: ArtifactIndex[], published: PublicationEntry[]): RunnerGoalProjection['waits'] {
     const waits: RunnerGoalProjection['waits'] = []
     const approvals = this.db.prepare("SELECT p.id,a.run_id,w.work_id FROM approvals p JOIN actions a ON a.id=p.action_id JOIN runner_runs r ON r.run_id=a.run_id AND r.task_id=a.task_id LEFT JOIN runner_work w ON w.work_id=json_extract(a.source_json,'$.owner.work_id') AND w.task_id=a.task_id AND w.run_id=a.run_id WHERE r.task_id=? AND r.purpose='production' AND r.request_id=? AND r.intent_revision=? AND p.decision='pending' AND p.validity='valid' AND a.state!='ended' AND a.commit_valid=1 AND p.expires_at>? ORDER BY p.rowid LIMIT 8").all(goal.task_id, goal.request_id, goal.intent_revision, new Date().toISOString()) as { id: string; run_id: string; work_id: string | null }[]
     for (const approval of approvals) waits.push({ reason: 'approval', run_id: approval.run_id, ...(approval.work_id ? { work_id: approval.work_id } : {}), approval_id: approval.id })
@@ -215,7 +215,7 @@ export class RunnerHostStatus {
   private published(task: string, request?: string): PublicationEntry[] {
     return this.host.publications.mappings(task).filter(entry => (!request || entry.request_id === request) && !!this.db.prepare("SELECT 1 FROM views v JOIN surfaces s ON s.id=v.surface_id WHERE s.task_id=? AND v.id=? AND v.revision=? AND v.bundle_resource_id=? AND EXISTS(SELECT 1 FROM json_each(s.layout_json,'$.slots') sl,json_each(sl.value,'$.groups') g,json_each(g.value,'$.views') item WHERE item.value=v.id)").get(task, entry.view_id, entry.view_revision, entry.published_bundle_resource_id))
   }
-  private accepted(goal: GoalRevision): ArtifactIndex[] {
+  private accepted(goal: ContentPlan): ArtifactIndex[] {
     const rows = this.db.prepare("SELECT a.payload_json FROM runner_artifacts a JOIN runner_artifact_owners o ON o.task_id=a.task_id AND o.artifact_id=a.artifact_id AND o.current_revision=a.artifact_revision WHERE a.task_id=? AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=?").all(goal.task_id, goal.request_id, goal.intent_revision) as Payload[]
     return rows.map(row => validateRunnerContract('runner_artifact_index', JSON.parse(row.payload_json))).filter(index => {
       try { this.composition.checkArtifact(goal.task_id, index.artifact_id, index.artifact_revision); return true }
@@ -223,7 +223,7 @@ export class RunnerHostStatus {
     })
   }
 
-  private goal(goal: GoalRevision): RunnerGoalProjection {
+  private goal(goal: ContentPlan): RunnerGoalProjection {
     const run = this.run(goal), reply = this.answer(goal), accepted = this.accepted(goal), published = this.published(goal.task_id, goal.request_id)
     let inventory = this.composition.inventory(goal.task_id, goal.request_id, goal.intent_revision)
     try { if (inventory) inventory = this.composition.checkInventory(goal.task_id, goal.request_id, goal.intent_revision, inventory.inventory_revision) } catch (error) { if (!(error instanceof ContractError)) throw error; inventory = null }
@@ -238,7 +238,7 @@ export class RunnerHostStatus {
     return { request_id: goal.request_id, intent_revision: goal.intent_revision, input_event_id: goal.input_event_id, title: this.goalTitle(goal), state: goal.state, run, waits: this.waits(goal, run, accepted, published), delivery, artifact_count, unresolved_count: unresolved.size, request: this.request(goal), reply }
   }
 
-  private scope(task: string): RunnerScopeProjection | null {
+  scope(task: string): RunnerScopeProjection | null {
     const scope = this.composition.scope(task)
     if (!scope) return null
     const complete = this.host.completeness(task), published = this.published(task)
@@ -264,6 +264,6 @@ export class RunnerHostStatus {
       catch (error) { if (!(error instanceof ContractError)) throw error; return true }
     }).length
     const running = !!this.db.prepare("SELECT 1 FROM runner_runs r JOIN runs c ON c.id=r.run_id WHERE r.task_id=? AND c.state IN ('running','waiting') LIMIT 1").get(task)
-    return { composition_version: scope.composition_version, state: complete.state === 'complete' && !unresolved.size ? 'complete' : published.length || !running ? 'partial' : 'working', required_goal_count: scope.targets.filter(target => target.required).length, unresolved_count: unresolved.size, pending_update_count: pending + pendingChapters.size, published_count: published.length }
+    return { composition_version: scope.composition_version, state: complete.state === 'complete' && !unresolved.size ? 'complete' : published.length || !running ? 'partial' : 'working', required_content_count: scope.targets.filter(target => target.required).length, unresolved_count: unresolved.size, pending_update_count: pending + pendingChapters.size, published_count: published.length }
   }
 }

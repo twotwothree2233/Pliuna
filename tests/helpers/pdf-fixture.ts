@@ -1,12 +1,23 @@
-export function pdfFixture(texts = ['Pliuna PDF text one', 'Pliuna PDF text two'], options: { encrypted?: boolean; activityUrl?: string; fontSize?: number; overlapLines?: boolean } = {}): Buffer {
+import { deflateSync } from 'node:zlib'
+
+export function pdfFixture(texts = ['Pliuna PDF text one', 'Pliuna PDF text two'], options: { encrypted?: boolean; activityUrl?: string; fontSize?: number; overlapLines?: boolean; firstPageImage?: { width: number; height: number } } = {}): Buffer {
   const objects: string[] = ['', '', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
   const pages: number[] = []
+  const imageId = options.firstPageImage ? objects.length + 1 : null
+  if (options.firstPageImage) {
+    const { width, height } = options.firstPageImage
+    const image = deflateSync(Buffer.alloc(width * height)).toString('hex') + '>'
+    objects.push(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter [/ASCIIHexDecode /FlateDecode] /Length ${image.length} >>\nstream\n${image}\nendstream`)
+  }
   for (const text of texts) {
     const page = objects.length + 1, contentId = page + 1
+    const scanned = !pages.length && imageId !== null
     pages.push(page)
     const escaped = (value: string) => value.replace(/[\\()]/g, '\\$&')
-    const content = !text ? '' : options.overlapLines ? `BT /F1 12 Tf ${Array.from({ length: Math.ceil(text.length / 60) }, (_, i) => `1 0 0 1 50 700 Tm (${escaped(text.slice(i * 60, i * 60 + 60))}) Tj`).join(' ')} ET` : `BT /F1 ${options.fontSize ?? 12} Tf 50 700 Td (${escaped(text)}) Tj ET`
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`, `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`)
+    const ink = !text ? '' : options.overlapLines ? `BT /F1 12 Tf ${Array.from({ length: Math.ceil(text.length / 60) }, (_, i) => `1 0 0 1 50 700 Tm (${escaped(text.slice(i * 60, i * 60 + 60))}) Tj`).join(' ')} ET` : `BT /F1 ${options.fontSize ?? 12} Tf 50 700 Td (${escaped(text)}) Tj ET`
+    const content = scanned ? `${ink}\nq 520 0 0 520 46 90 cm /Scan Do Q` : ink
+    const xobjects = scanned ? ` /XObject << /Scan ${imageId} 0 R >>` : ''
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >>${xobjects} >> /Contents ${contentId} 0 R >>`, `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`)
   }
   let activity = ''
   if (options.activityUrl) {

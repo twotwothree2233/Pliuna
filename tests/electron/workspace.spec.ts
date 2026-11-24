@@ -49,23 +49,21 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await page.getByRole('button', { name: '创建任务', exact: true }).click()
     await expect(page.getByRole('heading', { name: '事务与持久化', exact: true })).toBeVisible()
     const themes = [
-      ['graphite', 220, 300, 48, 42, 27, 640, 'light'], ['paper', 220, 300, 48, 42, 31, 618, 'light'],
-      ['midnight', 220, 300, 48, 42, 26, 640, 'dark'], ['dusk', 220, 300, 48, 42, 26, 640, 'dark'],
-      ['moss', 220, 300, 48, 42, 28, 660, 'light'], ['blueprint', 220, 300, 46, 40, 31, 672, 'light']
+      ['graphite', 48, 27, 640, 'light'], ['paper', 48, 31, 618, 'light'],
+      ['midnight', 48, 26, 640, 'dark'], ['dusk', 48, 26, 640, 'dark'],
+      ['moss', 48, 28, 660, 'light'], ['blueprint', 46, 31, 672, 'light']
     ] as const
-    for (const [theme, left, right, title, toolbar, heading, reading, scheme] of themes) {
+    for (const [theme, title, heading, reading, scheme] of themes) {
       await chooseTheme(page, theme)
       const actual = await page.evaluate(() => {
         const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
-        return { left: box('.sidebar').width, right: box('.agent').width, title: box('.titlebar').height, toolbar: box('.toolbar').height, row: box('.task-row').height, heading: getComputedStyle(document.querySelector('.document h1')!).fontSize, reading: getComputedStyle(document.documentElement).getPropertyValue('--reading').trim(), scheme: getComputedStyle(document.documentElement).colorScheme }
+        return { left: box('.sidebar').width, right: box('.agent').width, title: box('.titlebar').height, tabs: box('.workspace-tabs').height, row: box('.task-row').height, heading: getComputedStyle(document.querySelector('.task-heading h1')!).fontSize, reading: getComputedStyle(document.documentElement).getPropertyValue('--reading').trim(), scheme: getComputedStyle(document.documentElement).colorScheme }
       })
-      expect(actual).toEqual({ left, right, title, toolbar, row: 31, heading: heading + 'px', reading: reading + 'px', scheme })
-      if (theme === 'paper') expect(await page.locator('.document h1').evaluate(el => getComputedStyle(el).fontFamily)).toContain('Songti')
+      expect(actual).toEqual({ left: 214, right: 278, title, tabs: 42, row: 49, heading: heading + 'px', reading: reading + 'px', scheme })
       if (theme === 'blueprint') {
         const rule = await page.locator('.pane-separator[data-side=left]').evaluate(el => ({ token: getComputedStyle(el).getPropertyValue('--rule').trim(), color: getComputedStyle(el, '::before').backgroundColor }))
         expect(rule.token).toBe('1.5px')
         expect(rule.color).toBe('rgb(16, 18, 20)')
-        await expect(page.locator('.task-number').first()).toBeVisible()
         expect(await page.locator('.primary').first().evaluate(el => getComputedStyle(el).borderRadius)).toBe('0px')
       }
       if (theme === 'moss') expect(await page.locator('.primary').first().evaluate(el => getComputedStyle(el).borderRadius)).toBe('999px')
@@ -76,7 +74,6 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await chooseTheme(page, 'system')
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dusk')
     await chooseTheme(page, 'graphite')
-    await expect(page.locator('.task-number').first()).not.toBeVisible()
     await page.getByLabel('想从哪里开始？').fill('第一任务尚未发送的目标')
     await page.keyboard.press('ControlOrMeta+n')
     await expect(page.getByRole('dialog', { name: '新建任务' })).toBeVisible()
@@ -92,11 +89,11 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await openSettings(page, '权限与审批')
     await page.getByRole('button', { name: '外观', exact: true }).focus()
     await page.keyboard.press('Shift+Tab')
-    await expect(page.getByRole('button', { name: '启用独立辅助审批', exact: true })).not.toBeFocused()
+    await expect(page.getByRole('button', { name: /^返回工作台/ })).toBeFocused()
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
     await openSettings(page, '模型服务')
-    await page.getByRole('button', { name: /^返回工作区/ }).click()
+    await page.getByRole('button', { name: /^返回工作台/ }).click()
     await chooseModel(page, 'fixture')
     await page.getByLabel('想从哪里开始？').fill('请解释事务中的持久性')
     await page.getByRole('button', { name: /发送消息/ }).click()
@@ -107,16 +104,17 @@ test('desktop workspace: exact theme geometry, real navigation, per-task compose
     await chooseTheme(page, 'dusk')
     await page.screenshot({ path: join(tmpdir(), 'pliuna-workspace-dusk.png') })
     await page.setViewportSize({ width: 720, height: 900 })
-    await expect(page.getByLabel('筛选任务')).toBeVisible()
+    const narrow = page.getByRole('navigation', { name: '工作区视图' })
+    await expect(narrow).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.setViewportSize({ width: 390, height: 900 })
-    await page.locator('#toggle-left').click()
+    await narrow.getByRole('button', { name: '任务', exact: true }).click()
     await expect(page.getByLabel('筛选任务')).toBeVisible()
     await page.getByRole('button', { name: /版本与权限/ }).click()
     await expect(page.getByRole('heading', { name: '版本与权限' })).toBeVisible()
-    await page.locator('#toggle-right').click()
+    await narrow.getByRole('button', { name: 'Agent', exact: true }).click()
     await expect(page.getByLabel('想从哪里开始？')).toBeVisible()
-    await page.keyboard.press('Escape')
+    await narrow.getByRole('button', { name: '内容', exact: true }).click()
     await expect(page.getByLabel('想从哪里开始？')).not.toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     expect(errors).toEqual([])
