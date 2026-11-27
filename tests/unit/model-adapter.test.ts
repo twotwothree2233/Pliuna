@@ -118,6 +118,8 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     expect(modelErrorMessage(new Error('MODEL_AUTHENTICATION: Runtime operation failed'))).toContain('检查 API Key')
     expect(modelErrorMessage(new Error('MODEL_NETWORK_ERROR: failure'))).toContain('不要关闭 TLS')
     expect(modelErrorMessage(new Error('MODEL_CANCELLED'))).toContain('请求已取消')
+    expect(modelErrorMessage(new Error('MODEL_STREAM_MISSING_DONE'))).not.toContain('输出上限')
+    expect(modelErrorMessage(new Error('MODEL_OUTPUT_TOKEN_LIMIT'))).toContain('服务报告达到生成 token 上限')
   })
   it('assembles UTF-8 and fragmented indexed tool calls only after terminal response', async () => {
     const server = await modelServer((_x, res) => {
@@ -130,16 +132,31 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     expect(server.exchanges[0]!.body).toMatchObject({ model: 'exact-model-id', max_tokens: 1024, stream: true, stream_options: { include_usage: true } })
     expect(server.exchanges[0]!.authorization).toBe('Bearer secret-sentinel')
   })
-  for (const [name, payload] of [
-    ['missing DONE', frame({ content: 'partial' }) + frame({}, 'stop')],
-    ['truncated arguments', frame({ tool_calls: [{ index: 0, id: 'c', type: 'function', function: { name: 'list', arguments: '{' } }] }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n'],
-    ['length finish', frame({ content: 'partial' }) + frame({}, 'length') + 'data: [DONE]\n\n'],
-    ['duplicate IDs', frame({ tool_calls: [0, 1].map(index => ({ index, id: 'same', type: 'function', function: { name: 'list', arguments: '{}' } })) }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n'],
-    ['invalid JSON', 'data: nope\n\n'],
-    ['no terminal reason', frame({ content: 'x' }) + 'data: [DONE]\n\n']
+  for (const [name, payload, code] of [
+    ['missing DONE', frame({ content: 'partial' }) + frame({}, 'stop'), 'MODEL_STREAM_MISSING_DONE'],
+    ['truncated DONE', frame({}, 'stop') + 'data: [DO', 'MODEL_STREAM_MISSING_DONE'],
+    ['truncated arguments', frame({ tool_calls: [{ index: 0, id: 'c', type: 'function', function: { name: 'list', arguments: '{' } }] }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n', 'INVALID_TOOL_ARGUMENTS'],
+    ['duplicate IDs', frame({ tool_calls: [0, 1].map(index => ({ index, id: 'same', type: 'function', function: { name: 'list', arguments: '{}' } })) }) + frame({}, 'tool_calls') + 'data: [DONE]\n\n', 'INVALID_TOOL_ID'],
+    ['invalid JSON', 'data: nope\n\n', 'INVALID_STREAM_JSON'],
+    ['no terminal reason', frame({ content: 'x' }) + 'data: [DONE]\n\n', 'MODEL_STREAM_INVALID_FINISH'],
+    ['duplicate terminal reason', frame({}, 'stop') + frame({}, 'stop') + 'data: [DONE]\n\n', 'MODEL_STREAM_INVALID_FINISH'],
+    ['tool finish without calls', frame({}, 'tool_calls') + 'data: [DONE]\n\n', 'MODEL_STREAM_INVALID_FINISH']
   ]) it('rejects ' + name + ' without emitting executable calls', async () => {
     const server = await modelServer((_x, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(payload) }); cleanups.push(server.close)
-    await expect(new ChatAdapter().complete(config(server.url), '', [], tool, new AbortController().signal)).rejects.toBeDefined()
+    await expect(new ChatAdapter().complete(config(server.url), '', [], tool, new AbortController().signal)).rejects.toMatchObject({ code, retryable: false })
+  })
+  it.each([
+    ['length', 'data: [DONE]\n\n', 'MODEL_OUTPUT_TOKEN_LIMIT'],
+    ['content_filter', 'data: [DONE]\n\n', 'MODEL_REFUSAL'],
+    ['insufficient_system_resource', 'data: [DONE]\n\n', 'MODEL_PROVIDER_SERVER_ERROR'],
+    ['private provider finish detail', 'data: [DONE]\n\n', 'MODEL_STREAM_INVALID_FINISH'],
+    ['stop', 'data: [DONE]\n\n', 'MODEL_STREAM_INVALID_FINISH'],
+    ['tool_calls', '', 'MODEL_STREAM_MISSING_DONE']
+  ])('rejects tool output with finish %s and retains reported usage (%s)', async (finish, end, code) => {
+    const usage = { prompt_tokens: 41698, completion_tokens: 58 }
+    const payload = frame({ tool_calls: [{ index: 0, id: 'never-dispatch', type: 'function', function: { name: 'list', arguments: '{}' } }] }) + frame({}, finish) + `data: ${JSON.stringify({ choices: [], usage })}\n\n` + end
+    const server = await modelServer((_exchange, response) => { response.writeHead(200, { 'content-type': 'text/event-stream' }); response.end(payload) }); cleanups.push(server.close)
+    await expect(new ChatAdapter().complete(config(server.url), '', [], tool, new AbortController().signal)).rejects.toMatchObject({ code, message: code, partial: true, retryable: false, usage })
   })
   it('maps authentication errors without returning sensitive provider bodies', async () => {
     const server = await modelServer((_x, res) => { res.writeHead(401); res.end('secret-sentinel provider debug') }); cleanups.push(server.close)

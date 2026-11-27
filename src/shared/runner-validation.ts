@@ -115,6 +115,14 @@ export function sameDependencies(left: WorkDependency[], right: WorkDependency[]
   return a.length === b.length && a.every((value, index) => value === b[index])
 }
 
+type AssignmentInput = NonNullable<Extract<RouteWork, { action: 'dispatch' }>['assignments'][number]['inputs']>[number]
+
+export function assignmentInputKey(input: AssignmentInput): string {
+  if ('assignment_key' in input) return JSON.stringify(['local', input.assignment_key, input.output_key])
+  if ('work_id' in input) return JSON.stringify(['output', input.work_id, input.output_key])
+  return JSON.stringify(input.kind === 'material' ? ['material', input.resource_id] : ['published', input.view_id, input.node_id])
+}
+
 export function validateRunnerContract<K extends keyof RunnerContractTypes>(definition: K, value: unknown): RunnerContractTypes[K] {
   // The generic Ajv error can include caller-controlled field names. Runner errors expose no content.
   try { assertContract<RunnerContractTypes[K]>(definition, value) } catch { invalid(`Invalid ${definition} structure`) }
@@ -135,6 +143,7 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
   }
   if (definition === 'runner_logical_work') {
     if (object.purpose === 'composition' && object.role !== 'collator' || object.purpose === 'production' && object.role === 'collator') invalid('Worker role does not match its execution purpose')
+    if (object.assignment) unique(object.assignment.inputs.map(assignmentInputKey), 'assignment inputs')
   }
   if (definition === 'runner_execution_attempt' && object.previous_attempt_id === object.attempt_id) invalid('A resumed attempt must retain a different predecessor')
   if (definition === 'runner_outline') unique(object.sections.map((item: OutlineSection) => item.section_id), 'outline sections')

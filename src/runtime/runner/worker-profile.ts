@@ -5,6 +5,9 @@ import { modelTools } from '../model/tools'
 import { orchestrationRoleAllows } from './orchestration-tool'
 
 export type WorkerRole = LogicalWork['role']
+export class WorkerResultRejection extends ContractError {
+  constructor(readonly path: string, message: string) { super('INVALID_WORKER_RESULT', message) }
+}
 export type WorkerGrant =
   | { type: 'list'; kind: string }
   | { type: 'read'; kind: string; ids?: readonly string[] }

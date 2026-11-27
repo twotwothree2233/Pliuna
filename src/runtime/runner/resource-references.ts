@@ -46,7 +46,7 @@ export function runnerResourceReferences(db: Database.Database): RunnerResourceR
       if (!value || typeof value !== 'object') continue
       if (Array.isArray(value)) { for (const item of value) pending.push(item); continue }
       const object = value as Record<string, unknown>
-      if (object.kind === 'resource') add(object.resource_id ?? object.id)
+      if (object.kind === 'resource' || object.kind === 'material') add(object.resource_id ?? object.id)
       for (const [key, item] of Object.entries(object)) {
         if (resourceFields.has(key)) add(item)
         else if (key === 'source_bundle_resource_ids') {

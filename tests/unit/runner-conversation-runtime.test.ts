@@ -4,14 +4,16 @@ import { join } from 'node:path'
 import type Database from 'better-sqlite3'
 import { afterEach, expect, it, vi } from 'vitest'
 import { runtimeFeatures } from '../../src/runtime/features'
-import { ChatAdapter, type ChatMessage, type Completion } from '../../src/runtime/model/adapter'
+import { ChatAdapter, ModelError, type ChatMessage, type Completion } from '../../src/runtime/model/adapter'
 import { ModelService, type ModelLease } from '../../src/runtime/model/service'
 import { modelToolRequest } from '../../src/runtime/model/tool-input'
 import type { RunnerAdmission } from '../../src/runtime/runner/admission'
-import { READ_WORK_OUTPUT, REPORT_MISSING_INPUT, ROUTE_WORK } from '../../src/runtime/runner/orchestration-tool'
+import { RUNNER_LIMITS } from '../../src/runtime/runner/limits'
+import { DISCOVER_INPUTS, READ_BOUND_INPUT, READ_WORK_OUTPUT, REPORT_MISSING_INPUT, ROUTE_WORK } from '../../src/runtime/runner/orchestration-tool'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
 import { RuntimeStore } from '../../src/runtime/store'
 import type { ModelConfiguration } from '../../src/shared/contracts.generated'
+import defaults from '../../src/shared/contracts/development-defaults.json'
 import type { LiveFlowSnapshot, TaskMessagePage } from '../../src/shared/types'
 
 type Row = Record<string, any>
@@ -154,6 +156,52 @@ it('asks the Router to correct a trailing status report without repeating a save
   expect(s.records('runner.answer').map(({ payload }) => payload.text)).toEqual(['The actual reply.'])
 })
 
+it('supplies the previous publication requirement on continuation and keeps the lecture body out of chat', async () => {
+  const s = setup({ conversationRouting: true })
+  const status = (request: Row) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id }) as Row
+  const lecture = 'The Markov property conditions transitions on the current state.'
+  s.complete.mockResolvedValueOnce(answer('{"kind":"new"}')).mockImplementationOnce(async (_config, _key, messages) => {
+    const { owner } = JSON.parse(messages[0]!.content!.split('Bound data: ').at(-1)!) as Row
+    const { task_id, request_id, intent_revision } = owner
+    return answer(JSON.stringify({ version: 1, complete: true, answer: null, artifacts: [], requirement_ids: [], unresolved: [{ task_id, request_id, intent_revision, requirement_id: 'content' }] }))
+  })
+  const original = s.submit('生成强化学习讲义')
+  await vi.waitFor(() => expect(status(original)).toMatchObject({ delivery_state: 'incomplete' }))
+  expect(s.store.snapshot(s.task).views).toEqual([])
+
+  s.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    expect(messages[0]?.content).toContain('Do not substitute a chat answer for an unfinished publication.')
+    expect(JSON.parse(messages.at(-1)!.content!)).toMatchObject({ request: '继续', preceding_delivery: {
+      request_id: original.request_id, intent_revision: 1, state: 'incomplete', required_outputs: ['artifact']
+    } })
+    return invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, assignments: [
+      { assignment_key: 'lecture', instructions: 'Publish the lecture in the View', required: true, requirement_ids: ['content'], outputs: [{ kind: 'artifact', output_key: 'lecture', exposure: 'publish' }] }
+    ] })
+  }).mockResolvedValueOnce(answer('{"kind":"new"}')).mockImplementationOnce(async (_config, _key, messages) => {
+    expect(messages[0]?.content).toContain('Return answer:null')
+    return { ...answer(''), finish: 'tool_calls', calls: [{ id: 'write-lecture', type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: '强化学习讲义', content: { type: 'json', value: {
+      profile: 'managed-v1', html: `<article><h1>强化学习讲义</h1><p>${lecture}</p></article>`, css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'static' }, forms: [], behaviors: [], references: [], export: []
+    } } } }) } }] }
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    const { sections } = JSON.parse(messages[0]!.content!.split('Bound data: ').at(-1)!) as Row
+    const result = JSON.parse(messages.find(message => message.tool_call_id === 'write-lecture')!.content!) as Row
+    return answer(JSON.stringify({ version: 1, complete: true, answer: null, requirement_ids: ['content'], unresolved: [], artifacts: [{
+      output_key: 'lecture', section_id: sections[0].section_id, bundle_resource_id: result.data.id, provenance_ref: result.provenance_ref, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', requirement_ids: ['content'], unresolved: []
+    }] }))
+  })
+  const continued = s.submit('继续')
+  const pending = () => s.store.snapshot(s.task).approvals.find(item => item.decision === 'pending' && item.validity === 'valid')
+  await vi.waitFor(() => expect(pending()).toBeDefined())
+  const approval = pending()!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
+  await vi.waitFor(() => expect(s.store.snapshot(s.task).surface_updates).toEqual([expect.objectContaining({ action_id: approval.action_id })]))
+  await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: approval.action_id, proceed: true, confirm_discard: false })
+  await vi.waitFor(() => expect(status(continued)).toMatchObject({ delivery_state: 'complete' }))
+  expect(s.store.snapshot(s.task).views[0]?.bundle.html).toContain(lecture)
+  expect(s.records('runner.answer')).toEqual([])
+  expect(s.messages().map(message => message.text).join('\n')).not.toContain(lecture)
+})
+
 it('lets the Router select the same complete checkpoint for two separate assignments', async () => {
   const s = setup({ conversationRouting: true })
   const assignment = (key: string, instructions: string, checkpoint_id?: string) => ({ assignment_key: key, instructions, checkpoint_id,
@@ -185,9 +233,11 @@ it('lets the Router select the same complete checkpoint for two separate assignm
   expect(s.records('runner.answer').map(({ payload }) => payload.text)).toEqual(['Original answer', 'Final follow-up answer'])
 })
 
-it('dispatches added work, hands off exact paged output, and waits for required branches before replying', async () => {
+it.each([
+  { name: 'fits the byte budget', sourceText: 'source ' + '中文\\"\n'.repeat(2000) + ' end', pageCount: 1 },
+  { name: 'needs a continuation', sourceText: 'source ' + '中😀\\"\n'.repeat(3800) + ' end', pageCount: 2 }
+])('hands off exact output that $name and waits for required branches', async ({ sourceText, pageCount }) => {
   const s = setup({ releaseProfile: true }), source = deferred<Completion>(), independent = deferred<Completion>()
-  const sourceText = 'source ' + 'x'.repeat(4100) + ' end'
   const assignment = (key: string, instructions: string) => ({ assignment_key: key, instructions, required: true, requirement_ids: [], outputs: [{ kind: 'answer', output_key: 'text' }] })
   const output = (messages: ChatMessage[]) => JSON.parse(messages.find(message => message.role === 'tool')!.content!) as Row
   s.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, assignments: [assignment('gather', 'Gather the exact source')] }))
@@ -204,18 +254,29 @@ it('dispatches added work, hands off exact paged output, and waits for required 
       if (system.includes('Gather the exact source')) return system.includes('The host rejected the final result: INVALID_WORKER_RESULT') ? source.promise : answer('\n</｜DSML｜ calls>')
       if (system.includes('Run the independent check')) return independent.promise
       expect(system).toContain('Write the designated reply')
-      expect(system).toContain('next_offset is a result field, never an input field')
+      expect(system).toContain('Use data.next_call if you need the next page')
       expect(body(messages)).not.toContain(sourceText)
       const input = JSON.parse(messages.find(message => message.role === 'user')!.content!) as Row
       const { kind: _kind, ...reference } = input.bound.work_outputs[0]
       expect(reference).toMatchObject({ plan_revision: 1, result_revision: 1, output_key: 'text' })
-      const pages = messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content!) as Row)
+      const pages = messages.filter(message => message.role === 'tool').map(message => {
+        expect(Buffer.byteLength(message.content!)).toBeLessThanOrEqual(defaults.read.text_bytes)
+        return JSON.parse(message.content!) as Row
+      })
       if (!pages.length) return invoke(READ_WORK_OUTPUT, reference)
-      if (pages.length === 1) {
-        expect(pages[0]).toMatchObject({ execution: 'success', truncated: true, data: { text: sourceText.slice(0, 4096), next_offset: 4096 } })
-        return invoke(READ_WORK_OUTPUT, { ...reference, offset: pages[0]!.data.next_offset })
+      const page = pages.at(-1)!, received = pages.map(page => page.data.text).join('')
+      expect(page.execution).toBe('success')
+      if (pages.length < pageCount) {
+        expect(page).toMatchObject({ truncated: true, data: { next_offset: received.length } })
+        expect(received).toBe(sourceText.slice(0, received.length))
+        expect(page.data.next_call).toEqual({ name: 'call', arguments: { capability: READ_WORK_OUTPUT, input_json: expect.any(String) } })
+        const next = JSON.parse(page.data.next_call.arguments.input_json)
+        expect(next).toEqual({ ...reference, offset: received.length })
+        return invoke(READ_WORK_OUTPUT, next)
       }
-      expect(pages[1]).toMatchObject({ execution: 'success', truncated: false, data: { text: sourceText.slice(4096), next_offset: null } })
+      expect(page).toMatchObject({ truncated: false, data: { next_offset: null } })
+      expect(page.data).not.toHaveProperty('next_call')
+      expect(received).toBe(sourceText)
       return answer('The assembled answer.')
     })
   const request = s.submit('Use the source and perform an independent check.')
@@ -229,13 +290,67 @@ it('dispatches added work, hands off exact paged output, and waits for required 
   source.resolve(answer(sourceText))
   await vi.waitFor(() => expect(s.records('runner.output.accepted')).toHaveLength(2))
   expect(s.records('runner.output.handoff')).toHaveLength(1)
+  const handoff = s.records('runner.output.handoff')[0]!.payload
+  expect(new RunnerWorkState(s.db, s.store.epoch).work(handoff.consumer_work_id)).toMatchObject({ assignment: { inputs: [{ work_id: handoff.work_id, plan_revision: 1, output_key: 'text', result_revision: 1 }] } })
   expect(s.records('runner.answer')).toHaveLength(0)
   expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ delivery_state: 'open' })
   independent.resolve(answer('Internal check.'))
   await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ state: 'started', run_state: 'completed', delivery_state: 'complete' }))
   expect(s.records('runner.answer').map(({ payload }) => payload.text)).toEqual(['The assembled answer.'])
-  expect(s.complete).toHaveBeenCalledTimes(9)
+  expect(s.complete).toHaveBeenCalledTimes(7 + pageCount)
   expect(s.db.prepare("SELECT count(*) AS count FROM runner_runs WHERE purpose='composition'").get()).toEqual({ count: 0 })
+})
+
+it('reports repeated handoff pages and rejected reads but lets the assigned Worker finish', async () => {
+  const s = setup({ conversationRouting: true }), sourceText = 'Bound source: ' + '中😀\\"\n'.repeat(3800) + ' end'
+  const repeatCount = RUNNER_LIMITS.progress.stalled_repeat_threshold
+  s.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'write', assignments: [
+    { assignment_key: 'gather', instructions: 'Prepare the handoff', required: true, requirement_ids: [], outputs: [{ kind: 'answer', output_key: 'text' }] },
+    { assignment_key: 'write', instructions: 'Use the handoff', required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'text' }], inputs: [{ assignment_key: 'gather', output_key: 'text' }] }
+  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementation(async (_config, _key, messages) => {
+    if (messages[0]?.content?.includes('Prepare the handoff')) return answer(sourceText)
+    const input = JSON.parse(messages.find(message => message.role === 'user')!.content!) as Row
+    const { kind: _kind, ...reference } = input.bound.work_outputs[0]
+    const results = messages.filter(message => message.role === 'tool').map(message => {
+      expect(Buffer.byteLength(message.content!)).toBeLessThanOrEqual(defaults.read.text_bytes)
+      return JSON.parse(message.content!) as Row
+    })
+    if (!results.length) return invoke(READ_WORK_OUTPUT, reference)
+    expect(results[0]).toMatchObject({ execution: 'success', truncated: true })
+    expect(results[0]).not.toHaveProperty('notice')
+    if (results.length <= repeatCount * 2) return invoke(READ_WORK_OUTPUT, results.length % 2
+      ? { ...reference, work_id: 'unassigned-output' }
+      : { result_revision: reference.result_revision, ...reference, offset: 0 })
+    const duplicates = results.slice(1, repeatCount * 2 + 1).filter(result => result.execution === 'success')
+    expect(duplicates).toHaveLength(repeatCount)
+    for (const duplicate of duplicates) {
+      expect(duplicate.notice).toContain('contains no new data')
+      expect(duplicate.data).toEqual(results[0]!.data)
+    }
+    if (results.length === repeatCount * 2 + 1) return invoke(READ_WORK_OUTPUT, JSON.parse(results[0]!.data.next_call.arguments.input_json))
+    const last = results.at(-1)!
+    expect(last).toMatchObject({ execution: 'success', truncated: false })
+    expect(last).not.toHaveProperty('notice')
+    expect(results[0]!.data.text + last.data.text).toBe(sourceText)
+    return answer('The completed answer.')
+  })
+  const request = s.submit('Read the source and deliver an answer.')
+  await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ run_state: 'completed', delivery_state: 'complete' }), { timeout: 3000 })
+  const reads = s.records('model.tool_result').filter(({ payload }) => payload.query_pattern === READ_WORK_OUTPUT)
+  const readIds = reads.map(({ payload }) => payload.query_result_id)
+  expect(readIds.filter(id => id !== undefined)).toEqual([...Array(repeatCount + 1).fill(readIds[0]), readIds.at(-1)])
+  expect(readIds.at(-1)).not.toBe(readIds[0])
+  const rejected = reads.filter(({ payload }) => payload.query_result_id === undefined)
+  expect(rejected).toHaveLength(repeatCount)
+  for (const { payload } of rejected) expect(JSON.parse(payload.message.content)).toMatchObject({ execution: 'not_executed', error: { code: 'WORKER_CAPABILITY_DENIED' } })
+  const diagnoses = s.records('runner.progress.diagnosis').map(({ payload }) => payload)
+  expect(diagnoses).toEqual(expect.arrayContaining([
+    expect.objectContaining({ pattern: READ_WORK_OUTPUT, reason: 'repeated_failure', error_source: 'WORKER_CAPABILITY_DENIED', automatic_replay: false }),
+    expect.objectContaining({ pattern: READ_WORK_OUTPUT, reason: 'suspected_stall', automatic_replay: false })
+  ]))
+  expect(JSON.stringify(diagnoses)).not.toContain('Bound source:')
+  expect(s.records('runner.answer').map(({ payload }) => payload.text)).toEqual(['The completed answer.'])
+  expect(s.records('runner.plan.installed')).toHaveLength(2)
 })
 
 it.each(['planned', 'bound'] as const)('recovers a %s handoff without duplicating the plan or its accepted source', async boundary => {
@@ -282,7 +397,7 @@ it.each(['planned', 'bound'] as const)('recovers a %s handoff without duplicatin
   expect(next.complete).toHaveBeenCalledTimes(boundary === 'bound' ? 1 : 2)
 })
 
-it('routes a completed output from the bounded same-Task work table into a new assignment', async () => {
+it('lets the Router correct an invalid completed output reference before installing its draft', async () => {
   const s = setup({ conversationRouting: true })
   const assign = (instructions: string, inputs: unknown[] = []) => ({ action: 'dispatch', base_revision: 0, final_answer: 'answerer', assignments: [
     { assignment_key: 'answerer', instructions, required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'text' }], inputs }
@@ -298,6 +413,12 @@ it('routes a completed output from the bounded same-Task work table into a new a
     expect(table).toEqual([expect.objectContaining({ request_id: first.request_id, state: 'succeeded' })])
     const { kind: _kind, ...reference } = table[0].outputs[0]
     expect(reference.result_revision).toBe(1)
+    return invoke(ROUTE_WORK, assign('Use the first result', [{ ...reference, output_key: 'wrong-key' }]))
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    const receipt = JSON.parse(messages.at(-1)!.content!) as Row
+    expect(receipt).toMatchObject({ execution: 'not_executed', error: { code: 'RUNNER_DEPENDENCY_INVALID', message: expect.stringContaining('wrong-key') } })
+    const routed = JSON.parse(messages.filter(message => message.role === 'user').at(-1)!.content!) as Row
+    const { kind: _kind, ...reference } = routed.work_table[0].outputs[0]
     return invoke(ROUTE_WORK, assign('Use the exact first result', [reference]))
   }).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementationOnce(async (_config, _key, messages) => {
     const { kind: _kind, ...reference } = input(messages).bound.work_outputs[0]
@@ -309,7 +430,212 @@ it('routes a completed output from the bounded same-Task work table into a new a
   const second = s.submit('Delegate a follow-up using the first result.')
   await vi.waitFor(() => expect(status(second)).toMatchObject({ run_state: 'completed' }))
   expect(s.records('runner.output.handoff').map(({ payload }) => payload)).toEqual([expect.objectContaining({ request_id: second.request_id, result_revision: 1 })])
-  expect(s.complete).toHaveBeenCalledTimes(7)
+  expect(s.complete).toHaveBeenCalledTimes(8)
+})
+
+it('seals the recovered request with the accepted answer from the interrupted Run', async () => {
+  const first = setup({ conversationRouting: true }), state = new RunnerWorkState(first.db, first.store.epoch)
+  const admission = (first.store as unknown as { runnerAdmission: RunnerAdmission }).runnerAdmission, select = admission.next.bind(admission)
+  vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => select(task, candidates.filter(candidate => {
+    const work = state.work(candidate.work_id)
+    return work.purpose === 'production' && !!work.assignment?.final_answer
+  }), active, ready))
+  first.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
+    { assignment_key: 'reply', instructions: 'Write the final answer', required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'reply' }] },
+    { assignment_key: 'check', instructions: 'Complete the independent check', required: true, requirement_ids: [], outputs: [{ kind: 'answer', output_key: 'check' }] }
+  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockResolvedValueOnce(answer('The original accepted answer.'))
+  const request = first.submit('Answer and complete a separate check.')
+  await vi.waitFor(() => expect(first.records('runner.output.accepted')).toHaveLength(1))
+  const accepted = first.records('runner.output.accepted')[0]!.payload.owner
+  expect(first.records('runner.answer')).toHaveLength(0)
+  await first.store.shutdown()
+  first.close()
+
+  const next = setup({ directory: first.directory, task: first.task, conversationRouting: true })
+  next.complete.mockImplementation(async (_config, _key, messages) => {
+    expect(messages[0]?.content).toContain('Complete the independent check')
+    return answer('Independent check done.')
+  })
+  await next.store.recoverRunnerWork()
+  await vi.waitFor(() => expect(next.store.handle({ type: 'request.status', task_id: next.task, request_id: request.request_id })).toMatchObject({ run_state: 'completed', delivery_state: 'complete' }))
+  expect(next.records('runner.answer').map(({ payload }) => payload)).toEqual([expect.objectContaining({ owner: accepted, text: 'The original accepted answer.' })])
+  expect(next.messages().map(message => message.text)).toContain('The original accepted answer.')
+  expect(next.complete).toHaveBeenCalledTimes(1)
+})
+
+it('discovers and delivers existing materials with a pinned chapter and an in-flight result', async () => {
+  const s = setup({ releaseProfile: true }), statistics = deferred<Completion>()
+  const oldText = 'OLDER_MINUTES: confirm the rehearsal owner.'
+  const currentText = 'CURRENT_MINUTES: rehearsal is scheduled for Thursday.'
+  const chapterText = 'PUBLISHED_POLICY: a backup is required before switching.'
+  const otherText = 'UNRELATED_CHAPTER: internal room booking.'
+  const statisticsText = 'ACCEPTED_COUNTS: 12 checked and 2 pending.'
+  const old = importText(s.store, s.task, '纪要.md', oldText)
+  const attachment = importText(s.store, s.task, '纪要.md', currentText)
+  const bundle = (html: string) => ({ profile: 'managed-v1', html, css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'v1' }, forms: [], behaviors: [], references: [], export: [] })
+  const surface = s.store.snapshot(s.task).surface
+  const seed = deferred<Completion>()
+  s.complete.mockResolvedValueOnce(answer('{"kind":"new"}')).mockImplementationOnce(() => seed.promise)
+  s.submit('Seed the published policy')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(2))
+  const fixture = s.records('runner.plan.installed')[0]!.payload.run_id
+  const publication = s.store.modelTool(s.task, fixture, { type: 'write', input: { type: 'surface.update', surface_id: surface.id, expected_revision: surface.revision, operations: [{ type: 'view.create', client_ref: 'policy', slot_id: 'main', bundle: { type: 'inline', bundle: bundle(`<h1>交付规则</h1><p>${chapterText}</p><h1>其他事项</h1><p>${otherText}</p>`) } }] } }) as Row
+  const viewId = publication.views[0].view_id
+  s.store.handle({ type: 'run.cancel', task_id: s.task, run_id: fixture })
+  seed.resolve(answer(''))
+  s.complete.mockClear()
+  const result = (messages: ChatMessage[]) => JSON.parse(messages.at(-1)!.content!) as Row
+  const userInput = (messages: ChatMessage[]) => JSON.parse(messages.filter(message => message.role === 'user' && message.content?.startsWith('{')).at(-1)!.content!) as Row
+  const status = (request: Row) => s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id }) as Row
+  let routerCalls = 0
+  let bindings: Row[] = []
+  s.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'stats', assignments: [
+    { assignment_key: 'stats', instructions: 'Count the release checks', required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'statistics' }] }
+  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementationOnce(() => statistics.promise)
+  const source = s.submit('统计已核验和待核验的数量。')
+  await vi.waitFor(() => expect(s.complete).toHaveBeenCalledTimes(3))
+  s.complete.mockImplementationOnce(async () => {
+    routerCalls++
+    return invoke(DISCOVER_INPUTS, {})
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    routerCalls++
+    const catalog = result(messages)
+    expect(catalog).toMatchObject({ execution: 'success' })
+    expect(JSON.stringify(catalog)).not.toMatch(/OLDER_MINUTES|CURRENT_MINUTES|PUBLISHED_POLICY|UNRELATED_CHAPTER|ACCEPTED_COUNTS/)
+    const entries = catalog.data.items as Row[]
+    const minutes = entries.filter(entry => entry.name === '纪要.md')
+    expect(minutes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: expect.objectContaining({ kind: 'import' }), reference: { kind: 'material', resource_id: old.id } }),
+      expect.objectContaining({ source: expect.objectContaining({ kind: 'attachment' }), reference: { kind: 'material', resource_id: attachment.id } })
+    ]))
+    expect(minutes).toHaveLength(2)
+    const chapter = entries.find(entry => entry.kind === 'published' && entry.name === '交付规则')!
+    expect(chapter.reference).toMatchObject({ view_id: viewId, view_revision: 1, revision: 1 })
+    const counts = entries.find(entry => entry.kind === 'output' && entry.source.request_id === source.request_id)!
+    expect(counts).toMatchObject({ status: 'expected', reference: { plan_revision: 1, output_key: 'statistics' } })
+    expect(counts.reference).not.toHaveProperty('result_revision')
+    bindings = [minutes.find(entry => entry.source.kind === 'import')!.reference, chapter.reference, counts.reference]
+    return invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, assignments: [
+      { assignment_key: 'compose', instructions: 'Assemble the bound release brief', required: true, requirement_ids: ['content'], outputs: [{ kind: 'artifact', output_key: 'brief', exposure: 'publish' }], inputs: bindings }
+    ] })
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    routerCalls++
+    expect(result(messages)).toMatchObject({ execution: 'success' })
+    return answer('{"kind":"new"}')
+  }).mockImplementation(async (_config, _key, messages) => {
+    const system = messages[0]!.content!
+    if (system.includes('You are the Collator.')) {
+      expect(body(messages)).not.toMatch(/OLDER_MINUTES|CURRENT_MINUTES|PUBLISHED_POLICY|UNRELATED_CHAPTER|ACCEPTED_COUNTS|builtin:discover-inputs|builtin:read-bound-input/)
+      const { batch, indexes } = userInput(messages)
+      const { task_id, run_id, batch_id, composition_version } = batch
+      const [index] = indexes, [section] = batch.sections
+      return answer(JSON.stringify({ task_id, run_id, batch_id, composition_version, intents: [{
+        artifact: { task_id, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision }, section_id: section.section_id,
+        section_position_revision: section.position_revision, order_key: section.order_key, slot_id: 'main', layout_mode: 'column', width_constraint: index.width_constraint
+      }] }))
+    }
+    expect(system).toContain('Assemble the bound release brief')
+    const { bound_inputs, work_outputs } = userInput(messages).bound
+    expect(bound_inputs.map((entry: Row) => entry.binding)).toEqual(bindings.slice(0, 2))
+    const { kind, ...reference } = work_outputs[0]
+    expect(kind).toBe('answer')
+    expect(reference).toMatchObject({ ...bindings[2], result_revision: 1 })
+    const tools = messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content!) as Row)
+    if (!tools.length) return invoke(READ_BOUND_INPUT, { input_ref: bound_inputs[0].input_ref })
+    expect(tools[0]).toMatchObject({ execution: 'success' })
+    expect(JSON.stringify(tools[0]!.data)).toContain(oldText)
+    expect(JSON.stringify(tools[0]!.data)).not.toContain(currentText)
+    if (tools.length === 1) return invoke(READ_BOUND_INPUT, { input_ref: bound_inputs[1].input_ref })
+    expect(tools[1]).toMatchObject({ execution: 'success' })
+    expect(JSON.stringify(tools[1]!.data)).toContain(chapterText)
+    expect(JSON.stringify(tools[1]!.data)).not.toContain(otherText)
+    if (tools.length === 2) return invoke(READ_WORK_OUTPUT, reference)
+    expect(tools[2]).toMatchObject({ execution: 'success', data: { text: statisticsText } })
+    if (tools.length === 3) return { ...answer(''), finish: 'tool_calls', calls: [{ id: 'write-brief', type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: {
+      display_name: '交付稿', content: { type: 'json', value: bundle(`<h1>交付稿</h1><p>${oldText} ${chapterText} ${tools[2]!.data.text}</p>`) }
+    } }) } }] }
+    const binding = JSON.parse(system.split('Bound data: ').at(-1)!) as Row
+    return answer(JSON.stringify({ version: 1, complete: true, answer: null, requirement_ids: ['content'], unresolved: [], artifacts: [{
+      output_key: 'brief', section_id: binding.sections[0].section_id, bundle_resource_id: tools[3]!.data.id, provenance_ref: tools[3]!.provenance_ref,
+      presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', requirement_ids: ['content'], unresolved: []
+    }] }))
+  })
+  const request = s.submit('把现有材料整理成交付稿。', [attachment.id])
+  const state = new RunnerWorkState(s.db, s.store.epoch)
+  const composer = () => state.taskWorks(s.task).find(work => work.purpose === 'production' && work.request_id === request.request_id)
+  await vi.waitFor(() => expect(composer()).toMatchObject({ state: 'planned', assignment: { inputs: bindings } }))
+  const flow = s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot
+  expect(flow.lanes.Worker.items).toContainEqual(expect.objectContaining({ id: `work:${composer()!.work_id}`, state: 'waiting', reason: 'dependency' }))
+  expect(s.records('runner.output.handoff')).toHaveLength(0)
+  expect(s.complete).toHaveBeenCalledTimes(6)
+  statistics.resolve(answer(statisticsText))
+  const pending = () => s.store.snapshot(s.task).approvals.find(item => item.decision === 'pending' && item.validity === 'valid')
+  await vi.waitFor(() => expect(pending()).toBeDefined(), { timeout: 3000 })
+  expect(composer()).toMatchObject({ assignment: { inputs: [...bindings.slice(0, 2), { ...bindings[2], result_revision: 1 }] } })
+  expect(s.records('runner.output.handoff').map(({ payload }) => payload)).toEqual([expect.objectContaining({ consumer_work_id: composer()!.work_id, ...bindings[2], result_revision: 1 })])
+  expect(routerCalls).toBe(3)
+  expect(s.complete).toHaveBeenCalledTimes(12)
+  expect(status(request)).toMatchObject({ delivery_state: 'open' })
+  expect(s.store.snapshot(s.task).views.map(view => view.id)).toEqual([viewId])
+  const approval = pending()!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
+  await vi.waitFor(() => expect(s.store.snapshot(s.task).surface_updates).toEqual([expect.objectContaining({ action_id: approval.action_id })]))
+  await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: approval.action_id, proceed: true, confirm_discard: false })
+  await vi.waitFor(() => expect(status(request)).toMatchObject({ delivery_state: 'complete' }))
+  expect(s.store.snapshot(s.task).views.find(view => view.id !== viewId)!.bundle.html).toContain(`${oldText} ${chapterText} ${statisticsText}`)
+})
+
+it('returns conflicting handoff coverage to the Router before any Workers run', async () => {
+  const runtime = setup({ conversationRouting: true })
+  const dispatch = (base_revision: number, draftClaims: string[], publishClaims = ['content']) => invoke(ROUTE_WORK, { action: 'dispatch', base_revision, assignments: [
+    { assignment_key: 'collect', instructions: 'Collect the inventory', required: true, requirement_ids: draftClaims, outputs: [{ output_key: 'draft', kind: 'artifact', exposure: 'handoff' }] },
+    { assignment_key: 'release', instructions: 'Publish the inventory summary', required: true, requirement_ids: publishClaims, outputs: [{ output_key: 'summary', kind: 'artifact', exposure: 'publish' }], inputs: [{ assignment_key: 'collect', output_key: 'draft' }] }
+  ] })
+  runtime.complete.mockResolvedValueOnce(dispatch(0, ['content'])).mockResolvedValueOnce(answer('{"kind":"new"}'))
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      expect(runtime.records('runner.plan.installed')).toHaveLength(0)
+      expect(runtime.records('worker.state')).toHaveLength(0)
+      expect(messages[0]?.content).toContain('Assignment \\"collect\\" claims final artifact requirements [\\"content\\"]')
+      expect(messages[0]?.content).toContain('base_revision: 2')
+      return dispatch(2, [], [])
+    }).mockResolvedValueOnce(answer('{"kind":"new"}'))
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      expect(runtime.records('runner.plan.installed')).toHaveLength(0)
+      expect(messages[0]?.content).toContain('a publishing artifact output must include')
+      expect(messages[0]?.content).toContain('base_revision: 4')
+      return dispatch(4, [])
+    }).mockResolvedValueOnce(answer('{"kind":"new"}'))
+    .mockImplementation(async (_config, _key, messages) => {
+      const binding = JSON.parse(messages[0]!.content!.split('Bound data: ').at(-1)!) as Row
+      const output = binding.assignment.outputs[0], isDraft = output.exposure === 'handoff'
+      const input = JSON.parse(messages.find(message => message.role === 'user')!.content!) as Row
+      expect(binding.requirement_ids).toEqual(isDraft ? [] : ['content'])
+      if (!isDraft) expect(input.bound.work_outputs).toEqual([expect.objectContaining({ kind: 'artifact', output_key: 'draft', result_revision: 1 })])
+      const receipt = messages.find(message => message.tool_call_id === `write-${output.output_key}`)
+      if (!receipt) return { ...answer(''), finish: 'tool_calls', calls: [{ id: `write-${output.output_key}`, type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: output.output_key, content: { type: 'json', value: {
+        profile: 'managed-v1', html: `<article><p>${isDraft ? 'Internal inventory draft' : 'Published inventory summary'}</p></article>`, css: '', state: { schema: { type: 'object', properties: {}, additionalProperties: false }, initial: {}, compatibility_version: 'static' }, forms: [], behaviors: [], references: [], export: []
+      } } } }) } }] }
+      const result = JSON.parse(receipt.content!) as Row
+      return answer(JSON.stringify({ version: 1, complete: true, answer: null, requirement_ids: binding.requirement_ids, unresolved: [], artifacts: [{
+        output_key: output.output_key, section_id: binding.sections[0].section_id, bundle_resource_id: result.data.id, provenance_ref: result.provenance_ref,
+        presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'none', requirement_ids: binding.requirement_ids, unresolved: []
+      }] }))
+    })
+  const request = runtime.submit('Prepare an internal inventory draft, then publish the inventory summary.')
+  const pending = () => runtime.store.snapshot(runtime.task).approvals.find(item => item.decision === 'pending' && item.validity === 'valid')
+  await vi.waitFor(() => expect(pending()).toBeDefined())
+  const approval = pending()!
+  runtime.store.handle({ type: 'approval.decide', task_id: runtime.task, approval_id: approval.id, decision: 'approve' })
+  await vi.waitFor(() => expect(runtime.store.snapshot(runtime.task).surface_updates).toEqual([expect.objectContaining({ action_id: approval.action_id })]))
+  await runtime.store.handle({ type: 'surface.respond', task_id: runtime.task, action_id: approval.action_id, proceed: true, confirm_discard: false })
+  await vi.waitFor(() => expect(runtime.store.handle({ type: 'request.status', task_id: runtime.task, request_id: request.request_id })).toMatchObject({ delivery_state: 'complete' }))
+  const rejections = runtime.records('worker.result.rejected').map(({ payload }) => payload)
+  expect(rejections.map(payload => payload.code)).toEqual(['RUNNER_PLAN_CONFLICT', 'RUNNER_PLAN_CONFLICT'])
+  expect(rejections.every(payload => !payload.no_progress)).toBe(true)
+  expect(runtime.records('runner.output.handoff').map(({ payload }) => payload.output_key)).toEqual(['draft'])
+  const published = runtime.store.snapshot(runtime.task).views.map(view => view.bundle.html)
+  expect(published).toEqual([expect.stringContaining('Published inventory summary')])
+  expect(published[0]).not.toContain('Internal inventory draft')
 })
 
 it.each(['early', 'late', 'missing'] as const)('hands off migration evidence and gates the required reply on publication (%s)', async reply => {
@@ -419,15 +745,16 @@ it.each(['early', 'late', 'missing'] as const)('hands off migration evidence and
   expect(s.complete).toHaveBeenCalledTimes(reply === 'missing' ? 8 : reply === 'early' ? 9 : 7)
 })
 
-it.each(['layout', 'feedback'] as const)('follows the release Collator model decision: %s', async path => {
+it.each(['layout', 'feedback', 'feedback-only'] as const)('follows the release Collator model decision: %s', async path => {
   const s = setup({ releaseProfile: true }), repairGate = deferred<void>()
+  const expectsFeedback = path !== 'layout'
   const statement = 'PRIVATE_UPSTREAM_EVIDENCE', independent = 'Independent published card', repaired = 'Required detail card'
   const dispatch = (key: string, instructions: string, output: string, artifact = false, requirement_ids: string[] = []) => ({
     assignment_key: key, instructions, required: true, requirement_ids, outputs: [artifact ? { kind: 'artifact', output_key: output, exposure: 'publish' } : { kind: 'answer', output_key: output }]
   })
   const assignments = [
     { ...dispatch('detail', 'Produce required detail', 'detail', true, ['content']), inputs: [{ assignment_key: 'source', output_key: 'evidence' }] },
-    dispatch('source', 'Produce private upstream evidence', 'evidence'), dispatch('independent', 'Produce independent card', 'independent', true)
+    dispatch('source', 'Produce private upstream evidence', 'evidence'), ...(path === 'feedback-only' ? [] : [dispatch('independent', 'Produce independent card', 'independent', true)])
   ]
   s.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, assignments })).mockResolvedValueOnce(answer('{"kind":"new"}'))
     .mockImplementation(async (_config, _key, messages) => {
@@ -437,7 +764,8 @@ it.each(['layout', 'feedback'] as const)('follows the release Collator model dec
         const { task_id, run_id, batch_id, composition_version } = input.batch
         const identity = { task_id, run_id, batch_id, composition_version }
         if (input.structural_issues?.length) {
-          expect(path).toBe('feedback')
+          expect(expectsFeedback).toBe(true)
+          if (path === 'feedback-only') expect(input.indexes).toEqual([])
           expect(input.structural_issues).toEqual([expect.objectContaining({ kind: 'missing_requirement', requirement: expect.objectContaining({ requirement_id: 'content' }) })])
           return answer(JSON.stringify({ ...identity, kind: 'feedback', reports: [{ evidence_id: input.structural_issues[0].evidence_id, recipient: { kind: 'router' } }] }))
         }
@@ -464,7 +792,7 @@ it.each(['layout', 'feedback'] as const)('follows the release Collator model dec
         const { kind: _kind, ...reference } = input.bound.work_outputs[0]
         if (!tools.length) return invoke(READ_WORK_OUTPUT, reference)
         expect(tools[0]).toMatchObject({ execution: 'success', data: { text: statement } })
-        if (path === 'feedback') {
+        if (expectsFeedback) {
           const { task_id, request_id, intent_revision } = binding.owner
           return answer(JSON.stringify({ version: 1, complete: true, answer: null, artifacts: [], requirement_ids: [], unresolved: [{ task_id, request_id, intent_revision, requirement_id: 'content' }] }))
         }
@@ -489,10 +817,14 @@ it.each(['layout', 'feedback'] as const)('follows the release Collator model dec
     await vi.waitFor(() => expect(s.store.snapshot(s.task).surface_updates).toEqual([expect.objectContaining({ action_id: approval.action_id })]))
     await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: approval.action_id, proceed: true, confirm_discard: false })
   }
-  await publish()
+  if (path !== 'feedback-only') await publish()
   if (path === 'feedback') {
     expect(s.store.snapshot(s.task).views.map(view => view.bundle.html).join('')).toContain(independent)
     expect(s.store.snapshot(s.task).views.map(view => view.bundle.html).join('')).not.toContain(repaired)
+    expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ delivery_state: 'open' })
+  }
+  if (expectsFeedback) {
+    await vi.waitFor(() => expect(s.records('runner.repair.plan')).toHaveLength(1))
     expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ delivery_state: 'open' })
     repairGate.resolve()
     await publish()
@@ -500,8 +832,8 @@ it.each(['layout', 'feedback'] as const)('follows the release Collator model dec
   await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ delivery_state: 'complete' }))
   expect(s.store.snapshot(s.task).views.map(view => view.bundle.html).join('')).toContain(repaired)
   expect(s.records('runner.output.handoff')).toHaveLength(1)
-  expect(s.records('runner.composition.feedback')).toHaveLength(path === 'feedback' ? 1 : 0)
-  expect(s.records('runner.repair.plan')).toHaveLength(path === 'feedback' ? 1 : 0)
+  expect(s.records('runner.composition.feedback')).toHaveLength(expectsFeedback ? 1 : 0)
+  expect(s.records('runner.repair.plan')).toHaveLength(expectsFeedback ? 1 : 0)
   expect(s.records('runner.answer')).toHaveLength(0)
 })
 
@@ -553,6 +885,24 @@ it('lets a waiting Worker release its slot and resume after Router-directed supp
   await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ run_state: 'completed' }))
   expect(s.records('runner.answer').map(({ payload }) => payload.text)).toEqual(['The value is available now.'])
   expect(s.records('runner.input.routed')).toHaveLength(1)
+})
+
+it.each(['failure', 'no-progress'] as const)('settles a suspended assignment after missing-input routing shows %s', async result => {
+  const s = setup({ conversationRouting: true })
+  s.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
+    { assignment_key: 'reply', instructions: 'Use the missing value', required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'text' }] }
+  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+    .mockResolvedValueOnce(invoke(REPORT_MISSING_INPUT, { missing: 'Missing value', impact: 'Cannot answer exactly', wait: true }))
+  if (result === 'failure') s.complete.mockRejectedValueOnce(new ModelError('MODEL_STREAM_INTERRUPTED', true))
+  else s.complete.mockResolvedValue(answer('{"kind":"updated"}'))
+
+  const request = s.submit('Answer with the exact value.')
+  const code = result === 'failure' ? 'MODEL_STREAM_INTERRUPTED' : 'RUNNER_PLAN_CONFLICT'
+  await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ run_state: 'failed', delivery_state: 'incomplete' }))
+  expect(s.records('runner.input.blocked').map(({ payload }) => payload)).toEqual([expect.objectContaining({ request_id: request.request_id, code })])
+  expect(s.records('runner.input.routed')).toHaveLength(1)
+  expect(s.records('runner.input.clarification')).toHaveLength(0)
+  expect(s.records('worker.result.rejected')).toHaveLength(result === 'failure' ? 0 : 2)
 })
 
 it('resumes the waiting assignment only for an exact user reply under its confirmed configuration', async () => {

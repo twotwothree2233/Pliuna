@@ -215,9 +215,8 @@ export class RunnerHostProduction {
     // Other required work may finish last. Reuse the designated source's
     // persisted authority; the completing Integrator never becomes the sealer.
     let attempt: ExecutionAttempt
-    try { attempt = this.work.qualify(planner.current_attempt_id).attempt }
+    try { attempt = this.composition.inventorySealer(source) }
     catch (error) { if (error instanceof ContractError) return null; throw error }
-    if (!['running', 'waiting', 'succeeded'].includes(attempt.state)) return null
     const required = this.work.taskWorks(work.task_id).filter(item => item.purpose === 'production' && item.request_id === goal.request_id && item.intent_revision === goal.intent_revision && item.required && !artifactRepair(this.db, item.task_id, item.work_id) && (item.role !== 'router' || !repairRoutingWork(this.db, item.task_id, item.work_id)))
     const outputs = required.map(item => item.result_revision === undefined ? null : this.composition.output(item.task_id, item.work_id, item.plan_revision, item.result_revision))
     if (outputs.some(output => output === null)) return null

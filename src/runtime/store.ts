@@ -64,12 +64,14 @@ import { boundedRecent, snapshotValue } from './snapshot-summary'
 import { runActivity } from './run-activity'
 import { RunnerWorkState, type AssignmentSupplement, type QualifiedAttempt } from './runner/work-state'
 import { WorkerContext } from './runner/worker-context'
-import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory, type ConversationResult } from './runner/conversation'
+import { captureConversation, fitConversation, loadConversation, precedingDelivery, type ConversationBinding, type ConversationHistory, type ConversationResult } from './runner/conversation'
 import { liveRunnerFlow } from './runner/live-flow'
 import { approvalMessages, conversationContentPlan, conversationDependencyResult, conversationDependencyRunning, conversationPublicationRun, conversationReference, runMessage, type BoundConversationDependency } from './runner/conversation-query'
 import type { WorkerGrant, WorkerProfile } from './runner/worker-profile'
-import { dispatchOrchestrationTool, InitialWorkDraft, orchestrationCapability, READ_WORK_OUTPUT, REPORT_MISSING_INPUT, type DispatchWork, type OrchestrationInstallation } from './runner/orchestration-tool'
-import { assignmentRevisions, checkAssignmentRequirements, initialDeliveryRequirements, installableAssignments, propagateAssignmentRevisions } from './runner/orchestration-plan'
+import { dispatchOrchestrationTool, DISCOVER_INPUTS, InitialWorkDraft, orchestrationCapability, READ_BOUND_INPUT, READ_WORK_OUTPUT, REPORT_MISSING_INPUT, WORK_OUTPUT_REPEAT_NOTICE, type DispatchWork, type OrchestrationInstallation } from './runner/orchestration-tool'
+import { assignmentRevisions, bindOutput, checkAssignmentRequirements, initialDeliveryRequirements, installableAssignments, propagateAssignmentRevisions } from './runner/orchestration-plan'
+import { AssignmentContent, BoundContentReader, boundContentInputs } from './runner/assignment-content'
+import { RoutingInputCatalog, type CatalogOutput } from './runner/routing-input-catalog'
 import { captureExecutionScope } from './model/request-evidence'
 import type { ExecutionScope, ExecutionAttempt, InputEvent, ContentPlan, ReportMissingInput, RouteWork } from '../shared/contracts.generated'
 import { aggregateRunOutcome, type WorkRunState } from './runner/run-outcome'
@@ -127,6 +129,7 @@ type PreparedView = { op: Extract<SurfaceOperation, { type: 'view.create' | 'vie
 export class RuntimeStore {
   private summaryPager = new RepresentationPager()
   private readCursors = new ReadCursors()
+  private boundContentReader = new BoundContentReader()
   private db!: Database.Database
   private owner: Database.Database
   private recovery!: RecoveryManager
@@ -608,6 +611,7 @@ export class RuntimeStore {
     if (dialogue) grants.push({ type: 'list', kind: 'event' }, { type: 'read', kind: 'event' })
     const profile = dialogue ? createConversationRouterProfile(manifests, grants) : createChapterRouterProfile(manifests)
     const savedRoute = input.admission_route as ConversationRoute | undefined
+    const priorDelivery = dialogue && !savedRoute ? precedingDelivery(this.db, task, input.conversation) : undefined
     const workTable = dialogue && !savedRoute ? this.routingWorkTable(new RunnerWorkState(this.db, this.epoch), task, { model_config_id: selection.id, model_config_revision: selection.revision }) : []
     const lease = this.models.acquire(config, 'main'), controller = new AbortController(), operation = id()
     let routingRun: string | undefined
@@ -623,9 +627,19 @@ export class RuntimeStore {
     lease.accounting = event => { if (['reserved', 'dispatched'].includes(event.phase)) valid(); this.record(task, 'model.request.accounting', { ...event, routing_operation_id: operation }) }
     try {
       valid()
+      const content = new AssignmentContent(this.db), contentScope = content.scope(task, requestId, materials.map(material => material.id))
+      const catalog = new RoutingInputCatalog(this.db, contentScope, () => this.catalogOutputs(task))
+      const workState = new RunnerWorkState(this.db, this.epoch)
+      const checkOutput = (binding: RouteWorkRunnerOutputBinding, assignment: string) => {
+        try { this.routedOutputSource(workState, task, binding) }
+        catch (error) {
+          if (!(error instanceof ContractError)) throw error
+          fail(error.code, `Assignment ${assignment}: output ${binding.work_id}/${binding.output_key}: ${error.message}`)
+        }
+      }
       const draft = new InitialWorkDraft(savedRoute ? input.admission_dispatch?.plan : undefined, checkpoint => {
         WorkerContext.checkpoint(this.db, task, checkpoint, { model_config_id: lease.id, model_config_revision: lease.revision })
-      })
+      }, (binding, assignment) => content.checkNew(contentScope, binding, assignment), checkOutput)
       if (input.admission_dispatch && !isDeepStrictEqual(input.admission_dispatch.materials, materials)) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Draft materials changed before production admission')
       if (dialogue && !savedRoute) {
         this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)")
@@ -640,6 +654,7 @@ export class RuntimeStore {
           prior_messages: candidate.messages.map(({ source, message }) => ({ id: source.id, role: message.role, excerpt: message.content?.slice(0, 120) })),
           ...(candidate.truncated ? { conversation_truncated: true } : {}), pending_clarifications: clarifications,
           ...(phase === profile && pendingWorkerInputs.length ? { pending_worker_inputs: pendingWorkerInputs.map(({ id, question, request_id, work_id }) => ({ id, question, request_id, work_id })) } : {}),
+          ...(phase === profile && priorDelivery ? { preceding_delivery: priorDelivery } : {}),
           ...(phase === profile && workTable.length ? { work_table: workTable } : {}),
           ...(boundResult ? { preceding_result: boundResult } : {}), ...(publishedContext === undefined ? {} : { published_context: publishedContext })
         }) : text }]
@@ -653,6 +668,10 @@ export class RuntimeStore {
             valid(); phase.authorize(request)
             const query = validateModel(request)
             if (query.type === 'call' && routingRun && phase === profile && dialogue) {
+              if (query.input.capability === DISCOVER_INPUTS) {
+                if (query.input.references.length) fail('INVALID_RUNNER_CONTRACT', 'The catalog uses the current routing scope, not references')
+                return { request_type: 'call', execution: 'success', delivery: 'delivered', data: catalog.page(query.input.arguments) }
+              }
               return { request_type: 'call', execution: 'success', delivery: 'delivered', data: draft.propose(query.input) }
             }
             if (query.type !== 'read' && query.type !== 'list') fail('WORKER_CAPABILITY_DENIED', 'This routing context cannot execute the operation')
@@ -679,14 +698,19 @@ export class RuntimeStore {
         if (!dialogue || route.kind !== 'new' && route.kind !== 'delegate') return null
         const decision = draft.decision()
         try {
-          if (decision) checkAssignmentRequirements(decision, initialDeliveryRequirements(route.kind, decision))
+          if (decision) {
+            checkAssignmentRequirements(decision, initialDeliveryRequirements(route.kind, decision))
+            for (const assignment of decision.assignments) for (const binding of assignment.inputs ?? []) {
+              if ('work_id' in binding) checkOutput(binding, assignment.assignment_key)
+            }
+          }
           else if (replacementRevision !== undefined) fail('RUNNER_PLAN_CONFLICT', 'The rejected work draft has not been replaced')
           else if (route.kind === 'delegate') fail('RUNNER_PLAN_CONFLICT', 'Delegated answers require a work draft')
           return null
         } catch (error) {
           if (!(error instanceof ContractError)) throw error
           if (decision) replacementRevision = draft.discard()
-          return { code: error.code, path: 'dispatch', value: route.kind, message: `${error.message}. No assignments were installed. Submit a corrected draft with base_revision: ${replacementRevision ?? 0} before returning this route.` }
+          return { code: error.code, path: 'dispatch', value: { route: route.kind, conflict: error.message }, message: `${error.message}. No assignments were installed. Submit a corrected draft with base_revision: ${replacementRevision ?? 0} before returning this route.` }
         }
       })
       valid()
@@ -1390,11 +1414,8 @@ export class RuntimeStore {
     const dependencies = [...(messageId ? [] : [{ kind: 'goal' as const, task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision }]), ...materials.map(resource => ({ kind: 'resource' as const, task_id: taskId, resource_id: resource.id })), ...chapterDependencies]
     const source = { task_id: taskId, run_id: runId, request_id: requestId, intent_revision: goal.intent_revision, dependencies, ...origin }
     if (dispatch) {
-      const works = installableAssignments(dispatch, goal, source, id, binding => {
-        const work = this.orchestrationSource(state, taskId, binding)
-        if (work.state === 'succeeded') this.assignedOutput(work, binding)
-        return work
-      }, [], checkpoint => { WorkerContext.checkpoint(this.db, taskId, checkpoint, { model_config_id: main.id, model_config_revision: main.revision }) })
+      const content = new AssignmentContent(this.db), scope = content.scope(taskId, requestId)
+      const works = installableAssignments(dispatch, goal, source, id, binding => this.routedOutputSource(state, taskId, binding), [], checkpoint => { WorkerContext.checkpoint(this.db, taskId, checkpoint, { model_config_id: main.id, model_config_revision: main.revision }) }, (binding, assignment) => content.checkNew(scope, binding, assignment))
       state.installPlan(works)
       const sealer = works.find(work => work.assignment?.final_answer) ?? works.find(work => work.required)!
       this.runnerComposition().designateSource({ task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision, work_id: sealer.work_id, plan_revision: sealer.plan_revision })
@@ -1595,9 +1616,27 @@ export class RuntimeStore {
           if (!this.closed && this.epoch === epoch) this.record(task, 'runner.recovery.blocked', { batch_id: row.batch_id, operation_id: batch.operation_id, reason: error instanceof ContractError ? error.code : 'COMPOSITION_RECOVERY_FAILED' })
         })
       }
+      this.resumeFeedbackComposition(task, epoch)
       this.resumeContentRemainders(task)
       this.pumpRunnerWorkers(task)
       this.pumpRunnerGoals(task)
+      this.settleRunnerDeliveries(task)
+    }
+  }
+  private resumeFeedbackComposition(task: string, epoch: string): void {
+    if (this.runnerCompositionMerges.has(task) || this.runnerCompositionWaiting.has(task)) return
+    const composition = this.runnerComposition(), scope = composition.scope(task)
+    if (!scope) return
+    const batches = this.db.prepare(`SELECT b.batch_id FROM runner_batches b JOIN runs c ON c.task_id=b.task_id AND c.id=json_extract(b.payload_json,'$.run_id')
+      WHERE b.task_id=? AND c.runtime_epoch!=? AND EXISTS (SELECT 1 FROM records f WHERE f.task_id=b.task_id AND f.kind='runner.composition.feedback'
+      AND json_extract(f.payload_json,'$.run_id')=c.id) ORDER BY b.rowid`).all(task, epoch) as { batch_id: string }[]
+    for (const row of batches) {
+      const batch = composition.batch(task, row.batch_id)!
+      const remaining = batch.indexes.find(index => this.hasUnattemptedDeliveryFragment(task, index.artifact_id, index.artifact_revision))
+      if (!remaining) continue
+      const source = this.runnerArtifacts().artifact(task, remaining.artifact_id, remaining.artifact_revision)
+      const trigger = scope.targets.some(target => target.request_id === batch.trigger_request_id) ? batch.trigger_request_id : source?.request_id
+      if (trigger) { this.scheduleRunnerComposition(task, trigger); return }
     }
   }
   private async resumeRunnerProduction(task: string, previousRunId: string, works: LogicalWork[], epoch: string): Promise<void> {
@@ -1694,9 +1733,47 @@ export class RuntimeStore {
     if (work.purpose !== 'production' || work.plan_revision !== binding.plan_revision || !work.assignment?.outputs.some(output => output.output_key === binding.output_key)) fail('RUNNER_DEPENDENCY_INVALID', 'Output source no longer matches the selected plan')
     return work
   }
+  private routedOutputSource(state: RunnerWorkState, task: string, binding: RouteWorkRunnerOutputBinding): AssignedWork {
+    const work = this.orchestrationSource(state, task, binding), exact = bindOutput(task, work, binding)
+    if (work.state === 'succeeded') this.assignedOutput(work, exact)
+    else {
+      const run = state.run(work.run_id), goal = state.goal(work.request_id)
+      if (!run.commit_valid || run.runtime_epoch !== this.epoch || goal.state !== 'active' || goal.intent_revision !== work.intent_revision) fail('RUNNER_DEPENDENCY_INVALID', 'The selected work can no longer deliver its output')
+    }
+    return work
+  }
   private routingRevision(task: string, run: string): number {
     return (this.db.prepare(`SELECT COALESCE(MAX(json_extract(payload_json,'$.revision')),1) AS revision FROM records
       WHERE task_id=? AND kind='runner.plan.revised' AND json_extract(payload_json,'$.run_id')=?`).get(task, run) as { revision: number }).revision
+  }
+  private *catalogOutputs(task: string): Iterable<CatalogOutput> {
+    const state = new RunnerWorkState(this.db, this.epoch)
+    const candidates = this.db.prepare(`SELECT work_id FROM runner_work WHERE task_id=? AND state IN ('planned','queued','running','waiting','succeeded')
+      AND json_type(payload_json,'$.assignment')='object' ORDER BY work_id`).all(task) as { work_id: string }[]
+    for (const { work_id } of candidates) {
+      const work = state.work(work_id)
+      if (work.purpose !== 'production' || !work.assignment) continue
+      const source = { work_id, request_id: work.request_id }
+      if (work.state !== 'succeeded') {
+        const run = state.run(work.run_id), goal = state.goal(work.request_id)
+        if (!run.commit_valid || run.runtime_epoch !== this.epoch || goal.state !== 'active' || goal.intent_revision !== work.intent_revision) continue
+      }
+      for (const output of work.assignment.outputs) {
+        const reference = { work_id, plan_revision: work.plan_revision, output_key: output.output_key }
+        if (work.state !== 'succeeded') { yield { kind: 'output', name: output.output_key, status: 'expected', reference, source }; continue }
+        try {
+          const exact = this.assignedOutput(work, reference)
+          const publication = exact.kind === 'artifact'
+            ? this.db.prepare(`SELECT m.view_id,m.view_revision FROM runner_view_mappings m JOIN views v ON v.id=m.view_id AND v.revision=m.view_revision
+                WHERE m.task_id=? AND m.artifact_id=? AND m.artifact_revision=? LIMIT 1`).get(task, exact.artifact_id, exact.artifact_revision) as object | undefined
+            : this.db.prepare(`SELECT id AS message_id FROM records WHERE task_id=? AND kind='runner.answer' AND json_extract(payload_json,'$.purpose')='final_answer'
+                AND json_extract(payload_json,'$.result_ref.id')=? LIMIT 1`).get(task, exact.record_id) as object | undefined
+          yield { kind: 'output', name: output.output_key, status: publication ? 'published' : 'accepted', reference: { ...reference, result_revision: exact.result_revision }, source: { ...source, ...publication } }
+        } catch (error) {
+          if (!(error instanceof ContractError) || !['RUNNER_DEPENDENCY_INVALID', 'RUNNER_OUTPUT_UNAVAILABLE'].includes(error.code)) throw error
+        }
+      }
+    }
   }
   private routingWorkTable(state: RunnerWorkState, task: string, model: Pick<ExecutionAttempt, 'model_config_id' | 'model_config_revision'>, run?: string) {
     const rows = this.db.prepare(`SELECT work_id FROM runner_work WHERE task_id=? AND json_type(payload_json,'$.assignment')='object'
@@ -1737,12 +1814,14 @@ export class RuntimeStore {
     }
     const model = state.attempt(owner.attempt_id)
     const checkpoint = (id: string) => { WorkerContext.checkpoint(this.db, task, id, model) }
+    const content = new AssignmentContent(this.db), scope = content.scope(task, owner.request_id)
+    const checkContent: Parameters<typeof assignmentRevisions>[4] = (binding, assignment) => content.checkNew(scope, binding, assignment)
     const installed = decision.action === 'dispatch'
       ? state.installPlan(installableAssignments(decision, goal, {
           task_id: task, run_id: runId, request_id: owner.request_id, intent_revision: owner.intent_revision,
           dependencies: origin.dependencies, ...(owner.message_id ? { message_id: owner.message_id } : {})
-        }, id, lookup, works, checkpoint))
-      : state.installAssignmentRevisions(assignmentRevisions(decision, works, lookup, checkpoint))
+        }, id, lookup, works, checkpoint, checkContent))
+      : state.installAssignmentRevisions(assignmentRevisions(decision, works, lookup, checkpoint, checkContent))
     const inventorySource = this.runnerComposition().source(task, goal.request_id, goal.intent_revision)
     const revisedSource = installed.find(work => work.work_id === inventorySource?.work_id)
     if (inventorySource && revisedSource) this.runnerComposition().designateSource({ ...inventorySource, plan_revision: revisedSource.plan_revision }, inventorySource)
@@ -1817,25 +1896,44 @@ export class RuntimeStore {
         return attempt
       }).immediate()
       const revision = () => this.routingRevision(task, source.run_id)
+      const catalog = new RoutingInputCatalog(this.db, new AssignmentContent(this.db).scope(task, origin.request_id), () => this.catalogOutputs(task))
+      const stillWaiting = () => {
+        const current = state.work(origin.work_id)
+        return source.report.wait && current.state === 'waiting' && current.plan_revision === source.plan_revision && current.current_attempt_id === source.attempt_id ? current : undefined
+      }
       void this.executeWorker(attempt.attempt_id, profile, {
         text: this.runnerGoalText(task, origin.request_id, origin.intent_revision),
         bound: { base_revision: revision(), report: source, work_table: this.routingWorkTable(state, task, attempt, source.run_id) },
         orchestration: {
           get revision() { return revision() },
           route: (decision, owner) => this.applyWorkRouting(state, owner, origin, decision),
+          catalog: query => catalog.page(query),
           report: () => fail('WORKER_CAPABILITY_DENIED', 'Router cannot report on behalf of a Worker')
         }
       }, (result, owner) => {
         this.record(task, 'runner.input.resolved', { report_id: row.id, owner, request_id: origin.request_id, run_id: origin.run_id, result })
-        const current = state.work(origin.work_id)
-        if (!source.report.wait || current.state !== 'waiting' || current.current_attempt_id !== source.attempt_id) return
+        const current = stillWaiting()
+        if (!current) return
         if (result.kind === 'blocked') state.revokeWork(current.work_id, { kind: 'failure', work_id: current.work_id, attempt_id: source.attempt_id })
         if (result.kind === 'clarification') {
           const attempt = state.attempt(source.attempt_id), sourceOwner = this.workerOwner({ task_id: task, runtime_epoch: this.epoch, work: current, run: state.run(origin.run_id), attempt })
           this.record(task, 'runner.input.clarification', { owner, report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, reply_to: origin.message_id, text: result.question })
           this.record(task, 'worker.state', { owner: sourceOwner, run_id: origin.run_id, state: 'waiting', reason: 'input_required' })
         }
-      }).catch(() => {})
+      }, undefined, undefined, result => result.kind === 'updated' && stillWaiting() ? {
+        code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
+        message: 'The reporting assignment is still waiting. Bind or revise that assignment, ask for clarification, or return blocked.'
+      } : null).catch(error => {
+        if (this.closed || this.closing || !this.db.open || !state.run(origin.run_id).commit_valid) return
+        const router = state.attempt(attempt.attempt_id), current = stillWaiting()
+        if (!current || router.state === 'unknown' || router.dispatch_state === 'unknown') return
+        const code = error instanceof ContractError || error instanceof ModelError ? error.code : 'MODEL_EXECUTION_FAILED'
+        this.db.transaction(() => {
+          this.record(task, 'runner.input.blocked', { report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, work_id: current.work_id, routing_attempt_id: router.attempt_id, code })
+          state.revokeWork(current.work_id, { kind: 'failure', work_id: router.work_id, attempt_id: router.attempt_id, reason: code })
+        }).immediate()
+        this.aggregateWorkerRun(task, origin.run_id)
+      })
     }
   }
   private assignedOutput(work: Extract<LogicalWork, { purpose: 'production' }>, binding: RouteWorkRunnerOutputBinding) {
@@ -1862,10 +1960,14 @@ export class RuntimeStore {
     return { ...exact, kind: 'artifact' as const, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision, bundle_resource_id: index.bundle_resource_id }
   }
   private boundAssignmentOutputs(state: RunnerWorkState, work: Extract<LogicalWork, { purpose: 'production' }>) {
-    return (work.assignment?.inputs ?? []).map(binding => {
+    return (work.assignment?.inputs ?? []).filter(binding => 'work_id' in binding).map(binding => {
       const dependency = work.dependencies.find(item => item.kind === 'work' && item.work_id === binding.work_id)
       if (dependency?.kind !== 'work' || dependency.task_id !== work.task_id) fail('RUNNER_DEPENDENCY_INVALID', 'Assignment input is not authorized by its exact dependency')
-      return this.assignedOutput(this.orchestrationSource(state, work.task_id, binding), { ...binding, result_revision: dependency.result_revision })
+      try { return this.assignedOutput(this.orchestrationSource(state, work.task_id, binding), binding) }
+      catch (error) {
+        if (!(error instanceof ContractError)) throw error
+        fail(error.code, `Output ${binding.work_id}/${binding.output_key}: ${error.message}`)
+      }
     })
   }
   private publishDeliveryAnswer(state: RunnerWorkState, inventory: NonNullable<ReturnType<RunnerCompositionState['inventory']>>): void {
@@ -1876,8 +1978,10 @@ export class RuntimeStore {
       return work.purpose === 'production' && (work.assignment?.final_answer || this.features.runner?.conversationRouting && !work.assignment && output.artifacts.length > 0)
     })
     if (!output) return
+    try {
+      if (!this.runnerComposition().checkOutput(inventory.task_id, output.work_id, output.plan_revision, output.result_revision)) return
+    } catch (error) { if (error instanceof ContractError) return; throw error }
     const work = state.work(output.work_id), attempt = state.attempt(output.attempt_id), run = state.run(output.run_id)
-    if (work.current_attempt_id !== attempt.attempt_id || work.state !== 'succeeded' || attempt.state !== 'succeeded' || !['running', 'waiting', 'completed'].includes(run.state)) return
     const owner = this.workerOwner({ task_id: inventory.task_id, runtime_epoch: run.runtime_epoch, work, attempt, run, goal })
     const { text } = this.one("SELECT json_extract(payload_json,'$.value.answer') AS text FROM records WHERE task_id=? AND id=?", inventory.task_id, output.result_ref.id) as { text: string | null }
     if (text !== null) this.recordRunnerAnswer(inventory.task_id, { owner, purpose: 'final_answer', text, request_id: goal.request_id, input_event_id: goal.input_event_id, run_id: run.run_id, intent_revision: goal.intent_revision, result_ref: output.result_ref })
@@ -1899,7 +2003,12 @@ export class RuntimeStore {
     const pending = new RunnerRepairState(this.db, state, this.runnerArtifacts(), composition).pending(task)
     const goals = state.contentPlans(task)
     if (!goals.some(goal => requestDelivery(this.db, task, goal.request_id, goal.intent_revision)?.state === 'open')) return
-    const ready = composition.scope(task) ? this.runnerHostComposition().completeness(task) : undefined
+    const scope = composition.scope(task), host = this.runnerHostComposition()
+    const ready = scope ? host.completeness(task) : undefined
+    const modelFeedback = this.features.runner.collator === 'model' && this.task(task).state === 'active'
+    const rebuildId = modelFeedback ? this.runnerCompositionWaiting.get(task)?.previousBatchId : undefined
+    const rebuild = rebuildId ? composition.batch(task, rebuildId) : null
+    let feedback: ContentPlan | undefined
     this.db.transaction(() => {
       for (const goal of goals) {
         const { request_id, intent_revision, input_event_id } = goal
@@ -1917,6 +2026,11 @@ export class RuntimeStore {
           WHERE o.task_id=? AND a.artifact_revision=o.current_revision AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=?`).all(task, request_id, intent_revision) as { artifact_id: string; current_revision: number }[]
         const unheard = fragments.some(fragment => this.hasUnattemptedDeliveryFragment(task, fragment.artifact_id, fragment.current_revision))
         if (unheard) continue
+        if (rebuild?.indexes.length === 0 && rebuild.targets.some(target => target.request_id === request_id && target.intent_revision === intent_revision)) continue
+        if (inventory && scope && modelFeedback && host.missingRequirements(scope, [goal]).length && !this.missingFeedbackAttempted(goal)) {
+          feedback ??= goal
+          continue
+        }
         if (content && inventory && !ready?.targets.some(target => target.request_id === request_id && target.intent_revision === intent_revision)) {
           for (const requirement of goal.requirements.filter(item => item.required && item.kind !== 'answer')) missing.add(requirement.requirement_id)
         }
@@ -1927,6 +2041,26 @@ export class RuntimeStore {
         this.record(task, 'runner.delivery.settled', { request_id, intent_revision, input_event_id, state: missing.size ? 'incomplete' : 'complete', missing_requirement_ids: [...missing] })
       }
     }).immediate()
+    if (feedback) this.executeMissingCompositionFeedback(feedback)
+  }
+  private missingFeedbackAttempted(goal: ContentPlan): boolean {
+    const { task_id, request_id, intent_revision } = goal
+    return !!this.db.prepare(`SELECT 1 FROM runner_batches b,json_each(b.payload_json,'$.targets') t WHERE b.task_id=@task_id
+      AND json_array_length(b.payload_json,'$.indexes')=0 AND json_extract(t.value,'$.request_id')=@request_id AND json_extract(t.value,'$.intent_revision')=@intent_revision
+      UNION ALL SELECT 1 FROM records WHERE task_id=@task_id AND kind='runner.composition.feedback_blocked'
+      AND json_extract(payload_json,'$.request_id')=@request_id AND json_extract(payload_json,'$.intent_revision')=@intent_revision LIMIT 1`).get({ task_id, request_id, intent_revision })
+  }
+  private executeMissingCompositionFeedback(goal: ContentPlan): void {
+    const { task_id: task, request_id: request, intent_revision } = goal
+    let prepared: PreparedRunnerComposition
+    try { prepared = this.prepareRunnerComposition(task, request, { feedback_only: true }) }
+    catch (error) {
+      if (error instanceof ContractError && error.code === 'RUN_BUSY') return
+      this.record(task, 'runner.composition.feedback_blocked', { request_id: request, intent_revision, code: error instanceof ContractError ? error.code : 'COMPOSITION_PREPARATION_FAILED' })
+      queueMicrotask(() => this.settleRunnerDeliveries(task))
+      return
+    }
+    void this.executePreparedComposition(task, request, prepared).catch(() => {})
   }
   private hasUnattemptedDeliveryFragment(task: string, artifact: string, revision: number): boolean {
     if (fragmentHasFeedback(this.db, task, artifact, revision) || this.runnerHostComposition().publications.mapping(task, artifact)?.artifact_revision === revision) return false
@@ -1950,18 +2084,20 @@ export class RuntimeStore {
       try {
         const attempt = this.db.transaction(() => {
           const previous = state.attempts(work.work_id).at(-1)
+          const current = state.pinAssignmentOutputs(work.work_id, this.boundAssignmentOutputs(state, work))
+          const contentInputs = boundContentInputs(current)
           const attempt = state.createAttempt({ attempt_id: id(), task_id: task, work_id: work.work_id, run_id: work.run_id, runtime_epoch: this.epoch,
-            attempt_number: (previous?.attempt_number ?? 0) + 1, ...(previous ? { previous_attempt_id: previous.attempt_id } : {}), profile_id: 'producer-output-v1', model_config_id: agent.main.id, model_config_revision: agent.main.revision, input_versions: work.dependencies,
+            attempt_number: (previous?.attempt_number ?? 0) + 1, ...(previous ? { previous_attempt_id: previous.attempt_id } : {}), profile_id: 'producer-output-v1', model_config_id: agent.main.id, model_config_revision: agent.main.revision, input_versions: current.dependencies,
             state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: work.request_id, intent_revision: work.intent_revision,
-            ...(work.message_id ? { message_id: work.message_id } : {}) })
-          this.installAssignmentHandoffs(state, work, attempt)
+            ...(contentInputs.length ? { content_inputs: contentInputs } : {}), ...(work.message_id ? { message_id: work.message_id } : {}) })
+          this.installAssignmentHandoffs(state, current, attempt)
           return attempt
         }).immediate()
         void this.executeRunnerProduction(attempt.attempt_id).catch(() => {})
       } catch (error) {
         if (!(error instanceof ContractError) || !['RUNNER_OUTPUT_UNAVAILABLE', 'RUNNER_DEPENDENCY_INVALID', 'RUNNER_ATTEMPT_CONFLICT'].includes(error.code)) throw error
         state.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id })
-        this.record(task, 'runner.assignment.blocked', { run_id: work.run_id, request_id: work.request_id, work_id: work.work_id, code: error.code })
+        this.record(task, 'runner.assignment.blocked', { run_id: work.run_id, request_id: work.request_id, work_id: work.work_id, code: error.code, reason: error.message })
         settle.add(work.run_id)
       }
     }
@@ -2049,11 +2185,14 @@ export class RuntimeStore {
   private executeRepairRouter(state: RunnerWorkState, task: string, repairs: RunnerRepairState, repair: PendingRepair, work: AssignedWork, attempt: ExecutionAttempt, profile: ReturnType<typeof createWorkRouterProfile>, index: ReturnType<RunnerArtifactState['artifact']>, requirements: string[]) {
     const { issue, request_record_id, request_id, intent_revision, problem_key } = repair, runId = work.run_id
     const revision = () => this.routingRevision(task, runId)
+    const content = new AssignmentContent(this.db), scope = content.scope(task, request_id)
+    const catalog = new RoutingInputCatalog(this.db, scope, () => this.catalogOutputs(task))
     return this.executeWorker(attempt.attempt_id, profile, {
       text: this.runnerGoalText(task, request_id, intent_revision),
       bound: { base_revision: revision(), feedback: { issue, request_record_id }, work_table: this.routingWorkTable(state, task, attempt, runId) },
       orchestration: {
         get revision() { return revision() },
+        catalog: query => catalog.page(query),
         route: (decision, owner) => {
           if (!repairs.current(task, repair)) fail('REPAIR_OBSOLETE', 'Feedback no longer refers to a current problem')
           if (decision.action !== 'dispatch' || decision.final_answer !== undefined || this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.request_record_id')=?").get(task, request_record_id)) fail('RUNNER_PLAN_CONFLICT', 'Feedback installs one scoped dispatch without changing the original final answer source')
@@ -2062,7 +2201,7 @@ export class RuntimeStore {
           if (decision.assignments.some(assignment => assignment.requirement_ids.some(requirement => !allowed.includes(requirement)))) fail('REPAIR_SCOPE_INVALID', 'Feedback cannot add unrelated requirement work')
           if (index && (decision.assignments.length !== 1 || decision.assignments[0]!.outputs.length !== 1 || decision.assignments[0]!.outputs[0]!.exposure !== 'publish')) fail('REPAIR_SCOPE_INVALID', 'An exact artifact replacement uses one publishing assignment')
           if (!decision.assignments.some(assignment => assignment.required && allowed.every(requirement => assignment.requirement_ids.includes(requirement)) && assignment.outputs.some(output => output.exposure === 'publish'))) fail('REPAIR_SCOPE_INVALID', 'A repair must preserve its required publication coverage')
-          const signature = canonical(decision.assignments.map(assignment => ({ instructions: assignment.instructions.trim().replace(/\s+/g, ' '), requirements: assignment.requirement_ids, inputs: assignment.inputs?.map(input => 'assignment_key' in input ? input.output_key : [input.work_id, input.output_key]), outputs: assignment.outputs.map(output => [output.kind, output.exposure]) })))
+          const signature = canonical(decision.assignments.map(assignment => ({ instructions: assignment.instructions.trim().replace(/\s+/g, ' '), requirements: assignment.requirement_ids, inputs: assignment.inputs?.map(input => 'assignment_key' in input ? input.output_key : 'work_id' in input ? [input.work_id, input.output_key] : input), outputs: assignment.outputs.map(output => [output.kind, output.exposure]) })))
           if (this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.problem_key')=? AND json_extract(payload_json,'$.signature')=?`).get(task, problem_key, signature)) fail('REPAIR_NO_PROGRESS', 'This problem already received the same repair plan')
           const goal = state.goal(request_id), oldSource = this.runnerComposition().source(task, request_id, intent_revision)
           const existing = state.taskWorks(task).filter((item): item is AssignedWork => item.purpose === 'production' && item.request_id === request_id && item.intent_revision === intent_revision && item.state === 'succeeded')
@@ -2073,7 +2212,7 @@ export class RuntimeStore {
               if (index && output.kind === 'artifact' && output.artifact_id === index.artifact_id) fail('REPAIR_SCOPE_INVALID', 'The replacement baseline is already bound; it cannot be its own live output dependency')
             }
             return selected
-          }, existing, checkpoint => { WorkerContext.checkpoint(this.db, task, checkpoint, attempt) })
+          }, existing, checkpoint => { WorkerContext.checkpoint(this.db, task, checkpoint, attempt) }, (binding, assignment) => content.checkNew(scope, binding, assignment))
           const installed = state.installPlan(planned)
           if (index && issue.kind !== 'missing_requirement') {
             const binding: ArtifactRepair = { request_record_id, problem_key, request_id, intent_revision, issue, previous: index, repair_run_id: runId, repair_work_id: installed[0]!.work_id }
@@ -2099,10 +2238,12 @@ export class RuntimeStore {
     const conversationResources = repair ? [] : conversation.resource_ids.filter(resource => this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(work.task_id, resource))
     const materialIds = [...new Set([...resources, ...conversationResources])]
     const outputs = this.boundAssignmentOutputs(state, work)
+    const boundInputs = this.boundContentReader.entries(new AssignmentContent(this.db), work, attemptId)
     const materials = [...new Set([...materialIds, ...outputs.flatMap(output => output.kind === 'artifact' ? [output.bundle_resource_id] : [])])].map(resource => ({ ...this.one('SELECT r.id,r.display_name,r.byte_length,r.media_type FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', work.task_id, resource), provenance_ref: { task_id: work.task_id, kind: 'resource' as const, id: resource } }))
     const host = new RunnerHostProduction(this.db, this.epoch)
     const grants: WorkerGrant[] = repair ? [{ type: 'read', kind: 'resource', ids: materials.map(material => material.provenance_ref.id) }] : this.contentToolGrants(work.task_id, conversation)
     if (outputs.some(output => output.kind === 'answer')) grants.push({ type: 'call', capability: READ_WORK_OUTPUT })
+    if (boundInputs.length) grants.push({ type: 'call', capability: READ_BOUND_INPUT })
     if (work.assignment) grants.push({ type: 'call', capability: REPORT_MISSING_INPUT })
     const profile = createProducerProfile({ owner, work, goal, sections, grants, repair: !!repair, normalize: (draft, response) => host.normalize(draft, owner, response) })
     const loadArtifact = (resourceId: string) => loadBundleSource(this.db, this.root, work.task_id, { type: 'resource', resource: { kind: 'resource', id: resourceId } }, row => this.journal.assertResource(row)).bundle
@@ -2145,7 +2286,7 @@ export class RuntimeStore {
       }
     }
     let waitReport: string | undefined
-    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation: repair ? undefined : conversation, checkpoint, bound: { materials, ...(repair ? { repair: { instruction: 'Correct only the referenced artifact, use its exact base revision, preserve its coverage, and return no answer.', issue: repair.issue, previous: repair.previous } } : {}), ...(supplementalInputs.length ? { supplemental_inputs: supplementalInputs } : {}), ...(workOutputs.length ? { work_outputs: workOutputs } : {}), ...(chapterQuery ? chapterQuery.manifest.content_tree ? { content_query: { view_id: chapterQuery.manifest.view_id, node_ids: chapterQuery.region_ids } } : { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) },
+    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation: repair ? undefined : conversation, checkpoint, bound: { materials, ...(boundInputs.length ? { bound_inputs: boundInputs } : {}), ...(repair ? { repair: { instruction: 'Correct only the referenced artifact, use its exact base revision, preserve its coverage, and return no answer.', issue: repair.issue, previous: repair.previous } } : {}), ...(supplementalInputs.length ? { supplemental_inputs: supplementalInputs } : {}), ...(workOutputs.length ? { work_outputs: workOutputs } : {}), ...(chapterQuery ? chapterQuery.manifest.content_tree ? { content_query: { view_id: chapterQuery.manifest.view_id, node_ids: chapterQuery.region_ids } } : { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) },
       ...(work.assignment ? {
         waitReport: () => waitReport,
         orchestration: {
@@ -2220,7 +2361,9 @@ export class RuntimeStore {
           const state = new RunnerWorkState(this.db, this.epoch)
           new RunnerRepairState(this.db, state, this.runnerArtifacts(), this.runnerComposition()).install(prepared.collator.feedback(value), owner, this.record.bind(this))
           this.runnerHostComposition().setBatchState(task, prepared.batch.batch_id, 'failed')
-        }, prepared.collator)
+        }, prepared.collator, undefined, value => !prepared.batch.indexes.length && !('kind' in value) ? {
+          code: 'INVALID_COLLATOR_FEEDBACK', path: 'kind', value: null, message: 'This batch has no publishable indexes. Report the listed structural evidence as feedback.'
+        } : null)
         : prepared.collator.rulePlan()
     } catch (error) {
       this.finish(task, prepared.run_id, 'failed', error instanceof ContractError ? error.code : 'COLLATOR_FAILED')
@@ -2314,7 +2457,7 @@ export class RuntimeStore {
     this.pumpingWorkers.add(task)
     try {
       const state = new RunnerWorkState(this.db, this.epoch)
-      state.reconcileDependencies(task)
+      this.reconcileRunnerDependencies(state, task)
       this.queueRepairs(state, task)
       this.queueWorkRouting(state, task)
       this.queueAssignedWork(state, task)
@@ -2348,7 +2491,7 @@ export class RuntimeStore {
         this.runnerCompositionWaiting.delete(task)
         void this.executeAutomaticComposition(task, waiting.trigger, waiting.previousBatchId).catch(error => {
           if (!this.closed && this.db.open) this.record(task, 'runner.composition.blocked', { trigger_request_id: waiting.trigger, code: error instanceof ContractError ? error.code : 'COMPOSITION_EXECUTION_FAILED' })
-        })
+        }).finally(() => this.settleRunnerDeliveries(task))
       }
     }
   }
@@ -2564,7 +2707,7 @@ export class RuntimeStore {
   private aggregateWorkerRun(taskId: string, runId: string): void {
     if (this.closed || !this.db.open || !this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(runId)) return
     const state = new RunnerWorkState(this.db, this.epoch)
-    state.reconcileDependencies(taskId)
+    this.reconcileRunnerDependencies(state, taskId, runId)
     const run = state.run(runId), works = state.taskWorks(taskId).filter(work => work.run_id === runId)
     const attempts = works.flatMap(work => state.attempts(work.work_id)), states: WorkRunState[] = []
     for (const work of works) {
@@ -2597,20 +2740,32 @@ export class RuntimeStore {
     for (const [attemptId, worker] of this.workers) if (worker.owner.run_id === runId && outcome.cancel_work_ids.includes(worker.owner.work_id)) {
       this.pluginCalls.cancelAttempt(attemptId); this.monty.cancelAttempt(attemptId); worker.controller.abort()
     }
-    this.pumpRunnerWorkers(taskId)
-    if (!outcome.outcome) return
+    if (!outcome.outcome) { this.pumpRunnerWorkers(taskId); return }
     // Missing token usage remains an accounting fact after the request ends.
     // Only execution ownership and unconfirmed effects keep a Run closing.
     const unresolved = this.workersForRun(runId) || this.pluginCalls.busyRun(runId) || this.runnerCleanupPending(runId) || this.monty.busyRun(runId) || outcome.unknown_attempt_ids.length > 0 || !!this.db.prepare("SELECT 1 FROM calls WHERE run_id=? AND (state!='ended' OR execution='unknown') LIMIT 1").get(runId)
-    const reason = (outcome.outcome === 'failed' ? runnerFailureReason(this.db, taskId, runId, terminal.primary_reason) : terminal.primary_reason) ?? (cancellation ? 'user_cancelled' : 'required_work_settled')
+    const dependencyInvalid = works.some(work => work.required && work.state === 'invalidated' && work.purpose === 'production' && work.assignment)
+    const reason = (outcome.outcome === 'failed' ? runnerFailureReason(this.db, taskId, runId, terminal.primary_reason) ?? (dependencyInvalid ? 'RUNNER_DEPENDENCY_INVALID' : null) : terminal.primary_reason) ?? (cancellation ? 'user_cancelled' : 'required_work_settled')
     this.db.prepare("UPDATE runs SET state='waiting',wait_reason=?,intended_terminal=?,primary_reason=CASE WHEN primary_reason IS NULL OR primary_reason='required_work_settled' THEN ? ELSE primary_reason END WHERE id=? AND state IN ('running','waiting')").run(unresolved ? 'ending_cleanup' : 'runner_closing', outcome.outcome, reason, runId)
-    if (unresolved) return
+    if (unresolved) { this.pumpRunnerWorkers(taskId); return }
     const agent = this.agents.get(runId)
     if (agent?.managed) {
       agent.main.release(); agent.compact?.release(); agent.approval?.release(); this.agents.delete(runId)
     }
     this.finish(taskId, runId, outcome.outcome, reason, true)
     this.pumpRunnerWorkers(taskId)
+  }
+  private reconcileRunnerDependencies(state: RunnerWorkState, task: string, currentRun?: string): void {
+    const runs = new Set<string>()
+    for (const work of state.reconcileDependencies(task)) {
+      if (work.purpose !== 'production' || !work.assignment || work.state !== 'invalidated') continue
+      runs.add(work.run_id)
+      if (!work.current_attempt_id) continue
+      this.revokeRunActions(work.run_id, [work.current_attempt_id])
+      this.pluginCalls.cancelAttempt(work.current_attempt_id); this.monty.cancelAttempt(work.current_attempt_id)
+      this.workers.get(work.current_attempt_id)?.controller.abort()
+    }
+    for (const run of runs) if (run !== currentRun) this.aggregateWorkerRun(task, run)
   }
   private workersForRun(runId: string): boolean { return [...this.workers.values()].some(worker => worker.owner.run_id === runId) }
   private runnerCleanupPending(runId: string): boolean {
@@ -3154,6 +3309,7 @@ export class RuntimeStore {
   publishRunnerComposition(taskId: string, batchId: string, plan: PresentationPlan, options: PublishRunnerCompositionOptions = {}): Promise<PublicationResult> {
     const host = this.runnerHostComposition(), batch = this.runnerComposition().batch(taskId, batchId)
     if (!batch?.operation_id) return Promise.reject(new ContractError('RUNNER_NOT_FOUND', 'Composition publication is unavailable'))
+    if (!batch.indexes.length) return Promise.reject(new ContractError('COMPOSITION_NOT_READY', 'A feedback-only batch has no fragments to publish'))
     const original = host.operation(taskId, batch.operation_id)
     if (original?.result) return Promise.resolve(original.result)
     const pending = this.compositionPublications.get(batch.operation_id)
@@ -3566,18 +3722,39 @@ export class RuntimeStore {
     let value: unknown
     if (request.type === 'list' || request.type === 'read') value = await this.query(owner.task_id, request, attemptId)
     else if (request.type === 'call') {
+      if (request.input.capability === READ_BOUND_INPUT) {
+        if (owner.purpose !== 'production' || owner.update_id || request.input.references.length) fail('WORKER_CAPABILITY_DENIED', 'Read only entries assigned to this Worker attempt')
+        const data = await this.boundContentReader.read(this.db, qualified.work, attemptId, request.input.arguments, resource => this.bundle(resource), (read, source) => this.query(owner.task_id, read, source))
+        valid()
+        return { request_type: 'call', execution: 'success', delivery: 'delivered', data }
+      }
       if (request.input.capability === READ_WORK_OUTPUT) {
         if (qualified.work.purpose !== 'production' || request.input.references.length) fail('WORKER_CAPABILITY_DENIED', 'Only exact assigned work outputs can be read')
         const args = request.input.arguments as Row | null
         if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['work_id', 'plan_revision', 'result_revision', 'output_key', 'offset'].includes(key))) fail('INVALID_RUNNER_CONTRACT', 'Use input_json with work_id, plan_revision, result_revision, output_key and optional offset. Pass the returned next_offset value as offset; omit next_offset and kind.')
         const output = this.boundAssignmentOutputs(new RunnerWorkState(this.db, this.epoch), qualified.work).find(output => output.kind === 'answer' && output.work_id === args.work_id && output.plan_revision === args.plan_revision && output.result_revision === args.result_revision && output.output_key === args.output_key)
-        if (!output || output.kind !== 'answer') fail('WORKER_CAPABILITY_DENIED', 'Output is outside the assigned input set')
+        if (!output || output.kind !== 'answer') fail('WORKER_CAPABILITY_DENIED', 'Use the exact work_id, output_key and revisions from work_outputs')
         const { text } = this.one("SELECT json_extract(payload_json,'$.value.answer') AS text FROM records WHERE task_id=? AND id=?", owner.task_id, output.record_id) as { text: string }
         const offset = args.offset === undefined ? 0 : args.offset
-        if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) fail('INVALID_RUNNER_CONTRACT', 'Offset is outside the answer')
-        let end = Math.min(offset + 4096, text.length)
-        if (end < text.length && /[\uDC00-\uDFFF]/.test(text.charAt(end))) end--
-        return { request_type: 'call', execution: 'success', delivery: 'delivered', truncated: end < text.length, data: { text: text.slice(offset, end), next_offset: end < text.length ? end : null } }
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length || /[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(text.slice(Math.max(0, offset - 1), offset + 1))) fail('INVALID_RUNNER_CONTRACT', 'Use the exact next_offset returned for this answer, or omit offset to start')
+        const { work_id, output_key, plan_revision, result_revision } = output
+        const page = (chunk: string, nextOffset: number | null) => ({
+          request_type: 'call', execution: 'success', delivery: 'delivered', truncated: nextOffset !== null,
+          data: { text: chunk, next_offset: nextOffset, ...(nextOffset === null ? {} : { next_call: { name: 'call', arguments: { capability: READ_WORK_OUTPUT, input_json: json({ work_id, output_key, plan_revision, result_revision, offset: nextOffset }) } } }) }
+        })
+        const provenance_ref = { task_id: owner.task_id, kind: 'record', id: output.record_id }
+        const deliveryBytes = (result: ReturnType<typeof page>) => Buffer.byteLength(json({ ...result, provenance_ref, notice: WORK_OUTPUT_REPEAT_NOTICE }))
+        const remaining = text.slice(offset)
+        const complete = page(remaining, null)
+        if (deliveryBytes(complete) <= defaults.read.text_bytes) return complete
+        const room = defaults.read.text_bytes - deliveryBytes(page('', text.length))
+        let end = offset, bytes = 0
+        for (const point of remaining) {
+          const size = Buffer.byteLength(json(point)) - 2
+          if (bytes + size > room) break
+          end += point.length; bytes += size
+        }
+        return page(text.slice(offset, end), end)
       }
       if (orchestrationCapability(request.input.capability)) return this.db.transaction(() => {
         valid()
@@ -4404,8 +4581,10 @@ export class RuntimeStore {
     }
   }
   private undispatchedShutdownWork(work: LogicalWork): boolean {
-    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state) || !work.current_attempt_id) return false
-    const attempt = new RunnerWorkState(this.db, this.epoch).attempt(work.current_attempt_id)
+    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state)) return false
+    const state = new RunnerWorkState(this.db, this.epoch)
+    if (!work.current_attempt_id) return work.state === 'planned' && !!work.assignment && !state.attempts(work.work_id).length
+    const attempt = state.attempt(work.current_attempt_id)
     return attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
   }
   private finish(taskId: string, runId: string, state: string, reason: string, runnerFinal = false): void {

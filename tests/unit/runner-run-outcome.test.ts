@@ -148,6 +148,12 @@ it('keeps invalidated required work visible until its effective plan is resolved
   expect(aggregateRunOutcome(facts([work('invalidated', 'invalidated')]))).toMatchObject({ phase: 'active', state: 'waiting', waits: [{ work_id: 'invalidated', reason: 'work_invalidated' }] })
 })
 
+it('settles required assignments whose frozen input was invalidated without hiding an unknown operation', () => {
+  const assigned = work('consumer', 'invalidated', { current_attempt_id: 'attempt-consumer', assignment: { instructions: 'Use the bound input', inputs: [], outputs: [{ kind: 'answer', output_key: 'reply' }] } })
+  const result = aggregateRunOutcome(facts([assigned], { attempts: [attempt('consumer', 'unknown')] }))
+  expect(result).toMatchObject({ phase: 'closing', outcome: 'failed', pending_work_ids: [], unknown_attempt_ids: ['attempt-consumer'] })
+})
+
 it('retains a precise wait when the current attempt fact is unavailable', () => {
   expect(aggregateRunOutcome(facts([work('worker', 'running')], { attempts: [] }))).toMatchObject({ phase: 'active', state: 'waiting', waits: [{ work_id: 'worker', attempt_id: 'attempt-worker', reason: 'attempt_unavailable' }] })
 })

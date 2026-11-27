@@ -1,10 +1,14 @@
-import type { ExecutionScope, ModelRequest, ReportMissingInput, RouteWork } from '../../shared/contracts.generated'
-import { validateRunnerContract } from '../../shared/runner-validation'
+import type { ExecutionScope, ModelRequest, ReportMissingInput, RouteWork, RouteWorkRunnerOutputBinding } from '../../shared/contracts.generated'
+import { assignmentInputKey, validateRunnerContract } from '../../shared/runner-validation'
+import type { ContentInput } from './orchestration-plan'
 import { ContractError } from '../../shared/validation'
 
 export const ROUTE_WORK = 'builtin:route-work:v1'
 export const REPORT_MISSING_INPUT = 'builtin:report-missing-input:v1'
 export const READ_WORK_OUTPUT = 'builtin:read-work-output:v1'
+export const WORK_OUTPUT_REPEAT_NOTICE = 'This exact page was already delivered in this attempt. It contains no new data; reuse the text for your assignment.'
+export const READ_BOUND_INPUT = 'builtin:read-bound-input:v1'
+export const DISCOVER_INPUTS = 'builtin:discover-inputs:v1'
 
 type Call = Extract<ModelRequest, { type: 'call' }>['input']
 type Owner = Extract<ExecutionScope, { purpose: 'production' }>
@@ -14,15 +18,16 @@ export interface OrchestrationInstallation {
   readonly revision: number
   route(decision: RouteWork, owner: Owner): unknown
   report(report: ReportMissingInput, owner: Owner): unknown
+  catalog?(query: unknown): unknown
 }
 
 export function orchestrationCapability(capability: string): boolean {
-  return capability === ROUTE_WORK || capability === REPORT_MISSING_INPUT
+  return capability === ROUTE_WORK || capability === REPORT_MISSING_INPUT || capability === DISCOVER_INPUTS
 }
 
 export function orchestrationRoleAllows(capability: string, role: ExecutionScope['role']): boolean {
-  if (capability === ROUTE_WORK) return role === 'router'
-  if (capability === REPORT_MISSING_INPUT || capability === READ_WORK_OUTPUT) return role === 'producer' || role === 'integrator' || role === 'lightweight'
+  if (capability === ROUTE_WORK || capability === DISCOVER_INPUTS) return role === 'router'
+  if (capability === REPORT_MISSING_INPUT || capability === READ_WORK_OUTPUT || capability === READ_BOUND_INPUT) return role === 'producer' || role === 'integrator' || role === 'lightweight'
   return !orchestrationCapability(capability)
 }
 
@@ -40,6 +45,7 @@ function routeWork(raw: unknown, previous?: DispatchWork): RouteWork {
     if (decision.final_answer !== undefined && !assignments.get(decision.final_answer)?.outputs.some(output => output.kind === 'answer')) invalid('Final answer must designate an assignment with an answer output')
     for (const assignment of decision.assignments) {
       unique(assignment.outputs.map(output => output.output_key), 'output keys')
+      unique((assignment.inputs ?? []).map(assignmentInputKey), 'assignment inputs')
       if (assignment.outputs.filter(output => output.kind === 'answer').length > 1) invalid('Each assignment may declare at most one answer output')
       for (const output of assignment.outputs) {
         const path = `${assignment.assignment_key}.${output.output_key}`
@@ -51,6 +57,7 @@ function routeWork(raw: unknown, previous?: DispatchWork): RouteWork {
   } else if (decision.action === 'revise') {
     unique(decision.changes.map(change => change.work_id), 'revised work identities')
     if (decision.changes.some(change => change.inputs?.some(input => 'assignment_key' in input))) invalid('Plan revisions require installed work references')
+    for (const change of decision.changes) unique((change.inputs ?? []).map(assignmentInputKey), 'assignment inputs')
   }
   return decision
 }
@@ -59,7 +66,7 @@ export class InitialWorkDraft {
   private draft?: DispatchWork
   private revision = 0
 
-  constructor(saved?: unknown, private readonly checkpoint?: (id: string) => void) {
+  constructor(saved?: unknown, private readonly checkpoint?: (id: string) => void, private readonly checkContent?: (input: ContentInput, assignment: string) => void, private readonly checkOutput?: (input: RouteWorkRunnerOutputBinding, assignment: string) => void) {
     if (saved !== undefined) this.draft = this.validate(saved)
   }
 
@@ -73,6 +80,10 @@ export class InitialWorkDraft {
     const decision = routeWork(call.arguments, this.draft)
     if (decision.action !== 'dispatch') invalid('There is no installed plan to modify')
     if (decision.base_revision !== this.revision) throw new ContractError('RUNNER_PLAN_CONFLICT', `Draft changed; current revision is ${this.revision}`)
+    for (const assignment of decision.assignments) for (const input of assignment.inputs ?? []) {
+      if ('kind' in input) this.checkContent?.(input, assignment.assignment_key)
+      else if ('work_id' in input) this.checkOutput?.(input, assignment.assignment_key)
+    }
     for (const assignment of decision.assignments) if (assignment.checkpoint_id) {
       if (!this.checkpoint) throw new ContractError('RUNNER_CHECKPOINT_UNAVAILABLE', 'No checkpoint is available in this routing context')
       this.checkpoint(assignment.checkpoint_id)
@@ -102,6 +113,10 @@ export class InitialWorkDraft {
 export function dispatchOrchestrationTool(call: Call, owner: ExecutionScope, installation?: OrchestrationInstallation): unknown {
   if (!installation || owner.purpose !== 'production' || owner.update_id || !orchestrationCapability(call.capability) || !orchestrationRoleAllows(call.capability, owner.role)) throw new ContractError('WORKER_CAPABILITY_DENIED', 'Orchestration requires an authorized production role')
   if (call.references.length) invalid('Put references in the orchestration arguments')
+  if (call.capability === DISCOVER_INPUTS) {
+    if (!installation.catalog) throw new ContractError('WORKER_CAPABILITY_DENIED', 'This routing execution has no input catalog')
+    return installation.catalog(call.arguments)
+  }
   if (call.capability === ROUTE_WORK) {
     const decision = routeWork(call.arguments)
     if (decision.base_revision !== installation.revision) throw new ContractError('RUNNER_PLAN_CONFLICT', `Work plan changed; current revision is ${installation.revision}`)

@@ -1,6 +1,6 @@
 import { types } from 'node:util'
 import type Database from 'better-sqlite3'
-import type { ConsumptionStage, ExecutionAttempt, ContentPlan, InputEvent, LogicalWork, RunnerRun, WorkDependency } from '../../shared/contracts.generated'
+import type { ConsumptionStage, ExecutionAttempt, ContentPlan, InputEvent, LogicalWork, RouteWorkRunnerOutputBinding, RunnerRun, WorkDependency } from '../../shared/contracts.generated'
 import { sameDependencies, validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { RunnerBudgetLedger } from './budget'
@@ -8,6 +8,8 @@ import { assertRunnerId } from './limits'
 import { ChapterState } from './chapter-state'
 import { RunnerArtifactState } from './artifact-state'
 import { isCorrectableContentError } from './content-errors'
+import { AssignmentContent, BoundContentError, boundContentInputs } from './assignment-content'
+import { registerRunnerResources } from './resource-references'
 
 type PayloadRow = { payload_json: string }
 type CoreRun = { id: string; task_id: string; request_id: string | null; state: string; commit_valid: number; runtime_epoch: string }
@@ -322,6 +324,7 @@ export class RunnerWorkState {
     if (checking.has(work.work_id)) fail('RUNNER_DEPENDENCY_CYCLE', 'Logical work dependencies must form a DAG')
     checking.add(work.work_id)
     if (work.current_attempt_id) this.checkHandoffs(work, work.current_attempt_id)
+    else this.checkContentInputs(work)
     this.dependenciesCurrent(work.dependencies, requireSuccess, proposed, checking)
     checking.delete(work.work_id)
   }
@@ -395,6 +398,7 @@ export class RunnerWorkState {
       for (const work of plan) {
         if (!sameSource(run, work) || work.current_attempt_id !== undefined || work.root_cause !== undefined || work.result_revision !== undefined || !['planned', 'queued', 'waiting'].includes(work.state) || goal && work.requirement_ids.some(id => !goal.requirements.some(requirement => requirement.requirement_id === id))) fail('RUNNER_PLAN_CONFLICT', 'Logical work does not match its current source and requirements')
         this.dependenciesCurrent(work.dependencies, false, proposed)
+        this.checkContentInputs(work)
         const row = this.db.prepare('SELECT payload_json FROM runner_work WHERE work_id=?').get(work.work_id) as PayloadRow | undefined
         if (!row) { updates.add(work.work_id); continue }
         const old = this.payload('runner_logical_work', row)
@@ -419,7 +423,11 @@ export class RunnerWorkState {
         visiting.delete(work.work_id); visited.add(work.work_id)
       }
       for (const work of plan) visit(work)
-      for (const work of plan) if (updates.has(work.work_id)) this.db.prepare('INSERT INTO runner_work(work_id,task_id,run_id,plan_revision,state,payload_json) VALUES (?,?,?,?,?,?) ON CONFLICT(work_id) DO UPDATE SET run_id=excluded.run_id,plan_revision=excluded.plan_revision,state=excluded.state,payload_json=excluded.payload_json').run(work.work_id, work.task_id, work.run_id, work.plan_revision, work.state, json(work))
+      for (const work of plan) if (updates.has(work.work_id)) {
+        const materials = boundContentInputs(work).flatMap(input => input.kind === 'material' ? [input.resource_id] : [])
+        if (materials.length) registerRunnerResources(this.db, work.task_id, 'runner_work_input', json([work.work_id, work.plan_revision]), materials)
+        this.db.prepare('INSERT INTO runner_work(work_id,task_id,run_id,plan_revision,state,payload_json) VALUES (?,?,?,?,?,?) ON CONFLICT(work_id) DO UPDATE SET run_id=excluded.run_id,plan_revision=excluded.plan_revision,state=excluded.state,payload_json=excluded.payload_json').run(work.work_id, work.task_id, work.run_id, work.plan_revision, work.state, json(work))
+      }
       return plan.map(work => this.work(work.work_id))
     }).immediate()
   }
@@ -438,6 +446,7 @@ export class RunnerWorkState {
       this.sourceCurrent(run)
       if (!sameSource(run, attempt) || !sameSource(work, attempt) || work.run_id !== run.run_id || attempt.runtime_epoch !== this.epoch || terminalWork.has(work.state) || !sameDependencies(work.dependencies, attempt.input_versions)) fail('RUNNER_OWNERSHIP_INVALID', 'Attempt does not match its eligible logical work')
       this.dependenciesCurrent(attempt.input_versions, true)
+      this.checkContentInputs(work, attempt)
       const previous = this.attempts(work.work_id).at(-1)
       if (attempt.attempt_number !== (previous?.attempt_number ?? 0) + 1 || attempt.attempt_number > work.max_attempts || attempt.previous_attempt_id !== previous?.attempt_id) fail('RUNNER_ATTEMPT_CONFLICT', 'Attempt must retain its predecessor and installed bound')
       if (previous && (!terminalAttempt.has(previous.state) || previous.state === 'cancelled' || previous.dispatch_state === 'unknown' || previous.state === 'revoked' && previous.dispatch_state !== 'not_dispatched' && !this.assignmentWait(previous, work.plan_revision))) fail('RUNNER_ATTEMPT_CONFLICT', 'An unresolved or cancelled attempt cannot be replayed')
@@ -446,6 +455,23 @@ export class RunnerWorkState {
       this.saveWork({ ...work, current_attempt_id: attempt.attempt_id, state: 'queued' })
       return this.attempt(attempt.attempt_id)
     }).immediate()
+  }
+
+  pinAssignmentOutputs(workId: string, outputs: (RouteWorkRunnerOutputBinding & { result_revision: number })[]): Extract<LogicalWork, { purpose: 'production' }> {
+    const work = this.work(workId)
+    if (!this.db.inTransaction || work.purpose !== 'production' || !work.assignment || work.state !== 'planned' || work.current_attempt_id) fail('RUNNER_PLAN_CONFLICT', 'Output binding must join admission of a pending assignment')
+    const inputs = work.assignment.inputs.map(input => {
+      if (!('work_id' in input)) return input
+      const output = outputs.find(item => item.work_id === input.work_id && item.plan_revision === input.plan_revision && item.output_key === input.output_key)
+      const upstream = this.work(input.work_id)
+      if (!output || upstream.state !== 'succeeded' || upstream.plan_revision !== output.plan_revision || upstream.result_revision !== output.result_revision || input.result_revision !== undefined && input.result_revision !== output.result_revision) fail('RUNNER_DEPENDENCY_INVALID', `Output ${input.work_id}/${input.output_key} has no matching accepted result`)
+      return { ...input, result_revision: output.result_revision }
+    })
+    if (equivalent(inputs, work.assignment.inputs)) return work
+    const dependencies = work.dependencies.map(dependency => dependency.kind === 'work' ? { ...dependency, result_revision: outputs.find(output => output.work_id === dependency.work_id)?.result_revision ?? dependency.result_revision } : dependency)
+    const installed = { ...work, dependencies, assignment: { ...work.assignment, inputs } }
+    this.saveWork(installed)
+    return installed
   }
 
   private assignmentWait(attempt: ExecutionAttempt, beforeRevision: number): boolean {
@@ -479,9 +505,12 @@ export class RunnerWorkState {
 
   checkHandoffs(work: LogicalWork, attemptId: string): void {
     if (work.purpose !== 'production' || !work.assignment?.inputs.length) return
+    this.checkContentInputs(work, this.attempt(attemptId))
+    const outputs = work.assignment.inputs.filter(input => 'work_id' in input)
+    if (!outputs.length) return
     const receipts = (this.db.prepare(`SELECT payload_json FROM records WHERE task_id=? AND kind='runner.output.handoff'
       AND json_extract(payload_json,'$.consumer_attempt_id')=? ORDER BY sequence`).all(work.task_id, attemptId) as PayloadRow[]).map(row => JSON.parse(row.payload_json))
-    for (const input of work.assignment.inputs) {
+    for (const input of outputs) {
       const source = this.work(input.work_id)
       const receipt = receipts.find(item => item.consumer_work_id === work.work_id && item.work_id === input.work_id && item.output_key === input.output_key && item.plan_revision === input.plan_revision)
       if (!receipt || source.plan_revision !== input.plan_revision || source.result_revision !== receipt.result_revision || (input.result_revision !== undefined && input.result_revision !== receipt.result_revision)) fail('RUNNER_DEPENDENCY_INVALID', 'The bound output version is no longer current')
@@ -490,6 +519,14 @@ export class RunnerWorkState {
         if (!artifact?.current) fail('RUNNER_DEPENDENCY_INVALID', 'The bound artifact version is no longer current')
       }
     }
+  }
+
+  private checkContentInputs(work: LogicalWork, attempt?: ExecutionAttempt): void {
+    const inputs = boundContentInputs(work)
+    if (attempt && !equivalent(inputs, attempt.purpose === 'production' ? attempt.content_inputs ?? [] : [])) fail('RUNNER_DEPENDENCY_INVALID', 'Attempt does not retain its exact bound content inputs')
+    if (!inputs.length) return
+    const content = new AssignmentContent(this.db)
+    for (const input of inputs) content.checkInstalled(work.task_id, input, work.work_id)
   }
 
   private saveWork(work: LogicalWork): void {
@@ -515,7 +552,9 @@ export class RunnerWorkState {
   private installRevocation(work: LogicalWork, cause: WorkCause, downstream: boolean): LogicalWork {
     if (terminalWork.has(work.state) || terminalRun.has(this.run(work.run_id).state)) return work
     const state = cause.kind === 'failure' ? downstream ? 'dependency_failed' : 'failed' : cause.kind === 'cancellation' ? downstream ? 'dependency_cancelled' : 'cancelled' : 'invalidated'
-    const value = { ...work, state, root_cause: work.root_cause ?? cause } as LogicalWork
+    const missing = downstream && work.purpose === 'production' ? work.assignment?.inputs.find(input => 'work_id' in input && input.work_id === cause.work_id) : undefined
+    const root_cause = work.root_cause ?? (missing && !cause.input ? { ...cause, input: missing, reason: `Selected upstream output is unavailable (${cause.kind})` } : cause)
+    const value = { ...work, state, root_cause } as LogicalWork
     this.saveWork(value)
     // Revocation removes authority immediately. Dispatched execution is still
     // reconciled by its owner; it is not a clean cancellation result.
@@ -584,11 +623,12 @@ export class RunnerWorkState {
             if (!(error instanceof ContractError)) throw error
             causes.push(this.cause(work, 'invalidation'))
           }
-          if (work.current_attempt_id) {
-            try { this.checkHandoffs(work, work.current_attempt_id) } catch (error) {
-              if (!(error instanceof ContractError)) throw error
-              causes.push(this.cause(work, 'invalidation'))
-            }
+          try {
+            if (work.current_attempt_id) this.checkHandoffs(work, work.current_attempt_id)
+            else this.checkContentInputs(work)
+          } catch (error) {
+            if (!(error instanceof ContractError)) throw error
+            causes.push({ ...this.cause(work, 'invalidation'), ...(error instanceof BoundContentError ? { input: error.input, reason: error.message } : {}) })
           }
           if (work.update_id) {
             const chapters = new ChapterState(this.db), update = chapters.update(taskId, work.update_id)
@@ -610,7 +650,11 @@ export class RunnerWorkState {
         for (const dependency of work.dependencies) {
           if (dependency.kind === 'work') {
             const source = all.get(dependency.work_id)
-            if (!source || source.task_id !== dependency.task_id || source.result_revision !== undefined && source.result_revision !== dependency.result_revision || source.state === 'succeeded' && source.result_revision !== dependency.result_revision) causes.push(this.cause(work, 'invalidation'))
+            const binding = work.purpose === 'production' ? work.assignment?.inputs.find(input => 'work_id' in input && input.work_id === dependency.work_id) : undefined
+            const expected = binding && 'work_id' in binding && binding.result_revision === undefined
+            if (!source || source.task_id !== dependency.task_id || binding && 'work_id' in binding && (source.purpose !== 'production' || source.plan_revision !== binding.plan_revision || !source.assignment?.outputs.some(output => output.output_key === binding.output_key)) || !expected && (source.result_revision !== undefined || source.state === 'succeeded') && source.result_revision !== dependency.result_revision) {
+              causes.push({ ...this.cause(work, 'invalidation'), ...(binding ? { input: binding, reason: 'The selected upstream work no longer provides this output' } : {}) })
+            }
             else { const cause = inspect(source); if (cause) causes.push(cause) }
           } else if (dependency.kind === 'goal') {
             const goal = this.goal(dependency.request_id)

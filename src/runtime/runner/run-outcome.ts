@@ -84,7 +84,10 @@ export function aggregateRunOutcome(input: RunOutcomeInput): RunOutcome {
     if (work.state === 'succeeded') result = 'succeeded'
     else if (work.state === 'cancelled' || work.state === 'dependency_cancelled') result = 'cancelled'
     else if (work.state === 'failed' || work.state === 'dependency_failed') result = work.state === 'dependency_failed' && work.root_cause?.kind === 'cancellation' ? 'cancelled' : 'failed'
-    else if (work.state === 'invalidated') wait('work_invalidated')
+    else if (work.state === 'invalidated') {
+      if (work.purpose === 'production' && work.assignment) result = 'failed'
+      else wait('work_invalidated')
+    }
     else if (work.current_attempt_id && !attempt) wait('attempt_unavailable')
     else if (attempt?.state === 'unknown' || attempt?.dispatch_state === 'unknown') { /* Original operation must be reconciled. */ }
     else if (attempt?.state === 'failed') {

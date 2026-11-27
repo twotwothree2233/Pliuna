@@ -49,6 +49,7 @@ For runner_artifact_index use its artifact_id as id and selection.revision equal
 Return {task_id,run_id,batch_id,composition_version,intents:[{artifact:{task_id,artifact_id,artifact_revision},section_id,section_position_revision,order_key,slot_id:"main",layout_mode:"column"|"responsive_columns",width_constraint:"full"|"flexible"}]}.
 Select only exact batch references. Keep the index section and width; take position revision and order from the current outline and batch.
 For a problem in structural_issues, you may return {kind:"feedback",task_id,run_id,batch_id,composition_version,reports:[{evidence_id,recipient:{kind:"router"} or {kind:"worker",work_id}}]}. Use only listed evidence IDs. A Worker recipient must own the affected artifact. Send a missing requirement or a needed plan change to the Router. The listed evidence states the correction condition. Do not infer semantic problems from titles or add free text.
+If there are structural issues but no indexes, return feedback instead of a presentation plan.
 The host loads content and publishes the result after its own current-source checks.`
 
 function invalid(): never { throw new ContractError('INVALID_COLLATOR_CONTEXT', 'Collator requires a bounded exact batch of accepted metadata') }

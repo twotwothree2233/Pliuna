@@ -21,6 +21,10 @@ export function deliveryHasUnsettledExecution(db: Database.Database, task: strin
       SELECT json_extract(b.payload_json,'$.run_id') FROM runner_batches b,json_each(b.payload_json,'$.indexes') i
       JOIN runner_artifacts a ON a.task_id=b.task_id AND a.artifact_id=json_extract(i.value,'$.artifact_id') AND a.artifact_revision=json_extract(i.value,'$.artifact_revision')
       WHERE b.task_id=@task AND json_extract(a.payload_json,'$.request_id')=@request AND json_extract(a.payload_json,'$.intent_revision')=@revision
+      UNION
+      SELECT json_extract(b.payload_json,'$.run_id') FROM runner_batches b,json_each(b.payload_json,'$.targets') t
+      WHERE b.task_id=@task AND json_array_length(b.payload_json,'$.indexes')=0
+        AND json_extract(t.value,'$.request_id')=@request AND json_extract(t.value,'$.intent_revision')=@revision
     ) SELECT 1 WHERE EXISTS (SELECT 1 FROM related l JOIN runs r ON r.task_id=@task AND r.id=l.run_id WHERE r.state IN ('running','waiting','closing'))
       OR EXISTS (SELECT 1 FROM related l JOIN calls c ON c.task_id=@task AND c.run_id=l.run_id WHERE c.state!='ended' OR c.execution='unknown')
       OR EXISTS (SELECT 1 FROM related l JOIN runner_attempts a ON a.task_id=@task AND a.run_id=l.run_id WHERE a.state='unknown' OR json_extract(a.payload_json,'$.dispatch_state')='unknown')

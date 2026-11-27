@@ -101,7 +101,7 @@ export class ChatAdapter {
         throw this.httpError(response.status)
       }
       if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') || !response.body) { await response.body?.cancel(); throw new ModelError('INCOMPATIBLE_STREAM') }
-      let text = '', finish: string | null = null, done = false
+      let text = '', finish: Completion['finish'] | undefined, done = false
       const calls = new Map<number, ToolCall>()
       const callIds = new Set<string>()
       for await (const frame of sse(response, signal, config.limits?.response_bytes)) {
@@ -158,12 +158,21 @@ export class ChatAdapter {
           }
         }
         if (choice.finish_reason != null) {
-          if (finish || !['stop', 'tool_calls'].includes(choice.finish_reason)) throw new ModelError('MODEL_INCOMPLETE', partial)
-          finish = choice.finish_reason
+          if (finish) throw new ModelError('MODEL_STREAM_INVALID_FINISH', partial)
+          switch (choice.finish_reason) {
+            case 'stop':
+            case 'tool_calls': finish = choice.finish_reason; break
+            case 'length': upstream = new ModelError('MODEL_OUTPUT_TOKEN_LIMIT', partial); break
+            case 'content_filter': upstream = new ModelError('MODEL_REFUSAL', partial); break
+            case 'insufficient_system_resource': upstream = new ModelError('MODEL_PROVIDER_SERVER_ERROR', partial); break
+            default: upstream = new ModelError('MODEL_STREAM_INVALID_FINISH', partial)
+          }
         }
       }
+      if (signal.aborted) throw new ModelError('MODEL_CANCELLED', partial)
       if (upstream) throw upstream
-      if (!done || !finish || (finish === 'stop' && calls.size) || (finish === 'tool_calls' && !calls.size)) throw new ModelError('MODEL_INCOMPLETE', partial)
+      if (!done) throw new ModelError('MODEL_STREAM_MISSING_DONE', partial)
+      if (!finish || (finish === 'stop' && calls.size) || (finish === 'tool_calls' && !calls.size)) throw new ModelError('MODEL_STREAM_INVALID_FINISH', partial)
       const ordered = [...calls].sort(([a], [b]) => a - b)
       for (let i = 0; i < ordered.length; i++) {
         const [index, call] = ordered[i]!
@@ -172,7 +181,7 @@ export class ChatAdapter {
         try { args = JSON.parse(call.function.arguments) } catch { throw new ModelError('INVALID_TOOL_ARGUMENTS', true, false, usage, jsonDiagnostic(call.function.arguments, 'tool arguments')) }
         if (!object(args)) throw new ModelError('INVALID_TOOL_ARGUMENTS', true, false, usage, 'tool arguments must be a JSON object; no input was executed')
       }
-      return { text, calls: ordered.map(([, c]) => c), finish: finish as Completion['finish'], usage }
+      return { text, calls: ordered.map(([, c]) => c), finish, usage }
     } catch (caught) {
       const e = upstream && !signal.aborted ? upstream : caught
       if (e instanceof ModelError) throw new ModelError(e.code, partial || e.partial, !partial && e.retryable, usage ?? e.usage, e.inputDiagnostic)
@@ -187,7 +196,7 @@ async function* sse(response: Response, signal: AbortSignal, maximum?: number): 
     while (true) {
       if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
       const item = await reader.read()
-      if (item.done) { buffer += decoder.decode(); if (buffer || data.length) throw new ModelError('MODEL_INCOMPLETE'); break }
+      if (item.done) { buffer += decoder.decode(); if (buffer || data.length) throw new ModelError('MODEL_STREAM_MISSING_DONE'); break }
       bytes += item.value.byteLength
       if (maximum !== undefined && bytes > maximum) throw new ModelError('MODEL_OUTPUT_LIMIT')
       buffer += decoder.decode(item.value, { stream: true })

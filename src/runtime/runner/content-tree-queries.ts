@@ -77,6 +77,10 @@ export class ContentTreeQueries {
     return request.type === 'list' ? this.list(task, source, request) : this.read(task, source, request)
   }
 
+  readBound(snapshot: ContentTreeSnapshot, source: string, request: ReadQuery): unknown {
+    return this.read(snapshot.task_id, source, request, snapshot)
+  }
+
   private list(task: string, source: string, request: ListQuery): unknown {
     const { kind, filters, cursor, limit } = request.input
     if (filters && Object.keys(filters).some(key => key !== 'name_query')) return fail('CONTENT_QUERY_INVALID', 'Content lists support only name_query')
@@ -109,7 +113,7 @@ export class ContentTreeQueries {
     return { items: pages[0] ?? [], next_cursor: next, truncated: next !== null }
   }
 
-  private read(task: string, source: string, request: ReadQuery): unknown {
+  private read(task: string, source: string, request: ReadQuery, fixed?: ContentTreeSnapshot): unknown {
     const target = request.input.target, kind = target.kind, options = modelReadOptions(request), selection = options?.selection
     if (request.input.content || request.input.range || selection?.lines || selection?.pages || selection?.section !== undefined || selection?.view && selection.view !== 'object' || kind === 'content_node' && selection?.find !== undefined) return fail('CONTENT_QUERY_INVALID', 'Content reads support object view and structural heading search only')
     let cursor: ReadCursor | undefined
@@ -122,7 +126,8 @@ export class ContentTreeQueries {
     const chars = cursor?.chars ?? options?.max_chars ?? 12000, query = cursor?.query ?? selection?.find
     if (!integer(chars, 1) || chars > 32000) return fail('CONTENT_QUERY_INVALID', 'max_chars must be between 1 and 32000')
     if (query !== undefined && Buffer.byteLength(query) > RUNNER_LIMITS.index.title_bytes) return fail('CONTENT_QUERY_INVALID', 'Heading search exceeds the heading metadata size')
-    const snapshot = this.resolve(task, request, cursor)
+    if (fixed && cursor && (cursor.view !== fixed.view_id || cursor.revision !== fixed.tree.revision)) return invalidCursor()
+    const snapshot = fixed ?? this.resolve(task, request, cursor)
     const tree = snapshot.tree
     if (kind === 'content_tree' && target.expected_revision !== undefined && target.expected_revision !== tree.revision) return fail('READ_VERSION_CHANGED', 'Content tree revision conflicts with the fixed snapshot')
     const node = tree.nodes.find(item => item.node_id === (target.id === snapshot.view_id ? tree.root_id : target.id))

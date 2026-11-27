@@ -6455,11 +6455,42 @@
       },
       "required": ["work_id", "plan_revision", "output_key"]
     },
+    "runner_material_binding": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "material" },
+        "resource_id": { "$ref": "#/$defs/runner_id" }
+      },
+      "required": ["kind", "resource_id"]
+    },
+    "runner_published_binding": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "published" },
+        "view_id": { "$ref": "#/$defs/runner_id" },
+        "view_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "node_id": { "$ref": "#/$defs/runner_id" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "tree_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      },
+      "required": ["kind", "view_id", "view_revision", "node_id", "revision"]
+    },
+    "runner_installed_input": {
+      "oneOf": [
+        { "$ref": "#/$defs/runner_output_binding" },
+        { "$ref": "#/$defs/runner_material_binding" },
+        { "$ref": "#/$defs/runner_published_binding" }
+      ]
+    },
+    "runner_content_inputs": {
+      "type": "array", "maxItems": 32,
+      "items": { "oneOf": [{ "$ref": "#/$defs/runner_material_binding" }, { "$ref": "#/$defs/runner_published_binding" }] }
+    },
     "runner_assignment_inputs": {
       "type": "array", "maxItems": 32,
       "items": {
         "oneOf": [
-          { "$ref": "#/$defs/runner_output_binding" },
+          { "$ref": "#/$defs/runner_installed_input" },
           {
             "type": "object", "additionalProperties": false,
             "properties": { "assignment_key": { "$ref": "#/$defs/runner_id" }, "output_key": { "$ref": "#/$defs/runner_id" } },
@@ -6473,7 +6504,7 @@
       "properties": {
         "instructions": { "$ref": "#/$defs/runner_assignment_text" },
         "outputs": { "$ref": "#/$defs/runner_assignment_outputs" },
-        "inputs": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/runner_output_binding" } },
+        "inputs": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/runner_installed_input" } },
         "checkpoint_id": { "$ref": "#/$defs/runner_id" },
         "supplement_ids": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/runner_id" } },
         "final_answer": { "const": true }
@@ -6511,7 +6542,7 @@
             "action": { "const": "bind" },
             "base_revision": { "$ref": "#/$defs/runner_plan_base" },
             "work_id": { "$ref": "#/$defs/runner_id" },
-            "input": { "$ref": "#/$defs/runner_output_binding" }
+            "input": { "$ref": "#/$defs/runner_installed_input" }
           },
           "required": ["action", "base_revision", "work_id", "input"]
         },
@@ -7042,7 +7073,9 @@
         },
         "operation_id": {
           "$ref": "#/$defs/runner_id"
-        }
+        },
+        "input": { "$ref": "#/$defs/runner_installed_input" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
       },
       "required": [
         "kind",
@@ -7423,6 +7456,7 @@
                 "$ref": "#/$defs/runner_work_dependency"
               }
             },
+            "content_inputs": { "$ref": "#/$defs/runner_content_inputs" },
             "state": {
               "enum": [
                 "registered",

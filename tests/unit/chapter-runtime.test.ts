@@ -1019,7 +1019,7 @@ test('a follow-up waits for the exact chapter update and uses its published repl
   expect(s.state().run(status().run_id)).toMatchObject({ message_id: userRecords[0]!.id })
   expect(s.internal().db.prepare('SELECT COUNT(*) n FROM runner_current_content_plans WHERE task_id=?').get(s.task)).toEqual({ n: 1 })
   const routeCall = s.complete.mock.calls[routerIndex]!
-  expect(routeCall[3]!.map(tool => tool.function.name)).toEqual(['list', 'read'])
+  expect(routeCall[3]!.map(tool => tool.function.name)).toEqual(['list', 'read', 'call'])
   expect(routeCall[2].some(message => message.role === 'tool')).toBe(false)
   const exactMessage = userRecords[0]!.id, followText = 'Follow up only after that chapter is updated.'
   const admissions = vi.spyOn(s.store as unknown as { startQueuedRequest(...args: unknown[]): unknown }, 'startQueuedRequest')

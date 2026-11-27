@@ -310,6 +310,33 @@ it.each(['receipt', 'worker', 'router', 'cancelled', 'unknown'] as const)('recov
   expect(next.state.run(original.run)).toMatchObject({ state: 'completed', commit_valid: false })
 })
 
+it('recovers an unaffected fragment after the feedback batch ends and its repair is cancelled', async () => {
+  const first = setup(true, true), affected = first.source('affected'), independent = first.source('independent', bundle('Independent body'))
+  for (const request_id of ['affected', 'independent']) first.record(first.task, 'runner.delivery.opened', { request_id, intent_revision: 1, input_event_id: `input-${request_id}`, state: 'open' })
+  first.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(262145, affected.resourceId)
+  const admission = first.internal.runnerAdmission, select = admission.next.bind(admission)
+  vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => select(task, candidates.filter(candidate => candidate.kind === 'composition'), active, ready))
+  vi.spyOn(first.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const { batch, structural_issues } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    const { task_id, run_id, batch_id, composition_version } = batch
+    return { text: JSON.stringify({ kind: 'feedback', task_id, run_id, batch_id, composition_version, reports: [{ evidence_id: structural_issues[0].evidence_id, recipient: { kind: 'worker', work_id: affected.workId } }] }), calls: [], finish: 'stop', usage: { prompt_tokens: 20, completion_tokens: 15 } }
+  })
+  await first.automatic('affected')
+  const repair = first.state.taskWorks(first.task).find(work => work.purpose === 'production' && work.work_id !== affected.workId && work.work_id !== independent.workId)!
+  first.input('cancel_work', { work_id: repair.work_id, run_id: repair.run_id })
+  expect(first.store.snapshot(first.task).views).toEqual([])
+  first.store.close()
+
+  const next = setup(true, false, first), model = vi.spyOn(next.models, 'request')
+  await next.store.recoverRunnerWork()
+  await vi.waitFor(() => expect(next.store.snapshot(next.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true), { timeout: 3000 })
+  await approveAndConfirm(next)
+  await vi.waitFor(() => expect(requestDelivery(next.db, next.task, 'independent')).toMatchObject({ state: 'complete' }))
+  expect(next.store.snapshot(next.task).views.map(view => view.bundle.html)).toEqual([expect.stringContaining('Independent body')])
+  expect(next.records('runner.composition.feedback')).toHaveLength(1)
+  expect(model).not.toHaveBeenCalled()
+})
+
 it('attributes one shared approval only to the messages that contributed to its batch', async () => {
   const s = setup(), first = s.source('alpha'), second = s.source('beta')
   s.source('trigger')

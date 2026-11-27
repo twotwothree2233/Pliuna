@@ -1268,6 +1268,7 @@ kind: "resource"
 task_id: LogicalWorkRunnerId
 resource_id: LogicalWorkRunnerId
 } | LogicalWorkRunnerChapterDependency)
+export type LogicalWorkRunnerInstalledInput = (LogicalWorkRunnerOutputBinding | LogicalWorkRunnerMaterialBinding | LogicalWorkRunnerPublishedBinding)
 export type LogicalWorkRunnerAssignmentText = string
 /**
  * @minItems 1
@@ -1291,6 +1292,26 @@ kind: ("failure" | "cancellation" | "invalidation")
 work_id: LogicalWorkRunnerId
 attempt_id?: LogicalWorkRunnerId
 operation_id?: LogicalWorkRunnerId
+input?: LogicalWorkRunnerInstalledInput
+reason?: string
+}
+export interface LogicalWorkRunnerOutputBinding {
+work_id: LogicalWorkRunnerId
+plan_revision: number
+output_key: LogicalWorkRunnerId
+result_revision?: number
+}
+export interface LogicalWorkRunnerMaterialBinding {
+kind: "material"
+resource_id: LogicalWorkRunnerId
+}
+export interface LogicalWorkRunnerPublishedBinding {
+kind: "published"
+view_id: LogicalWorkRunnerId
+view_revision: number
+node_id: LogicalWorkRunnerId
+revision: number
+tree_revision?: number
 }
 export interface LogicalWorkRunnerInstalledAssignment {
 instructions: LogicalWorkRunnerAssignmentText
@@ -1298,19 +1319,13 @@ outputs: LogicalWorkRunnerAssignmentOutputs
 /**
  * @maxItems 32
  */
-inputs: LogicalWorkRunnerOutputBinding[]
+inputs: LogicalWorkRunnerInstalledInput[]
 checkpoint_id?: LogicalWorkRunnerId
 /**
  * @maxItems 16
  */
 supplement_ids?: LogicalWorkRunnerId[]
 final_answer?: true
-}
-export interface LogicalWorkRunnerOutputBinding {
-work_id: LogicalWorkRunnerId
-plan_revision: number
-output_key: LogicalWorkRunnerId
-result_revision?: number
 }
 export type RouteWork = ({
 action: "dispatch"
@@ -1325,7 +1340,7 @@ final_answer?: RouteWorkRunnerId
 action: "bind"
 base_revision: RouteWorkRunnerPlanBase
 work_id: RouteWorkRunnerId
-input: RouteWorkRunnerOutputBinding
+input: RouteWorkRunnerInstalledInput
 } | {
 action: "revise"
 base_revision: RouteWorkRunnerPlanBase
@@ -1352,10 +1367,11 @@ output_key: RouteWorkRunnerId
 kind: ("answer" | "artifact")
 exposure?: ("handoff" | "publish")
 }[]
+export type RouteWorkRunnerInstalledInput = (RouteWorkRunnerOutputBinding | RouteWorkRunnerMaterialBinding | RouteWorkRunnerPublishedBinding)
 /**
  * @maxItems 32
  */
-export type RouteWorkRunnerAssignmentInputs = (RouteWorkRunnerOutputBinding | {
+export type RouteWorkRunnerAssignmentInputs = (RouteWorkRunnerInstalledInput | {
 assignment_key: RouteWorkRunnerId
 output_key: RouteWorkRunnerId
 })[]
@@ -1377,6 +1393,18 @@ work_id: RouteWorkRunnerId
 plan_revision: number
 output_key: RouteWorkRunnerId
 result_revision?: number
+}
+export interface RouteWorkRunnerMaterialBinding {
+kind: "material"
+resource_id: RouteWorkRunnerId
+}
+export interface RouteWorkRunnerPublishedBinding {
+kind: "published"
+view_id: RouteWorkRunnerId
+view_revision: number
+node_id: RouteWorkRunnerId
+revision: number
+tree_revision?: number
 }
 export type ReportMissingInputRunnerAssignmentText = string
 export type ReportMissingInputRunnerId = string
@@ -1406,6 +1434,7 @@ profile_id: ExecutionAttemptRunnerId
 model_config_id: ExecutionAttemptRunnerId
 model_config_revision: number
 input_versions: ExecutionAttemptRunnerWorkDependency[]
+content_inputs?: ExecutionAttemptRunnerContentInputs
 state: ("registered" | "queued" | "dispatched" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "unknown" | "revoked")
 dispatch_state: ("not_dispatched" | "dispatched" | "unknown")
 previous_attempt_id?: ExecutionAttemptRunnerId
@@ -1460,6 +1489,10 @@ kind: "resource"
 task_id: ExecutionAttemptRunnerId
 resource_id: ExecutionAttemptRunnerId
 } | ExecutionAttemptRunnerChapterDependency)
+/**
+ * @maxItems 32
+ */
+export type ExecutionAttemptRunnerContentInputs = (ExecutionAttemptRunnerMaterialBinding | ExecutionAttemptRunnerPublishedBinding)[]
 
 export interface ExecutionAttemptRunnerChapterDependency {
 kind: "chapter"
@@ -1467,6 +1500,18 @@ task_id: ExecutionAttemptRunnerId
 view_id: ExecutionAttemptRunnerId
 revision: number
 region_id?: ExecutionAttemptRunnerId
+}
+export interface ExecutionAttemptRunnerMaterialBinding {
+kind: "material"
+resource_id: ExecutionAttemptRunnerId
+}
+export interface ExecutionAttemptRunnerPublishedBinding {
+kind: "published"
+view_id: ExecutionAttemptRunnerId
+view_revision: number
+node_id: ExecutionAttemptRunnerId
+revision: number
+tree_revision?: number
 }
 export interface ExecutionAttemptRunnerProvenanceRef {
 task_id: ExecutionAttemptRunnerId

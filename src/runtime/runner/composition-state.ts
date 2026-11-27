@@ -236,6 +236,20 @@ export class RunnerCompositionState {
     if (goal.requirements.some(requirement => requirement.required && !inventory.requirement_ids.includes(requirement.requirement_id) && !inventory.unresolved.some(item => item.requirement_id === requirement.requirement_id))) fail('RUNNER_OUTPUT_INCOMPLETE', 'Uncovered required outcomes must remain unresolved')
   }
 
+  inventorySealer(source: InventorySource): ExecutionAttempt {
+    const work = this.work.work(source.work_id)
+    if (work.purpose !== 'production' || !sameGoal(source, work) || work.plan_revision !== source.plan_revision || !['producer', 'router'].includes(work.role) || !work.current_attempt_id) fail('RUNNER_OWNERSHIP_INVALID', 'Inventory seal requires its designated planning source')
+    const run = this.work.run(work.run_id)
+    if (run.state === 'interrupted' && work.state === 'succeeded' && work.result_revision !== undefined) {
+      this.activeTask(source.task_id)
+      const output = this.checkOutput(source.task_id, work.work_id, work.plan_revision, work.result_revision)
+      if (output) return this.work.attempt(output.attempt_id)
+    }
+    const { attempt } = this.work.qualify(work.current_attempt_id)
+    if (!['running', 'waiting', 'succeeded'].includes(attempt.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Inventory seal requires an eligible attempt from the designated planning source')
+    return attempt
+  }
+
   sealInventory(raw: ContributionInventory): ContributionInventory {
     const inventory = validateRunnerContract('runner_contribution_inventory', JSON.parse(json(raw)))
     return this.db.transaction(() => {
@@ -247,9 +261,10 @@ export class RunnerCompositionState {
       const head = this.inventory(inventory.task_id, inventory.request_id, inventory.intent_revision)
       if ((inventory.previous_revision ?? 0) !== (head?.inventory_revision ?? 0) || inventory.inventory_revision !== (head?.inventory_revision ?? 0) + 1) fail('RUNNER_INVENTORY_CONFLICT', 'Inventory must advance its exact current predecessor')
       const source = this.source(inventory.task_id, inventory.request_id, inventory.intent_revision), seal = inventory.sealed_by
-      const qualified = this.work.qualify(seal.attempt_id)
       this.currentGoal(inventory)
-      if (!source || source.work_id !== seal.work_id || source.plan_revision !== seal.plan_revision || qualified.work.purpose !== 'production' || !sameGoal(inventory, qualified.work) || qualified.work.work_id !== seal.work_id || qualified.work.plan_revision !== seal.plan_revision || qualified.work.role !== seal.role || qualified.run.run_id !== seal.run_id || !['running', 'waiting', 'succeeded'].includes(qualified.attempt.state)) fail('RUNNER_OWNERSHIP_INVALID', 'Inventory seal must come from its designated current planning source')
+      if (!source) fail('RUNNER_OWNERSHIP_INVALID', 'Inventory has no designated planning source')
+      const attempt = this.inventorySealer(source)
+      if (source.work_id !== seal.work_id || source.plan_revision !== seal.plan_revision || attempt.attempt_id !== seal.attempt_id || attempt.run_id !== seal.run_id || this.work.work(source.work_id).role !== seal.role) fail('RUNNER_OWNERSHIP_INVALID', 'Inventory seal must come from its designated planning source or its accepted predecessor result')
       this.inventoryOutputs(inventory)
       this.db.prepare('INSERT INTO runner_contribution_inventories(task_id,request_id,intent_revision,inventory_revision,payload_json) VALUES (?,?,?,?,?)').run(inventory.task_id, inventory.request_id, inventory.intent_revision, inventory.inventory_revision, json(inventory))
       return inventory

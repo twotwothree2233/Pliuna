@@ -63,11 +63,19 @@ export function containsProducerResult(text: string): boolean {
   return envelopes(text).length > 0
 }
 
+export class ProducerResultSyntaxError extends Error {}
+
+export function parseProducerJson(text: string): unknown {
+  try { return JSON.parse(text) } catch { throw new ProducerResultSyntaxError('The result is not valid JSON. Return one valid JSON object.') }
+}
+
 /** Descriptive prose and a code fence may wrap one complete JSON result. */
 export function decodeProducerResult(text: string): unknown | undefined {
   const found = envelopes(text)
   if (!found.length) return undefined
   const envelope = found[0]!
-  if (found.length !== 1 || envelope.depth !== 0 || envelope.end === undefined) throw Error('INVALID_PRODUCER_RESULT')
-  return JSON.parse(text.slice(envelope.start, envelope.end)) as unknown
+  if (found.length !== 1) throw new ProducerResultSyntaxError('Multiple result objects were found. Return exactly one result.')
+  if (envelope.depth !== 0) throw new ProducerResultSyntaxError('The result is nested inside another JSON value. Return it as the top-level object.')
+  if (envelope.end === undefined) throw new ProducerResultSyntaxError('The result object was left open. Return the complete JSON object.')
+  return parseProducerJson(text.slice(envelope.start, envelope.end))
 }

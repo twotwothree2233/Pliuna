@@ -236,6 +236,19 @@ it('revokes only consumers holding a superseded exact output', () => {
   expect(state.attempt('attempt').state).toBe('succeeded')
 })
 
+it.each(['failed', 'cancelled'] as const)('settles an expected output when its source is %s', outcome => {
+  const { db, state } = setup(); register(db, state)
+  const outputs = [{ kind: 'answer' as const, output_key: 'counts' }], expected = { work_id: 'work', plan_revision: 1, output_key: 'counts' }
+  const source = work('work', { assignment: { instructions: 'Count', inputs: [], outputs } })
+  const consumer = work('consumer', { assignment: { instructions: 'Use counts', inputs: [expected], outputs }, dependencies: [{ kind: 'work', task_id: 'task', work_id: 'work', result_revision: 1 }] })
+  state.installPlan([source, consumer, work('independent')])
+  expect(state.reconcileDependencies('task')).toEqual([])
+  state.createAttempt(attempt()); dispatch(state)
+  state.updateAttempt({ ...state.attempt('attempt'), state: outcome })
+  expect(state.reconcileDependencies('task')).toMatchObject([{ work_id: 'consumer', state: `dependency_${outcome}`, root_cause: { input: expected, reason: expect.stringContaining('upstream output is unavailable') } }])
+  expect(state.work('independent').state).toBe('planned')
+})
+
 it('retains bounded attempts and unknown operation evidence without permitting a replay', () => {
   const { db, state } = setup(); register(db, state); state.installPlan([work()]); state.createAttempt(attempt()); dispatch(state)
   state.updateAttempt({ ...state.attempt('attempt'), state: 'failed' }, work('work', { plan_revision: 2, state: 'queued' }))

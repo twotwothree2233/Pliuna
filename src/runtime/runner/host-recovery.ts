@@ -276,7 +276,7 @@ export class RunnerHostRecovery {
       const plans = source.works.map(work => {
         const { current_attempt_id: _attempt, root_cause: _cause, result_revision: _result, ...binding } = work
         const next = { ...binding, run_id: run.run_id, plan_revision: revisions.get(work.work_id)!, state: plannedIds.has(work.work_id) ? 'planned' : 'queued' } as LogicalWork
-        if (next.purpose === 'production' && next.assignment) next.assignment = { ...next.assignment, inputs: next.assignment.inputs.map(input => ({ ...input, plan_revision: input.result_revision === undefined ? revisions.get(input.work_id) ?? input.plan_revision : input.plan_revision })) }
+        if (next.purpose === 'production' && next.assignment) next.assignment = { ...next.assignment, inputs: next.assignment.inputs.map(input => 'work_id' in input && input.result_revision === undefined ? { ...input, plan_revision: revisions.get(input.work_id) ?? input.plan_revision } : input) }
         return next
       })
       for (const revision of new Set(plans.map(work => work.plan_revision))) this.work.installPlan(plans.filter(work => work.plan_revision === revision))
