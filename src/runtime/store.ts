@@ -1772,11 +1772,9 @@ export class RuntimeStore {
       if (work.purpose !== 'production' || !work.assignment) return []
       const outputs = work.assignment.outputs.flatMap(output => {
         const reference = { work_id: work.work_id, plan_revision: work.plan_revision, output_key: output.output_key }
-        if (work.state !== 'succeeded') return ['planned', 'queued', 'running', 'waiting'].includes(work.state) ? [{ ...output, ...reference }] : []
         try {
-          const exact = this.assignedOutput(work, reference)
-          const { result_revision } = exact
-          return [{ ...output, ...reference, result_revision }]
+          const source = this.routedOutputSource(state, task, reference)
+          return [{ ...output, ...reference, ...(source.state === 'succeeded' ? { result_revision: source.result_revision } : {}) }]
         } catch (error) {
           if (error instanceof ContractError) return []
           throw error
@@ -1796,11 +1794,7 @@ export class RuntimeStore {
     const task = owner.task_id, runId = owner.run_id, goal = state.goal(owner.request_id)
     if (decision.base_revision !== this.routingRevision(task, runId) || goal.intent_revision !== owner.intent_revision) fail('RUNNER_PLAN_CONFLICT', 'This routing context is no longer current')
     const works = state.taskWorks(task).filter((work): work is AssignedWork => work.purpose === 'production' && work.run_id === runId && !!work.assignment)
-    const lookup = (binding: RouteWorkRunnerOutputBinding) => {
-      const source = this.orchestrationSource(state, task, binding)
-      if (source.state === 'succeeded') this.assignedOutput(source, binding)
-      return source
-    }
+    const lookup = (binding: RouteWorkRunnerOutputBinding) => this.routedOutputSource(state, task, binding)
     const model = state.attempt(owner.attempt_id)
     const checkpoint = (id: string) => { WorkerContext.checkpoint(this.db, task, id, model) }
     const content = new AssignmentContent(this.db), scope = content.scope(task, owner.request_id)
@@ -1911,10 +1905,20 @@ export class RuntimeStore {
           this.record(task, 'runner.input.clarification', { owner, report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, reply_to: origin.message_id, text: result.question })
           this.record(task, 'worker.state', { owner: sourceOwner, run_id: origin.run_id, state: 'waiting', reason: 'input_required' })
         }
-      }, undefined, undefined, result => result.kind === 'updated' && stillWaiting() ? {
-        code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
-        message: 'The reporting assignment is still waiting. Bind or revise that assignment, ask for clarification, or return blocked.'
-      } : null).then(() => this.settleDependentRuns(task, affected, origin.run_id), error => {
+      }, undefined, undefined, result => {
+        const current = stillWaiting()
+        if (result.kind === 'clarification' && !current) return {
+          code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind, message: 'No assignment is waiting for a user reply. Return updated if a decision was installed, or blocked.'
+        }
+        if (!current || result.kind === 'blocked') return null
+        if (state.attempt(source.attempt_id).attempt_number >= current.max_attempts) return {
+          code: 'RUNNER_ATTEMPTS_EXHAUSTED', path: 'kind', value: result.kind, message: 'The waiting assignment has no attempts left. A user reply cannot resume it. Return blocked.'
+        }
+        return result.kind === 'updated' ? {
+          code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
+          message: 'The reporting assignment is still waiting. Bind or revise that assignment, ask for clarification, or return blocked.'
+        } : null
+      }).then(() => this.settleDependentRuns(task, affected, origin.run_id), error => {
         if (this.closed || this.closing || !this.db.open || !state.run(origin.run_id).commit_valid) return
         const router = state.attempt(attempt.attempt_id), current = stillWaiting()
         if (!current || router.state === 'unknown' || router.dispatch_state === 'unknown') return
@@ -2197,10 +2201,10 @@ export class RuntimeStore {
           const goal = state.goal(request_id), oldSource = this.runnerComposition().source(task, request_id, intent_revision)
           const existing = state.taskWorks(task).filter((item): item is AssignedWork => item.purpose === 'production' && item.request_id === request_id && item.intent_revision === intent_revision && item.state === 'succeeded')
           const planned = installableAssignments(decision, goal, work, id, binding => {
-            const selected = this.orchestrationSource(state, task, binding)
-            if (selected.state === 'succeeded') {
+            const selected = this.routedOutputSource(state, task, binding)
+            if (index && selected.state === 'succeeded') {
               const output = this.assignedOutput(selected, binding)
-              if (index && output.kind === 'artifact' && output.artifact_id === index.artifact_id) fail('REPAIR_SCOPE_INVALID', 'The replacement baseline is already bound; it cannot be its own live output dependency')
+              if (output.kind === 'artifact' && output.artifact_id === index.artifact_id) fail('REPAIR_SCOPE_INVALID', 'The replacement baseline is already bound; it cannot be its own live output dependency')
             }
             return selected
           }, existing, checkpoint => { WorkerContext.checkpoint(this.db, task, checkpoint, attempt) }, (binding, assignment) => content.checkNew(scope, binding, assignment))

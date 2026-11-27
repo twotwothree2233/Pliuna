@@ -158,6 +158,19 @@ describe('Chat Completions wire adapter via real HTTP', () => {
     const server = await modelServer((_exchange, response) => { response.writeHead(200, { 'content-type': 'text/event-stream' }); response.end(payload) }); cleanups.push(server.close)
     await expect(new ChatAdapter().complete(config(server.url), '', [], tool, new AbortController().signal)).rejects.toMatchObject({ code, message: code, partial: true, retryable: false, usage })
   })
+  it('returns the known terminal error even if the provider keeps SSE open', async () => {
+    let cancelled = false
+    const usage = { prompt_tokens: 250, completion_tokens: 30 }
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(frame({}, 'length') + `data: ${JSON.stringify({ choices: [], usage })}\n\n`))
+      },
+      cancel() { cancelled = true }
+    })
+    const adapter = new ChatAdapter(async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } }))
+    await expect(adapter.complete(config('https://example.invalid'), '', [], tool, new AbortController().signal)).rejects.toMatchObject({ code: 'MODEL_OUTPUT_TOKEN_LIMIT', usage })
+    expect(cancelled).toBe(true)
+  })
   it('maps authentication errors without returning sensitive provider bodies', async () => {
     const server = await modelServer((_x, res) => { res.writeHead(401); res.end('secret-sentinel provider debug') }); cleanups.push(server.close)
     await expect(new ChatAdapter().complete(config(server.url), '', [], undefined, new AbortController().signal)).rejects.toMatchObject({ code: 'MODEL_AUTHENTICATION', retryable: false, message: 'MODEL_AUTHENTICATION' })

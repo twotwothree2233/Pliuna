@@ -510,6 +510,40 @@ it('lets the Router correct an invalid completed output reference before install
   expect(s.complete).toHaveBeenCalledTimes(8)
 })
 
+it('rejects binding a missing assignment to an interrupted output with no eligible continuation', async () => {
+  const first = setup({ conversationRouting: true }), interrupted = deferred<Completion>()
+  const dispatch = (instructions: string) => invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
+    { assignment_key: 'reply', instructions, required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'text' }] }
+  ] })
+  first.complete.mockResolvedValueOnce(dispatch('Produce the old value')).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementationOnce(() => interrupted.promise)
+  const source = first.submit('Produce a value for later.')
+  await vi.waitFor(() => expect(first.complete).toHaveBeenCalledTimes(3))
+  const upstream = first.records('runner.plan.installed').find(({ payload }) => payload.request_id === source.request_id)!.payload
+  first.close()
+  interrupted.resolve(answer('Too late to accept.'))
+
+  const next = setup({ directory: first.directory, task: first.task, conversationRouting: true })
+  await next.store.recoverRunnerWork()
+  const state = new RunnerWorkState(next.db, next.store.epoch)
+  expect(state.run(upstream.run_id).state).toBe('interrupted')
+  expect(state.attempt(state.work(upstream.work_id).current_attempt_id!).state).toBe('unknown')
+  next.complete.mockResolvedValueOnce(dispatch('Use the value from an earlier request')).mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+    .mockResolvedValueOnce(invoke(REPORT_MISSING_INPUT, { missing: 'Value', impact: 'Cannot answer without it', wait: true }))
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      const { bound } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+      expect(bound.work_table).toContainEqual(expect.objectContaining({ work_id: upstream.work_id, outputs: [] }))
+      return invoke(ROUTE_WORK, { action: 'bind', base_revision: bound.base_revision, work_id: bound.report.work_id,
+        input: { work_id: upstream.work_id, plan_revision: upstream.plan_revision, output_key: 'text' } })
+    }).mockImplementationOnce(async (_config, _key, messages) => {
+      expect(JSON.parse(messages.at(-1)!.content!)).toMatchObject({ execution: 'not_executed', error: { code: 'RUNNER_DEPENDENCY_INVALID' } })
+      return answer('{"kind":"blocked"}')
+    })
+  const consumer = next.submit('Answer using the earlier value.')
+  await vi.waitFor(() => expect(next.store.handle({ type: 'request.status', task_id: next.task, request_id: consumer.request_id })).toMatchObject({ run_state: 'failed', delivery_state: 'incomplete' }))
+  expect(next.records('runner.plan.revised')).toHaveLength(0)
+  expect(next.records('runner.input.resolved').map(({ payload }) => payload.result)).toEqual([{ kind: 'blocked' }])
+})
+
 it.each(['failed', 'cancelled'] as const)('settles a dependent Run with no attempt when its upstream is %s', async terminal => {
   const runtime = setup({ conversationRouting: true }), gate = deferred<void>()
   const state = new RunnerWorkState(runtime.db, runtime.store.epoch)
@@ -1118,6 +1152,31 @@ it('resumes the waiting assignment only for an exact user reply under its confir
   const [final] = s.records('runner.answer')
   expect(final!.payload).toMatchObject({ request_id: request.request_id, text: 'The rate for 2024 is 7%.', owner: { work_id: originalWait.payload.work_id } })
   expect(final!.payload.owner.attempt_id).not.toBe(originalWait.payload.attempt_id)
+})
+
+it('rejects a clarification when the waiting assignment has exhausted its attempts', async () => {
+  const s = setup({ conversationRouting: true })
+  s.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
+    { assignment_key: 'reply', instructions: 'Calculate the specified rate', required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'rate' }] }
+  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+    .mockResolvedValueOnce(invoke(REPORT_MISSING_INPUT, { missing: 'Year', impact: 'Rate depends on year', wait: true }))
+    .mockResolvedValueOnce(answer('{"kind":"clarification","question":"Which year should I use?"}'))
+  const request = s.submit('What rate applies?')
+  await vi.waitFor(() => expect(s.records('runner.input.clarification')).toHaveLength(1))
+  const clarification = s.records('runner.input.clarification')[0]!
+  s.complete.mockResolvedValueOnce(answer(JSON.stringify({ kind: 'supply_input', message_id: clarification.id })))
+    .mockResolvedValueOnce(invoke(REPORT_MISSING_INPUT, { missing: 'Region', impact: 'Rate also depends on region', wait: true }))
+    .mockResolvedValueOnce(answer('{"kind":"clarification","question":"Which region should I use?"}'))
+    .mockImplementationOnce(async (_config, _key, messages) => {
+      expect(messages[0]?.content).toContain('RUNNER_ATTEMPTS_EXHAUSTED')
+      return answer('{"kind":"blocked"}')
+    })
+  s.submit('Use the year 2024.')
+  await vi.waitFor(() => expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ run_state: 'failed', delivery_state: 'incomplete' }))
+  expect(s.records('runner.input.clarification')).toHaveLength(1)
+  expect(s.records('runner.input.bound')).toHaveLength(1)
+  expect(s.records('runner.input.resolved').map(({ payload }) => payload.result.kind)).toEqual(['clarification', 'blocked'])
+  expect(s.records('worker.result.rejected').map(({ payload }) => payload.code)).toEqual(['RUNNER_ATTEMPTS_EXHAUSTED'])
 })
 
 it.each(['shutdown', 'restart'] as const)('keeps a settled Worker clarification answerable after %s without replaying its attempt', async boundary => {

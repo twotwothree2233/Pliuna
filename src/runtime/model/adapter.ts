@@ -2,6 +2,8 @@ import type { ModelConfiguration, ProviderTokenUsage } from '../../shared/contra
 import defaults from '../../shared/contracts/development-defaults.json'
 import { jsonDiagnostic } from './json-diagnostic'
 
+const terminalUsageWaitMs = 250
+
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
 export interface ChatMessage { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: ToolCall[]; tool_call_id?: string }
 export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: unknown } }
@@ -85,6 +87,13 @@ export class ChatAdapter {
   }
   async complete(config: ModelConfiguration, key: string, messages: ChatMessage[], tools: ToolDefinition[] | undefined, signal: AbortSignal, onText?: (text: string) => void, outputLimit = config.max_output_tokens): Promise<Completion> {
     let partial = false, usage: Completion['usage'], upstream: ModelError | undefined
+    const terminalDrain = new AbortController()
+    let terminalTimer: ReturnType<typeof setTimeout> | undefined
+    const rejectAfterUsage = (code: string) => {
+      if (upstream) return
+      upstream = new ModelError(code, partial)
+      terminalTimer = setTimeout(() => terminalDrain.abort(), terminalUsageWaitMs)
+    }
     try {
       const response = await this.transport(endpoint(config.base_url, 'chat/completions'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) }, redirect: 'error', signal,
@@ -104,7 +113,7 @@ export class ChatAdapter {
       let text = '', finish: Completion['finish'] | undefined, done = false
       const calls = new Map<number, ToolCall>()
       const callIds = new Set<string>()
-      for await (const frame of sse(response, signal, config.limits?.response_bytes)) {
+      for await (const frame of sse(response, AbortSignal.any([signal, terminalDrain.signal]), config.limits?.response_bytes)) {
         if (done) throw new ModelError('TRAILING_STREAM_DATA', partial)
         if (frame === '[DONE]') { done = true; break }
         let chunk: unknown
@@ -121,7 +130,7 @@ export class ChatAdapter {
         if (chunk.error) {
           if (contextOverflow(chunk.error)) throw new ModelError('MODEL_CONTEXT_LENGTH_EXCEEDED', partial, false, usage)
           const server = object(chunk.error) && (chunk.error.type === 'server_error' || chunk.error.code === 'internal_server_error')
-          upstream ??= new ModelError(server ? 'MODEL_PROVIDER_SERVER_ERROR' : 'MODEL_PROVIDER_ERROR', partial)
+          rejectAfterUsage(server ? 'MODEL_PROVIDER_SERVER_ERROR' : 'MODEL_PROVIDER_ERROR')
           continue
         }
         if (upstream) continue
@@ -162,10 +171,10 @@ export class ChatAdapter {
           switch (choice.finish_reason) {
             case 'stop':
             case 'tool_calls': finish = choice.finish_reason; break
-            case 'length': upstream = new ModelError('MODEL_OUTPUT_TOKEN_LIMIT', partial); break
-            case 'content_filter': upstream = new ModelError('MODEL_REFUSAL', partial); break
-            case 'insufficient_system_resource': upstream = new ModelError('MODEL_PROVIDER_SERVER_ERROR', partial); break
-            default: upstream = new ModelError('MODEL_STREAM_INVALID_FINISH', partial)
+            case 'length': rejectAfterUsage('MODEL_OUTPUT_TOKEN_LIMIT'); break
+            case 'content_filter': rejectAfterUsage('MODEL_REFUSAL'); break
+            case 'insufficient_system_resource': rejectAfterUsage('MODEL_PROVIDER_SERVER_ERROR'); break
+            default: rejectAfterUsage('MODEL_STREAM_INVALID_FINISH')
           }
         }
       }
@@ -186,16 +195,19 @@ export class ChatAdapter {
       const e = upstream && !signal.aborted ? upstream : caught
       if (e instanceof ModelError) throw new ModelError(e.code, partial || e.partial, !partial && e.retryable, usage ?? e.usage, e.inputDiagnostic)
       throw new ModelError(signal.aborted ? 'MODEL_CANCELLED' : partial ? 'MODEL_STREAM_INTERRUPTED' : 'MODEL_NETWORK_ERROR', partial, !partial && !signal.aborted, usage)
-    }
+    } finally { clearTimeout(terminalTimer) }
   }
 }
 async function* sse(response: Response, signal: AbortSignal, maximum?: number): AsyncGenerator<string> {
   const reader = response.body!.getReader(), decoder = new TextDecoder('utf-8', { fatal: true })
+  const cancel = () => { void reader.cancel().catch(() => {}) }
+  signal.addEventListener('abort', cancel, { once: true })
   let buffer = '', bytes = 0, data: string[] = []
   try {
     while (true) {
       if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
       const item = await reader.read()
+      if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
       if (item.done) { buffer += decoder.decode(); if (buffer || data.length) throw new ModelError('MODEL_STREAM_MISSING_DONE'); break }
       bytes += item.value.byteLength
       if (maximum !== undefined && bytes > maximum) throw new ModelError('MODEL_OUTPUT_LIMIT')
@@ -211,7 +223,7 @@ async function* sse(response: Response, signal: AbortSignal, maximum?: number): 
       }
       if (Buffer.byteLength(buffer) > defaults.model.frame_bytes) throw new ModelError('MODEL_FRAME_LIMIT')
     }
-  } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
+  } finally { signal.removeEventListener('abort', cancel); await reader.cancel().catch(() => {}); reader.releaseLock() }
 }
 async function boundedText(response: Response, signal: AbortSignal): Promise<string> {
   if (!response.body) throw new ModelError('INCOMPATIBLE_RESPONSE')

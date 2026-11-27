@@ -42,6 +42,17 @@ describe('orchestration capability dispatch', () => {
     expect(() => dispatchOrchestrationTool(discovery.input, { ...owner, role: 'collator' }, host)).toThrow(expect.objectContaining({ code: 'WORKER_CAPABILITY_DENIED' }))
   })
 
+  it('does not accept user clarification from a feedback Router', () => {
+    const result = { kind: 'clarification', question: 'Which format?' }
+    const complete = (value: unknown) => ({ text: JSON.stringify(value), finish: 'stop' as const, calls: [] })
+    const feedback = createWorkRouterProfile('feedback')
+    expect(() => feedback.parseResult(complete(result))).toThrow(expect.objectContaining({
+      code: 'INVALID_WORKER_RESULT', path: 'kind', message: expect.stringContaining('Feedback routing cannot deliver a user clarification')
+    }))
+    expect(feedback.parseResult(complete({ kind: 'blocked' }))).toEqual({ kind: 'blocked' })
+    expect(createWorkRouterProfile().parseResult(complete(result))).toEqual(result)
+  })
+
   it('preserves new content bindings alongside legacy output edges in a persisted assignment', () => {
     const draft = new InitialWorkDraft()
     draft.propose(call(ROUTE_WORK, { ...dispatch, assignments: [
