@@ -16,6 +16,21 @@ it('uses the matching provider count instead of treating Unicode bytes as tokens
   expect(new RunBudget(lease.config).plan(messages, undefined).measurement).toBe('serialized-utf8-estimate')
 })
 
+it('keeps equal concurrent reservations and provider measurements separate by attempt', () => {
+  const budget = new RunBudget({ ...lease.config, context_tokens: 10000 })
+  const first = budget.forAttempt(), second = budget.forAttempt()
+  const firstInput = [{ role: 'user' as const, content: 'first' }], secondInput = [{ role: 'user' as const, content: 'other' }]
+  const firstReservation = first.reserve(firstInput, undefined), secondReservation = second.reserve(secondInput, undefined)
+  expect(firstReservation).toBe(secondReservation)
+  second.settle(secondReservation, { text: 'done', calls: [], finish: 'stop', usage: { prompt_tokens: 800, completion_tokens: 20 } })
+  first.settle(firstReservation, { text: 'done', calls: [], finish: 'stop', usage: { prompt_tokens: 100, completion_tokens: 10 } })
+  expect(first.plan(firstInput, undefined)).toMatchObject({ measurement: 'provider-usage', estimated_input: 110 })
+  const next = [...secondInput, { role: 'user' as const, content: '新'.repeat(10000) }]
+  expect(second.plan(next, undefined)).toMatchObject({ measurement: 'provider-usage', estimated_input: 820, needsCompaction: false })
+  second.tool()
+  expect(budget.state).toMatchObject({ model_requests: 2, tool_requests: 1, tokens: 930, accounting: 'provider-usage' })
+})
+
 it.each([400, 413])('classifies explicit context errors at HTTP %s without leaking the response', async status => {
   const adapter = new ChatAdapter(async () => new Response(JSON.stringify({ error: { code: 'context_length_exceeded', message: 'private details' } }), { status }))
   await expect(adapter.complete(lease.config, '', [], undefined, new AbortController().signal)).rejects.toMatchObject({ code: 'MODEL_CONTEXT_LENGTH_EXCEEDED', message: 'MODEL_CONTEXT_LENGTH_EXCEEDED', retryable: false })

@@ -80,9 +80,12 @@ export class RunnerCompositionState {
   private resultRunCurrent(run: RunnerRun, work: LogicalWork, attempt?: ExecutionAttempt): boolean {
     if (run.state === 'completed') return true
     if (['running', 'waiting'].includes(run.state)) return run.commit_valid && run.runtime_epoch === this.work.epoch
-    if (!['interrupted', 'closing'].includes(run.state) || work.state !== 'succeeded' || !work.current_attempt_id) return false
+    const assigned = work.purpose === 'production' && !!work.assignment
+    if (!['interrupted', 'closing'].includes(run.state) && !(assigned && run.state === 'failed')) return false
+    if (work.state !== 'succeeded' || !work.current_attempt_id) return false
     const settled = attempt ?? this.work.attempt(work.current_attempt_id)
     if (settled.attempt_id !== work.current_attempt_id || settled.work_id !== work.work_id || settled.run_id !== run.run_id || settled.task_id !== run.task_id || settled.runtime_epoch !== run.runtime_epoch || settled.state !== 'succeeded' || settled.dispatch_state !== 'dispatched' || !settled.result_ref || work.result_revision === undefined) return false
+    if (run.state === 'failed') return !run.commit_valid
     if (run.state === 'interrupted' && run.purpose === 'production') return !!this.db.prepare(`WITH RECURSIVE lineage(run_id) AS (
       SELECT @original
       UNION
@@ -94,13 +97,13 @@ export class RunnerCompositionState {
         AND json_extract(successor.payload_json,'$.previous_run_id')=prior.id
         AND json_extract(r.payload_json,'$.request_id')=@request AND json_extract(r.payload_json,'$.intent_revision')=@intent
       ) SELECT 1 FROM lineage JOIN runs c ON c.id=lineage.run_id AND c.task_id=@task AND c.request_id=@request
-      WHERE c.state='completed' OR c.state IN ('running','waiting') AND c.commit_valid=1 AND c.runtime_epoch=@epoch LIMIT 1`)
-      .get({ original: run.run_id, task: run.task_id, request: run.request_id, intent: run.intent_revision, budget: run.budget_id, epoch: this.work.epoch })
+      WHERE c.state='completed' OR c.state='failed' AND @assigned=1 AND c.commit_valid=0
+        OR c.state IN ('running','waiting') AND c.runtime_epoch=@epoch
+          AND (c.commit_valid=1 OR c.intended_terminal='completed' OR c.intended_terminal='failed' AND @assigned=1) LIMIT 1`)
+      .get({ original: run.run_id, task: run.task_id, request: run.request_id, intent: run.intent_revision, budget: run.budget_id, epoch: this.work.epoch, assigned: Number(assigned) })
     if (run.state !== 'closing' || run.runtime_epoch !== this.work.epoch) return false
-    // Closing revokes new commits before cleanup drains. Settled results remain
-    // readable only while this Run is still closing toward successful completion.
     const row = this.db.prepare('SELECT intended_terminal FROM runs WHERE id=? AND task_id=? AND runtime_epoch=?').get(run.run_id, run.task_id, run.runtime_epoch) as { intended_terminal: string | null } | undefined
-    return row?.intended_terminal === 'completed'
+    return row?.intended_terminal === 'completed' || assigned && row?.intended_terminal === 'failed'
   }
 
   source(taskId: string, requestId: string, intentRevision: number): InventorySource | null {

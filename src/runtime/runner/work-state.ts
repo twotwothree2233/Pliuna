@@ -495,6 +495,13 @@ export class RunnerWorkState {
     return previous.attempt_number >= work.max_attempts ? 'RUNNER_ATTEMPTS_EXHAUSTED' : null
   }
 
+  private exhaustedRecovery(work: LogicalWork): boolean {
+    if (work.purpose !== 'production' || !work.assignment || terminalWork.has(work.state) || this.run(work.run_id).state !== 'interrupted') return false
+    if (!work.current_attempt_id) return this.pendingAssignmentRecoveryFailure(work) === 'RUNNER_ATTEMPTS_EXHAUSTED'
+    const attempt = this.attempt(work.current_attempt_id)
+    return attempt.attempt_number >= work.max_attempts && attempt.state === 'revoked' && (attempt.dispatch_state === 'not_dispatched' || !!this.clarifiedAssignment(work))
+  }
+
   rebindRecoveredOutputInputs(run: RunnerRun, originals: LogicalWork[]): void {
     if (!this.db.inTransaction || !run.previous_run_id) fail('RUNNER_PLAN_CONFLICT', 'Output rebinding requires an installed recovery')
     const predecessor = this.run(run.previous_run_id)
@@ -618,11 +625,12 @@ export class RunnerWorkState {
     return { kind, work_id: work.work_id, ...(attempt ? { attempt_id: attempt.attempt_id } : {}), ...(attempt?.operation_id ? { operation_id: attempt.operation_id } : {}) }
   }
 
-  private installRevocation(work: LogicalWork, cause: WorkCause, downstream: boolean): LogicalWork {
-    if (terminalWork.has(work.state) || terminalRun.has(this.run(work.run_id).state)) return work
+  private installRevocation(work: LogicalWork, cause: WorkCause, downstream: boolean, settleInterrupted = false): LogicalWork {
+    const runState = this.run(work.run_id).state
+    if (terminalWork.has(work.state) || terminalRun.has(runState) && !(settleInterrupted && runState === 'interrupted')) return work
     const state = cause.kind === 'failure' ? downstream ? 'dependency_failed' : 'failed' : cause.kind === 'cancellation' ? downstream ? 'dependency_cancelled' : 'cancelled' : 'invalidated'
     const missing = downstream && work.purpose === 'production' ? work.assignment?.inputs.find(input => 'work_id' in input && input.work_id === cause.work_id) : undefined
-    const root_cause = work.root_cause ?? (missing && !cause.input ? { ...cause, input: missing, reason: `Selected upstream output is unavailable (${cause.kind})` } : cause)
+    const root_cause = work.root_cause ?? (missing && !cause.input ? { ...cause, input: missing, reason: cause.reason ?? `Selected upstream output is unavailable (${cause.kind})` } : cause)
     const value = { ...work, state, root_cause } as LogicalWork
     this.saveWork(value)
     // Revocation removes authority immediately. Dispatched execution is still
@@ -688,6 +696,7 @@ export class RunnerWorkState {
         checking.add(work.work_id)
         const causes: WorkCause[] = []
         if (work.purpose === 'production') {
+          if (this.exhaustedRecovery(work)) causes.push({ ...this.cause(work, 'failure'), reason: 'RUNNER_ATTEMPTS_EXHAUSTED' })
           try { this.productionPlan(work) } catch (error) {
             if (!(error instanceof ContractError)) throw error
             causes.push(this.cause(work, 'invalidation'))
@@ -743,7 +752,11 @@ export class RunnerWorkState {
       const affected: LogicalWork[] = []
       for (const work of works) {
         const cause = inspect(work)
-        if (cause && !terminalWork.has(work.state) && !terminalRun.has(this.run(work.run_id).state)) affected.push(this.installRevocation(work, cause, cause.work_id !== work.work_id))
+        if (!cause || terminalWork.has(work.state)) continue
+        const downstream = cause.work_id !== work.work_id
+        const settleInterrupted = cause.reason === 'RUNNER_ATTEMPTS_EXHAUSTED' && (!downstream || !work.current_attempt_id)
+        const settled = this.installRevocation(work, cause, downstream, settleInterrupted)
+        if (settled !== work) affected.push(settled)
       }
       return affected
     }).immediate()

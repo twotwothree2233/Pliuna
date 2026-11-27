@@ -39,11 +39,16 @@ export interface WorkerExecution<Result> {
 type LegacyBudgetLimits = NonNullable<ModelLease['config']['limits']> & { run_model_requests?: number; run_tool_requests?: number; run_tokens?: number; run_wall_ms?: number }
 export interface BudgetState { model_requests: number; tool_requests: number; tokens: number; accounting: 'estimated' | 'mixed' | 'provider-usage'; cost: 'unknown'; template: 'agent-v0.1'; limits_version: string; unbounded_output_requests?: number; limits?: LegacyBudgetLimits }
 export class RunBudget {
-  private usageResponses = 0
+  private totals: { usageResponses: number; state: BudgetState } = { usageResponses: 0, state: { model_requests: 0, tool_requests: 0, tokens: 0, accounting: 'estimated', cost: 'unknown', template: 'agent-v0.1', limits_version: defaults.version } }
   private observations = new Map<string, { input: string[]; tokens: number; tools: string }>()
   private reservations = new Map<number, { messages: ChatMessage[]; tools: ToolDefinition[] | undefined; config: ModelLease['config'] }[]>()
-  readonly state: BudgetState = { model_requests: 0, tool_requests: 0, tokens: 0, accounting: 'estimated', cost: 'unknown', template: 'agent-v0.1', limits_version: defaults.version }
   constructor(private config: ModelLease['config']) { this.config = structuredClone(config) }
+  get state(): BudgetState { return this.totals.state }
+  forAttempt(): RunBudget {
+    const budget = new RunBudget(this.config)
+    budget.totals = this.totals
+    return budget
+  }
   fits(messages: ChatMessage[], tools: ToolDefinition[] | undefined, config = this.config): boolean {
     return this.plan(messages, tools, config).fits
   }
@@ -69,7 +74,7 @@ export class RunBudget {
     if (!providerCheck && !this.plan(messages, tools, config).fits) throw this.rejection(messages, tools, stage, 'CONTEXT_BUDGET_EXCEEDED', config)
     this.state.model_requests++; this.state.tokens += input + output
     if (config.max_output_tokens === undefined) this.state.unbounded_output_requests = (this.state.unbounded_output_requests ?? 0) + 1
-    this.state.accounting = this.usageResponses ? 'mixed' : 'estimated'
+    this.state.accounting = this.totals.usageResponses ? 'mixed' : 'estimated'
     const reservation = input + output
     this.reservations.set(reservation, [...(this.reservations.get(reservation) ?? []), { messages: structuredClone(messages), tools, config }])
     return reservation
@@ -79,8 +84,8 @@ export class RunBudget {
     if (!entries?.length) this.reservations.delete(reservation)
     if (response.usage) {
       this.state.tokens += response.usage.prompt_tokens + response.usage.completion_tokens - reservation
-      this.usageResponses++
-      this.state.accounting = this.usageResponses === this.state.model_requests ? 'provider-usage' : 'mixed'
+      this.totals.usageResponses++
+      this.state.accounting = this.totals.usageResponses === this.state.model_requests ? 'provider-usage' : 'mixed'
       if (reserved) this.observe(messages ?? reserved.messages, messages ? tools : reserved.tools, response.usage, reserved.config)
     } else if (reserved) {
       this.observations.delete(JSON.stringify({ config: reserved.config, tools: reserved.tools }))

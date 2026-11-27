@@ -88,7 +88,7 @@ import { RunnerHostProduction } from './runner/host-production'
 import { RunnerHostRecovery } from './runner/host-recovery'
 import { RunnerHostProgress } from './runner/host-progress'
 import { deliveryHasUnsettledExecution, requestDelivery } from './runner/delivery-state'
-import { artifactRepair, repairRequestId, repairRoutingWork, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
+import { artifactRepair, installedRepairDispatch, repairRequestId, repairRoutingWork, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
 import { createRunnerDiagnostic, type RunnerDiagnostic } from './runner/diagnostic'
 import type { ProgressDiagnosis } from './runner/progress-observer'
 import { RunnerHostStatus } from './runner/host-status'
@@ -1577,6 +1577,7 @@ export class RuntimeStore {
         } while (cursor && this.task(task).state === 'active')
       } finally { this.recoveringRunnerInputs.delete(task) }
       if (this.task(task).state !== 'active') continue
+      this.reconcileRunnerDependencies(new RunnerWorkState(this.db, epoch), task)
       const runs = this.db.prepare("SELECT r.run_id FROM runner_runs r JOIN runs c ON c.id=r.run_id WHERE r.task_id=? AND r.purpose='production' AND c.state='interrupted' AND c.runtime_epoch!=? ORDER BY r.rowid").all(task, epoch) as Row[]
       for (const row of runs) {
         if (this.closed || this.closing || this.epoch !== epoch) return
@@ -2167,6 +2168,7 @@ export class RuntimeStore {
         void execution.catch(error => {
           if (this.closed || this.closing || !this.db.open) return
           if (error instanceof ContractError && error.code === 'RUNNER_WAITING_INPUT') return
+          if (profile && installedRepairDispatch(this.db, task, attemptId)) return
           const run = state.run(runId)
           if (run.commit_valid && state.attempt(attemptId).state !== 'unknown') this.finish(task, runId, 'failed', error instanceof ContractError ? error.code : 'REPAIR_EXECUTION_FAILED')
         })
@@ -2196,7 +2198,8 @@ export class RuntimeStore {
           const allowed = requirementId ? [requirementId] : requirements
           if (decision.assignments.some(assignment => assignment.requirement_ids.some(requirement => !allowed.includes(requirement)))) fail('REPAIR_SCOPE_INVALID', 'Feedback cannot add unrelated requirement work')
           if (index && (decision.assignments.length !== 1 || decision.assignments[0]!.outputs.length !== 1 || decision.assignments[0]!.outputs[0]!.exposure !== 'publish')) fail('REPAIR_SCOPE_INVALID', 'An exact artifact replacement uses one publishing assignment')
-          if (!decision.assignments.some(assignment => assignment.required && allowed.every(requirement => assignment.requirement_ids.includes(requirement)) && assignment.outputs.some(output => output.exposure === 'publish'))) fail('REPAIR_SCOPE_INVALID', 'A repair must preserve its required publication coverage')
+          const covering = decision.assignments.findIndex(assignment => assignment.required && allowed.every(requirement => assignment.requirement_ids.includes(requirement)) && assignment.outputs.some(output => output.exposure === 'publish'))
+          if (covering < 0) fail('REPAIR_SCOPE_INVALID', 'A repair must preserve its required publication coverage')
           const signature = canonical(decision.assignments.map(assignment => ({ instructions: assignment.instructions.trim().replace(/\s+/g, ' '), requirements: assignment.requirement_ids, inputs: assignment.inputs?.map(input => 'assignment_key' in input ? input.output_key : 'work_id' in input ? [input.work_id, input.output_key] : input), outputs: assignment.outputs.map(output => [output.kind, output.exposure]) })))
           if (this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.problem_key')=? AND json_extract(payload_json,'$.signature')=?`).get(task, problem_key, signature)) fail('REPAIR_NO_PROGRESS', 'This problem already received the same repair plan')
           const goal = state.goal(request_id), oldSource = this.runnerComposition().source(task, request_id, intent_revision)
@@ -2213,7 +2216,10 @@ export class RuntimeStore {
           if (index && issue.kind !== 'missing_requirement') {
             const binding: ArtifactRepair = { request_record_id, problem_key, request_id, intent_revision, issue, previous: index, repair_run_id: runId, repair_work_id: installed[0]!.work_id }
             this.record(task, 'runner.repair.started', binding)
-          } else this.runnerComposition().designateSource({ task_id: task, request_id, intent_revision, work_id: work.work_id, plan_revision: work.plan_revision }, oldSource)
+          } else {
+            const sealer = installed[covering]!
+            this.runnerComposition().designateSource({ task_id: task, request_id, intent_revision, work_id: sealer.work_id, plan_revision: sealer.plan_revision }, oldSource)
+          }
           this.record(task, 'runner.repair.plan', { request_record_id, problem_key, request_id, intent_revision, run_id: runId, owner, requirement_id: requirementId ?? null, signature, work_ids: installed.map(item => item.work_id) })
           const nextRevision = decision.base_revision + 1
           this.record(task, 'runner.plan.revised', { owner, run_id: runId, request_id, revision: nextRevision, works: installed.map(item => ({ work_id: item.work_id, plan_revision: item.plan_revision })) })
@@ -2540,7 +2546,7 @@ export class RuntimeStore {
     agent.controller.signal.addEventListener('abort', cancel, { once: true })
     if (agent.controller.signal.aborted) cancel()
     const clone = (lease: ModelLease): ModelLease => ({ ...lease, owner: { ...owner }, release() {} })
-    const worker: WorkerAgent = { owner, controller, main: clone(agent.main), ...(agent.compact ? { compact: clone(agent.compact) } : {}), ...(agent.approval ? { approval: clone(agent.approval) } : {}), budget: agent.budget, mode: agent.mode, context: new WorkerContext(this.db, owner), profile, ...(collator ? { collator } : {}), ...(diagnostic ? { diagnostic } : {}), orchestration: input?.orchestration, state: 'running' }
+    const worker: WorkerAgent = { owner, controller, main: clone(agent.main), ...(agent.compact ? { compact: clone(agent.compact) } : {}), ...(agent.approval ? { approval: clone(agent.approval) } : {}), budget: agent.budget.forAttempt(), mode: agent.mode, context: new WorkerContext(this.db, owner), profile, ...(collator ? { collator } : {}), ...(diagnostic ? { diagnostic } : {}), orchestration: input?.orchestration, state: 'running' }
     this.workers.set(attemptId, worker)
     let result!: Result, accepted = false
     try {
@@ -2739,7 +2745,8 @@ export class RuntimeStore {
     }
     const cancelled = this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='runner.cancelled' AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1").get(taskId, runId) as Row | undefined
     const cancellation = cancelled ? JSON.parse(cancelled.payload_json).scope === 'task' ? 'task' as const : 'run' as const : undefined
-    const proposed = aggregateRunOutcome({ run, works, attempts, states, ...(cancellation ? { cancellation } : {}) })
+    const outcomeWorks = works.map(work => work.role === 'router' && work.state === 'failed' && work.current_attempt_id && installedRepairDispatch(this.db, taskId, work.current_attempt_id) ? { ...work, required: false } : work)
+    const proposed = aggregateRunOutcome({ run, works: outcomeWorks, attempts, states, ...(cancellation ? { cancellation } : {}) })
     const terminal = this.one('SELECT intended_terminal,primary_reason FROM runs WHERE id=?', runId)
     const interrupted = terminal.intended_terminal === 'interrupted'
     const outcome = interrupted && proposed.phase !== 'terminal' ? {
@@ -3439,6 +3446,7 @@ export class RuntimeStore {
   private async assessRunnerComposition(taskId: string, runId: string, approvalId: string, input: unknown, context: ExecutionActionContext, signal: AbortSignal): Promise<void> {
     const agent = this.agents.get(runId), owner = context.owner!
     if (!agent?.approval) return
+    const budget = agent.budget.forAttempt()
     const run = new RunnerWorkState(this.db, this.epoch).run(runId)
     if (run.purpose !== 'composition' && !run.update_id) fail('RUNNER_OWNERSHIP_INVALID', 'Host publication requires its exact publisher Run')
     const accounting = new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: taskId, budget_id: run.budget_id, attempt_id: owner.attempt_id })
@@ -3454,9 +3462,9 @@ export class RuntimeStore {
       const request = this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.purpose === 'composition' ? run.trigger_request_id : run.request_id, taskId)
       const chapter = run.purpose === 'production' && run.update_id ? this.chapters().state.update(taskId, run.update_id) : null
       const messages: ChatMessage[] = [{ role: 'system', content: approvalTemplate }, { role: 'user', content: json({ source: owner, action: input, permission: 'Only this exact compiled Surface action. Input discard requires separate explicit human confirmation.', user_request: chapter?.text ?? request.input_json }) }]
-      const reservation = agent.budget.reserve(messages, undefined, lease.config, 'approval-input')
+      const reservation = budget.reserve(messages, undefined, lease.config, 'approval-input')
       const response = await this.models.request(lease, taskId, messages, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'approval')
-      context.valid(); agent.budget.settle(reservation, response)
+      context.valid(); budget.settle(reservation, response)
       const evaluation: unknown = JSON.parse(response.text)
       assertContract<{ decision: 'approve' | 'deny' | 'escalate'; reason: string }>('approval_decision', evaluation)
       const approval = this.one('SELECT validity,decision FROM approvals WHERE id=?', approvalId)

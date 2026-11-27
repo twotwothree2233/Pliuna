@@ -572,6 +572,84 @@ it.each(['failed', 'cancelled'] as const)('settles a dependent Run with no attem
   expect(state.attempts(downstream.work_id)).toEqual([])
 })
 
+it('settles an expected cross-Run output when the upstream has no attempts left after restart', async () => {
+  const first = setup({ conversationRouting: true })
+  const dispatch = (instructions: string, inputs: unknown[] = []) => invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
+    { assignment_key: 'reply', instructions, required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'text' }], inputs }
+  ] })
+  const holdUpstream = (runtime: ReturnType<typeof setup>) => {
+    const state = new RunnerWorkState(runtime.db, runtime.store.epoch)
+    const admission = (runtime.store as unknown as { runnerAdmission: RunnerAdmission }).runnerAdmission, select = admission.next.bind(admission)
+    vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => select(task, candidates.filter(candidate => {
+      const work = state.work(candidate.work_id)
+      return work.purpose !== 'production' || work.assignment?.instructions !== 'Produce the upstream answer'
+    }), active, ready))
+    return state
+  }
+  const state = holdUpstream(first)
+  first.complete.mockResolvedValueOnce(dispatch('Produce the upstream answer')).mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+  const source = first.submit('Produce the source answer.')
+  await vi.waitFor(() => expect(state.taskWorks(first.task)).toContainEqual(expect.objectContaining({ request_id: source.request_id, state: 'queued' })))
+  const upstream = state.taskWorks(first.task).find(work => work.purpose === 'production' && work.request_id === source.request_id)!
+  first.close()
+
+  const second = setup({ directory: first.directory, task: first.task, conversationRouting: true }), resumed = holdUpstream(second)
+  await second.store.recoverRunnerWork()
+  expect(resumed.attempts(upstream.work_id).at(-1)).toMatchObject({ attempt_number: 2, state: 'queued', dispatch_state: 'not_dispatched' })
+  second.complete.mockResolvedValueOnce(dispatch('Use the upstream answer', [{ work_id: upstream.work_id, plan_revision: 2, output_key: 'text' }]))
+    .mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+  const consumer = second.submit('Use the expected upstream answer.')
+  await vi.waitFor(() => expect(resumed.taskWorks(second.task)).toContainEqual(expect.objectContaining({ request_id: consumer.request_id, state: 'planned' })))
+  const downstream = resumed.taskWorks(second.task).find(work => work.purpose === 'production' && work.request_id === consumer.request_id)!
+  second.close()
+
+  const third = setup({ directory: first.directory, task: first.task, conversationRouting: true }), recovered = new RunnerWorkState(third.db, third.store.epoch)
+  await third.store.recoverRunnerWork()
+  expect(recovered.work(upstream.work_id)).toMatchObject({ state: 'failed', root_cause: { reason: 'RUNNER_ATTEMPTS_EXHAUSTED' } })
+  expect(recovered.attempts(upstream.work_id).at(-1)).toMatchObject({ attempt_number: 2, state: 'revoked', dispatch_state: 'not_dispatched' })
+  expect(recovered.work(downstream.work_id)).toMatchObject({ state: 'dependency_failed', root_cause: { work_id: upstream.work_id, reason: 'RUNNER_ATTEMPTS_EXHAUSTED', input: { output_key: 'text' } } })
+  expect(third.store.handle({ type: 'request.status', task_id: third.task, request_id: consumer.request_id })).toMatchObject({ delivery_state: 'incomplete' })
+  expect(third.complete).not.toHaveBeenCalled()
+})
+
+it('reuses an accepted output after an independent Worker fails in its Run', async () => {
+  const runtime = setup({ conversationRouting: true }), gate = deferred<void>()
+  const assignment = (key: string, instructions: string, requirements: string[] = [], inputs: unknown[] = []) => ({
+    assignment_key: key, instructions, required: true, requirement_ids: requirements, outputs: [{ kind: 'answer', output_key: 'text' }], inputs
+  })
+  const dispatch = (assignments: unknown[]) => invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments })
+  const status = (request: Row) => runtime.store.handle({ type: 'request.status', task_id: runtime.task, request_id: request.request_id })
+  runtime.complete.mockResolvedValueOnce(dispatch([assignment('reply', 'Produce the reusable answer', ['answer']), assignment('independent', 'Do unrelated required work')]))
+    .mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementation(async (_config, _key, messages) => {
+      if (messages[0]?.content?.includes('Produce the reusable answer')) return answer('Exact accepted result.')
+      await gate.promise
+      throw new ModelError('MODEL_STREAM_INTERRUPTED')
+    })
+  const source = runtime.submit('Produce two independent results.')
+  await vi.waitFor(() => expect(runtime.records('runner.output.accepted')).toHaveLength(1))
+  const accepted = runtime.records('runner.output.accepted')[0]!.payload
+  gate.resolve()
+  await vi.waitFor(() => expect(status(source)).toMatchObject({ run_state: 'failed' }))
+
+  runtime.complete.mockImplementationOnce(async (_config, _key, messages) => {
+    const { work_table } = JSON.parse(messages.at(-1)!.content!) as Row
+    const output = work_table.find((entry: Row) => entry.work_id === accepted.owner.work_id)?.outputs[0]
+    expect(output).toMatchObject({ result_revision: 1 })
+    const { kind: _kind, ...reference } = output
+    return dispatch([assignment('reply', 'Use the accepted result', ['answer'], [reference])])
+  }).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementationOnce(async (_config, _key, messages) => {
+    const { bound } = JSON.parse(messages.at(-1)!.content!)
+    const { kind: _kind, ...reference } = bound.work_outputs[0]
+    return invoke(READ_WORK_OUTPUT, reference)
+  }).mockImplementationOnce(async (_config, _key, messages) => {
+    expect(JSON.parse(messages.at(-1)!.content!)).toMatchObject({ execution: 'success', data: { text: 'Exact accepted result.' } })
+    return answer('Used the accepted result.')
+  })
+  const consumer = runtime.submit('Use the accepted output from the first request.')
+  await vi.waitFor(() => expect(status(consumer)).toMatchObject({ run_state: 'completed', delivery_state: 'complete' }))
+  expect(runtime.records('runner.output.handoff')).toHaveLength(1)
+})
+
 it.each(['pending', 'clarification'] as const)('seals the recovered request with the accepted answer after a restart boundary at %s', async boundary => {
   const first = setup({ conversationRouting: true }), state = new RunnerWorkState(first.db, first.store.epoch)
   const admission = (first.store as unknown as { runnerAdmission: RunnerAdmission }).runnerAdmission, select = admission.next.bind(admission)
@@ -908,10 +986,10 @@ it.each(['early', 'late', 'missing'] as const)('hands off migration evidence and
   expect(s.complete).toHaveBeenCalledTimes(reply === 'missing' ? 8 : reply === 'early' ? 9 : 7)
 })
 
-it.each(['layout', 'feedback', 'feedback-only', 'failure', 'recovered'] as const)('follows the release Collator model decision: %s', async path => {
+it.each(['layout', 'feedback', 'feedback-only', 'feedback-receipt-interrupted', 'failure', 'recovered'] as const)('follows the release Collator model decision: %s', async path => {
   let s = setup({ releaseProfile: true })
   const repairGate = deferred<void>()
-  const expectsFeedback = path === 'feedback' || path === 'feedback-only' || path === 'recovered'
+  const expectsFeedback = path === 'feedback' || path === 'feedback-only' || path === 'feedback-receipt-interrupted' || path === 'recovered'
   const statement = 'PRIVATE_UPSTREAM_EVIDENCE', independent = 'Independent published card', repaired = 'Required detail card'
   const dispatch = (key: string, instructions: string, output: string, artifact = false, requirement_ids: string[] = []) => ({
     assignment_key: key, instructions, required: true, requirement_ids, outputs: [artifact ? { kind: 'artifact', output_key: output, exposure: 'publish' } : { kind: 'answer', output_key: output }]
@@ -952,6 +1030,7 @@ it.each(['layout', 'feedback', 'feedback-only', 'failure', 'recovered'] as const
       if (input.bound?.feedback) {
         if (tools.length) {
           expect(tools[0]).toMatchObject({ execution: 'success' })
+          if (path === 'feedback-receipt-interrupted') throw new ModelError('MODEL_STREAM_INTERRUPTED')
           return answer('{"kind":"updated"}')
         }
         return invoke(ROUTE_WORK, { action: 'dispatch', base_revision: input.bound.base_revision, assignments: [dispatch('repair', 'Supply required detail', 'detail', true, ['content'])] })
@@ -1015,6 +1094,11 @@ it.each(['layout', 'feedback', 'feedback-only', 'failure', 'recovered'] as const
   }
   if (expectsFeedback) {
     await vi.waitFor(() => expect(s.records('runner.repair.plan')).toHaveLength(1))
+    if (path === 'feedback-receipt-interrupted') {
+      const { owner } = s.records('runner.repair.plan')[0]!.payload
+      await vi.waitFor(() => expect(s.records('worker.ended')).toContainEqual(expect.objectContaining({ payload: expect.objectContaining({ owner, state: 'failed', code: 'MODEL_STREAM_INTERRUPTED' }) })))
+      expect(s.records('runner.repair.response')).toHaveLength(0)
+    }
     expect(s.store.handle({ type: 'request.status', task_id: s.task, request_id: request.request_id })).toMatchObject({ delivery_state: 'open' })
     repairGate.resolve()
     await publish()

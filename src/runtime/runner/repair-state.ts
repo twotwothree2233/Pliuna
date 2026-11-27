@@ -115,6 +115,10 @@ export function repairRoutingWork(db: Database.Database, task: string, work: str
   return !!db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.routed' AND json_extract(payload_json,'$.work_id')=?`).get(task, work)
 }
 
+export function installedRepairDispatch(db: Database.Database, task: string, attempt: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.owner.attempt_id')=?`).get(task, attempt)
+}
+
 function repairedRequirements(db: Database.Database, task: string, outputs: readonly { work_id: string; requirement_ids: readonly string[] }[]): Set<string> {
   const resolved = new Set<string>()
   for (const output of outputs) {
