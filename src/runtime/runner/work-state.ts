@@ -529,31 +529,43 @@ export class RunnerWorkState {
     }
   }
 
-  clarifiedAssignment(work: LogicalWork): ExecutionAttempt | undefined {
+  waitingAssignment(work: LogicalWork): { attempt: ExecutionAttempt; reportId: string } | undefined {
     if (work.purpose !== 'production' || !work.assignment || work.update_id || work.state !== 'waiting' || !work.current_attempt_id) return
     const attempt = this.attempt(work.current_attempt_id)
     if (!sameSource(work, attempt) || attempt.work_id !== work.work_id || attempt.profile_id !== 'producer-output-v1' || attempt.state !== 'revoked' ||
       attempt.dispatch_state !== 'dispatched') return
-    if (!this.db.prepare(`SELECT 1 FROM records q JOIN records w ON w.task_id=q.task_id AND w.kind='runner.assignment.waiting'
-      AND json_extract(w.payload_json,'$.report_id')=json_extract(q.payload_json,'$.report_id')
-      WHERE q.task_id=@task AND q.kind='runner.input.clarification' AND json_extract(q.payload_json,'$.run_id')=@run
+    const report = this.db.prepare(`SELECT e.id FROM records w JOIN records e ON e.task_id=w.task_id AND e.kind='runner.input.reported'
+      AND e.id=json_extract(w.payload_json,'$.report_id') AND json_extract(e.payload_json,'$.report.wait')=1
+      AND json_extract(e.payload_json,'$.attempt_id')=@attempt AND json_extract(e.payload_json,'$.run_id')=@run
+      WHERE w.task_id=@task AND w.kind='runner.assignment.waiting'
       AND json_extract(w.payload_json,'$.run_id')=@run AND json_extract(w.payload_json,'$.attempt_id')=@attempt
       AND json_extract(w.payload_json,'$.work_id')=@work AND json_extract(w.payload_json,'$.plan_revision')=@revision
-      AND NOT EXISTS (SELECT 1 FROM records b WHERE b.task_id=q.task_id AND b.kind='runner.input.bound' AND json_extract(b.payload_json,'$.clarification_id')=q.id)
-      LIMIT 1`).get({ task: work.task_id, run: attempt.run_id, attempt: attempt.attempt_id, work: work.work_id, revision: work.plan_revision })) return
-    if (this.assignmentOperationUnsettled(attempt)) return
-    return attempt
+      LIMIT 1`).get({ task: work.task_id, run: attempt.run_id, attempt: attempt.attempt_id, work: work.work_id, revision: work.plan_revision }) as { id: string } | undefined
+    if (report && !this.assignmentOperationUnsettled(attempt)) return { attempt, reportId: report.id }
   }
 
-  rebindClarifiedAssignment(workId: string, runId: string): void {
+  clarifiedAssignment(work: LogicalWork): ExecutionAttempt | undefined {
+    const waiting = this.waitingAssignment(work)
+    if (waiting && this.db.prepare(`SELECT 1 FROM records q WHERE q.task_id=? AND q.kind='runner.input.clarification'
+      AND json_extract(q.payload_json,'$.report_id')=?
+      AND NOT EXISTS (SELECT 1 FROM records b WHERE b.task_id=q.task_id AND b.kind='runner.input.bound' AND json_extract(b.payload_json,'$.clarification_id')=q.id)
+      LIMIT 1`).get(work.task_id, waiting.reportId)) return waiting.attempt
+  }
+
+  rebindWaitingAssignment(workId: string, runId: string, retiredRouter?: ExecutionAttempt): void {
     const work = this.work(workId), run = this.run(runId), previous = this.run(work.run_id)
-    const attempt = this.clarifiedAssignment(work)
+    const attempt = this.waitingAssignment(work)?.attempt
     if (!this.db.inTransaction || !attempt || run.previous_run_id !== previous.run_id || previous.state !== 'interrupted' || previous.commit_valid ||
-      previous.runtime_epoch === this.epoch || !sameSource(run, work) || attempt.attempt_number >= work.max_attempts) fail('RUNNER_PLAN_CONFLICT', 'Only a settled assignment waiting for clarification can rebind without an attempt')
+      previous.runtime_epoch === this.epoch || !sameSource(run, work) || attempt.attempt_number >= work.max_attempts) fail('RUNNER_PLAN_CONFLICT', 'Only a settled assignment waiting for input can rebind without an attempt')
     this.sourceCurrent(run)
     this.checkHandoffs(work, attempt.attempt_id)
     this.dependenciesCurrent(work.dependencies, true)
     this.saveWork({ ...work, run_id: runId })
+    if (retiredRouter) {
+      const router = this.work(retiredRouter.work_id)
+      if (router.run_id !== previous.run_id || router.role !== 'router' || router.current_attempt_id !== retiredRouter.attempt_id || !['registered', 'queued', 'revoked'].includes(retiredRouter.state) || retiredRouter.dispatch_state !== 'not_dispatched') fail('RUNNER_PLAN_CONFLICT', 'Only the undispatched predecessor Router can be retired')
+      this.installRevocation(router, { ...this.cause(router, 'cancellation'), reason: 'ROUTING_REBOUND' }, false, true)
+    }
   }
 
   suspendAssignment(attemptId: string, reportId: string, recordWait: (work: LogicalWork) => void): void {

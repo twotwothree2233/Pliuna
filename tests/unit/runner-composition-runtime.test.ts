@@ -38,7 +38,7 @@ function setup(enabled = true, modelCollator = false, previous?: { directory: st
   const { db, epoch } = internal, task = previous?.task ?? store.create('Composition').task.id
   const state = new RunnerWorkState(db, epoch), artifacts = new RunnerArtifactState(db, state), composition = new RunnerCompositionState(db, state, artifacts)
   const records = (kind: string) => db.prepare('SELECT * FROM records WHERE task_id=? AND kind=?').all(task, kind)
-  function source(name = 'goal', contents = bundle(), sealed = true, completed = true, configId = 'model', fragments = 1) {
+  function source(name = 'goal', contents = bundle(), sealed = true, completed = true, configId = 'model', fragments = 1, assigned = false) {
     const run = `run-${name}`, workId = `work-${name}`, attemptId = `attempt-${name}`, artifactId = `artifact-${name}`
     db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,?,'started',?,?,?)").run(name, task, JSON.stringify({ id: configId, revision: 1, approval_mode: 'manual' }), JSON.stringify({ text: `Explicit request ${name}` }), 'time')
     const inputRecord = internal.record(task, 'message.user', { text: name })
@@ -47,7 +47,8 @@ function setup(enabled = true, modelCollator = false, previous?: { directory: st
     new RunnerBudgetLedger(db).create({ budget_id: `budget-${name}`, task_id: task, purpose: 'production', request_id: name, limits: { model_requests: 20, tool_requests: 100, tokens: 100000, wall_ms: 60000 } })
     db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,'{}','{}','time')").run(run, task, name, epoch)
     state.registerRun({ run_id: run, task_id: task, runtime_epoch: epoch, state: 'running', commit_valid: true, budget_id: `budget-${name}`, purpose: 'production', request_id: name, intent_revision: 1 })
-    const work: LogicalWork = { work_id: workId, task_id: task, run_id: run, plan_revision: 1, role: 'producer', required: true, requirement_ids: ['content'], dependencies: [{ kind: 'goal', task_id: task, request_id: name, intent_revision: 1 }], state: 'planned', max_attempts: 2, purpose: 'production', request_id: name, intent_revision: 1 }
+    const work: LogicalWork = { work_id: workId, task_id: task, run_id: run, plan_revision: 1, role: 'producer', required: true, requirement_ids: ['content'], dependencies: [{ kind: 'goal', task_id: task, request_id: name, intent_revision: 1 }], state: 'planned', max_attempts: 2, purpose: 'production', request_id: name, intent_revision: 1,
+      ...(assigned ? { assignment: { instructions: 'Produce the published fragment.', inputs: [], outputs: [{ kind: 'artifact', output_key: 'content', exposure: 'publish' }] } } : {}) }
     state.installPlan([work])
     const attempt: ExecutionAttempt = { attempt_id: attemptId, work_id: workId, task_id: task, run_id: run, runtime_epoch: epoch, attempt_number: 1, profile_id: 'producer', model_config_id: configId, model_config_revision: 1, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: name, intent_revision: 1 }
     state.createAttempt(attempt); state.updateAttempt({ ...attempt, state: 'dispatched', dispatch_state: 'dispatched', operation_id: `operation-${name}` })
@@ -55,6 +56,7 @@ function setup(enabled = true, modelCollator = false, previous?: { directory: st
     const priorOutline = artifacts.outline(task)
     artifacts.installOutline({ task_id: task, outline_revision: (priorOutline?.outline_revision ?? 0) + 1, base_outline_revision: priorOutline?.outline_revision ?? 0, sections: [...(priorOutline?.sections ?? []), { section_id: `section-${name}`, request_id: name, intent_revision: 1, order_key: name, position_revision: 1 }] })
     artifacts.assign([{ task_id: task, artifact_id: artifactId, work_id: workId, plan_revision: 1, section_id: `section-${name}`, base_artifact_revision: 0 }])
+    if (assigned) db.prepare('INSERT INTO runner_artifact_slots(work_id,output_key,task_id,artifact_id) VALUES (?,?,?,?)').run(workId, 'content', task, artifactId)
     const resource = (next: Bundle) => (store.modelTool(task, run, { type: 'write', input: { type: 'resource.create', display_name: 'Accepted bundle', content: { type: 'json', value: next } } }) as { data: { id: string } }).data.id
     const resourceId = resource(contents)
     const candidate: ArtifactCandidate = { candidate_id: `candidate-${name}`, task_id: task, request_id: name, intent_revision: 1, run_id: run, work_id: workId, attempt_id: attemptId, artifact_id: artifactId, base_artifact_revision: 0, plan_revision: 1, bundle_resource_id: resourceId, section_id: `section-${name}`, section_position_revision: 1, order_key: name, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: { task_id: task, kind: 'record', id: inputRecord }, requirement_ids: ['content'], unresolved: [], dependencies: work.dependencies }
@@ -99,8 +101,9 @@ async function approveAndConfirm(s: ReturnType<typeof setup>, actionId?: string)
   catch { throw Error((s.db.prepare('SELECT result_json FROM actions WHERE id=?').get(pending.action_id) as { result_json: string }).result_json) }
 }
 
-it.each([['worker', false, 'new'], ['router', false, 'new'], ['worker', true, 'new'], ['worker', false, 'denied'], ['worker', false, 'draft'], ['worker', false, 'conflict']] as const)('sends scoped feedback to %s (no progress: %s, replacement: %s) without blocking an independent publication', async (recipient, noProgress, replacement) => {
-  const s = setup(true, true), affected = s.source('affected', bundle('Affected body'), true, replacement === 'new'), independent = s.source('independent', bundle('Independent body'))
+it.each([['worker', false, 'new', false], ['router', false, 'new', false], ['worker', true, 'new', false], ['worker', false, 'denied', false], ['worker', false, 'draft', false], ['worker', false, 'conflict', false], ['worker', false, 'new', true]] as const)('sends scoped feedback to %s (no progress: %s, replacement: %s, failed source Run: %s) without blocking an independent publication', async (recipient, noProgress, replacement, failedSource) => {
+  const s = setup(true, true), affected = s.source('affected', bundle('Affected body'), true, replacement === 'new' && !failedSource, 'model', 1, failedSource), independent = s.source('independent', bundle('Independent body'))
+  if (failedSource) s.db.prepare("UPDATE runs SET state='failed',commit_valid=0 WHERE id=?").run(affected.run)
   s.record(s.task, 'runner.delivery.opened', { request_id: 'affected', intent_revision: 1, input_event_id: 'input-affected', state: 'open' })
   s.record(s.task, 'runner.delivery.opened', { request_id: 'independent', intent_revision: 1, input_event_id: 'input-independent', state: 'open' })
   const originalView = replacement === 'new' ? undefined : await (async () => {
@@ -160,7 +163,7 @@ it.each([['worker', false, 'new'], ['router', false, 'new'], ['worker', true, 'n
   const repair = new RunnerRepairState(s.db, s.state, s.artifacts, s.composition)
   expect(repair.install({ result, issues }, owner, s.record)).toBe(receipt[0]!.id)
   expect(s.records('runner.repair.requested')).toHaveLength(1)
-  expect(s.state.run(affected.run)).toMatchObject({ state: 'completed', commit_valid: false })
+  expect(s.state.run(affected.run)).toMatchObject({ state: failedSource ? 'failed' : 'completed', commit_valid: false })
   await vi.waitFor(() => expect(s.records('runner.repair.started')).toHaveLength(1))
   expect(s.records('runner.repair.routed')).toHaveLength(recipient === 'router' ? 1 : 0)
   if (recipient === 'worker') {

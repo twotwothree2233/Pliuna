@@ -138,6 +138,22 @@ export class RunnerHostRecovery {
     return ['registered', 'queued', 'revoked'].includes(attempt.state) && attempt.dispatch_state === 'not_dispatched' && !this.attemptMayHaveDispatched(attempt)
   }
 
+  waitingAssignmentRecovery(work: LogicalWork): { attempt: ExecutionAttempt; router?: ExecutionAttempt } | undefined {
+    const waiting = this.work.waitingAssignment(work)
+    if (!waiting) return
+    if (this.work.clarifiedAssignment(work)) return { attempt: waiting.attempt }
+    if (this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind IN ('runner.input.resolved','runner.input.blocked')
+      AND json_extract(payload_json,'$.report_id')=? LIMIT 1`).get(work.task_id, waiting.reportId)) return
+    const receipt = this.db.prepare(`SELECT json_extract(payload_json,'$.attempt_id') attempt_id FROM records
+      WHERE task_id=? AND kind='runner.input.routed' AND json_extract(payload_json,'$.report_id')=?
+        AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1`).get(work.task_id, waiting.reportId, work.run_id) as { attempt_id: string } | undefined
+    if (!receipt) return { attempt: waiting.attempt }
+    const router = this.work.attempt(receipt.attempt_id), route = this.work.work(router.work_id)
+    if (router.task_id === work.task_id && router.run_id === work.run_id && router.profile_id === 'work-router-v1' &&
+      route.run_id === work.run_id && route.role === 'router' && !terminalWorks.has(route.state) &&
+      route.current_attempt_id === router.attempt_id && this.undispatchedAttempt(router.attempt_id)) return { attempt: waiting.attempt, router }
+  }
+
   pendingInputs(taskId: string, cursor?: string, limit: number = RUNNER_LIMITS.index.page_items): RunnerRecoveryInputPage {
     assertRunnerId(taskId, 'task_id')
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > RUNNER_LIMITS.index.page_items) invalid()
@@ -242,7 +258,9 @@ export class RunnerHostRecovery {
     for (const work of works) {
       if (work.task_id !== taskId || work.run_id !== runId || terminalWorks.has(work.state)) ineligible()
       if (waiting.has(work.work_id)) {
-        if (!this.work.clarifiedAssignment(work)) ineligible()
+        const binding = this.waitingAssignmentRecovery(work)
+        if (!binding || binding.router && workIds.includes(binding.router.work_id)) ineligible()
+        if (binding.attempt.attempt_number >= work.max_attempts) fail('RUNNER_ATTEMPTS_EXHAUSTED', 'Recovery cannot exceed the installed attempt limit')
         continue
       }
       if (planned.has(work.work_id)) {
@@ -281,7 +299,10 @@ export class RunnerHostRecovery {
       }
       synchronous(host.installRun(copy(run), copy(source)))
       this.work.registerRun(run)
-      for (const workId of waiting) this.work.rebindClarifiedAssignment(workId, run.run_id)
+      for (const workId of waiting) {
+        const binding = this.waitingAssignmentRecovery(this.work.work(workId)) ?? ineligible()
+        this.work.rebindWaitingAssignment(workId, run.run_id, binding.router)
+      }
       const starting = source.works.filter(work => !waitingIds.has(work.work_id))
       const plans = starting.map(work => {
         const { current_attempt_id: _attempt, root_cause: _cause, result_revision: _result, ...binding } = work

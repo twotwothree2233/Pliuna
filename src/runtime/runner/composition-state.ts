@@ -96,10 +96,20 @@ export class RunnerCompositionState {
       WHERE successor.purpose='production' AND successor.request_id=@request AND successor.intent_revision=@intent AND successor.budget_id=@budget
         AND json_extract(successor.payload_json,'$.previous_run_id')=prior.id
         AND json_extract(r.payload_json,'$.request_id')=@request AND json_extract(r.payload_json,'$.intent_revision')=@intent
-      ) SELECT 1 FROM lineage JOIN runs c ON c.id=lineage.run_id AND c.task_id=@task AND c.request_id=@request
+      ), related AS (
+        SELECT c.id,c.state,c.commit_valid,c.runtime_epoch,c.intended_terminal FROM lineage
+        JOIN runs c ON c.id=lineage.run_id AND c.task_id=@task AND c.request_id=@request
+      ) SELECT 1 FROM related c
       WHERE c.state='completed' OR c.state='failed' AND @assigned=1 AND c.commit_valid=0
         OR c.state IN ('running','waiting') AND c.runtime_epoch=@epoch
-          AND (c.commit_valid=1 OR c.intended_terminal='completed' OR c.intended_terminal='failed' AND @assigned=1) LIMIT 1`)
+          AND (c.commit_valid=1 OR c.intended_terminal='completed' OR c.intended_terminal='failed' AND @assigned=1)
+      UNION ALL SELECT 1 WHERE @assigned=1 AND NOT EXISTS (
+        SELECT 1 FROM related r WHERE r.state!='interrupted' OR r.commit_valid!=0
+          OR EXISTS (SELECT 1 FROM runner_work w WHERE w.run_id=r.id AND w.state IN ('planned','queued','running','waiting'))
+          OR EXISTS (SELECT 1 FROM runner_attempts a WHERE a.run_id=r.id AND (a.state NOT IN ('succeeded','failed','cancelled','revoked') OR json_extract(a.payload_json,'$.dispatch_state')='unknown'))
+          OR EXISTS (SELECT 1 FROM calls c WHERE c.run_id=r.id AND (c.state!='ended' OR c.execution='unknown'))
+          OR EXISTS (SELECT 1 FROM actions a WHERE a.run_id=r.id AND (a.state!='ended' OR a.result='unknown'))
+      ) LIMIT 1`)
       .get({ original: run.run_id, task: run.task_id, request: run.request_id, intent: run.intent_revision, budget: run.budget_id, epoch: this.work.epoch, assigned: Number(assigned) })
     if (run.state !== 'closing' || run.runtime_epoch !== this.work.epoch) return false
     const row = this.db.prepare('SELECT intended_terminal FROM runs WHERE id=? AND task_id=? AND runtime_epoch=?').get(run.run_id, run.task_id, run.runtime_epoch) as { intended_terminal: string | null } | undefined
