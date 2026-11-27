@@ -702,6 +702,7 @@ export class RuntimeStore {
             checkAssignmentRequirements(decision, initialDeliveryRequirements(route.kind, decision))
             for (const assignment of decision.assignments) for (const binding of assignment.inputs ?? []) {
               if ('work_id' in binding) checkOutput(binding, assignment.assignment_key)
+              else if ('kind' in binding) content.checkNew(contentScope, binding, assignment.assignment_key)
             }
           }
           else if (replacementRevision !== undefined) fail('RUNNER_PLAN_CONFLICT', 'The rejected work draft has not been replaced')
@@ -1595,6 +1596,7 @@ export class RuntimeStore {
         const unavailable = works.map(work => {
           const attempt = work.current_attempt_id ? state.attempt(work.current_attempt_id) : undefined
           if (!attempt) return work.purpose === 'production' && work.assignment && work.state === 'planned' && !state.attempts(work.work_id).length ? null : 'RUNNER_RECOVERY_INELIGIBLE'
+          if (state.clarifiedAssignment(work)) return attempt.attempt_number < work.max_attempts ? null : 'RUNNER_ATTEMPTS_EXHAUSTED'
           if (attempt.state === 'unknown' || attempt.dispatch_state !== 'not_dispatched') return 'RUNNER_OPERATION_UNKNOWN'
           if (attempt.profile_id !== 'producer-output-v1' && !(attempt.profile_id === 'work-router-v1' && repairRequestId(this.db, task, work.work_id))) return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
           if (attempt.attempt_number >= work.max_attempts) return 'RUNNER_ATTEMPTS_EXHAUSTED'
@@ -1667,10 +1669,12 @@ export class RuntimeStore {
         approval = this.models.acquire(selection.approval_id, 'approval')
         if (approval.revision !== selection.approval_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovery requires the original approval revision')
       }
+      const waits = new Set<string>()
       const attempts: ExecutionAttempt[] = works.flatMap(work => {
         if (!work.current_attempt_id) return []
         const original = state.attempt(work.current_attempt_id)
         if (original.model_config_id !== main.id || original.model_config_revision !== main.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovered attempts retain their model binding')
+        if (state.clarifiedAssignment(work)) { waits.add(work.work_id); return [] }
         state.checkHandoffs(work, original.attempt_id)
         const { result_ref: _result, operation_id: _operation, ...binding } = original
         return [{ ...binding, attempt_id: id(), previous_attempt_id: original.attempt_id, run_id: runId, runtime_epoch: epoch, attempt_number: original.attempt_number + 1, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }]
@@ -1688,7 +1692,7 @@ export class RuntimeStore {
           repairTargets.set(work.work_id, { repair, target })
           if (binding) this.record(task, 'runner.repair.rebound', { ...binding, repair_run_id: runId, previous_run_id: previousRunId })
         }
-        new RunnerHostRecovery(this.db, epoch).resume({ run: { ...previous, run_id: runId, previous_run_id: previous.run_id, runtime_epoch: epoch, state: 'running', commit_valid: true }, attempts, planned_work_ids: works.filter(work => !work.current_attempt_id).map(work => work.work_id) }, {
+        new RunnerHostRecovery(this.db, epoch).resume({ run: { ...previous, run_id: runId, previous_run_id: previous.run_id, runtime_epoch: epoch, state: 'running', commit_valid: true }, attempts, planned_work_ids: works.filter(work => !work.current_attempt_id).map(work => work.work_id), waiting_work_ids: [...waits] }, {
           recheck: () => {
             this.acceptWork(); this.recovery.assertWrite()
             if (!this.runnerRunAvailable(task, request)) fail('RUN_BUSY', 'Recovery awaits production admission')
@@ -1704,6 +1708,7 @@ export class RuntimeStore {
         for (const attempt of attempts) this.installAssignmentHandoffs(state, state.work(attempt.work_id), attempt)
       })()
       this.agents.set(runId, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
+      if (waits.size) this.aggregateWorkerRun(task, runId)
       for (const attempt of attempts) {
         const resumed = repairTargets.get(attempt.work_id)
         const execution = attempt.profile_id === 'work-router-v1' && resumed
@@ -1843,8 +1848,9 @@ export class RuntimeStore {
       FROM records q JOIN records e ON e.id=json_extract(q.payload_json,'$.report_id') AND e.task_id=q.task_id AND e.kind='runner.input.reported'
       JOIN runner_work w ON w.work_id=json_extract(e.payload_json,'$.work_id') AND w.task_id=q.task_id AND w.state='waiting' AND w.plan_revision=json_extract(e.payload_json,'$.plan_revision')
       JOIN runner_attempts a ON a.attempt_id=json_extract(e.payload_json,'$.attempt_id') AND a.task_id=q.task_id AND a.work_id=w.work_id AND a.state='revoked'
-      JOIN runs r ON r.id=w.run_id AND r.task_id=q.task_id AND r.id=json_extract(q.payload_json,'$.run_id') AND r.runtime_epoch=? AND r.commit_valid=1
+      JOIN runs r ON r.id=w.run_id AND r.task_id=q.task_id AND r.runtime_epoch=? AND r.commit_valid=1
       WHERE q.task_id=? AND q.kind='runner.input.clarification' AND q.sequence<=? AND a.attempt_id=json_extract(w.payload_json,'$.current_attempt_id')
+      AND a.run_id=json_extract(q.payload_json,'$.run_id')
       AND NOT EXISTS (SELECT 1 FROM records b WHERE b.task_id=q.task_id AND b.kind='runner.input.bound' AND json_extract(b.payload_json,'$.clarification_id')=q.id)
       ORDER BY q.sequence DESC LIMIT 16`).all(this.epoch, task, through) as PendingWorkerInput[]
   }
@@ -1901,6 +1907,7 @@ export class RuntimeStore {
         const current = state.work(origin.work_id)
         return source.report.wait && current.state === 'waiting' && current.plan_revision === source.plan_revision && current.current_attempt_id === source.attempt_id ? current : undefined
       }
+      let affected: LogicalWork[] = []
       void this.executeWorker(attempt.attempt_id, profile, {
         text: this.runnerGoalText(task, origin.request_id, origin.intent_revision),
         bound: { base_revision: revision(), report: source, work_table: this.routingWorkTable(state, task, attempt, source.run_id) },
@@ -1914,7 +1921,7 @@ export class RuntimeStore {
         this.record(task, 'runner.input.resolved', { report_id: row.id, owner, request_id: origin.request_id, run_id: origin.run_id, result })
         const current = stillWaiting()
         if (!current) return
-        if (result.kind === 'blocked') state.revokeWork(current.work_id, { kind: 'failure', work_id: current.work_id, attempt_id: source.attempt_id })
+        if (result.kind === 'blocked') affected = state.revokeWork(current.work_id, { kind: 'failure', work_id: current.work_id, attempt_id: source.attempt_id })
         if (result.kind === 'clarification') {
           const attempt = state.attempt(source.attempt_id), sourceOwner = this.workerOwner({ task_id: task, runtime_epoch: this.epoch, work: current, run: state.run(origin.run_id), attempt })
           this.record(task, 'runner.input.clarification', { owner, report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, reply_to: origin.message_id, text: result.question })
@@ -1923,15 +1930,16 @@ export class RuntimeStore {
       }, undefined, undefined, result => result.kind === 'updated' && stillWaiting() ? {
         code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
         message: 'The reporting assignment is still waiting. Bind or revise that assignment, ask for clarification, or return blocked.'
-      } : null).catch(error => {
+      } : null).then(() => this.settleDependentRuns(task, affected, origin.run_id), error => {
         if (this.closed || this.closing || !this.db.open || !state.run(origin.run_id).commit_valid) return
         const router = state.attempt(attempt.attempt_id), current = stillWaiting()
         if (!current || router.state === 'unknown' || router.dispatch_state === 'unknown') return
         const code = error instanceof ContractError || error instanceof ModelError ? error.code : 'MODEL_EXECUTION_FAILED'
-        this.db.transaction(() => {
+        const affected = this.db.transaction(() => {
           this.record(task, 'runner.input.blocked', { report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, work_id: current.work_id, routing_attempt_id: router.attempt_id, code })
-          state.revokeWork(current.work_id, { kind: 'failure', work_id: router.work_id, attempt_id: router.attempt_id, reason: code })
+          return state.revokeWork(current.work_id, { kind: 'failure', work_id: router.work_id, attempt_id: router.attempt_id, reason: code })
         }).immediate()
+        this.settleDependentRuns(task, affected, origin.run_id)
         this.aggregateWorkerRun(task, origin.run_id)
       })
     }
@@ -2075,7 +2083,7 @@ export class RuntimeStore {
       AND NOT EXISTS(SELECT 1 FROM records r WHERE r.task_id=b.task_id AND r.kind='runner.composition.feedback' AND json_extract(r.payload_json,'$.run_id')=c.id)`).get(task, artifact, revision)
   }
   private queueAssignedWork(state: RunnerWorkState, task: string): void {
-    const settle = new Set<string>()
+    const settle = new Set<string>(), affected: LogicalWork[] = []
     for (const work of state.taskWorks(task)) {
       if (work.purpose !== 'production' || !work.assignment || work.state !== 'planned' || work.current_attempt_id) continue
       const agent = this.agents.get(work.run_id), run = state.run(work.run_id)
@@ -2096,11 +2104,12 @@ export class RuntimeStore {
         void this.executeRunnerProduction(attempt.attempt_id).catch(() => {})
       } catch (error) {
         if (!(error instanceof ContractError) || !['RUNNER_OUTPUT_UNAVAILABLE', 'RUNNER_DEPENDENCY_INVALID', 'RUNNER_ATTEMPT_CONFLICT'].includes(error.code)) throw error
-        state.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id })
+        affected.push(...state.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id }))
         this.record(task, 'runner.assignment.blocked', { run_id: work.run_id, request_id: work.request_id, work_id: work.work_id, code: error.code, reason: error.message })
         settle.add(work.run_id)
       }
     }
+    this.settleDependentRuns(task, affected)
     for (const runId of settle) this.aggregateWorkerRun(task, runId)
   }
   private installAssignmentHandoffs(state: RunnerWorkState, work: LogicalWork, attempt: ExecutionAttempt): void {
@@ -2114,12 +2123,15 @@ export class RuntimeStore {
   private repairTarget(state: RunnerWorkState, task: string, repair: PendingRepair) {
     const { issue, request_id, intent_revision } = repair, artifacts = this.runnerArtifacts(), direct = repair.recipient.kind === 'worker'
     const index = issue.kind === 'missing_requirement' ? null : artifacts.artifact(task, issue.artifact.artifact_id, issue.artifact.artifact_revision)
-    const sourceId = index?.work_id ?? this.runnerComposition().source(task, request_id, intent_revision)?.work_id
+    const composition = this.runnerComposition(), designated = !index ? composition.source(task, request_id, intent_revision) : null
+    const sourceId = index?.work_id ?? designated?.work_id
     if (!sourceId || issue.kind !== 'missing_requirement' && !index || direct && !index) fail('REPAIR_SOURCE_INELIGIBLE', 'The feedback source is unavailable')
     const source = state.work(sourceId), originalId = index?.attempt_id ?? source.current_attempt_id
     if (!originalId) fail('REPAIR_SOURCE_INELIGIBLE', 'The feedback source has no eligible attempt')
     const original = state.attempt(originalId), previous = state.run(original.run_id)
-    if (source.purpose !== 'production' || previous.purpose !== 'production' || direct && source.role !== 'producer' || source.update_id || previous.state !== 'completed' || original.state !== 'succeeded') fail('REPAIR_SOURCE_INELIGIBLE', 'Feedback requires an eligible settled production source')
+    if (source.purpose !== 'production' || previous.purpose !== 'production' || direct && source.role !== 'producer' || source.update_id || original.state !== 'succeeded') fail('REPAIR_SOURCE_INELIGIBLE', 'Feedback requires an eligible settled production source')
+    if (previous.state !== 'completed' && !(previous.state === 'interrupted' && designated?.plan_revision === source.plan_revision && source.result_revision !== undefined &&
+      composition.checkOutput(task, source.work_id, source.plan_revision, source.result_revision)?.attempt_id === originalId)) fail('REPAIR_SOURCE_INELIGIBLE', 'Feedback requires an eligible settled production source')
     if (this.db.prepare(`SELECT 1 FROM actions a JOIN approvals p ON p.action_id=a.id WHERE a.task_id=? AND p.decision='deny'
       AND json_extract(a.source_json,'$.owner.attempt_id')=?`).get(task, original.attempt_id)) fail('APPROVAL_DENIED', 'Feedback cannot bypass an original denial')
     const requirements = index ? artifacts.candidate(task, this.one('SELECT candidate_id FROM runner_artifacts WHERE task_id=? AND artifact_id=? AND artifact_revision=?', task, index.artifact_id, index.artifact_revision).candidate_id)!.candidate.requirement_ids : []
@@ -2366,7 +2378,15 @@ export class RuntimeStore {
         } : null)
         : prepared.collator.rulePlan()
     } catch (error) {
-      this.finish(task, prepared.run_id, 'failed', error instanceof ContractError ? error.code : 'COLLATOR_FAILED')
+      if (!this.closed && this.db.open) {
+        const state = new RunnerWorkState(this.db, this.epoch), run = state.run(prepared.run_id), attempt = state.attempt(prepared.attempt_id)
+        if (!this.closing && this.runnerComposition().batch(task, prepared.batch.batch_id)?.state === 'preparing' &&
+          attempt.state !== 'unknown' && attempt.dispatch_state !== 'unknown' && run.state !== 'interrupted') {
+          this.runnerHostComposition().setBatchState(task, prepared.batch.batch_id, run.state === 'cancelled' || attempt.state === 'cancelled' ? 'cancelled' : 'failed')
+        }
+        this.finish(task, prepared.run_id, 'failed', error instanceof ContractError || error instanceof ModelError ? error.code : 'COLLATOR_FAILED')
+        this.settleRunnerDeliveries(task)
+      }
       throw error
     }
     if ('kind' in outcome) {
@@ -2725,7 +2745,7 @@ export class RuntimeStore {
     const interrupted = terminal.intended_terminal === 'interrupted'
     const outcome = interrupted && proposed.phase !== 'terminal' ? {
       phase: 'closing' as const, outcome: 'interrupted' as const,
-      cancel_work_ids: works.filter(work => ['planned', 'queued', 'running', 'waiting'].includes(work.state) && !(terminal.primary_reason === 'host_shutdown' && this.undispatchedShutdownWork(work))).map(work => work.work_id),
+      cancel_work_ids: works.filter(work => ['planned', 'queued', 'running', 'waiting'].includes(work.state) && !(terminal.primary_reason === 'host_shutdown' && this.preservedShutdownWork(work))).map(work => work.work_id),
       unknown_attempt_ids: attempts.filter(attempt => attempt.state === 'unknown' || attempt.dispatch_state === 'unknown').map(attempt => attempt.attempt_id)
     } : proposed
     if (outcome.phase === 'terminal') return
@@ -2734,12 +2754,13 @@ export class RuntimeStore {
       return
     }
     state.closeRun(runId)
-    for (const workId of outcome.cancel_work_ids) state.revokeWork(workId)
+    const affected = outcome.cancel_work_ids.flatMap(workId => state.revokeWork(workId))
     const cancelledAttempts = attempts.filter(attempt => outcome.cancel_work_ids.includes(attempt.work_id)).map(attempt => attempt.attempt_id)
     if (cancelledAttempts.length) this.revokeRunActions(runId, cancelledAttempts)
     for (const [attemptId, worker] of this.workers) if (worker.owner.run_id === runId && outcome.cancel_work_ids.includes(worker.owner.work_id)) {
       this.pluginCalls.cancelAttempt(attemptId); this.monty.cancelAttempt(attemptId); worker.controller.abort()
     }
+    this.settleDependentRuns(taskId, affected, runId)
     if (!outcome.outcome) { this.pumpRunnerWorkers(taskId); return }
     // Missing token usage remains an accounting fact after the request ends.
     // Only execution ownership and unconfirmed effects keep a Run closing.
@@ -2756,16 +2777,20 @@ export class RuntimeStore {
     this.pumpRunnerWorkers(taskId)
   }
   private reconcileRunnerDependencies(state: RunnerWorkState, task: string, currentRun?: string): void {
+    this.settleDependentRuns(task, state.reconcileDependencies(task), currentRun)
+  }
+  private settleDependentRuns(task: string, affected: LogicalWork[], currentRun?: string): void {
+    if (this.closed || !this.db.open) return
     const runs = new Set<string>()
-    for (const work of state.reconcileDependencies(task)) {
-      if (work.purpose !== 'production' || !work.assignment || work.state !== 'invalidated') continue
-      runs.add(work.run_id)
+    for (const work of affected) {
+      if (work.purpose !== 'production' || !work.assignment || !['invalidated', 'dependency_failed', 'dependency_cancelled'].includes(work.state)) continue
+      if (work.run_id !== currentRun) runs.add(work.run_id)
       if (!work.current_attempt_id) continue
       this.revokeRunActions(work.run_id, [work.current_attempt_id])
       this.pluginCalls.cancelAttempt(work.current_attempt_id); this.monty.cancelAttempt(work.current_attempt_id)
       this.workers.get(work.current_attempt_id)?.controller.abort()
     }
-    for (const run of runs) if (run !== currentRun) this.aggregateWorkerRun(task, run)
+    for (const run of runs) this.aggregateWorkerRun(task, run)
   }
   private workersForRun(runId: string): boolean { return [...this.workers.values()].some(worker => worker.owner.run_id === runId) }
   private runnerCleanupPending(runId: string): boolean {
@@ -4580,12 +4605,12 @@ export class RuntimeStore {
       throw error
     }
   }
-  private undispatchedShutdownWork(work: LogicalWork): boolean {
+  private preservedShutdownWork(work: LogicalWork): boolean {
     if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state)) return false
     const state = new RunnerWorkState(this.db, this.epoch)
     if (!work.current_attempt_id) return work.state === 'planned' && !!work.assignment && !state.attempts(work.work_id).length
     const attempt = state.attempt(work.current_attempt_id)
-    return attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
+    return !!state.clarifiedAssignment(work) || attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
   }
   private finish(taskId: string, runId: string, state: string, reason: string, runnerFinal = false): void {
     if (!runnerFinal && state === 'cancelled') {
@@ -4599,22 +4624,23 @@ export class RuntimeStore {
       const core = this.one('SELECT state FROM runs WHERE id=? AND task_id=?', runId, taskId)
       if (!['running', 'waiting'].includes(core.state)) return
       const workState = new RunnerWorkState(this.db, this.epoch)
-      this.db.transaction(() => {
+      const affected = this.db.transaction(() => {
         if (state === 'cancelled') this.record(taskId, 'runner.cancelled', { run_id: runId, scope: this.task(taskId).state === 'stopping' ? 'task' : 'run', reason })
         if (state === 'interrupted') this.db.prepare('UPDATE runs SET intended_terminal=COALESCE(intended_terminal,?),primary_reason=COALESCE(primary_reason,?) WHERE id=?').run(state, reason, runId)
         workState.closeRun(runId)
         const works = workState.taskWorks(taskId).filter(work => work.run_id === runId)
         const terminal = this.one('SELECT intended_terminal,primary_reason FROM runs WHERE id=?', runId)
+        let affected: LogicalWork[] = []
         if (terminal.intended_terminal === 'interrupted' && terminal.primary_reason === 'host_shutdown') {
-          // Host exit revokes this Run, while definitely undispatched content
-          // remains eligible for a new Run and attempt after restart.
-          for (const work of works) if (!this.undispatchedShutdownWork(work)) workState.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id })
-        } else if (works.length) workState.revokeRun(runId, { kind: state === 'cancelled' ? 'cancellation' : 'failure', work_id: works[0]!.work_id })
+          affected = works.filter(work => !this.preservedShutdownWork(work)).flatMap(work => workState.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id }))
+        } else if (works.length) affected = workState.revokeRun(runId, { kind: state === 'cancelled' ? 'cancellation' : 'failure', work_id: works[0]!.work_id })
         this.revokeRunActions(runId)
+        return affected
       })()
       this.pluginCalls.cancelRun(runId); this.monty.cancelRun(runId)
       this.agents.get(runId)?.controller.abort()
       for (const worker of this.workers.values()) if (worker.owner.run_id === runId) worker.controller.abort()
+      this.settleDependentRuns(taskId, affected, runId)
       this.aggregateWorkerRun(taskId, runId)
       this.pumpRunnerWorkers(taskId)
       return

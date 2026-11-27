@@ -479,6 +479,35 @@ export class RunnerWorkState {
       AND json_extract(payload_json,'$.attempt_id')=? AND json_extract(payload_json,'$.plan_revision')<? LIMIT 1`).get(attempt.task_id, attempt.attempt_id, beforeRevision)
   }
 
+  clarifiedAssignment(work: LogicalWork): ExecutionAttempt | undefined {
+    if (work.purpose !== 'production' || !work.assignment || work.update_id || work.state !== 'waiting' || !work.current_attempt_id) return
+    const attempt = this.attempt(work.current_attempt_id)
+    if (!sameSource(work, attempt) || attempt.work_id !== work.work_id || attempt.profile_id !== 'producer-output-v1' || attempt.state !== 'revoked' ||
+      attempt.dispatch_state !== 'dispatched') return
+    if (!this.db.prepare(`SELECT 1 FROM records q JOIN records w ON w.task_id=q.task_id AND w.kind='runner.assignment.waiting'
+      AND json_extract(w.payload_json,'$.report_id')=json_extract(q.payload_json,'$.report_id')
+      WHERE q.task_id=@task AND q.kind='runner.input.clarification' AND json_extract(q.payload_json,'$.run_id')=@run
+      AND json_extract(w.payload_json,'$.run_id')=@run AND json_extract(w.payload_json,'$.attempt_id')=@attempt
+      AND json_extract(w.payload_json,'$.work_id')=@work AND json_extract(w.payload_json,'$.plan_revision')=@revision
+      AND NOT EXISTS (SELECT 1 FROM records b WHERE b.task_id=q.task_id AND b.kind='runner.input.bound' AND json_extract(b.payload_json,'$.clarification_id')=q.id)
+      LIMIT 1`).get({ task: work.task_id, run: attempt.run_id, attempt: attempt.attempt_id, work: work.work_id, revision: work.plan_revision })) return
+    if (this.db.prepare(`SELECT 1 FROM actions WHERE run_id=@run AND json_extract(source_json,'$.owner.attempt_id')=@attempt AND (state!='ended' OR result='unknown')
+      UNION ALL SELECT 1 FROM calls WHERE run_id=@run AND json_extract(limits_json,'$.owner.attempt_id')=@attempt AND (state!='ended' OR execution='unknown') LIMIT 1`)
+      .get({ run: attempt.run_id, attempt: attempt.attempt_id })) return
+    return attempt
+  }
+
+  rebindClarifiedAssignment(workId: string, runId: string): void {
+    const work = this.work(workId), run = this.run(runId), previous = this.run(work.run_id)
+    const attempt = this.clarifiedAssignment(work)
+    if (!this.db.inTransaction || !attempt || run.previous_run_id !== previous.run_id || previous.state !== 'interrupted' || previous.commit_valid ||
+      previous.runtime_epoch === this.epoch || !sameSource(run, work) || attempt.attempt_number >= work.max_attempts) fail('RUNNER_PLAN_CONFLICT', 'Only a settled assignment waiting for clarification can rebind without an attempt')
+    this.sourceCurrent(run)
+    this.checkHandoffs(work, attempt.attempt_id)
+    this.dependenciesCurrent(work.dependencies, true)
+    this.saveWork({ ...work, run_id: runId })
+  }
+
   suspendAssignment(attemptId: string, reportId: string, recordWait: (work: LogicalWork) => void): void {
     this.db.transaction(() => {
       const { attempt, work } = this.qualify(attemptId)

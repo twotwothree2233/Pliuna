@@ -88,7 +88,7 @@ export function aggregateRunOutcome(input: RunOutcomeInput): RunOutcome {
       if (work.purpose === 'production' && work.assignment) result = 'failed'
       else wait('work_invalidated')
     }
-    else if (work.current_attempt_id && !attempt) wait('attempt_unavailable')
+    else if (work.current_attempt_id && !attempt) wait(work.state === 'waiting' && (input.states ?? []).some(state => state.work_id === work.work_id && state.attempt_id === work.current_attempt_id && state.reason === 'input_required') ? 'input_required' : 'attempt_unavailable')
     else if (attempt?.state === 'unknown' || attempt?.dispatch_state === 'unknown') { /* Original operation must be reconciled. */ }
     else if (attempt?.state === 'failed') {
       if (attempt.attempt_number >= work.max_attempts) result = 'failed'

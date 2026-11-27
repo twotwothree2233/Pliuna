@@ -41,7 +41,7 @@ export interface RunnerResumeSource {
   attempts: ExecutionAttempt[]
   request_id: string
 }
-export interface RunnerResumeInput { run: RunnerRun; attempts: ExecutionAttempt[]; planned_work_ids?: string[] }
+export interface RunnerResumeInput { run: RunnerRun; attempts: ExecutionAttempt[]; planned_work_ids?: string[]; waiting_work_ids?: string[] }
 export interface RunnerResumeHost {
   // Acquire leases and prepare material/configuration facts before this call.
   // Recheck their exact current bindings here, inside the installation lock.
@@ -223,7 +223,7 @@ export class RunnerHostRecovery {
     return this.queryOperation(taskId, operationId)
   }
 
-  private source(taskId: string, runId: string, workIds: readonly string[]): RunnerResumeSource {
+  private source(taskId: string, runId: string, workIds: readonly string[], waiting: ReadonlySet<string>): RunnerResumeSource {
     assertRunnerId(taskId, 'task_id'); assertRunnerId(runId, 'run_id')
     if (!this.db.prepare("SELECT id FROM tasks WHERE id=? AND state='active'").get(taskId)) ineligible()
     const previous_run = this.work.run(runId)
@@ -241,6 +241,10 @@ export class RunnerHostRecovery {
     const attempts: ExecutionAttempt[] = []
     for (const work of works) {
       if (work.task_id !== taskId || work.run_id !== runId || terminalWorks.has(work.state)) ineligible()
+      if (waiting.has(work.work_id)) {
+        if (!this.work.clarifiedAssignment(work)) ineligible()
+        continue
+      }
       const previous = this.work.attempts(work.work_id).at(-1)
       if (previous) {
         if (work.current_attempt_id !== previous.attempt_id || previous.run_id !== runId || !['registered', 'queued', 'revoked'].includes(previous.state) || previous.dispatch_state !== 'not_dispatched' || this.attemptMayHaveDispatched(previous) || previous.attempt_number >= work.max_attempts) ineligible()
@@ -252,15 +256,16 @@ export class RunnerHostRecovery {
 
   resume(raw: RunnerResumeInput, host: RunnerResumeHost): RunnerResumeResult {
     const run = validateRunnerContract('runner_run', copy(raw.run)), attempts = raw.attempts.map(value => validateRunnerContract('runner_execution_attempt', copy(value)))
-    const planned = raw.planned_work_ids ?? [], workIds = [...attempts.map(value => value.work_id), ...planned]
+    const planned = raw.planned_work_ids ?? [], waiting = raw.waiting_work_ids ?? [], waitingIds = new Set(waiting)
+    const workIds = [...attempts.map(value => value.work_id), ...planned, ...waiting]
     if (!run.previous_run_id || run.run_id === run.previous_run_id || run.runtime_epoch !== this.epoch || !run.commit_valid || !['queued', 'running'].includes(run.state) || !workIds.length || new Set(workIds).size !== workIds.length || new Set(attempts.map(value => value.attempt_id)).size !== attempts.length) ineligible()
     return this.db.transaction(() => {
       if (this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(run.run_id)) {
-        if (attempts.some(attempt => !this.db.prepare('SELECT 1 FROM runner_attempts WHERE attempt_id=? AND run_id=? AND work_id=?').get(attempt.attempt_id, run.run_id, attempt.work_id)) || planned.some(id => this.work.work(id).run_id !== run.run_id)) ineligible()
+        if (attempts.some(attempt => !this.db.prepare('SELECT 1 FROM runner_attempts WHERE attempt_id=? AND run_id=? AND work_id=?').get(attempt.attempt_id, run.run_id, attempt.work_id)) || [...planned, ...waiting].some(id => this.work.work(id).run_id !== run.run_id)) ineligible()
         const existing = this.work.registerRun(run)
         return { run: existing, works: workIds.map(id => this.work.work(id)), attempts: attempts.map(attempt => this.work.createAttempt(attempt)) }
       }
-      const source = this.source(run.task_id, run.previous_run_id!, workIds)
+      const source = this.source(run.task_id, run.previous_run_id!, workIds, waitingIds)
       const previous = source.previous_run
       if (run.budget_id !== previous.budget_id || run.purpose !== previous.purpose || run.purpose === 'production' && previous.purpose === 'production' && (run.request_id !== previous.request_id || run.intent_revision !== previous.intent_revision) || run.purpose === 'composition' && previous.purpose === 'composition' && (run.batch_id !== previous.batch_id || run.composition_version !== previous.composition_version || run.trigger_request_id !== previous.trigger_request_id)) ineligible()
       const plannedIds = new Set(planned)
@@ -272,8 +277,10 @@ export class RunnerHostRecovery {
       }
       synchronous(host.installRun(copy(run), copy(source)))
       this.work.registerRun(run)
-      const revisions = new Map(source.works.map(work => [work.work_id, work.plan_revision + 1]))
-      const plans = source.works.map(work => {
+      for (const workId of waiting) this.work.rebindClarifiedAssignment(workId, run.run_id)
+      const starting = source.works.filter(work => !waitingIds.has(work.work_id))
+      const revisions = new Map(starting.map(work => [work.work_id, work.plan_revision + 1]))
+      const plans = starting.map(work => {
         const { current_attempt_id: _attempt, root_cause: _cause, result_revision: _result, ...binding } = work
         const next = { ...binding, run_id: run.run_id, plan_revision: revisions.get(work.work_id)!, state: plannedIds.has(work.work_id) ? 'planned' : 'queued' } as LogicalWork
         if (next.purpose === 'production' && next.assignment) next.assignment = { ...next.assignment, inputs: next.assignment.inputs.map(input => 'work_id' in input && input.result_revision === undefined ? { ...input, plan_revision: revisions.get(input.work_id) ?? input.plan_revision } : input) }
@@ -284,7 +291,7 @@ export class RunnerHostRecovery {
         if (attempt.run_id !== run.run_id || attempt.runtime_epoch !== this.epoch) ineligible()
         this.work.createAttempt(attempt)
       }
-      return { run: this.work.run(run.run_id), works: plans.map(work => this.work.work(work.work_id)), attempts: attempts.map(attempt => this.work.attempt(attempt.attempt_id)) }
+      return { run: this.work.run(run.run_id), works: workIds.map(workId => this.work.work(workId)), attempts: attempts.map(attempt => this.work.attempt(attempt.attempt_id)) }
     }).immediate()
   }
 }

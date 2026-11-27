@@ -110,7 +110,7 @@ function executionItems(db: Database.Database, params: Params, options: Options,
     const work = db.prepare(`SELECT w.work_id,json_extract(w.payload_json,'$.role') role,
       a.attempt_id,a.state attempt_state,json_extract(a.payload_json,'$.profile_id') profile,
       CASE WHEN w.state='waiting' THEN (SELECT json_extract(r.payload_json,'$.reason') FROM records r
-        WHERE r.task_id=w.task_id AND r.kind='worker.state' AND json_extract(r.payload_json,'$.owner.attempt_id')=a.attempt_id
+        WHERE r.task_id=w.task_id AND r.kind='worker.state' AND json_extract(r.payload_json,'$.owner.attempt_id')=json_extract(w.payload_json,'$.current_attempt_id')
         ORDER BY r.sequence DESC LIMIT 1)
         WHEN w.state='planned' AND EXISTS(SELECT 1 FROM json_each(w.payload_json,'$.dependencies') d
           JOIN runner_work upstream ON upstream.task_id=w.task_id AND upstream.work_id=json_extract(d.value,'$.work_id')
