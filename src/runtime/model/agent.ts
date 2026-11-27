@@ -9,8 +9,9 @@ import { modelToolRequest, modelToolResult, modelToolSuggestion } from './tool-i
 import { accountingResultLimit } from './accounting'
 import { type RequestLink } from './request-evidence'
 import { capacityPlan, serializedInput, rejectedContext, type RejectionStage } from './capacity'
-import type { WorkerProfile } from '../runner/worker-profile'
+import { WorkerResultRejection, type WorkerProfile } from '../runner/worker-profile'
 import { RUNNER_LIMITS } from '../runner/limits'
+import { READ_WORK_OUTPUT, WORK_OUTPUT_REPEAT_NOTICE } from '../runner/orchestration-tool'
 export interface AgentHost {
   context?(messages: ChatMessage[], recovery?: ContextRecovery): Promise<ChatMessage[]>
   valid(): void
@@ -19,6 +20,7 @@ export interface AgentHost {
   record(kind: string, payload: Record<string, unknown>): void
   tool(request: unknown, signal: AbortSignal): Promise<unknown>
   toolsSettled?(): void
+  yieldAfterTools?(): boolean
 }
 export interface ContextRecovery { overflow: true; partial?: string }
 export interface WorkerResultIssue {
@@ -37,11 +39,16 @@ export interface WorkerExecution<Result> {
 type LegacyBudgetLimits = NonNullable<ModelLease['config']['limits']> & { run_model_requests?: number; run_tool_requests?: number; run_tokens?: number; run_wall_ms?: number }
 export interface BudgetState { model_requests: number; tool_requests: number; tokens: number; accounting: 'estimated' | 'mixed' | 'provider-usage'; cost: 'unknown'; template: 'agent-v0.1'; limits_version: string; unbounded_output_requests?: number; limits?: LegacyBudgetLimits }
 export class RunBudget {
-  private usageResponses = 0
+  private totals: { usageResponses: number; state: BudgetState } = { usageResponses: 0, state: { model_requests: 0, tool_requests: 0, tokens: 0, accounting: 'estimated', cost: 'unknown', template: 'agent-v0.1', limits_version: defaults.version } }
   private observations = new Map<string, { input: string[]; tokens: number; tools: string }>()
   private reservations = new Map<number, { messages: ChatMessage[]; tools: ToolDefinition[] | undefined; config: ModelLease['config'] }[]>()
-  readonly state: BudgetState = { model_requests: 0, tool_requests: 0, tokens: 0, accounting: 'estimated', cost: 'unknown', template: 'agent-v0.1', limits_version: defaults.version }
   constructor(private config: ModelLease['config']) { this.config = structuredClone(config) }
+  get state(): BudgetState { return this.totals.state }
+  forAttempt(): RunBudget {
+    const budget = new RunBudget(this.config)
+    budget.totals = this.totals
+    return budget
+  }
   fits(messages: ChatMessage[], tools: ToolDefinition[] | undefined, config = this.config): boolean {
     return this.plan(messages, tools, config).fits
   }
@@ -67,7 +74,7 @@ export class RunBudget {
     if (!providerCheck && !this.plan(messages, tools, config).fits) throw this.rejection(messages, tools, stage, 'CONTEXT_BUDGET_EXCEEDED', config)
     this.state.model_requests++; this.state.tokens += input + output
     if (config.max_output_tokens === undefined) this.state.unbounded_output_requests = (this.state.unbounded_output_requests ?? 0) + 1
-    this.state.accounting = this.usageResponses ? 'mixed' : 'estimated'
+    this.state.accounting = this.totals.usageResponses ? 'mixed' : 'estimated'
     const reservation = input + output
     this.reservations.set(reservation, [...(this.reservations.get(reservation) ?? []), { messages: structuredClone(messages), tools, config }])
     return reservation
@@ -77,8 +84,8 @@ export class RunBudget {
     if (!entries?.length) this.reservations.delete(reservation)
     if (response.usage) {
       this.state.tokens += response.usage.prompt_tokens + response.usage.completion_tokens - reservation
-      this.usageResponses++
-      this.state.accounting = this.usageResponses === this.state.model_requests ? 'provider-usage' : 'mixed'
+      this.totals.usageResponses++
+      this.state.accounting = this.totals.usageResponses === this.state.model_requests ? 'provider-usage' : 'mixed'
       if (reserved) this.observe(messages ?? reserved.messages, messages ? tools : reserved.tools, response.usage, reserved.config)
     } else if (reserved) {
       this.observations.delete(JSON.stringify({ config: reserved.config, tools: reserved.tools }))
@@ -156,8 +163,8 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
         const signature = resultSignature(response.text)
         if (rejectedResults.has(signature)) throw error
         rejectedResults.add(signature)
-        host.record('worker.result.rejected', { code: error.code, ...association })
-        resultCorrection = correction
+        host.record('worker.result.rejected', { code: error.code, ...error.detail, ...association })
+        resultCorrection = error.detail ? `${correction}\nHost result validation: ${JSON.stringify(error.detail)}` : correction
         messages[0] = { role: 'system', content: [execution.profile.system, resultCorrection, preflightCorrection].filter(Boolean).join('\n\n') }
         continue
       }
@@ -186,14 +193,16 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
       if (host.context) await host.context(messages)
       return
     }
-    let failed = false
+    let failed = false, yielded = false
     for (const call of response.calls) {
       host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
       const errorCall = collator && !['list', 'read', 'write', 'call'].includes(call.function.name) ? { ...call, function: { ...call.function, name: 'unknown' } } : call
       let result: unknown
       let queryResultId: number | undefined
+      let queryPattern: typeof READ_WORK_OUTPUT | undefined
       let repeatedRejection = false
-      if (failed) result = toolError(errorCall, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
+      if (yielded) result = toolError(errorCall, 'WORKER_WAITING_INPUT', 'This attempt requested a wait; this call was not executed')
+      else if (failed) result = toolError(errorCall, 'PREVIOUS_TOOL_FAILED', 'Earlier tool failed; this call was not executed')
       else {
         budget.tool(); host.budget(budget.state)
         let raw: unknown
@@ -201,15 +210,23 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
         try {
           if (collator && call.function.name !== 'read') throw new ContractError('WORKER_CAPABILITY_DENIED', 'Collator can read only its frozen runner metadata')
           raw = JSON.parse(call.function.arguments)
+          if (queryResults && call.function.name === 'call' && raw && typeof raw === 'object' && 'capability' in raw && raw.capability === READ_WORK_OUTPUT) queryPattern = READ_WORK_OUTPUT
           const request = modelToolRequest(call.function.name, raw)
           profile?.authorize(request)
           validating = false
           rejectedInput = undefined
           const delivered = await host.tool(request, signal)
-          if (request.type === 'list' || request.type === 'read') queryResultId = queryResults?.identify(call, delivered)
+          let query: ReturnType<QueryResults['identify']>
+          if (queryPattern && request.type === 'call') {
+            const input = request.input.arguments as Record<string, unknown>
+            query = queryResults?.identify(queryPattern, JSON.stringify({ ...input, offset: input?.offset ?? 0 }), delivered)
+          } else if (request.type === 'list' || request.type === 'read') query = queryResults?.identify(request.type, call.function.arguments, delivered)
+          queryResultId = query?.id
           result = modelToolResult(call.function.name, raw, delivered)
+          if (queryPattern && query?.repeated) result = { ...result as object, notice: WORK_OUTPUT_REPEAT_NOTICE }
           const outcome = result as { execution?: string; delivery?: string } | null
           if ((outcome?.execution && outcome.execution !== 'success') || outcome?.delivery === 'failed') failed = true
+          yielded = host.yieldAfterTools?.() === true
         } catch (e) {
           host.valid(); if (signal.aborted) throw new ModelError('MODEL_CANCELLED')
           failed = true
@@ -219,7 +236,7 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
             repeatedRejection = rejectedInput === signature
             rejectedInput = signature
           }
-          const suggestion = !collator && e instanceof ContractError ? modelToolSuggestion(call.function.name, raw, e, request => {
+          const suggestion = !collator && !queryPattern && e instanceof ContractError ? modelToolSuggestion(call.function.name, raw, e, request => {
             if (!tools.some(tool => tool.function.name === request.type)) throw new ContractError('WORKER_CAPABILITY_DENIED', 'Suggested tool is unavailable')
             profile?.authorize(request)
           }) : undefined
@@ -229,10 +246,11 @@ export async function runAgent<Result = void>(service: ModelService, lease: Mode
       const content = JSON.stringify(result)
       if (Buffer.byteLength(content) > (call.function.name === 'read' ? accountingResultLimit(result) : defaults.read.text_bytes)) throw new ModelError('TOOL_RESULT_LIMIT')
       const message: ChatMessage = { role: 'tool', tool_call_id: call.id, content }
-      host.record('model.tool_result', { message, ...association, ...(queryResultId === undefined ? {} : { query_result_id: queryResultId }) }); messages.push(message)
+      host.record('model.tool_result', { message, ...association, ...(queryPattern ? { query_pattern: queryPattern } : {}), ...(queryResultId === undefined ? {} : { query_result_id: queryResultId }) }); messages.push(message)
       if (repeatedRejection) throw new ModelError('MODEL_TOOL_NO_PROGRESS')
     }
     host.toolsSettled?.()
+    if (yielded) return
   }
 }
 
@@ -243,10 +261,10 @@ class QueryResults {
   private bytes = 0
   private nextId = 0
 
-  identify(call: ToolCall, value: unknown): number | undefined {
+  identify(pattern: string, input: string, value: unknown): { id: number; repeated: boolean } | undefined {
     const result = value as { execution?: string; delivery?: string; data?: unknown } | null
     if (result?.execution !== 'success' || result.delivery !== 'delivered' || result.data === undefined) return
-    const key = JSON.stringify([call.function.name, resultSignature(call.function.arguments)])
+    const key = JSON.stringify([pattern, resultSignature(input)])
     const data = JSON.stringify(result.data)
     const bytes = Buffer.byteLength(key) + Buffer.byteLength(data), maxBytes = RUNNER_LIMITS.progress_query_result_bytes
     const previous = this.entries.get(key)
@@ -256,9 +274,10 @@ class QueryResults {
       const oldest = this.entries.keys().next().value!
       this.bytes -= this.entries.get(oldest)!.bytes; this.entries.delete(oldest)
     }
-    const id = previous?.data === data ? previous.id : ++this.nextId
+    const repeated = previous?.data === data
+    const id = repeated ? previous.id : ++this.nextId
     this.entries.set(key, { id, data, bytes }); this.bytes += bytes
-    return id
+    return { id, repeated }
   }
 }
 
@@ -271,7 +290,7 @@ function resultSignature(text: string): string {
   try { return JSON.stringify(canonical(JSON.parse(text))) } catch { return text.trim() }
 }
 class WorkerResultError extends ContractError {
-  constructor(readonly correctable: boolean) { super('INVALID_WORKER_RESULT', 'Worker result does not satisfy its required contract') }
+  constructor(readonly correctable: boolean, readonly detail?: { path: string; message: string }) { super('INVALID_WORKER_RESULT', 'Worker result does not satisfy its required contract') }
 }
 function workerResult<Result>(profile: WorkerProfile<Result>, response: Completion): Result {
   try {
@@ -281,6 +300,9 @@ function workerResult<Result>(profile: WorkerProfile<Result>, response: Completi
       throw Error()
     }
     return result
-  } catch (error) { throw new WorkerResultError(error instanceof ContractError && error.code === 'INVALID_WORKER_RESULT') }
+  } catch (error) {
+    const detail = error instanceof WorkerResultRejection ? { path: error.path, message: error.message } : undefined
+    throw new WorkerResultError(error instanceof ContractError && error.code === 'INVALID_WORKER_RESULT', detail)
+  }
 }
 function toolError(call: ToolCall, code: string, message: string, suggestion?: string): unknown { return { request_type: call.function.name, execution: 'not_executed', delivery: 'delivered', truncated: false, error: { code, message, ...(suggestion ? { suggestion } : {}) } } }

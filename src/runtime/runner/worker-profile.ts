@@ -2,8 +2,12 @@ import type { LogicalWork, ModelRequest } from '../../shared/contracts.generated
 import { ContractError, validateModel } from '../../shared/validation'
 import type { Completion, ToolDefinition } from '../model/adapter'
 import { modelTools } from '../model/tools'
+import { orchestrationRoleAllows } from './orchestration-tool'
 
 export type WorkerRole = LogicalWork['role']
+export class WorkerResultRejection extends ContractError {
+  constructor(readonly path: string, message: string) { super('INVALID_WORKER_RESULT', message) }
+}
 export type WorkerGrant =
   | { type: 'list'; kind: string }
   | { type: 'read'; kind: string; ids?: readonly string[] }
@@ -47,7 +51,7 @@ export function createWorkerProfile<Result>(input: WorkerProfileInput<Result>): 
         if (!Array.isArray(grant.ids) || !grant.ids.every(text)) invalid()
         return { ...grant, ids: [...grant.ids] }
       }
-    } else if (grant.type === 'write' ? !text(grant.operation) : !text(grant.capability)) invalid()
+    } else if (grant.type === 'write' ? !text(grant.operation) : !text(grant.capability) || !orchestrationRoleAllows(grant.capability, input.role)) invalid()
     return { ...grant }
   })
   const tools = modelTools.filter(tool => grants.some(grant => grant.type === tool.function.name))

@@ -5,6 +5,7 @@ import type { ExecutionAttempt, ContentPlan, InputEvent, LogicalWork, RunnerRun 
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerWorkState } from '../../src/runtime/runner/work-state'
+import { assignmentRevisions } from '../../src/runtime/runner/orchestration-plan'
 
 const coreSql = readFileSync(new URL('../../src/shared/contracts/001-core.sql', import.meta.url), 'utf8')
 const runnerSql = readFileSync(new URL('../../src/shared/contracts/002-runner.sql', import.meta.url), 'utf8')
@@ -177,6 +178,28 @@ it('rejects invalid plans atomically and preserves an attempt on duplicate plan 
   expect(() => state.installPlan([work('foreign', { requirement_ids: ['unowned'] })])).toThrow(/requirements/)
 })
 
+it('revises a branch without changing its user authority, priority or independent work', () => {
+  const { db, state } = setup(); register(db, state)
+  const assigned = (key: string, inputs: Array<{ work_id: string; plan_revision: number; output_key: string }> = []) => ({
+    ...work(key), purpose: 'production' as const, request_id: 'goal', intent_revision: 1,
+    assignment: { instructions: key, inputs, outputs: [{ kind: 'answer' as const, output_key: 'answer' }] },
+    dependencies: [...work().dependencies, ...inputs.map(input => ({ kind: 'work' as const, task_id: 'task', work_id: input.work_id, result_revision: 1 }))]
+  })
+  const upstream = { work_id: 'source', plan_revision: 1, output_key: 'answer' }
+  const initial = [assigned('source'), assigned('consumer', [upstream]), assigned('independent')]
+  state.installPlan(initial)
+  const propose = (workId: string, input: typeof upstream) => assignmentRevisions({ action: 'bind', base_revision: 1, work_id: workId, input }, initial, binding => initial.find(work => work.work_id === binding.work_id)!)
+  expect(() => state.installAssignmentRevisions(propose('source', { ...upstream, work_id: 'consumer' }))).toThrow(/DAG/)
+  expect(state.taskWorks('task')).toEqual(initial)
+  const revised = propose('consumer', { ...upstream, work_id: 'independent' })[0]!
+  expect(() => state.installAssignmentRevisions([{ ...revised, required: false }])).toThrow(/priority/)
+  expect(() => state.installAssignmentRevisions([{ ...revised, dependencies: revised.dependencies.filter(input => input.kind !== 'goal') }])).toThrow(/authority/)
+  expect(state.taskWorks('task')).toEqual(initial)
+  state.installAssignmentRevisions([revised])
+  expect(state.taskWorks('task')).toEqual([initial[0], revised, initial[2]])
+  expect(() => state.installAssignmentRevisions([revised])).toThrow(/authority/)
+})
+
 it('holds downstream work until its exact successful input exists and rechecks revisions before commit', () => {
   const { db, state } = setup(); register(db, state)
   const downstream = work('downstream', { dependencies: [{ kind: 'work', task_id: 'task', work_id: 'work', result_revision: 1 }] })
@@ -191,6 +214,39 @@ it('holds downstream work until its exact successful input exists and rechecks r
   state.installGoal({ ...goal, intent_revision: 2, previous_revision: 1, input_event_id: 'correction' })
   expect(() => state.qualify('child')).toThrow(/revision/)
   expect(state.attempt('attempt').state).toBe('succeeded')
+})
+
+it('revokes only consumers holding a superseded exact output', () => {
+  const { db, state } = setup(); register(db, state)
+  const source = { ...work(), purpose: 'production' as const, request_id: 'goal', intent_revision: 1,
+    assignment: { instructions: 'Source', inputs: [], outputs: [{ kind: 'answer' as const, output_key: 'value' }] } }
+  const consumer = { ...source, work_id: 'consumer', assignment: { ...source.assignment, inputs: [{ work_id: 'work', plan_revision: 1, output_key: 'value' }] },
+    dependencies: [...source.dependencies, { kind: 'work' as const, task_id: 'task', work_id: 'work', result_revision: 1 }] }
+  state.installPlan([source, consumer, work('independent')])
+  state.createAttempt(attempt()); dispatch(state)
+  state.updateAttempt({ ...state.attempt('attempt'), state: 'succeeded' })
+  state.createAttempt(attempt('consumer-attempt', { work_id: consumer.work_id, input_versions: consumer.dependencies }))
+  state.createAttempt(attempt('independent-attempt', { work_id: 'independent' }))
+  db.prepare("INSERT INTO records(id,task_id,sequence,kind,payload_json,created_at) VALUES ('handoff','task',2,'runner.output.handoff',?,'time')").run(JSON.stringify({ work_id: 'work', plan_revision: 1, result_revision: 1, output_key: 'value', consumer_work_id: 'consumer', consumer_attempt_id: 'consumer-attempt' }))
+  expect(state.qualify('consumer-attempt', 'dispatch').work.work_id).toBe('consumer')
+  state.installPlan([{ ...source, plan_revision: 2 }])
+  expect(state.reconcileDependencies('task').map(work => work.work_id)).toEqual(['consumer'])
+  expect(state.attempt('consumer-attempt').state).toBe('revoked')
+  expect(state.qualify('independent-attempt', 'dispatch').work.plan_revision).toBe(1)
+  expect(state.attempt('attempt').state).toBe('succeeded')
+})
+
+it.each(['failed', 'cancelled'] as const)('settles an expected output when its source is %s', outcome => {
+  const { db, state } = setup(); register(db, state)
+  const outputs = [{ kind: 'answer' as const, output_key: 'counts' }], expected = { work_id: 'work', plan_revision: 1, output_key: 'counts' }
+  const source = work('work', { assignment: { instructions: 'Count', inputs: [], outputs } })
+  const consumer = work('consumer', { assignment: { instructions: 'Use counts', inputs: [expected], outputs }, dependencies: [{ kind: 'work', task_id: 'task', work_id: 'work', result_revision: 1 }] })
+  state.installPlan([source, consumer, work('independent')])
+  expect(state.reconcileDependencies('task')).toEqual([])
+  state.createAttempt(attempt()); dispatch(state)
+  state.updateAttempt({ ...state.attempt('attempt'), state: outcome })
+  expect(state.reconcileDependencies('task')).toMatchObject([{ work_id: 'consumer', state: `dependency_${outcome}`, root_cause: { input: expected, reason: expect.stringContaining('upstream output is unavailable') } }])
+  expect(state.work('independent').state).toBe('planned')
 })
 
 it('retains bounded attempts and unknown operation evidence without permitting a replay', () => {

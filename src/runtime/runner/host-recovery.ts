@@ -41,7 +41,7 @@ export interface RunnerResumeSource {
   attempts: ExecutionAttempt[]
   request_id: string
 }
-export interface RunnerResumeInput { run: RunnerRun; attempts: ExecutionAttempt[] }
+export interface RunnerResumeInput { run: RunnerRun; attempts: ExecutionAttempt[]; planned_work_ids?: string[]; waiting_work_ids?: string[] }
 export interface RunnerResumeHost {
   // Acquire leases and prepare material/configuration facts before this call.
   // Recheck their exact current bindings here, inside the installation lock.
@@ -138,6 +138,22 @@ export class RunnerHostRecovery {
     return ['registered', 'queued', 'revoked'].includes(attempt.state) && attempt.dispatch_state === 'not_dispatched' && !this.attemptMayHaveDispatched(attempt)
   }
 
+  waitingAssignmentRecovery(work: LogicalWork): { attempt: ExecutionAttempt; router?: ExecutionAttempt } | undefined {
+    const waiting = this.work.waitingAssignment(work)
+    if (!waiting) return
+    if (this.work.clarifiedAssignment(work)) return { attempt: waiting.attempt }
+    if (this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind IN ('runner.input.resolved','runner.input.blocked')
+      AND json_extract(payload_json,'$.report_id')=? LIMIT 1`).get(work.task_id, waiting.reportId)) return
+    const receipt = this.db.prepare(`SELECT json_extract(payload_json,'$.attempt_id') attempt_id FROM records
+      WHERE task_id=? AND kind='runner.input.routed' AND json_extract(payload_json,'$.report_id')=?
+        AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1`).get(work.task_id, waiting.reportId, work.run_id) as { attempt_id: string } | undefined
+    if (!receipt) return { attempt: waiting.attempt }
+    const router = this.work.attempt(receipt.attempt_id), route = this.work.work(router.work_id)
+    if (router.task_id === work.task_id && router.run_id === work.run_id && router.profile_id === 'work-router-v1' &&
+      route.run_id === work.run_id && route.role === 'router' && !terminalWorks.has(route.state) &&
+      route.current_attempt_id === router.attempt_id && this.undispatchedAttempt(router.attempt_id)) return { attempt: waiting.attempt, router }
+  }
+
   pendingInputs(taskId: string, cursor?: string, limit: number = RUNNER_LIMITS.index.page_items): RunnerRecoveryInputPage {
     assertRunnerId(taskId, 'task_id')
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > RUNNER_LIMITS.index.page_items) invalid()
@@ -223,7 +239,7 @@ export class RunnerHostRecovery {
     return this.queryOperation(taskId, operationId)
   }
 
-  private source(taskId: string, runId: string, workIds: readonly string[]): RunnerResumeSource {
+  private source(taskId: string, runId: string, workIds: readonly string[], planned: ReadonlySet<string>, waiting: ReadonlySet<string>): RunnerResumeSource {
     assertRunnerId(taskId, 'task_id'); assertRunnerId(runId, 'run_id')
     if (!this.db.prepare("SELECT id FROM tasks WHERE id=? AND state='active'").get(taskId)) ineligible()
     const previous_run = this.work.run(runId)
@@ -241,9 +257,21 @@ export class RunnerHostRecovery {
     const attempts: ExecutionAttempt[] = []
     for (const work of works) {
       if (work.task_id !== taskId || work.run_id !== runId || terminalWorks.has(work.state)) ineligible()
+      if (waiting.has(work.work_id)) {
+        const binding = this.waitingAssignmentRecovery(work)
+        if (!binding || binding.router && workIds.includes(binding.router.work_id)) ineligible()
+        if (binding.attempt.attempt_number >= work.max_attempts) fail('RUNNER_ATTEMPTS_EXHAUSTED', 'Recovery cannot exceed the installed attempt limit')
+        continue
+      }
+      if (planned.has(work.work_id)) {
+        const reason = this.work.pendingAssignmentRecoveryFailure(work)
+        if (reason === 'RUNNER_ATTEMPTS_EXHAUSTED') fail(reason, 'Recovery cannot exceed the installed attempt limit')
+        if (reason) ineligible()
+        continue
+      }
       const previous = this.work.attempts(work.work_id).at(-1)
       if (previous) {
-        if (work.current_attempt_id !== previous.attempt_id || previous.run_id !== runId || !['registered', 'queued', 'revoked'].includes(previous.state) || previous.dispatch_state !== 'not_dispatched' || this.attemptMayHaveDispatched(previous) || previous.attempt_number >= work.max_attempts) ineligible()
+        if (work.current_attempt_id !== previous.attempt_id || previous.run_id !== runId || !this.undispatchedAttempt(previous.attempt_id) || previous.attempt_number >= work.max_attempts) ineligible()
         attempts.push(previous)
       } else if (work.current_attempt_id !== undefined) ineligible()
     }
@@ -252,14 +280,16 @@ export class RunnerHostRecovery {
 
   resume(raw: RunnerResumeInput, host: RunnerResumeHost): RunnerResumeResult {
     const run = validateRunnerContract('runner_run', copy(raw.run)), attempts = raw.attempts.map(value => validateRunnerContract('runner_execution_attempt', copy(value)))
-    if (!run.previous_run_id || run.run_id === run.previous_run_id || run.runtime_epoch !== this.epoch || !run.commit_valid || !['queued', 'running'].includes(run.state) || !attempts.length || new Set(attempts.map(value => value.attempt_id)).size !== attempts.length) ineligible()
+    const planned = raw.planned_work_ids ?? [], waiting = raw.waiting_work_ids ?? [], waitingIds = new Set(waiting)
+    const workIds = [...attempts.map(value => value.work_id), ...planned, ...waiting]
+    if (!run.previous_run_id || run.run_id === run.previous_run_id || run.runtime_epoch !== this.epoch || !run.commit_valid || !['queued', 'running'].includes(run.state) || !workIds.length || new Set(workIds).size !== workIds.length || new Set(attempts.map(value => value.attempt_id)).size !== attempts.length) ineligible()
     return this.db.transaction(() => {
       if (this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(run.run_id)) {
-        if (attempts.some(attempt => !this.db.prepare('SELECT 1 FROM runner_attempts WHERE attempt_id=? AND run_id=? AND work_id=?').get(attempt.attempt_id, run.run_id, attempt.work_id))) ineligible()
+        if (attempts.some(attempt => !this.db.prepare('SELECT 1 FROM runner_attempts WHERE attempt_id=? AND run_id=? AND work_id=?').get(attempt.attempt_id, run.run_id, attempt.work_id)) || [...planned, ...waiting].some(id => this.work.work(id).run_id !== run.run_id)) ineligible()
         const existing = this.work.registerRun(run)
-        return { run: existing, works: attempts.map(attempt => this.work.work(attempt.work_id)), attempts: attempts.map(attempt => this.work.createAttempt(attempt)) }
+        return { run: existing, works: workIds.map(id => this.work.work(id)), attempts: attempts.map(attempt => this.work.createAttempt(attempt)) }
       }
-      const source = this.source(run.task_id, run.previous_run_id!, attempts.map(value => value.work_id))
+      const plannedIds = new Set(planned), source = this.source(run.task_id, run.previous_run_id!, workIds, plannedIds, waitingIds)
       const previous = source.previous_run
       if (run.budget_id !== previous.budget_id || run.purpose !== previous.purpose || run.purpose === 'production' && previous.purpose === 'production' && (run.request_id !== previous.request_id || run.intent_revision !== previous.intent_revision) || run.purpose === 'composition' && previous.purpose === 'composition' && (run.batch_id !== previous.batch_id || run.composition_version !== previous.composition_version || run.trigger_request_id !== previous.trigger_request_id)) ineligible()
       synchronous(host.recheck(copy(source)))
@@ -269,16 +299,22 @@ export class RunnerHostRecovery {
       }
       synchronous(host.installRun(copy(run), copy(source)))
       this.work.registerRun(run)
-      const plans = source.works.map(work => {
+      for (const workId of waiting) {
+        const binding = this.waitingAssignmentRecovery(this.work.work(workId)) ?? ineligible()
+        this.work.rebindWaitingAssignment(workId, run.run_id, binding.router)
+      }
+      const starting = source.works.filter(work => !waitingIds.has(work.work_id))
+      const plans = starting.map(work => {
         const { current_attempt_id: _attempt, root_cause: _cause, result_revision: _result, ...binding } = work
-        return { ...binding, run_id: run.run_id, plan_revision: work.plan_revision + 1, state: 'queued' as const } as LogicalWork
+        return { ...binding, run_id: run.run_id, plan_revision: work.plan_revision + 1, state: plannedIds.has(work.work_id) ? 'planned' : 'queued' } as LogicalWork
       })
       for (const revision of new Set(plans.map(work => work.plan_revision))) this.work.installPlan(plans.filter(work => work.plan_revision === revision))
+      this.work.rebindRecoveredOutputInputs(run, starting)
       for (const attempt of attempts) {
         if (attempt.run_id !== run.run_id || attempt.runtime_epoch !== this.epoch) ineligible()
         this.work.createAttempt(attempt)
       }
-      return { run: this.work.run(run.run_id), works: plans.map(work => this.work.work(work.work_id)), attempts: attempts.map(attempt => this.work.attempt(attempt.attempt_id)) }
+      return { run: this.work.run(run.run_id), works: workIds.map(workId => this.work.work(workId)), attempts: attempts.map(attempt => this.work.attempt(attempt.attempt_id)) }
     }).immediate()
   }
 }

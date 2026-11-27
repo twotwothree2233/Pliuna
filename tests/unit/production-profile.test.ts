@@ -80,6 +80,77 @@ it.each(['producer', 'lightweight', 'integrator'] as const)('normalizes a plain 
   expect(profile.parseResult(final('42'))).toEqual({ version: 1, complete: true, answer: '42', artifacts: [], requirement_ids: ['answer'], unresolved: [] })
 })
 
+it('guides an internal text handoff without borrowing the request’s final answer requirement', () => {
+  const input = artifactSource()
+  if (input.work.purpose !== 'production') throw Error('Expected production work')
+  input.work.requirement_ids = []
+  input.work.assignment = { instructions: 'Summarize the bound evidence for downstream work.', inputs: [], outputs: [{ output_key: 'evidence', kind: 'answer' }] }
+  const profile = createProducerProfile(input)
+  const text = 'Node.js 20 End: 2026-04-30. RISK-NODE20-EOL.'
+  expect(profile.system).toContain('Return the assigned text directly as plain text.')
+  expect(profile.resultCorrection).toContain('assigned requirement_ids []')
+  expect(profile.system).not.toContain('For artifact construction')
+  expect(profile.resultCorrection).not.toContain('complete draft JSON')
+  const accepted = { version: 1, complete: true, answer: text, artifacts: [], requirement_ids: [], unresolved: [] }
+  expect(profile.parseResult(final(text))).toEqual(accepted)
+  expect(() => profile.parseResult(final(JSON.stringify({ ...accepted, requirement_ids: ['answer'] })))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
+})
+
+it('guides a publishing assignment to return a card without chat text or display titles as resource keys', () => {
+  const input = artifactSource()
+  if (input.work.purpose !== 'production') throw Error('Expected production work')
+  input.work.requirement_ids = ['document']
+  input.work.assignment = { instructions: 'Publish the decision card.', inputs: [], outputs: [{ output_key: 'artifact', kind: 'artifact', exposure: 'publish' }] }
+  const profile = createProducerProfile(input)
+  expect(profile.system).toContain('Set answer to null.')
+  expect(profile.system).toContain('declared artifact output keys ["artifact"], one bundle per key')
+  expect(profile.system).toContain('Each artifact draft includes a required output_key')
+  expect(profile.resultCorrection).toContain('declared artifact output keys ["artifact"], one bundle per key')
+  expect(profile.system).toContain('Use references:[] when no local resource is embedded.')
+  expect(profile.system).toContain('never display titles')
+  const accepted = result({ answer: null, requirement_ids: ['document'] })
+  expect(profile.parseResult(final(JSON.stringify(producerDraft(accepted))))).toEqual(accepted)
+})
+
+it.each(['missing', 'undeclared'] as const)('reports the %s output key to the model before accepting a corrected submission', async problem => {
+  const input = artifactSource()
+  if (input.work.purpose !== 'production') throw Error('Expected production work')
+  input.work.requirement_ids = ['document']
+  input.work.assignment = { instructions: 'Publish the document.', inputs: [], outputs: [{ output_key: 'final_doc', kind: 'artifact', exposure: 'publish' }] }
+  const profile = createProducerProfile(input)
+  const accepted = result({ answer: null, requirement_ids: ['document'], artifacts: [candidate({ artifact_id: 'final_doc' })] })
+  const draft = producerDraft(accepted)
+  const { output_key: _key, ...withoutKey } = draft.artifacts[0]!
+  const rejected = { ...draft, artifacts: [problem === 'missing' ? withoutKey : { ...withoutKey, output_key: 'unassigned_private_fragment' }] }
+  const message = problem === 'missing' ? 'Missing output_key. Use one of the declared artifact output keys ["final_doc"].' : 'Use only the declared artifact output keys ["final_doc"], with at most one artifact per key.'
+  const duplicate = { ...draft, artifacts: [draft.artifacts[0], draft.artifacts[0]] }
+  expect(() => profile.parseResult(final(JSON.stringify(duplicate)))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT', path: 'artifacts[1].output_key', message: expect.stringContaining('already used') }))
+
+  const service = new ModelService(), lease: ModelLease = { id: 'model', revision: 1, config: { id: 'model', base_url: 'https://example.invalid', wire_model_id: 'synthetic', context_tokens: 100000, compatibility_profile: 'chat-max-tokens' }, release() {} }
+  const requests = vi.spyOn(service, 'request')
+    .mockResolvedValueOnce(final(JSON.stringify(rejected)))
+    .mockResolvedValueOnce(final(JSON.stringify(draft)))
+  const onResult = vi.fn(), record = vi.fn(), tool = vi.fn()
+  const host: AgentHost = { valid() {}, state() {}, budget() {}, record, tool }
+  await runAgent(service, lease, 'task', [], host, new AbortController().signal, undefined, { profile, onResult })
+
+  expect(requests).toHaveBeenCalledTimes(2)
+  const correction = requests.mock.calls[1]?.[2][0]?.content
+  expect(correction).toContain(JSON.stringify({ path: 'artifacts[0].output_key', message }))
+  expect(correction).not.toContain('unassigned_private_fragment')
+  expect(record).toHaveBeenCalledWith('worker.result.rejected', { code: 'INVALID_WORKER_RESULT', path: 'artifacts[0].output_key', message })
+  expect(onResult).toHaveBeenCalledExactlyOnceWith(accepted)
+  expect(tool).not.toHaveBeenCalled()
+})
+
+it('reports the exact missing draft fields and coverage without echoing the rejected content', () => {
+  const profile = createProducerProfile(artifactSource()), draft = producerDraft(result())
+  const { bundle_resource_id: _resource, ...withoutResource } = draft.artifacts[0]!
+  expect(() => profile.parseResult(final(JSON.stringify({ ...draft, artifacts: [withoutResource] })))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT', path: 'artifacts[0].bundle_resource_id', message: 'This field is required.' }))
+  expect(() => profile.parseResult(final(JSON.stringify({ ...draft, artifacts: [{ ...draft.artifacts[0], presentation_kind: 'PRIVATE BODY' }] })))).toThrow(expect.objectContaining({ path: 'artifacts[0].presentation_kind', message: 'Use an allowed value: "managed-v1".' }))
+  expect(() => profile.parseResult(final(JSON.stringify({ ...draft, requirement_ids: ['answer'] })))).toThrow(expect.objectContaining({ path: 'requirement_ids', message: expect.stringContaining('Assigned requirement "document" is absent') }))
+})
+
 it('keeps artifact, content-check and provenance requirements unresolved for ordinary text', () => {
   const input = artifactSource('lightweight')
   input.goal.requirements.push({ requirement_id: 'check', kind: 'content_check', required: true, provenance_required: false }, { requirement_id: 'cited', kind: 'answer', required: true, provenance_required: true })
@@ -106,9 +177,16 @@ it('decodes one exact production result surrounded by prose or a JSON fence', ()
 
 it('preserves ordinary prose and unrelated JSON examples', () => {
   const profile = createProducerProfile(source())
-  for (const text of ['The managed-v1 resource ID is part of this explanation.', 'Example:\n```json\n{"version":1,"artifacts":[]}\n```']) {
+  for (const text of ['The managed-v1 resource ID is part of this explanation.', 'Example:\n```json\n{"version":1,"artifacts":[]}\n```', 'The marker `</｜DSML｜ calls>` ends a tool block.']) {
     expect(profile.parseResult(final(text)).answer).toBe(text)
     expect(containsProducerResult(text)).toBe(false)
+  }
+})
+
+it.each(['\n</｜DSML｜ calls>', '<|DSML| calls>\n</|DSML| calls>'])('rejects isolated tool protocol markup in both answer formats: %j', text => {
+  const profile = createProducerProfile(source())
+  for (const response of [text, JSON.stringify({ ...result(), answer: text, artifacts: [], requirement_ids: ['answer'] })]) {
+    expect(() => profile.parseResult(final(response))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
   }
 })
 
@@ -127,6 +205,15 @@ it('recognizes malformed protocol keys and truncated or conflicting result envel
     expect(containsProducerResult(text)).toBe(true)
     expect(() => profile.parseResult(final(text))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT' }))
   }
+})
+
+it.each([
+  ['   ', 'final result is empty'],
+  ['<|DSML| calls>\n</|DSML| calls>', 'Tool protocol markup is not a result'],
+  ['{"answer":"PRIVATE BODY",}', 'not valid JSON'],
+  ['{"version":1,"complete":true,"answer":null,"artifacts":[]', 'result object was left open']
+])('reports a bounded syntax reason for %j', (text, reason) => {
+  expect(() => createProducerProfile(artifactSource()).parseResult(final(text))).toThrow(expect.objectContaining({ code: 'INVALID_WORKER_RESULT', path: '$', message: expect.stringContaining(reason) }))
 })
 
 it('does not combine unrelated object fields or inspect JSON string contents as an envelope', () => {
@@ -239,6 +326,15 @@ it.each(['producer', 'lightweight', 'integrator'] as const)('authorizes every do
   const input = JSON.parse(example.input_json)
   expect(validateProducerBundle(input.operations[0].bundle.bundle)).toMatchObject({ profile: 'managed-v1' })
   expect(representations[4]).toMatchObject({ draft: expect.stringContaining('number/integer fields are strings') })
+})
+
+it('provides a static card write example that passes the producer tool contract', () => {
+  const profile = createProducerProfile(artifactSource())
+  const example = profile.system.split('\n').find(line => line.startsWith('{"operation":"resource.create"'))
+  expect(example).toBeDefined()
+  const request = modelToolRequest('write', JSON.parse(example!))
+  expect(() => profile.authorize(request)).not.toThrow()
+  expect(profile.system).toContain('Cite public sources as visible plain text')
 })
 
 it('keeps resource and task-data operations while business reads and plugins require explicit grants', () => {
@@ -481,7 +577,7 @@ it('corrects draft identity and rejects supplied execution metadata without repl
     expect(host.tool).toHaveBeenCalledOnce()
     expect(records.filter(item => item.kind === 'model.tool_result')).toHaveLength(1)
     expect(records.find(item => item.kind === 'model.tool_result')?.payload.message).toMatchObject({ tool_call_id: 'create-bundle' })
-    expect(records.filter(item => item.kind === 'worker.result.rejected')).toEqual(Array.from({ length: 2 }, () => ({ kind: 'worker.result.rejected', payload: { code: 'INVALID_WORKER_RESULT' } })))
+    expect(records.filter(item => item.kind === 'worker.result.rejected')).toEqual(['candidate_id', 'dependencies'].map(field => ({ kind: 'worker.result.rejected', payload: { code: 'INVALID_WORKER_RESULT', path: `artifacts[0].${field}`, message: 'This field is bound by the host. Omit it from the draft.' } })))
     expect(records.filter(item => item.kind === 'message.assistant').map(item => item.payload.text)).toEqual([JSON.stringify(producerDraft(result()))])
     expect(budget.state).toMatchObject({ model_requests: 4, tool_requests: 1 })
   } finally { requests.mockRestore() }

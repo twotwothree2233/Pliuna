@@ -6,6 +6,7 @@ import type { ChatMessage, ToolCall } from '../../src/runtime/model/adapter'
 import { latestUser, retainedContext, type InstalledSummary } from '../../src/runtime/model/context'
 import { messageEvidence, requestEvidence } from '../../src/runtime/model/request-evidence'
 import { WorkerContext } from '../../src/runtime/runner/worker-context'
+import { READ_WORK_OUTPUT } from '../../src/runtime/runner/orchestration-tool'
 import { assertContract } from '../../src/shared/validation'
 
 const coreSql = readFileSync(new URL('../../src/shared/contracts/001-core.sql', import.meta.url), 'utf8')
@@ -67,6 +68,52 @@ it('filters interleaved work before restoring complete batches with the same cal
   expect(JSON.stringify(messages)).not.toContain('PRIVATE')
   expect(messages.slice(1).every(message => JSON.stringify(messageEvidence(message)?.owner) === JSON.stringify(owner))).toBe(true)
   expect(messageEvidence(messages[3]!)?.read_target).toEqual({ kind: 'resource', id: 'resource' })
+})
+
+it('shares only the selected complete prefix between independent attempts', () => {
+  const fixture = setup(), siblings = [
+    { ...owner, work_id: 'left', attempt_id: 'left-attempt' },
+    { ...owner, work_id: 'right', attempt_id: 'right-attempt' }
+  ]
+  const model = { model_config_id: 'model', model_config_revision: 1 }
+  grants(fixture, [{ kind: 'resource', task_id: owner.task_id, resource_id: 'resource' }])
+  const start = fixture.record('worker.input', { text: 'Previous assignment', checkpoint_source: true })
+  const partial = fixture.record('model.response', response('', [call()]))
+  expect(fixture.context.checkpoints(model).map(item => item.checkpoint_id)).toEqual([start])
+  const end = fixture.record('model.tool_result', result('Frozen material'))
+  fixture.record('model.response', response('Later than the checkpoint'))
+  const access = { dependencies: [{ kind: 'resource' as const, task_id: owner.task_id, resource_id: 'resource' }], resources: ['resource'], outputs: [], authorize() {} }
+  const attempts = siblings.map(sibling => {
+    fixture.record('worker.input', { text: sibling.work_id }, sibling)
+    fixture.record('model.response', response(`${sibling.work_id} answer`), sibling)
+    const prefix = WorkerContext.checkpoint(fixture.db, owner.task_id, end, model, access)
+    const current = new WorkerContext(fixture.db, sibling).load(system)
+    return [...prefix!.messages, ...current.slice(1)]
+  })
+  expect(attempts[0]!.slice(0, 3)).toEqual(attempts[1]!.slice(0, 3))
+  expect(attempts.map(messages => messages.at(-1)?.content)).toEqual(['left answer', 'right answer'])
+  expect(attempts[0]!.map(message => message.content)).not.toContain('Later than the checkpoint')
+  expect(messageEvidence(attempts[0]![2]!)?.owner).toEqual(owner)
+  expect(() => WorkerContext.checkpoint(fixture.db, owner.task_id, partial, model)).toThrowError(expect.objectContaining({ code: 'RUNNER_CHECKPOINT_UNAVAILABLE' }))
+  expect(() => WorkerContext.checkpoint(fixture.db, 'other-task', end, model)).toThrowError(expect.objectContaining({ code: 'RUNNER_CHECKPOINT_UNAVAILABLE' }))
+  expect(() => WorkerContext.checkpoint(fixture.db, owner.task_id, end, { ...model, model_config_revision: 2 })).toThrowError(expect.objectContaining({ code: 'RUNNER_CHECKPOINT_UNAVAILABLE' }))
+  expect(WorkerContext.checkpoint(fixture.db, owner.task_id, end, model, { ...access, authorize() { throw Error('No current resource read grant') } })).toMatchObject({ checkpoint_id: start })
+  expect(WorkerContext.checkpoint(fixture.db, owner.task_id, end, model, { ...access, dependencies: [] })).toBeUndefined()
+})
+
+it('backs up to before delivery of a superseded answer and excludes later messages', () => {
+  const fixture = setup(), model = { model_config_id: 'model', model_config_revision: 1 }
+  const input = { work_id: 'upstream', output_key: 'answer', plan_revision: 1, result_revision: 1 }
+  grants(fixture, [{ kind: 'work', task_id: owner.task_id, work_id: input.work_id, result_revision: 1 }])
+  const before = fixture.record('worker.input', { text: 'Use the exact input', checkpoint_source: true, bound: { work_outputs: [input] } })
+  fixture.record('model.response', response('', [{ id: 'same-id', type: 'function', function: { name: 'call', arguments: JSON.stringify({ capability: READ_WORK_OUTPUT, input_json: JSON.stringify(input), references: [] }) } }]))
+  fixture.record('model.tool_result', result('Superseded value'))
+  const after = fixture.record('model.response', response('Derived from the superseded value'))
+  const access = { dependencies: [], resources: [], outputs: [input], authorize() {} }
+  expect(WorkerContext.checkpoint(fixture.db, owner.task_id, after, model, access)?.messages.at(-1)?.content).toBe('Derived from the superseded value')
+  const fallback = WorkerContext.checkpoint(fixture.db, owner.task_id, after, model, { ...access, outputs: [{ ...input, result_revision: 2 }] })
+  expect(fallback?.checkpoint_id).toBe(before)
+  expect(fallback?.messages.map(message => message.role)).toEqual(['user'])
 })
 
 const otherScopes: [string, ExecutionScope][] = [

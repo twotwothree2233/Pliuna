@@ -11,7 +11,12 @@ import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerCompositionState } from '../../src/runtime/runner/composition-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerHostRecovery } from '../../src/runtime/runner/host-recovery'
-import { RunnerHostComposition } from '../../src/runtime/runner/host-composition'
+import { createCollator } from '../../src/runtime/runner/collator'
+import type { RunnerAdmission } from '../../src/runtime/runner/admission'
+import { RunnerHostComposition, type PreparedRunnerComposition } from '../../src/runtime/runner/host-composition'
+import { RunnerRepairState } from '../../src/runtime/runner/repair-state'
+import { ROUTE_WORK } from '../../src/runtime/runner/orchestration-tool'
+import { requestDelivery } from '../../src/runtime/runner/delivery-state'
 import { liveRunnerFlow } from '../../src/runtime/runner/live-flow'
 import { conversationDependencyResult } from '../../src/runtime/runner/conversation-query'
 import type { LiveFlowSnapshot } from '../../src/shared/types'
@@ -21,19 +26,19 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 function bundle(title = 'Original', compatibility = 'form-v1'): Bundle {
   return { profile: 'managed-v1', html: `<section><h2>${title}</h2><textarea id="answer"></textarea></section>`, css: '', state: { schema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }, initial: { answer: '' }, compatibility_version: compatibility }, forms: [], behaviors: [{ type: 'input', element_id: 'answer', field: '/answer', control: 'textarea' }], references: [], export: [] }
 }
-function setup(enabled = true) {
-  const directory = mkdtempSync(join(tmpdir(), 'pliuna-composition-runtime-')), models = new ModelService()
+function setup(enabled = true, modelCollator = false, previous?: { directory: string; task: string }) {
+  const directory = previous?.directory ?? mkdtempSync(join(tmpdir(), 'pliuna-composition-runtime-')), models = new ModelService()
   const config: ModelConfiguration = { id: 'model', base_url: 'https://example.invalid/v1', wire_model_id: 'synthetic', context_tokens: 1000000, max_output_tokens: 1024, compatibility_profile: 'chat-max-tokens' }
   const releases: ReturnType<typeof vi.fn>[] = []
   vi.spyOn(models, 'acquire').mockImplementation((id): ModelLease => { const release = vi.fn(); releases.push(release); return { id, revision: 1, config: { ...config, id }, release } })
   vi.spyOn(models, 'acquireCompaction').mockReturnValue(undefined)
-  const store = new RuntimeStore(directory, models, { viewReplacement: enabled })
-  cleanups.push(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
-  const internal = store as unknown as { db: Database.Database; epoch: string; record(task: string, kind: string, payload: unknown): string; pumpRunnerWorkers(task: string): void; aggregateWorkerRun(task: string, run: string): void; executeAutomaticComposition(task: string, trigger: string, previousBatchId?: string): Promise<void> }
-  const { db, epoch } = internal, task = store.create('Composition').task.id
+  const store = new RuntimeStore(directory, models, { viewReplacement: enabled, ...(modelCollator || previous ? { runner: { productionRuns: 2, collator: modelCollator ? 'model' : 'rule' } as const } : {}) })
+  cleanups.push(() => { store.close(); if (!previous) rmSync(directory, { recursive: true, force: true }) })
+  const internal = store as unknown as { db: Database.Database; epoch: string; runnerAdmission: RunnerAdmission; runnerRunAvailable(task: string, request: string): boolean; record(task: string, kind: string, payload: unknown): string; pumpRunnerWorkers(task: string): void; aggregateWorkerRun(task: string, run: string): void; executeAutomaticComposition(task: string, trigger: string, previousBatchId?: string): Promise<void>; executePreparedComposition(task: string, trigger: string, prepared: PreparedRunnerComposition): Promise<void> }
+  const { db, epoch } = internal, task = previous?.task ?? store.create('Composition').task.id
   const state = new RunnerWorkState(db, epoch), artifacts = new RunnerArtifactState(db, state), composition = new RunnerCompositionState(db, state, artifacts)
   const records = (kind: string) => db.prepare('SELECT * FROM records WHERE task_id=? AND kind=?').all(task, kind)
-  function source(name = 'goal', contents = bundle(), sealed = true, completed = true, configId = 'model', fragments = 1) {
+  function source(name = 'goal', contents = bundle(), sealed = true, completed = true, configId = 'model', fragments = 1, assigned = false) {
     const run = `run-${name}`, workId = `work-${name}`, attemptId = `attempt-${name}`, artifactId = `artifact-${name}`
     db.prepare("INSERT INTO requests(id,task_id,state,config_selection_json,input_json,created_at) VALUES (?,?,'started',?,?,?)").run(name, task, JSON.stringify({ id: configId, revision: 1, approval_mode: 'manual' }), JSON.stringify({ text: `Explicit request ${name}` }), 'time')
     const inputRecord = internal.record(task, 'message.user', { text: name })
@@ -42,7 +47,8 @@ function setup(enabled = true) {
     new RunnerBudgetLedger(db).create({ budget_id: `budget-${name}`, task_id: task, purpose: 'production', request_id: name, limits: { model_requests: 20, tool_requests: 100, tokens: 100000, wall_ms: 60000 } })
     db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,'{}','{}','time')").run(run, task, name, epoch)
     state.registerRun({ run_id: run, task_id: task, runtime_epoch: epoch, state: 'running', commit_valid: true, budget_id: `budget-${name}`, purpose: 'production', request_id: name, intent_revision: 1 })
-    const work: LogicalWork = { work_id: workId, task_id: task, run_id: run, plan_revision: 1, role: 'producer', required: true, requirement_ids: ['content'], dependencies: [{ kind: 'goal', task_id: task, request_id: name, intent_revision: 1 }], state: 'planned', max_attempts: 2, purpose: 'production', request_id: name, intent_revision: 1 }
+    const work: LogicalWork = { work_id: workId, task_id: task, run_id: run, plan_revision: 1, role: 'producer', required: true, requirement_ids: ['content'], dependencies: [{ kind: 'goal', task_id: task, request_id: name, intent_revision: 1 }], state: 'planned', max_attempts: 2, purpose: 'production', request_id: name, intent_revision: 1,
+      ...(assigned ? { assignment: { instructions: 'Produce the published fragment.', inputs: [], outputs: [{ kind: 'artifact', output_key: 'content', exposure: 'publish' }] } } : {}) }
     state.installPlan([work])
     const attempt: ExecutionAttempt = { attempt_id: attemptId, work_id: workId, task_id: task, run_id: run, runtime_epoch: epoch, attempt_number: 1, profile_id: 'producer', model_config_id: configId, model_config_revision: 1, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: name, intent_revision: 1 }
     state.createAttempt(attempt); state.updateAttempt({ ...attempt, state: 'dispatched', dispatch_state: 'dispatched', operation_id: `operation-${name}` })
@@ -50,6 +56,7 @@ function setup(enabled = true) {
     const priorOutline = artifacts.outline(task)
     artifacts.installOutline({ task_id: task, outline_revision: (priorOutline?.outline_revision ?? 0) + 1, base_outline_revision: priorOutline?.outline_revision ?? 0, sections: [...(priorOutline?.sections ?? []), { section_id: `section-${name}`, request_id: name, intent_revision: 1, order_key: name, position_revision: 1 }] })
     artifacts.assign([{ task_id: task, artifact_id: artifactId, work_id: workId, plan_revision: 1, section_id: `section-${name}`, base_artifact_revision: 0 }])
+    if (assigned) db.prepare('INSERT INTO runner_artifact_slots(work_id,output_key,task_id,artifact_id) VALUES (?,?,?,?)').run(workId, 'content', task, artifactId)
     const resource = (next: Bundle) => (store.modelTool(task, run, { type: 'write', input: { type: 'resource.create', display_name: 'Accepted bundle', content: { type: 'json', value: next } } }) as { data: { id: string } }).data.id
     const resourceId = resource(contents)
     const candidate: ArtifactCandidate = { candidate_id: `candidate-${name}`, task_id: task, request_id: name, intent_revision: 1, run_id: run, work_id: workId, attempt_id: attemptId, artifact_id: artifactId, base_artifact_revision: 0, plan_revision: 1, bundle_resource_id: resourceId, section_id: `section-${name}`, section_position_revision: 1, order_key: name, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: { task_id: task, kind: 'record', id: inputRecord }, requirement_ids: ['content'], unresolved: [], dependencies: work.dependencies }
@@ -81,7 +88,7 @@ function setup(enabled = true) {
     store.receiveRunnerInput(event)
     return store.advanceRunnerInput(event.input_event_id)
   }
-  return { store, models, db, epoch, task, state, artifacts, composition, source, records, releases, input, pump: () => internal.pumpRunnerWorkers(task), aggregate: (run: string) => internal.aggregateWorkerRun(task, run), automatic: (trigger: string, previousBatchId?: string) => internal.executeAutomaticComposition(task, trigger, previousBatchId) }
+  return { store, models, db, epoch, task, directory, internal, state, artifacts, composition, source, records, releases, input, record: internal.record.bind(internal), pump: () => internal.pumpRunnerWorkers(task), aggregate: (run: string) => internal.aggregateWorkerRun(task, run), automatic: (trigger: string, previousBatchId?: string) => internal.executeAutomaticComposition(task, trigger, previousBatchId), executePrepared: (trigger: string, prepared: PreparedRunnerComposition) => internal.executePreparedComposition(task, trigger, prepared) }
 }
 async function tick() { for (let n = 0; n < 16; n++) await Promise.resolve() }
 async function approveAndConfirm(s: ReturnType<typeof setup>, actionId?: string) {
@@ -93,6 +100,264 @@ async function approveAndConfirm(s: ReturnType<typeof setup>, actionId?: string)
   try { await s.store.handle({ type: 'surface.respond', task_id: s.task, action_id: pending.action_id, proceed: true, confirm_discard: false }) }
   catch { throw Error((s.db.prepare('SELECT result_json FROM actions WHERE id=?').get(pending.action_id) as { result_json: string }).result_json) }
 }
+
+it.each([['worker', false, 'new', false], ['router', false, 'new', false], ['worker', true, 'new', false], ['worker', false, 'denied', false], ['worker', false, 'draft', false], ['worker', false, 'conflict', false], ['worker', false, 'new', true]] as const)('sends scoped feedback to %s (no progress: %s, replacement: %s, failed source Run: %s) without blocking an independent publication', async (recipient, noProgress, replacement, failedSource) => {
+  const s = setup(true, true), affected = s.source('affected', bundle('Affected body'), true, replacement === 'new' && !failedSource, 'model', 1, failedSource), independent = s.source('independent', bundle('Independent body'))
+  if (failedSource) s.db.prepare("UPDATE runs SET state='failed',commit_valid=0 WHERE id=?").run(affected.run)
+  s.record(s.task, 'runner.delivery.opened', { request_id: 'affected', intent_revision: 1, input_event_id: 'input-affected', state: 'open' })
+  s.record(s.task, 'runner.delivery.opened', { request_id: 'independent', intent_revision: 1, input_event_id: 'input-independent', state: 'open' })
+  const originalView = replacement === 'new' ? undefined : await (async () => {
+    const prepared = s.store.prepareRunnerComposition(s.task, 'affected', { artifact_ids: [affected.artifactId] })
+    const published = s.store.publishRunnerComposition(s.task, prepared.batch.batch_id, prepared.collator.rulePlan())
+    await approveAndConfirm(s, prepared.batch.action_id)
+    expect(await published).toMatchObject({ state: 'published' })
+    const view = s.store.snapshot(s.task).views[0]!
+    if (replacement === 'draft') s.store.handle({ type: 'draft.save', task_id: s.task, view_id: view.id, view_revision: view.revision, expected_state_revision: view.state_revision, fields: [{ path: '/answer', value: 'Saved original answer' }] })
+    s.db.prepare("UPDATE runs SET state='completed',commit_valid=0 WHERE id=?").run(affected.run)
+    return view
+  })()
+  const originalBytes = (s.db.prepare('SELECT byte_length FROM resources WHERE id=?').get(affected.resourceId) as { byte_length: number }).byte_length
+  s.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(262145, affected.resourceId)
+  let releaseRepair!: () => void
+  const repairGate = new Promise<void>(resolve => { releaseRepair = resolve })
+  cleanups.push(releaseRepair)
+  let triedUnchanged = false
+  vi.spyOn(s.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const text = messages.find(message => message.role === 'user')!.content!
+    const { batch, indexes, structural_issues, bound } = JSON.parse(text)
+    const usage = { prompt_tokens: 20, completion_tokens: 15 }
+    if (bound?.feedback) {
+      expect(recipient).toBe('router')
+      const tool = messages.find(message => message.role === 'tool' && message.tool_call_id === 'route-repair')
+      if (tool) {
+        expect(JSON.parse(tool.content!)).toMatchObject({ execution: 'success' })
+        return { text: '{"kind":"updated"}', calls: [], finish: 'stop', usage }
+      }
+      const route = { action: 'dispatch', base_revision: bound.base_revision, assignments: [{ assignment_key: 'fix', instructions: 'Create a smaller bundle for the existing fragment.', required: true, requirement_ids: ['content'], outputs: [{ output_key: 'fixed', kind: 'artifact', exposure: 'publish' }] }] }
+      return { text: '', finish: 'tool_calls', usage, calls: [{ id: 'route-repair', type: 'function', function: { name: 'call', arguments: JSON.stringify({ capability: ROUTE_WORK, input_json: JSON.stringify(route) }) } }] }
+    }
+    if (bound?.repair) {
+      await repairGate
+      expect(bound.repair.previous).toMatchObject({ artifact_id: affected.artifactId, artifact_revision: 1 })
+      expect(text).not.toContain(independent.resourceId)
+      const generated = messages.find(message => message.role === 'tool' && message.tool_call_id === 'repair-bundle')
+      if (!generated) return { text: '', finish: 'tool_calls', usage, calls: [{ id: 'repair-bundle', type: 'function', function: { name: 'write', arguments: JSON.stringify({ operation: 'resource.create', input: { display_name: 'Corrected fragment', content: { type: 'json', value: bundle('Corrected body', replacement === 'draft' ? 'form-v2' : 'form-v1') } } }) } }] }
+      const { data } = JSON.parse(generated.content!)
+      const resource = triedUnchanged && !noProgress ? data.id : affected.resourceId
+      triedUnchanged = true
+      const artifact = { artifact_id: affected.artifactId, base_artifact_revision: 1, section_id: affected.index.section_id, bundle_resource_id: resource, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input', provenance_ref: affected.index.provenance_ref, requirement_ids: ['content'], unresolved: [] }
+      return { text: JSON.stringify({ version: 1, complete: true, answer: null, artifacts: [artifact], requirement_ids: ['content'], unresolved: [] }), calls: [], finish: 'stop', usage }
+    }
+    expect(structural_issues).toEqual([expect.objectContaining({ kind: 'artifact_size_limit', artifact: expect.objectContaining({ artifact_id: affected.artifactId }) })])
+    expect(text).not.toContain('Affected body')
+    const { task_id, run_id, batch_id, composition_version } = batch
+    const source = indexes.find((index: { artifact_id: string }) => index.artifact_id === affected.artifactId)
+    const result = { kind: 'feedback', task_id, run_id, batch_id, composition_version, reports: [{ evidence_id: structural_issues[0].evidence_id, recipient: recipient === 'router' ? { kind: 'router' } : { kind: 'worker', work_id: source.work_id } }] }
+    return { text: JSON.stringify(result), calls: [], finish: 'stop', usage }
+  })
+  if (originalView) await s.executePrepared('affected', s.store.prepareRunnerComposition(s.task, 'affected', { artifact_ids: [affected.artifactId] }))
+  else await s.automatic('affected')
+  const receipt = s.records('runner.composition.feedback') as { id: string; payload_json: string }[]
+  expect(receipt).toHaveLength(1)
+  const { owner, result, issues } = JSON.parse(receipt[0]!.payload_json)
+  const repair = new RunnerRepairState(s.db, s.state, s.artifacts, s.composition)
+  expect(repair.install({ result, issues }, owner, s.record)).toBe(receipt[0]!.id)
+  expect(s.records('runner.repair.requested')).toHaveLength(1)
+  expect(s.state.run(affected.run)).toMatchObject({ state: failedSource ? 'failed' : 'completed', commit_valid: false })
+  await vi.waitFor(() => expect(s.records('runner.repair.started')).toHaveLength(1))
+  expect(s.records('runner.repair.routed')).toHaveLength(recipient === 'router' ? 1 : 0)
+  if (recipient === 'worker') {
+    const read = () => s.store.handle({ type: 'host.runner.flow', task_id: s.task }) as LiveFlowSnapshot
+    const flow = read()
+    expect(flow.lanes.Worker.items).toContainEqual(expect.objectContaining({ handoff: { from: 'Collator', kind: 'feedback', sequence: expect.any(Number) },
+      sources: [expect.objectContaining({ request_id: 'affected', message_id: expect.any(String) })] }))
+    expect(read()).toEqual(flow)
+    expect(JSON.stringify(flow)).not.toMatch(/Affected body|Independent body/)
+  }
+
+  const prepared = s.store.prepareRunnerComposition(s.task, 'independent')
+  expect(prepared.batch.indexes.map(index => index.artifact_id)).toEqual([independent.artifactId])
+  const publication = s.store.publishRunnerComposition(s.task, prepared.batch.batch_id, prepared.collator.rulePlan())
+  await approveAndConfirm(s, prepared.batch.action_id)
+  expect(await publication).toMatchObject({ state: 'published' })
+  expect(s.composition.scope(s.task)?.state).toBe('working')
+  expect(requestDelivery(s.db, s.task, 'affected')).toMatchObject({ state: 'open' })
+  await vi.waitFor(() => expect(requestDelivery(s.db, s.task, 'independent')).toMatchObject({ state: 'complete', missing_requirement_ids: [] }))
+
+  releaseRepair()
+  if (noProgress) {
+    await vi.waitFor(() => expect(requestDelivery(s.db, s.task, 'affected')).toMatchObject({ state: 'incomplete', missing_requirement_ids: ['content'] }))
+    expect((s.records('worker.result.rejected') as { payload_json: string }[]).map(row => JSON.parse(row.payload_json))).toContainEqual(expect.objectContaining({ code: 'REPAIR_CONDITION_UNMET', no_progress: true }))
+    expect(s.records('runner.repair.applied')).toHaveLength(0)
+    expect(s.artifacts.artifact(s.task, affected.artifactId)?.artifact_revision).toBe(1)
+    return
+  }
+  await vi.waitFor(() => expect(s.artifacts.artifact(s.task, affected.artifactId)?.artifact_revision).toBe(2))
+  expect(JSON.stringify(s.records('worker.result.rejected'))).toContain('REPAIR_CONDITION_UNMET')
+  if (originalView) s.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(originalBytes, affected.resourceId)
+  const repaired = s.store.prepareRunnerComposition(s.task, 'affected')
+  expect(repaired.batch.indexes).toEqual([{ task_id: s.task, artifact_id: affected.artifactId, artifact_revision: 2 }])
+  const replaced = s.store.publishRunnerComposition(s.task, repaired.batch.batch_id, repaired.collator.rulePlan())
+  if (originalView) {
+    await tick()
+    if (replacement === 'denied' || replacement === 'conflict') {
+      const approval = s.store.snapshot(s.task).approvals.find(item => item.action_id === repaired.batch.action_id)!
+      if (replacement === 'conflict') s.store.handle({ type: 'draft.save', task_id: s.task, view_id: originalView.id, view_revision: originalView.revision, expected_state_revision: originalView.state_revision, fields: [{ path: '/answer', value: 'Concurrent saved answer' }] })
+      s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: replacement === 'denied' ? 'deny' : 'approve' })
+    }
+    expect(await replaced).toMatchObject({ state: 'failure', code: replacement === 'draft' ? 'STATE_INCOMPATIBLE' : replacement === 'denied' ? 'APPROVAL_INVALID' : 'VERSION_CONFLICT' })
+    expect(s.store.snapshot(s.task).views.find(view => view.id === originalView.id)).toMatchObject({ revision: originalView.revision, bundle: originalView.bundle,
+      draft: { answer: replacement === 'draft' ? 'Saved original answer' : replacement === 'conflict' ? 'Concurrent saved answer' : '' } })
+    if (replacement === 'denied') {
+      s.store.close()
+      const recovered = setup(true, false, s), model = vi.spyOn(recovered.models, 'request')
+      await recovered.store.recoverRunnerWork()
+      expect(model).not.toHaveBeenCalled()
+      expect(recovered.records('runner.repair.started')).toHaveLength(1)
+      expect(recovered.store.snapshot(recovered.task).views.find(view => view.id === originalView.id)?.bundle).toEqual(originalView.bundle)
+    }
+    return
+  }
+  await approveAndConfirm(s, repaired.batch.action_id)
+  expect(await replaced).toMatchObject({ state: 'published' })
+  expect(s.composition.scope(s.task)?.state).toBe('complete')
+  expect(s.records('runner.repair.applied')).toHaveLength(1)
+  await vi.waitFor(() => expect(requestDelivery(s.db, s.task, 'affected')).toMatchObject({ state: 'complete', missing_requirement_ids: [] }))
+  const corrected = s.artifacts.artifact(s.task, affected.artifactId)!
+  s.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(262145, corrected.bundle_resource_id)
+  await s.executePrepared('affected', s.store.prepareRunnerComposition(s.task, 'affected', { artifact_ids: [affected.artifactId] }))
+  expect(s.records('runner.repair.started')).toHaveLength(1)
+  expect(JSON.parse((s.records('runner.repair.requested').at(-1) as { payload_json: string }).payload_json)).toMatchObject({ disposition: 'obsolete', issue: { artifact: { artifact_revision: 2 } } })
+})
+
+it.each(['receipt', 'worker', 'router', 'router shutdown', 'cancelled', 'unknown'] as const)('recovers structural feedback at the %s boundary without repeating an installed decision', async boundary => {
+  const first = setup(true, true), original = first.source('affected')
+  const router = boundary === 'router' || boundary === 'router shutdown'
+  first.record(first.task, 'runner.delivery.opened', { request_id: 'affected', intent_revision: 1, input_event_id: 'input-affected', state: 'open' })
+  first.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(262145, original.resourceId)
+  const usage = { prompt_tokens: 20, completion_tokens: 15 }
+  const done = (value: unknown) => ({ text: JSON.stringify(value), calls: [], finish: 'stop' as const, usage })
+  let finishOld!: (value: ReturnType<typeof done>) => void
+  const oldResult = new Promise<ReturnType<typeof done>>(resolve => { finishOld = resolve })
+  vi.spyOn(first.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const { batch, structural_issues } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    if (!batch) return oldResult
+    const { task_id, run_id, batch_id, composition_version } = batch
+    return done({ kind: 'feedback', task_id, run_id, batch_id, composition_version, reports: [{ evidence_id: structural_issues[0].evidence_id,
+      recipient: router ? { kind: 'router' } : { kind: 'worker', work_id: original.workId } }] })
+  })
+  if (boundary === 'receipt') vi.spyOn(first.internal, 'runnerRunAvailable').mockReturnValue(false)
+  else if (boundary !== 'unknown') {
+    const admission = first.internal.runnerAdmission, next = admission.next.bind(admission)
+    vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => next(task, candidates.filter(candidate => candidate.kind === 'composition'), active, ready))
+  }
+  await first.automatic('affected')
+  const [receipt] = first.records('runner.composition.feedback') as { id: string; payload_json: string }[]
+  const feedback = JSON.parse(receipt!.payload_json)
+  const repair = first.state.taskWorks(first.task).find(work => work.purpose === 'production' && work.work_id !== original.workId)
+  const attempt = repair?.current_attempt_id ? first.state.attempt(repair.current_attempt_id) : undefined
+  if (boundary === 'receipt') {
+    expect(repair).toBeUndefined()
+    first.db.prepare("UPDATE runs SET state='running',commit_valid=1,ended_at=NULL WHERE id=?").run(feedback.owner.run_id)
+  } else expect(attempt).toMatchObject({ dispatch_state: boundary === 'unknown' ? 'dispatched' : 'not_dispatched' })
+  if (router) {
+    const flow = first.store.handle({ type: 'host.runner.flow', task_id: first.task }) as LiveFlowSnapshot
+    expect(flow.lanes.Router.items).toContainEqual(expect.objectContaining({ id: `work:${repair!.work_id}`, state: 'queued', handoff: { from: 'Collator', kind: 'feedback', sequence: expect.any(Number) } }))
+  }
+  if (boundary === 'cancelled') first.input('cancel_work', { work_id: repair!.work_id, run_id: repair!.run_id })
+  if (boundary === 'router shutdown') await first.store.shutdown()
+  else first.store.close()
+  const next = setup(true, false, first)
+  const invoke = (name: string, args: unknown) => ({ text: '', finish: 'tool_calls' as const, usage, calls: [{ id: name, type: 'function' as const, function: { name: name === 'recover-route' ? 'call' : 'write', arguments: JSON.stringify(args) } }] })
+  let reportedPrematureUpdate = false, reportedFalseBlock = false
+  const calls = vi.spyOn(next.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const { bound } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    if (bound.feedback) {
+      const result = messages.find(message => message.role === 'tool' && message.tool_call_id === 'recover-route')
+      if (result) {
+        expect(JSON.parse(result.content!)).toMatchObject({ execution: 'success' })
+        if (!reportedFalseBlock) {
+          reportedFalseBlock = true
+          return done({ kind: 'blocked' })
+        }
+        expect(messages[0]!.content).toContain('A repair plan was installed. Return updated without dispatching again.')
+        return done({ kind: 'updated' })
+      }
+      if (!reportedPrematureUpdate) {
+        reportedPrematureUpdate = true
+        return done({ kind: 'updated' })
+      }
+      expect(messages[0]!.content).toContain('No repair plan was installed.')
+      return invoke('recover-route', { capability: ROUTE_WORK, input_json: JSON.stringify({ action: 'dispatch', base_revision: bound.base_revision, assignments: [
+        { assignment_key: 'repair', instructions: 'Return the compact fragment.', required: true, requirement_ids: ['content'], outputs: [{ output_key: 'fixed', kind: 'artifact', exposure: 'publish' }] }
+      ] }) })
+    }
+    expect(bound.repair.previous).toMatchObject({ artifact_id: original.artifactId, artifact_revision: 1 })
+    const resource = messages.find(message => message.role === 'tool' && message.tool_call_id === 'recover-bundle')
+    if (!resource) return invoke('recover-bundle', { operation: 'resource.create', input: { display_name: 'Recovered repair', content: { type: 'json', value: bundle('Recovered repair') } } })
+    return done({ version: 1, complete: true, answer: null, artifacts: [{ artifact_id: original.artifactId, base_artifact_revision: 1,
+      section_id: original.index.section_id, bundle_resource_id: JSON.parse(resource.content!).data.id, presentation_kind: 'managed-v1', width_constraint: 'full', interaction_kind: 'input',
+      provenance_ref: original.index.provenance_ref, requirement_ids: ['content'], unresolved: [] }], requirement_ids: ['content'], unresolved: [] })
+  })
+  const repairs = new RunnerRepairState(next.db, next.state, next.artifacts, next.composition)
+  expect(repairs.install({ result: feedback.result, issues: feedback.issues }, feedback.owner, next.record)).toBe(receipt!.id)
+  await next.store.recoverRunnerWork()
+  if (boundary === 'unknown' || boundary === 'cancelled') {
+    if (boundary === 'unknown') {
+      expect(new RunnerHostRecovery(next.db, next.epoch).queryOperation(next.task, attempt!.operation_id!)).toMatchObject({ state: 'unknown', operation_id: attempt!.operation_id })
+      finishOld(done({ version: 1, complete: true, answer: 'A stale response', artifacts: [], requirement_ids: [], unresolved: [] }))
+    }
+    await next.store.recoverRunnerWork()
+    expect(calls).not.toHaveBeenCalled()
+    expect(next.artifacts.artifact(next.task, original.artifactId)?.artifact_revision).toBe(1)
+  } else {
+    await vi.waitFor(() => expect(next.artifacts.artifact(next.task, original.artifactId)?.artifact_revision,
+      JSON.stringify(['runner.goal.waiting', 'runner.production.resumed', 'worker.tool.ended', 'worker.ended', 'runner.repair.response'].flatMap(next.records))).toBe(2))
+    expect(next.records('runner.repair.applied')).toHaveLength(1)
+    if (router) {
+      expect(next.records('runner.repair.plan')).toHaveLength(1)
+      await vi.waitFor(() => expect((next.records('runner.repair.response') as { payload_json: string }[]).map(row => JSON.parse(row.payload_json).kind)).toEqual(['updated']))
+      expect((next.records('worker.result.rejected') as { payload_json: string }[]).map(row => JSON.parse(row.payload_json)).filter(row => row.code === 'RUNNER_PLAN_CONFLICT').map(row => row.value)).toEqual(['updated', 'blocked'])
+    }
+    if (repair) {
+      const current = next.state.work(repair.work_id)
+      expect(next.state.attempt(current.current_attempt_id!)).toMatchObject({ previous_attempt_id: attempt!.attempt_id, runtime_epoch: next.epoch })
+      expect(next.state.run(repair.run_id)).toMatchObject({ state: 'interrupted', commit_valid: false })
+      expect(() => next.state.qualify(attempt!.attempt_id)).toThrow()
+    }
+  }
+  await next.store.recoverRunnerWork()
+  expect(next.records('runner.composition.feedback')).toHaveLength(1)
+  expect(next.records('runner.repair.requested')).toHaveLength(1)
+  expect(next.state.run(original.run)).toMatchObject({ state: 'completed', commit_valid: false })
+})
+
+it('recovers an unaffected fragment after the feedback batch ends and its repair is cancelled', async () => {
+  const first = setup(true, true), affected = first.source('affected'), independent = first.source('independent', bundle('Independent body'))
+  for (const request_id of ['affected', 'independent']) first.record(first.task, 'runner.delivery.opened', { request_id, intent_revision: 1, input_event_id: `input-${request_id}`, state: 'open' })
+  first.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(262145, affected.resourceId)
+  const admission = first.internal.runnerAdmission, select = admission.next.bind(admission)
+  vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => select(task, candidates.filter(candidate => candidate.kind === 'composition'), active, ready))
+  vi.spyOn(first.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const { batch, structural_issues } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    const { task_id, run_id, batch_id, composition_version } = batch
+    return { text: JSON.stringify({ kind: 'feedback', task_id, run_id, batch_id, composition_version, reports: [{ evidence_id: structural_issues[0].evidence_id, recipient: { kind: 'worker', work_id: affected.workId } }] }), calls: [], finish: 'stop', usage: { prompt_tokens: 20, completion_tokens: 15 } }
+  })
+  await first.automatic('affected')
+  const repair = first.state.taskWorks(first.task).find(work => work.purpose === 'production' && work.work_id !== affected.workId && work.work_id !== independent.workId)!
+  first.input('cancel_work', { work_id: repair.work_id, run_id: repair.run_id })
+  expect(first.store.snapshot(first.task).views).toEqual([])
+  first.store.close()
+
+  const next = setup(true, false, first), model = vi.spyOn(next.models, 'request')
+  await next.store.recoverRunnerWork()
+  await vi.waitFor(() => expect(next.store.snapshot(next.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true), { timeout: 3000 })
+  await approveAndConfirm(next)
+  await vi.waitFor(() => expect(requestDelivery(next.db, next.task, 'independent')).toMatchObject({ state: 'complete' }))
+  expect(next.store.snapshot(next.task).views.map(view => view.bundle.html)).toEqual([expect.stringContaining('Independent body')])
+  expect(next.records('runner.composition.feedback')).toHaveLength(1)
+  expect(model).not.toHaveBeenCalled()
+})
 
 it('attributes one shared approval only to the messages that contributed to its batch', async () => {
   const s = setup(), first = s.source('alpha'), second = s.source('beta')
@@ -294,6 +559,28 @@ it('rebuilds in the grown scope with the original budget without losing either V
   expect(manifest.contributions.map((entry: { artifact_id: string }) => entry.artifact_id).sort()).toEqual([alpha.artifactId, beta.artifactId])
 })
 
+it('keeps delivery open while an automatic publication rebuilds after a version conflict', async () => {
+  const first = setup(), alpha = first.source('alpha'), beta = first.source('beta')
+  first.record(first.task, 'runner.delivery.opened', { request_id: 'alpha', intent_revision: 1, input_event_id: 'input-alpha', state: 'open' })
+  first.store.close()
+
+  const s = setup(true, false, first)
+  const original = s.store.prepareRunnerComposition(s.task, 'alpha', { artifact_ids: [alpha.artifactId] })
+  const rebuilding = s.executePrepared('alpha', original)
+  const other = s.store.prepareRunnerComposition(s.task, 'beta', { artifact_ids: [beta.artifactId] })
+  const independent = s.store.publishRunnerComposition(s.task, other.batch.batch_id, other.collator.rulePlan())
+  await approveAndConfirm(s, other.batch.action_id)
+  expect(await independent).toMatchObject({ state: 'published' })
+  const approval = s.store.snapshot(s.task).approvals.find(item => item.action_id === original.batch.action_id)!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
+  await vi.waitFor(() => expect(s.store.snapshot(s.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true))
+  expect(s.store.runnerPublicationOperation(s.task, original.batch.operation_id!)?.result).toMatchObject({ state: 'failure', code: 'VERSION_CONFLICT' })
+  expect(requestDelivery(s.db, s.task, 'alpha')).toMatchObject({ state: 'open' })
+  await approveAndConfirm(s)
+  await rebuilding
+  expect(requestDelivery(s.db, s.task, 'alpha')).toMatchObject({ state: 'complete' })
+})
+
 it.each(['cleanup', 'usage-unknown', 'legacy-budget-exceeded'] as const)('rebuilds a conflicted composition after real cleanup while preserving %s evidence', async blocker => {
   const s = setup(), alpha = s.source('alpha'), beta = s.source('beta'), ledger = new RunnerBudgetLedger(s.db)
   const original = s.store.prepareRunnerComposition(s.task, 'alpha', { artifact_ids: [alpha.artifactId] })
@@ -408,6 +695,57 @@ it('checks every sealed fragment across batches before marking a single goal com
   expect(manifest.targets).toEqual([{ task_id: s.task, request_id: 'goal', intent_revision: 1 }])
   expect(manifest.contributions.map((entry: { artifact_id: string }) => entry.artifact_id).sort()).toEqual(source.indexes.map(index => index.artifact_id).sort())
   expect(s.db.prepare('SELECT count(*) count FROM views').get()).toEqual({ count: 17 })
+})
+
+it('automatically publishes the unbatched fragment after the first batch is denied', async () => {
+  const s = setup(true, true), source = s.source('goal', bundle(), true, true, 'model', 17)
+  s.record(s.task, 'runner.delivery.opened', { request_id: 'goal', intent_revision: 1, input_event_id: 'input-goal', state: 'open' })
+  vi.spyOn(s.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const { batch } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    const stored = s.composition.batch(s.task, batch.batch_id)!
+    expect(stored.indexes).toHaveLength(1)
+    const plan = createCollator({ batch: stored, outline: s.artifacts.outline(s.task)!, indexes: stored.indexes.map(index => s.artifacts.artifact(s.task, index.artifact_id, index.artifact_revision)!), currentLayout: null }).rulePlan()
+    return { text: JSON.stringify(plan),
+      calls: [], finish: 'stop', usage: { prompt_tokens: 20, completion_tokens: 15 } }
+  })
+  const first = s.store.prepareRunnerComposition(s.task, 'goal')
+  expect(first.batch.indexes).toHaveLength(16)
+  const initial = s.store.publishRunnerComposition(s.task, first.batch.batch_id, first.collator.rulePlan())
+  await tick()
+  const approval = s.store.snapshot(s.task).approvals.find(item => item.action_id === first.batch.action_id)!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'deny' })
+  expect(await initial).toMatchObject({ state: 'failure', code: 'APPROVAL_INVALID' })
+  expect(requestDelivery(s.db, s.task, 'goal')).toMatchObject({ state: 'open' })
+  await vi.waitFor(() => expect(s.store.snapshot(s.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true))
+  await approveAndConfirm(s)
+  await vi.waitFor(() => expect(requestDelivery(s.db, s.task, 'goal')).toMatchObject({ state: 'incomplete', missing_requirement_ids: ['content'] }))
+  const remaining = source.indexes.find(index => !first.batch.indexes.some(item => item.artifact_id === index.artifact_id))!
+  expect(s.store.snapshot(s.task).views).toHaveLength(1)
+  expect(new RunnerHostComposition(s.db, s.state, s.artifacts, s.composition).publications.mapping(s.task, remaining.artifact_id)).toMatchObject({ artifact_revision: 1 })
+  await s.store.recoverRunnerWork()
+  expect(s.records('runner.composition.prepared')).toHaveLength(2)
+})
+
+it.each(['ready', 'unavailable'] as const)('settles a %s composition opportunity recovered before its first batch', async configuration => {
+  const first = setup(), source = first.source()
+  first.record(first.task, 'runner.delivery.opened', { request_id: 'goal', intent_revision: 1, input_event_id: 'input-goal', state: 'open' })
+  expect(first.records('runner.composition.prepared')).toHaveLength(0)
+  first.store.close()
+
+  const next = setup(true, false, first)
+  if (configuration === 'unavailable') next.db.prepare("UPDATE requests SET config_selection_json=json_set(config_selection_json,'$.revision',2) WHERE id='goal'").run()
+  await next.store.recoverRunnerWork()
+  if (configuration === 'ready') {
+    await vi.waitFor(() => expect(next.store.snapshot(next.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true))
+    await approveAndConfirm(next)
+    await vi.waitFor(() => expect(requestDelivery(next.db, next.task, 'goal')).toMatchObject({ state: 'complete' }))
+    expect(new RunnerHostComposition(next.db, next.state, next.artifacts, next.composition).publications.mapping(next.task, source.artifactId)).toMatchObject({ artifact_revision: 1 })
+    expect(next.records('runner.composition.prepared')).toHaveLength(1)
+  } else {
+    await vi.waitFor(() => expect(requestDelivery(next.db, next.task, 'goal')).toMatchObject({ state: 'incomplete', missing_requirement_ids: ['content'] }))
+    await next.store.recoverRunnerWork()
+    expect(next.records('runner.composition.prepared')).toHaveLength(0)
+  }
 })
 
 it('keeps an old valid batch publishable when another goal grows the necessary scope', async () => {

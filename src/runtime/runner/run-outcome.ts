@@ -84,14 +84,17 @@ export function aggregateRunOutcome(input: RunOutcomeInput): RunOutcome {
     if (work.state === 'succeeded') result = 'succeeded'
     else if (work.state === 'cancelled' || work.state === 'dependency_cancelled') result = 'cancelled'
     else if (work.state === 'failed' || work.state === 'dependency_failed') result = work.state === 'dependency_failed' && work.root_cause?.kind === 'cancellation' ? 'cancelled' : 'failed'
-    else if (work.state === 'invalidated') wait('work_invalidated')
-    else if (work.current_attempt_id && !attempt) wait('attempt_unavailable')
+    else if (work.state === 'invalidated') {
+      if (work.purpose === 'production' && work.assignment) result = 'failed'
+      else wait('work_invalidated')
+    }
+    else if (work.current_attempt_id && !attempt) wait(work.state === 'waiting' && (input.states ?? []).some(state => state.work_id === work.work_id && state.attempt_id === work.current_attempt_id && state.reason === 'input_required') ? 'input_required' : 'attempt_unavailable')
     else if (attempt?.state === 'unknown' || attempt?.dispatch_state === 'unknown') { /* Original operation must be reconciled. */ }
     else if (attempt?.state === 'failed') {
       if (attempt.attempt_number >= work.max_attempts) result = 'failed'
       else { retry = true; runnable = true }
     } else if (attempt?.state === 'cancelled') result = 'cancelled'
-    else if (attempt?.state === 'revoked') wait('attempt_revoked')
+    else if (attempt?.state === 'revoked') wait((input.states ?? []).find(state => state.work_id === work.work_id && state.attempt_id === attempt.attempt_id && ['missing_input', 'input_required'].includes(state.reason ?? ''))?.reason ?? 'attempt_revoked')
     else {
       const states = (input.states ?? []).filter(state => state.work_id === work.work_id && state.attempt_id === work.current_attempt_id && !knownAttempt.has(attempt?.state ?? 'registered'))
       for (const state of states) if (state.state === 'waiting') waits.push({ work_id: work.work_id, attempt_id: state.attempt_id, reason: state.reason ?? 'work_waiting', ...(state.operation_id ? { operation_id: state.operation_id } : {}) })

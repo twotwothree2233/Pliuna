@@ -1,14 +1,17 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import type { ExecutionAttempt, ExecutionScope, LogicalWork, WorkDependency } from '../../shared/contracts.generated'
+import type { ExecutionAttempt, ExecutionScope, LogicalWork, ModelRequest, RouteWorkRunnerOutputBinding, WorkDependency } from '../../shared/contracts.generated'
 import { dependencyKey, sameDependencies, validateRunnerContract } from '../../shared/runner-validation'
 import { assertContract, ContractError } from '../../shared/validation'
 import { ModelError, type ChatMessage } from '../model/adapter'
 import { interactions, recordedMessage, restoreMessages, summaryMessage, type HistoryRecord, type InstalledSummary } from '../model/context'
 import { attachEvidence, captureExecutionScope, messageEvidence } from '../model/request-evidence'
+import { modelToolRequest } from '../model/tool-input'
+import { READ_WORK_OUTPUT } from './orchestration-tool'
 
 const recordBytes = 1024 * 1024, contextBytes = 8 * recordBytes, recordCount = 4096
 const navigationBytes = 64 * 1024
+const checkpointBytes = 64 * 1024, checkpointRecords = 128
 const historyKinds = "'worker.input','worker.conversation','model.response','model.tool_result'"
 const scopeFields = ['task_id', 'run_id', 'work_id', 'attempt_id', 'role', 'purpose', 'request_id', 'intent_revision', 'message_id', 'update_id', 'batch_id', 'composition_version', 'trigger_request_id'] as const
 // Guard json_extract independently: unrelated legacy records can contain invalid JSON.
@@ -20,6 +23,26 @@ function invalidSummary(): never { throw new ContractError('SUMMARY_STORED_INVAL
 function denied(): never { throw new ContractError('WORKER_DEPENDENCY_DENIED', 'Worker dependency is outside the granted input set') }
 function limit(): never { throw new ModelError('CONTEXT_RECORD_LIMIT') }
 const sequence = (value: number): boolean => Number.isSafeInteger(value) && value >= 0
+const checkpointDenied = (): never => { throw new ContractError('RUNNER_CHECKPOINT_UNAVAILABLE', 'Checkpoint is unavailable to this Task and model configuration') }
+
+type ModelBinding = Pick<ExecutionAttempt, 'model_config_id' | 'model_config_revision'>
+type CheckpointOutput = RouteWorkRunnerOutputBinding & { bundle_resource_id?: string }
+interface CheckpointAccess {
+  dependencies: readonly WorkDependency[]
+  resources: readonly string[]
+  outputs: readonly CheckpointOutput[]
+  authorize(request: ModelRequest): void
+}
+
+function sameOutput(left: RouteWorkRunnerOutputBinding, right: RouteWorkRunnerOutputBinding): boolean {
+  return left.work_id === right.work_id && left.plan_revision === right.plan_revision && left.result_revision === right.result_revision && left.output_key === right.output_key
+}
+
+function checkpointTool(request: ModelRequest): boolean {
+  return request.type === 'list' && request.input.kind === 'object_type'
+    || request.type === 'read' && ['object_type', 'resource'].includes(request.input.target.kind)
+    || request.type === 'call' && request.input.capability === READ_WORK_OUTPUT
+}
 
 function scopeValues(owner: ExecutionScope): (string | number | null)[] {
   return [owner.task_id, owner.run_id, owner.work_id, owner.attempt_id, owner.role, owner.purpose,
@@ -119,6 +142,98 @@ export class WorkerContext {
       interactions(restored)
       return [system, ...(summary ? [summaryMessage(summary.value)] : []), ...restored]
     })()
+  }
+
+  checkpoints(model: ModelBinding): { checkpoint_id: string; through_sequence: number }[] {
+    if (!this.checkpointAttempt(model)) return []
+    return this.checkpointGroups().slice(-3).reverse().map(group => {
+      const end = group.records.at(-1)!
+      return { checkpoint_id: end.id, through_sequence: end.sequence }
+    })
+  }
+
+  static checkpoint(db: Database.Database, task: string, checkpointId: string, model: ModelBinding, access?: CheckpointAccess): { checkpoint_id: string; messages: ChatMessage[] } | undefined {
+    return db.transaction(() => {
+      const row = db.prepare(`SELECT ${selectedRecord} FROM records WHERE task_id=? AND id=? AND kind IN (${historyKinds})`).get(task, checkpointId) as RecordRow | undefined
+      if (!row?.payload_json) return checkpointDenied()
+      let owner: ExecutionScope | undefined
+      try { owner = captureExecutionScope(JSON.parse(row.payload_json).owner, task) } catch { return checkpointDenied() }
+      if (!owner) return checkpointDenied()
+      const context = new WorkerContext(db, owner), source = context.checkpointAttempt(model)
+      if (!source) return checkpointDenied()
+      const groups = context.checkpointGroups(row.sequence)
+      if (groups.at(-1)?.records.at(-1)?.id !== checkpointId) return checkpointDenied()
+      if (!access) return
+      const input = groups[0]!.records.at(-1)!.payload
+      const current = new Set(access.dependencies.map(dependencyKey)), resourceIds = new Set(access.resources)
+      if (source.input_versions.some(dependency => !['work', 'goal'].includes(dependency.kind) && !current.has(dependencyKey(dependency)))) return
+      if ((input.bound?.materials ?? []).some((material: { id: string }) => !resourceIds.has(material.id))) return
+      const outputs: CheckpointOutput[] = input.bound?.work_outputs ?? []
+      const messages: ChatMessage[] = []
+      let end: HistoryRecord | undefined
+      for (const group of groups) {
+        if (!group.requests.every(request => {
+          try { access.authorize(request) } catch { return false }
+          if (request.type === 'read' && request.input.target.kind === 'resource') {
+            const resource = request.input.target.id, output = outputs.find(output => output.bundle_resource_id === resource)
+            return resourceIds.has(resource) && (!output || access.outputs.some(current => sameOutput(output, current)))
+          }
+          if (request.type === 'call') {
+            const args = request.input.arguments as unknown as RouteWorkRunnerOutputBinding
+            return !!args && access.outputs.some(output => sameOutput(output, args))
+          }
+          return true
+        })) break
+        messages.push(...group.records.map(record => validMessage(record, owner!)))
+        end = group.records.at(-1)
+      }
+      if (end) return { checkpoint_id: end.id, messages }
+    })()
+  }
+
+  private checkpointAttempt(model: ModelBinding): ExecutionAttempt | undefined {
+    const owner = this.owner
+    if (owner.purpose !== 'production' || owner.role !== 'producer' || owner.update_id) return
+    const row = this.db.prepare(`SELECT payload_json FROM runner_attempts WHERE task_id=? AND run_id=? AND work_id=? AND attempt_id=?
+      AND length(CAST(payload_json AS BLOB))<=?`).get(owner.task_id, owner.run_id, owner.work_id, owner.attempt_id, recordBytes) as { payload_json: string } | undefined
+    if (!row) return
+    const attempt = validateRunnerContract('runner_execution_attempt', JSON.parse(row.payload_json))
+    if (!sameOwner(sourceOwner(attempt, owner.role, attempt.attempt_id), owner) || attempt.model_config_id !== model.model_config_id || attempt.model_config_revision !== model.model_config_revision) return
+    if (['cancelled', 'failed', 'unknown'].includes(attempt.state)) return
+    if (attempt.state === 'revoked' && !this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.assignment.waiting'
+      AND json_extract(payload_json,'$.attempt_id')=?`).get(owner.task_id, owner.attempt_id)) return
+    if (this.db.prepare(`SELECT 1 FROM runner_current_content_plans WHERE task_id=? AND request_id=? AND intent_revision!=?
+      UNION ALL SELECT 1 FROM runner_content_removals WHERE task_id=? AND request_id=? AND intent_revision=?`).get(owner.task_id, owner.request_id, owner.intent_revision, owner.task_id, owner.request_id, owner.intent_revision)) return
+    return attempt
+  }
+
+  private checkpointGroups(through = Number.MAX_SAFE_INTEGER): { records: HistoryRecord[]; requests: ModelRequest[] }[] {
+    const rows = this.db.prepare(`SELECT ${selectedRecord} FROM records WHERE ${scopeWhere} AND sequence<=? AND kind IN (${historyKinds}) ORDER BY sequence LIMIT ${checkpointRecords}`).iterate(...this.parameters, through) as Iterable<RecordRow>
+    const groups: { records: HistoryRecord[]; requests: ModelRequest[] }[] = []
+    let records: HistoryRecord[] = [], requests: ModelRequest[] = [], pending = new Set<string>(), bytes = 0, input = false
+    for (const row of rows) {
+      bytes += row.bytes
+      if (bytes > checkpointBytes) break
+      const record = this.original(row), message = validMessage(record, this.owner)
+      if (!input) {
+        if (record.kind === 'worker.input') {
+          if (record.payload.checkpoint_source !== true || record.payload.preceding_result) return []
+          groups.push({ records: [...records, record], requests: [] }); records = []; input = true
+        } else if (record.kind === 'worker.conversation') records.push(record)
+        else break
+        continue
+      }
+      if (record.kind === 'model.response' && pending.size === 0) {
+        try { requests = (message.tool_calls ?? []).map(call => modelToolRequest(call.function.name, JSON.parse(call.function.arguments))) }
+        catch { break }
+        if (!requests.every(checkpointTool)) break
+        pending = new Set(message.tool_calls?.map(call => call.id))
+        records = [record]
+      } else if (record.kind === 'model.tool_result' && pending.delete(message.tool_call_id!)) records.push(record)
+      else break
+      if (pending.size === 0) groups.push({ records, requests })
+    }
+    return groups
   }
 
   installSummary(value: InstalledSummary): void {

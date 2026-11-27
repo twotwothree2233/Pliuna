@@ -332,6 +332,25 @@ it('keeps unreturned tools, partial replies and failed delivery distinct and ret
   activity(run)
   expect(db.prepare('SELECT count(*) n FROM records').get()).toEqual(before)
 })
+it.each(['request link', 'legacy attempt'])('pairs parallel tools with reused call IDs by %s', association => {
+  const run = store.start(task.task.id, '并发工具', 'fixture', [])
+  store.handle({ type: 'run.cancel', task_id: task.task.id, run_id: run })
+  const binding = (name: string) => ({ owner: { attempt_id: name }, ...(association === 'request link' ? { request_link: { request_id: `request-${name}`, evidence_event_id: `evidence-${name}` } } : {}) })
+  const response = (name: string) => activityRecord(run, 'model.response', { ...binding(name), message: { tool_calls: [{ id: 'reused-wire-id', function: { name: 'read', arguments: JSON.stringify({ id: name }) } }] } })
+  const result = (name: string, value: unknown) => activityRecord(run, 'model.tool_result', { ...binding(name), message: { tool_call_id: 'reused-wire-id', content: JSON.stringify(value) } })
+  response('slow')
+  response('fast')
+  result('fast', { execution: 'not_executed', error: { code: 'NOT_FOUND' } })
+  expect(activity(run).items).toEqual([
+    expect.objectContaining({ target_id: 'slow', execution: null, error: null }),
+    expect.objectContaining({ target_id: 'fast', execution: 'not_executed', error: 'NOT_FOUND' })
+  ])
+  result('slow', { execution: 'success' })
+  expect(activity(run).items).toEqual([
+    expect.objectContaining({ target_id: 'slow', execution: 'success', error: null }),
+    expect.objectContaining({ target_id: 'fast', execution: 'not_executed', error: 'NOT_FOUND' })
+  ])
+})
 it('shows actual fixture actions without requiring model-wire records', async () => {
   const run = store.start(task.task.id, '练习单', 'fixture', [])
   await vi.advanceTimersByTimeAsync(160)

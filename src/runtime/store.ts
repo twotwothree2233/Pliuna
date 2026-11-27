@@ -31,7 +31,7 @@ import type { Bundle, IpcRequest, ModelRequest } from '../shared/contracts.gener
 import type { Snapshot, Task, RunnerProjection } from '../shared/types'
 import { ContractError, assertContract, validateIpc, validateModel } from '../shared/validation'
 import { answerValues, checkBundle, checkDraft, fieldSchema, getField, setField, schemaCheck } from './managed'
-import { replacementDraft } from './surface-transition'
+import { canonical, replacementDraft } from './surface-transition'
 import { ObjectQueries } from './queries'
 import { digest, resourceBody, resourceValue } from './resources'
 import { captureEvidence, checkEvidence, historyValue, saveHistory } from './evidence'
@@ -62,14 +62,18 @@ import { backgroundCheck } from './export-check-runner'
 import { RpcError } from './plugins/rpc'
 import { boundedRecent, snapshotValue } from './snapshot-summary'
 import { runActivity } from './run-activity'
-import { RunnerWorkState, type QualifiedAttempt } from './runner/work-state'
+import { RunnerWorkState, type AssignmentSupplement, type QualifiedAttempt } from './runner/work-state'
 import { WorkerContext } from './runner/worker-context'
-import { captureConversation, fitConversation, loadConversation, type ConversationBinding, type ConversationHistory, type ConversationResult } from './runner/conversation'
+import { captureConversation, fitConversation, loadConversation, precedingDelivery, type ConversationBinding, type ConversationHistory, type ConversationResult } from './runner/conversation'
 import { liveRunnerFlow } from './runner/live-flow'
 import { approvalMessages, conversationContentPlan, conversationDependencyResult, conversationDependencyRunning, conversationPublicationRun, conversationReference, runMessage, type BoundConversationDependency } from './runner/conversation-query'
 import type { WorkerGrant, WorkerProfile } from './runner/worker-profile'
+import { dispatchOrchestrationTool, DISCOVER_INPUTS, InitialWorkDraft, orchestrationCapability, READ_BOUND_INPUT, READ_WORK_OUTPUT, REPORT_MISSING_INPUT, WORK_OUTPUT_REPEAT_NOTICE, type DispatchWork, type OrchestrationInstallation } from './runner/orchestration-tool'
+import { assignmentRevisions, bindOutput, checkAssignmentRequirements, initialDeliveryRequirements, installableAssignments, propagateAssignmentRevisions } from './runner/orchestration-plan'
+import { AssignmentContent, BoundContentReader, boundContentInputs } from './runner/assignment-content'
+import { RoutingInputCatalog, type CatalogOutput } from './runner/routing-input-catalog'
 import { captureExecutionScope } from './model/request-evidence'
-import type { ExecutionScope, ExecutionAttempt, InputEvent, ContentPlan } from '../shared/contracts.generated'
+import type { ExecutionScope, ExecutionAttempt, InputEvent, ContentPlan, ReportMissingInput, RouteWork } from '../shared/contracts.generated'
 import { aggregateRunOutcome, type WorkRunState } from './runner/run-outcome'
 import { runnerFailureReason } from './runner/failure-reason'
 import { TaskRunner, type TaskRunnerRoute, type TaskRunnerInstallation, type TaskRunnerEffect, type TaskRunnerStatusQuery, type TaskRunnerStatusPage } from './runner/task-runner'
@@ -83,6 +87,8 @@ import { createProducerProfile, ruleRouterOutline, validateProducerBundle, type 
 import { RunnerHostProduction } from './runner/host-production'
 import { RunnerHostRecovery } from './runner/host-recovery'
 import { RunnerHostProgress } from './runner/host-progress'
+import { deliveryHasUnsettledExecution, requestDelivery } from './runner/delivery-state'
+import { artifactRepair, installedRepairDispatch, repairRequestId, repairRoutingWork, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
 import { createRunnerDiagnostic, type RunnerDiagnostic } from './runner/diagnostic'
 import type { ProgressDiagnosis } from './runner/progress-observer'
 import { RunnerHostStatus } from './runner/host-status'
@@ -91,13 +97,13 @@ import { RunnerHostComposition, type PrepareRunnerCompositionOptions, type Prepa
 import type { PublicationOperation, PublicationResult } from './runner/publication-state'
 import { freezeExportComposition } from './runner/export-selection'
 import { exportCompositionIssue, exportCompositionSummary, type FrozenExportComposition } from './export-composition'
-import type { LogicalWork, PresentationPlan } from '../shared/contracts.generated'
+import type { LogicalWork, PresentationPlan, RouteWorkRunnerOutputBinding } from '../shared/contracts.generated'
 import type { ChapterManifest, ChapterProposal, ChapterPublication, ChapterUpdate } from '../shared/contracts.generated'
 import { ChapterHost } from './runner/chapter-host'
 import { chapterTerminal } from './runner/chapter-state'
 import { assembleChapterUpdate, chapterCandidateTemplate, chapterContext, chapterInput, validateChapterCandidate } from './runner/chapter-content'
 import { createChapterProfile, createContentProfile } from './runner/chapter-profile'
-import { createChapterRouterProfile, createConversationReadingProfile, createConversationRouterProfile, validateChapterRoute, validateConversationRoute, type ConversationRoute } from './runner/chapter-router'
+import { createChapterRouterProfile, createConversationReadingProfile, createConversationRouterProfile, createWorkRouterProfile, validateChapterRoute, validateConversationRoute, type ConversationRoute } from './runner/chapter-router'
 import { ContentTreeState } from './runner/content-tree-state'
 import { ContentTreeQueries } from './runner/content-tree-queries'
 import { isCorrectableContentError } from './runner/content-errors'
@@ -110,15 +116,20 @@ const now = () => new Date().toISOString()
 const json = JSON.stringify
 function fail(code: string, message: string): never { throw new ContractError(code, message) }
 type Row = Record<string, any>
+type RoutedAdmission = { input: Row; route: ConversationRoute; draft?: DispatchWork; chapterQuery?: { manifest: ChapterManifest; region_ids: string[] } }
 type ExecutionActionContext = (PluginActionContext | { id: string; signal: AbortSignal; owner: ExecutionScope; authorize(request: unknown): void; valid(): void; identity?: never }) & { hostPublication?: boolean }
-type WorkerAgent = { owner: ExecutionScope; controller: AbortController; main: ModelLease; compact?: ModelLease; approval?: ModelLease; budget: RunBudget; mode: 'manual' | 'assisted'; context: WorkerContext; profile: WorkerProfile<unknown>; collator?: Collator; diagnostic?: RunnerDiagnostic; messages?: ChatMessage[]; state: 'running' | 'waiting'; reason?: string }
-type WorkerInput = { text: string; conversation?: ConversationHistory; bound?: unknown }
+type WorkerAgent = { owner: ExecutionScope; controller: AbortController; main: ModelLease; compact?: ModelLease; approval?: ModelLease; budget: RunBudget; mode: 'manual' | 'assisted'; context: WorkerContext; profile: WorkerProfile<unknown>; collator?: Collator; diagnostic?: RunnerDiagnostic; orchestration?: OrchestrationInstallation; prefix?: ChatMessage[]; messages?: ChatMessage[]; state: 'running' | 'waiting'; reason?: string }
+type WorkerInput = { text: string; conversation?: ConversationHistory; bound?: unknown; orchestration?: OrchestrationInstallation; waitReport?: () => string | undefined; checkpoint?: ReturnType<typeof WorkerContext.checkpoint> }
+type AssignedWork = Extract<LogicalWork, { purpose: 'production' }>
+type MissingInputEvent = { run_id: string; request_id: string; work_id: string; attempt_id: string; plan_revision: number; report: ReportMissingInput }
+type PendingWorkerInput = Omit<AssignmentSupplement, 'clarification_id' | 'source_request_id' | 'message_id' | 'resource_ids'> & { id: string; question: string }
 type SurfaceWrite = Extract<ModelRequest, { type: 'write' }> & { input: Extract<Extract<ModelRequest, { type: 'write' }>['input'], { type: 'surface.update' }> }
 type SurfaceOperation = SurfaceWrite['input']['operations'][number]
 type PreparedView = { op: Extract<SurfaceOperation, { type: 'view.create' | 'view.replace' | 'view.remove' }>; viewId: string; resourceId: string; stageId: string; hash: string; body: Buffer; bundle: Bundle; draft: Record<string, unknown>; hasLocalInput: boolean; answers: number; direct: import('./export-control').ExportResource[]; source?: BundleSource }
 export class RuntimeStore {
   private summaryPager = new RepresentationPager()
   private readCursors = new ReadCursors()
+  private boundContentReader = new BoundContentReader()
   private db!: Database.Database
   private owner: Database.Database
   private recovery!: RecoveryManager
@@ -172,6 +183,7 @@ export class RuntimeStore {
   private runnerProgressObservedAt = new Map<string, number>()
   private runnerCompositionMerges = new Map<string, { first: number; latest: number; trigger: string; timer: ReturnType<typeof setTimeout> }>()
   private runnerCompositionWaiting = new Map<string, { trigger: string; previousBatchId?: string }>()
+  private runnerCompositionPublishing = new Map<string, PreparedRunnerComposition['batch']>()
   private approvalMode: 'manual' | 'assisted' = 'manual'
   private approvalModel = ''
   private approvalWaiters = new Map<string, { resolve: () => void; timer: ReturnType<typeof setTimeout> }>()
@@ -585,7 +597,7 @@ export class RuntimeStore {
     return this.routeChapterRequest(task, text, config, attachments, requestId, manifests)
   }
   private async routeChapterRequest(task: string, text: string, config: string, attachments: Row[], requestId: string, manifests: ChapterManifest[]): Promise<string> {
-    const row = this.one("SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=? AND state='queued'", task, requestId)
+    const row = this.one("SELECT id,input_json,config_selection_json FROM requests WHERE task_id=? AND id=? AND state='queued'", task, requestId)
     const input = JSON.parse(row.input_json), selection = JSON.parse(row.config_selection_json), dialogue = this.features.runner?.conversationRouting === true
     const history = loadConversation(this.db, task, input.conversation)
     const boundResult = this.boundConversationResult(task, input.conversation_dependency)
@@ -593,13 +605,16 @@ export class RuntimeStore {
       ON q.task_id=r.task_id AND q.id=json_extract(r.payload_json,'$.request_id') WHERE r.task_id=? AND r.kind='chapter.route.clarification'
       AND r.sequence<=? AND q.state='confirmation_required' AND json_extract(q.input_json,'$.code')='CHAPTER_SCOPE_REQUIRED'
       ORDER BY r.sequence DESC LIMIT 16`).all(task, input.conversation.through_sequence) : []
+    const pendingWorkerInputs = dialogue ? this.pendingWorkerInputs(task, input.conversation.through_sequence) : []
     const materials = dialogue ? attachments.map(item => this.requestMaterial(task, item.id)) : []
     const grants: WorkerGrant[] = []
     if (materials.length) grants.push({ type: 'read', kind: 'resource', ids: materials.map(item => item.id) })
     if (dialogue) grants.push({ type: 'list', kind: 'event' }, { type: 'read', kind: 'event' })
     const profile = dialogue ? createConversationRouterProfile(manifests, grants) : createChapterRouterProfile(manifests)
-    const lease = this.models.acquire(config, 'main'), controller = new AbortController(), operation = id()
     const savedRoute = input.admission_route as ConversationRoute | undefined
+    const priorDelivery = dialogue && !savedRoute ? precedingDelivery(this.db, task, input.conversation) : undefined
+    const workTable = dialogue && !savedRoute ? this.routingWorkTable(new RunnerWorkState(this.db, this.epoch), task, { model_config_id: selection.id, model_config_revision: selection.revision }) : []
+    const lease = this.models.acquire(config, 'main'), controller = new AbortController(), operation = id()
     let routingRun: string | undefined
     if (!savedRoute) this.chapterRoutes.set(requestId, { taskId: task, controller, runId: operation })
     const valid = () => {
@@ -613,6 +628,20 @@ export class RuntimeStore {
     lease.accounting = event => { if (['reserved', 'dispatched'].includes(event.phase)) valid(); this.record(task, 'model.request.accounting', { ...event, routing_operation_id: operation }) }
     try {
       valid()
+      const content = new AssignmentContent(this.db), contentScope = content.scope(task, requestId, materials.map(material => material.id))
+      const catalog = new RoutingInputCatalog(this.db, contentScope, () => this.catalogOutputs(task))
+      const workState = new RunnerWorkState(this.db, this.epoch)
+      const checkOutput = (binding: RouteWorkRunnerOutputBinding, assignment: string) => {
+        try { this.routedOutputSource(workState, task, binding) }
+        catch (error) {
+          if (!(error instanceof ContractError)) throw error
+          fail(error.code, `Assignment ${assignment}: output ${binding.work_id}/${binding.output_key}: ${error.message}`)
+        }
+      }
+      const draft = new InitialWorkDraft(savedRoute ? input.admission_dispatch?.plan : undefined, checkpoint => {
+        WorkerContext.checkpoint(this.db, task, checkpoint, { model_config_id: lease.id, model_config_revision: lease.revision })
+      }, (binding, assignment) => content.checkNew(contentScope, binding, assignment), checkOutput)
+      if (input.admission_dispatch && !isDeepStrictEqual(input.admission_dispatch.materials, materials)) fail('REQUEST_MATERIAL_UNAVAILABLE', 'Draft materials changed before production admission')
       if (dialogue && !savedRoute) {
         this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)")
           .run(operation, task, requestId, this.epoch, json({ ...defaults, run: lease.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now())
@@ -620,11 +649,14 @@ export class RuntimeStore {
         this.accountLease(task, operation, lease)
       }
       const budget = new RunBudget(lease.config)
-      const runPhase = async <T>(phase: WorkerProfile<T>, allowBody: boolean, source: string, publishedContext?: unknown): Promise<T> => {
+      const runPhase = async <T>(phase: WorkerProfile<T>, allowBody: boolean, source: string, publishedContext?: unknown, validateResult?: (value: T) => WorkerResultIssue | null): Promise<T> => {
         const messages = (candidate: ConversationHistory): ChatMessage[] => [...candidate.messages.map(item => item.message), { role: 'user', content: dialogue ? json({
           request: text, materials: materials.map(({ sha256: _sha256, ...metadata }) => metadata), conversation_records: candidate.refs,
           prior_messages: candidate.messages.map(({ source, message }) => ({ id: source.id, role: message.role, excerpt: message.content?.slice(0, 120) })),
           ...(candidate.truncated ? { conversation_truncated: true } : {}), pending_clarifications: clarifications,
+          ...(phase === profile && pendingWorkerInputs.length ? { pending_worker_inputs: pendingWorkerInputs.map(({ id, question, request_id, work_id }) => ({ id, question, request_id, work_id })) } : {}),
+          ...(phase === profile && priorDelivery ? { preceding_delivery: priorDelivery } : {}),
+          ...(phase === profile && workTable.length ? { work_table: workTable } : {}),
           ...(boundResult ? { preceding_result: boundResult } : {}), ...(publishedContext === undefined ? {} : { published_context: publishedContext })
         }) : text }]
         const fitted = fitConversation(history, candidate => !budget.plan([{ role: 'system', content: phase.system }, ...messages(candidate)], phase.tools).needsCompaction)
@@ -635,7 +667,15 @@ export class RuntimeStore {
           record: (kind, payload) => { this.record(task, kind, { ...payload, routing_operation_id: operation, input_request_id: requestId, ...(routingRun ? { run_id: routingRun } : {}) }) },
           tool: async request => {
             valid(); phase.authorize(request)
-            const query = validateModel(request) as Extract<ModelRequest, { type: 'read' | 'list' }>
+            const query = validateModel(request)
+            if (query.type === 'call' && routingRun && phase === profile && dialogue) {
+              if (query.input.capability === DISCOVER_INPUTS) {
+                if (query.input.references.length) fail('INVALID_RUNNER_CONTRACT', 'The catalog uses the current routing scope, not references')
+                return { request_type: 'call', execution: 'success', delivery: 'delivered', data: catalog.page(query.input.arguments) }
+              }
+              return { request_type: 'call', execution: 'success', delivery: 'delivered', data: draft.propose(query.input) }
+            }
+            if (query.type !== 'read' && query.type !== 'list') fail('WORKER_CAPABILITY_DENIED', 'This routing context cannot execute the operation')
             const kind = query.type === 'list' ? query.input.kind : query.input.target.kind
             if (dialogue && kind === 'event') {
               if (query.type === 'list') {
@@ -650,15 +690,50 @@ export class RuntimeStore {
             const result = await (kind === 'content_tree' || kind === 'content_node' ? this.contentTreeQuery(task, query, source, allowBody) : this.query(task, query, source))
             valid(); return result
           }
-        }, controller.signal, budget, { profile: phase, onResult: value => { valid(); result = value } })
+        }, controller.signal, budget, { profile: phase, validateResult, onResult: value => { valid(); result = value } })
         return result
       }
       if (!savedRoute) this.record(task, 'chapter.route.started', { request_id: requestId, operation_id: operation })
-      const raw = savedRoute ?? await runPhase(profile, false, `chapter-route:${operation}`)
+      let replacementRevision: number | undefined
+      const raw = savedRoute ?? await runPhase(profile, false, `chapter-route:${operation}`, undefined, route => {
+        if (!dialogue || route.kind !== 'new' && route.kind !== 'delegate') return null
+        const decision = draft.decision()
+        try {
+          if (decision) {
+            checkAssignmentRequirements(decision, initialDeliveryRequirements(route.kind, decision))
+            for (const assignment of decision.assignments) for (const binding of assignment.inputs ?? []) {
+              if ('work_id' in binding) checkOutput(binding, assignment.assignment_key)
+              else if ('kind' in binding) content.checkNew(contentScope, binding, assignment.assignment_key)
+            }
+          }
+          else if (replacementRevision !== undefined) fail('RUNNER_PLAN_CONFLICT', 'The rejected work draft has not been replaced')
+          else if (route.kind === 'delegate') fail('RUNNER_PLAN_CONFLICT', 'Delegated answers require a work draft')
+          return null
+        } catch (error) {
+          if (!(error instanceof ContractError)) throw error
+          if (decision) replacementRevision = draft.discard()
+          return { code: error.code, path: 'dispatch', value: { route: route.kind, conflict: error.message }, message: `${error.message}. No assignments were installed. Submit a corrected draft with base_revision: ${replacementRevision ?? 0} before returning this route.` }
+        }
+      })
       valid()
       const route = (dialogue ? validateConversationRoute : validateChapterRoute)(raw, this.publishedChapterManifests(task))
+      const dispatch = route.kind === 'new' || route.kind === 'delegate' ? draft.decision() : undefined
+      if (route.kind === 'delegate' && !dispatch) fail('RUNNER_PLAN_CONFLICT', 'Delegated answers require a work draft')
       if (!savedRoute) this.record(task, 'chapter.route.resolved', { request_id: requestId, operation_id: operation, route: route.kind === 'reply' ? { kind: route.kind } : route })
       const reference = (refId: string) => conversationReference(this.db, task, refId, input.conversation.through_sequence) ?? fail('CONVERSATION_REFERENCE_INVALID', 'Reference must identify a saved message within the accepted history')
+      if (routingRun && route.kind === 'supply_input') {
+        const target = pendingWorkerInputs.find(item => item.id === route.message_id)
+        if (!target) fail('CONVERSATION_REFERENCE_INVALID', 'Reply must identify one pending Worker clarification from the accepted history')
+        const run = routingRun
+        this.db.transaction(() => {
+          this.bindAssignmentReply(task, row, input, target, route.checkpoint_id, materials)
+          this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'")
+            .run(json({ ...input, code: null, conversation_run_id: run, conversation_route: route.kind, conversation_reference: target.id, supplements_request_id: target.request_id }), task, requestId)
+          this.finish(task, run, 'completed', 'conversation_replied')
+        }).immediate()
+        this.pumpRunnerWorkers(task)
+        return run
+      }
       if (routingRun && route.kind === 'depends') {
         if (input.conversation_dependency) fail('CONVERSATION_REFERENCE_INVALID', 'The request already has its exact preceding result')
         const parent = reference(route.message_id)
@@ -734,11 +809,12 @@ export class RuntimeStore {
         return operation
       }
       if (routingRun) { this.finish(task, routingRun, 'completed', 'conversation_routed'); routingRun = undefined }
-      if (dialogue && ['new', 'update', 'clarify'].includes(route.kind) && !this.runnerRunAvailable(task, requestId)) {
-        this.db.prepare("UPDATE requests SET input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, admission_route: route, code: 'PRODUCTION_ADMISSION_PENDING' }), task, requestId)
+      if (dialogue && ['new', 'delegate', 'update', 'clarify'].includes(route.kind) && !this.runnerRunAvailable(task, requestId)) {
+        this.db.prepare("UPDATE requests SET input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, admission_route: route, ...(dispatch ? { admission_dispatch: { plan: dispatch, materials } } : {}), code: 'PRODUCTION_ADMISSION_PENDING' }), task, requestId)
         return ''
       }
       delete input.admission_route
+      delete input.admission_dispatch
       if (route.kind === 'clarify') {
         const original = reference(route.message_id)
         if (original.kind !== 'chapter.route.clarification' || !original.request_id) fail('CONVERSATION_REFERENCE_INVALID', 'Reply does not identify a saved clarification')
@@ -770,8 +846,7 @@ export class RuntimeStore {
       const chapterQuery = (route.kind === 'query' || route.kind === 'explanation') && route.view_id && route.region_ids
         ? { manifest: this.chapters().state.manifest(task, route.view_id)!, region_ids: route.region_ids }
         : undefined
-      this.db.prepare('UPDATE requests SET input_json=? WHERE task_id=? AND id=?').run(json({ ...input, chapter_route: route, ...(dialogue && route.kind === 'new' ? { content_plan: true } : {}), ...(chapterQuery ? { chapter_query: chapterQuery } : {}) }), task, requestId)
-      return this.start(task, text, config, attachments, requestId)
+      return this.start(task, text, config, attachments, requestId, { input, route, draft: dispatch, chapterQuery })
     } catch (error) {
       if (routingRun && !this.closed && this.db.open) this.finish(task, routingRun, controller.signal.aborted ? 'cancelled' : 'failed', error instanceof ModelError || error instanceof ContractError ? error.code : 'REQUEST_START_FAILED')
       throw error
@@ -840,7 +915,7 @@ export class RuntimeStore {
     void this.exportChecks.stop().catch(() => {})
     if(this.monty?.busy()) fail('MONTY_CLEANUP_ACTIVE','Calculation cleanup must end before database switch')
     for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
-    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
+    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear(); this.runnerCompositionPublishing.clear()
     for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Database changed before dispatch'))
     this.pendingWorkers.clear(); this.preparingRunnerGoals.clear(); this.recoveringRunnerInputs.clear(); this.runnerProgressObservedAt.clear()
     this.runnerRecoveryFlight = undefined
@@ -930,7 +1005,7 @@ export class RuntimeStore {
     for (const { controller } of this.chapterRoutes.values()) controller.abort()
     this.chapterRoutes.clear()
     for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
-    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
+    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear(); this.runnerCompositionPublishing.clear()
     for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Runtime closed before worker dispatch'))
     this.pendingWorkers.clear()
     void this.exportChecks.stop().catch(() => {})
@@ -1249,7 +1324,7 @@ export class RuntimeStore {
     if (!run.commit_valid || !['running', 'waiting'].includes(run.state) || run.runtime_epoch !== this.epoch) fail('SOURCE_INVALID', 'Run has no commit permission')
     return run
   }
-  start(taskId: string, text: string, config: string, attachments: unknown[], queuedRequestId?: string): string {
+  start(taskId: string, text: string, config: string, attachments: unknown[], queuedRequestId?: string, routed?: RoutedAdmission): string {
     this.acceptWork()
     this.recovery.assertWrite()
     if (!queuedRequestId && this.db.prepare("SELECT 1 FROM requests WHERE task_id=? AND state IN ('queued','confirmation_required') LIMIT 1").get(taskId)) fail('REQUEST_QUEUE_PENDING', 'Resolve or cancel earlier requests before using the legacy start entry')
@@ -1269,16 +1344,20 @@ export class RuntimeStore {
       const conversation = !queuedRequestId && this.features.runner ? captureConversation(this.db, taskId) : undefined
       let userRecord: string | undefined
       if (queuedRequestId) {
-        const request = this.one("SELECT state,input_json FROM requests WHERE id=? AND task_id=?", requestId, taskId)
-        const input = JSON.parse(request.input_json)
+        const request = this.one("SELECT state,input_json,config_selection_json FROM requests WHERE id=? AND task_id=?", requestId, taskId)
+        const input = routed?.input ?? JSON.parse(request.input_json)
         if (request.state !== 'queued' || input.epoch !== this.epoch) fail('REQUEST_SOURCE_INVALID', 'Request is no longer eligible')
+        if (routed && ((main && main.revision !== JSON.parse(request.config_selection_json).revision) || json(this.requestSelection(config)) !== request.config_selection_json)) fail('REQUEST_CONFIGURATION_CHANGED', 'Confirm the model configuration before production')
         userRecord = input.user_record_id
         if (userRecord) {
           const source = this.one("SELECT payload_json FROM records WHERE id=? AND task_id=? AND kind='message.user'", userRecord, taskId)
           const payload = JSON.parse(source.payload_json)
           if (payload.request_id !== requestId || payload.text !== text) fail('REQUEST_SOURCE_INVALID', 'Original conversation input changed')
         }
-        this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE id=?").run(json({ ...input, bound_materials: boundMaterials, code: null }), requestId)
+        this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE id=?").run(json({ ...input, bound_materials: boundMaterials, code: null, ...(routed ? {
+          chapter_route: routed.route, ...(this.features.runner?.conversationRouting && ['new', 'delegate'].includes(routed.route.kind) ? { content_plan: true } : {}),
+          ...(routed.chapterQuery ? { chapter_query: routed.chapterQuery } : {})
+        } : {}) }), requestId)
       } else this.db.prepare("INSERT INTO requests VALUES (?,?,'started',?,?,?)").run(requestId, taskId, json({ id: config, revision: main?.revision ?? 1, approval_id: approval?.id, approval_revision: approval?.revision, approval_mode: this.approvalMode }), json({ text, attachments, ...(conversation ? { conversation } : {}) }), now())
       this.db.prepare("INSERT INTO runs (id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, taskId, requestId, this.epoch, json({ ...defaults, run: main?.config.limits ?? {}, output_policy: main?.config.max_output_tokens === undefined ? 'service-default' : 'configured' }), json({ model_requests: 0, tool_requests: 0, tokens: 0, fixture: config === 'fixture' }), now())
       const recordId = userRecord ?? this.record(taskId, 'message.user', { text, run_id: runId, request_id: requestId, ...(queuedRequestId ? { materials: boundMaterials } : {}) })
@@ -1288,10 +1367,13 @@ export class RuntimeStore {
           const work = new RunnerWorkState(this.db, this.epoch)
           const route = work.consume(event.input_event_id, 'routed', () => ({ route: 'direct', kind: 'request', request_id: requestId } as const))
           work.consume(event.input_event_id, 'installed', () => {
-            const plan = work.installContentPlan(event)
-            this.runnerArtifacts().installOutline(ruleRouterOutline(plan, this.runnerArtifacts().outline(taskId)))
-            this.refreshRunnerScope(taskId)
-            this.installRunnerProduction(taskId, requestId, runId, main, boundMaterials, recordId)
+            const answerOnly = routed?.route.kind === 'delegate'
+            const plan = work.installContentPlan(event, initialDeliveryRequirements(answerOnly ? 'delegate' : 'new', routed?.draft))
+            if (!answerOnly) {
+              this.runnerArtifacts().installOutline(ruleRouterOutline(plan, this.runnerArtifacts().outline(taskId)))
+              this.refreshRunnerScope(taskId)
+            }
+            this.installRunnerProduction(taskId, requestId, runId, main, boundMaterials, recordId, routed?.draft)
             return { version: 1, input_event_id: event.input_event_id, task_id: taskId, state: 'installed', route, refs: [{ task_id: taskId, kind: 'run', id: runId }], waits: [] }
           })
         } else {
@@ -1306,13 +1388,16 @@ export class RuntimeStore {
       this.accountLease(taskId, runId, main); if (compact) this.accountLease(taskId, runId, compact); if (approval) this.accountLease(taskId, runId, approval)
       this.agents.set(runId, { controller, main, compact, approval, budget, mode: this.approvalMode, ...(this.features.runner ? { managed: true } : {}) })
       if (this.features.runner) {
-        const work = new RunnerWorkState(this.db, this.epoch).taskWorks(taskId).find(work => work.run_id === runId)!
-        void this.executeRunnerProduction(work.current_attempt_id!).catch(() => {})
+        if (routed?.draft) this.pumpRunnerWorkers(taskId)
+        else {
+          const work = new RunnerWorkState(this.db, this.epoch).taskWorks(taskId).find(work => work.run_id === runId)!
+          void this.executeRunnerProduction(work.current_attempt_id!).catch(() => {})
+        }
       } else void this.agent(taskId, runId, text)
     } else this.timers.set(runId, setTimeout(() => { this.timers.delete(runId); this.fixture(taskId, runId, text) }, 150))
     return runId
   }
-  private installRunnerProduction(taskId: string, requestId: string, runId: string, main: ModelLease, materials: Row[], messageId?: string): void {
+  private installRunnerProduction(taskId: string, requestId: string, runId: string, main: ModelLease, materials: Row[], messageId?: string, dispatch?: DispatchWork): void {
     const state = new RunnerWorkState(this.db, this.epoch), goal = state.goal(requestId)
     const query = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', taskId, requestId).input_json).chapter_query as { manifest: ChapterManifest; region_ids: string[] } | undefined
     const chapterDependencies = query ? [...new Map([
@@ -1327,8 +1412,20 @@ export class RuntimeStore {
     if (!previous) ledger.create({ budget_id: budgetId, task_id: taskId, purpose: 'production', request_id: requestId })
     const origin = messageId ? { message_id: messageId } : {}
     state.registerRun({ run_id: runId, task_id: taskId, runtime_epoch: this.epoch, state: 'running', commit_valid: true, budget_id: budgetId, ...origin, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision })
+    if (!requestDelivery(this.db, taskId, requestId, goal.intent_revision)) this.record(taskId, 'runner.delivery.opened', { request_id: requestId, intent_revision: goal.intent_revision, input_event_id: goal.input_event_id, state: 'open' })
+    const dependencies = [...(messageId ? [] : [{ kind: 'goal' as const, task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision }]), ...materials.map(resource => ({ kind: 'resource' as const, task_id: taskId, resource_id: resource.id })), ...chapterDependencies]
+    const source = { task_id: taskId, run_id: runId, request_id: requestId, intent_revision: goal.intent_revision, dependencies, ...origin }
+    if (dispatch) {
+      const content = new AssignmentContent(this.db), scope = content.scope(taskId, requestId)
+      const works = installableAssignments(dispatch, goal, source, id, binding => this.routedOutputSource(state, taskId, binding), [], checkpoint => { WorkerContext.checkpoint(this.db, taskId, checkpoint, { model_config_id: main.id, model_config_revision: main.revision }) }, (binding, assignment) => content.checkNew(scope, binding, assignment))
+      state.installPlan(works)
+      const sealer = works.find(work => work.assignment?.final_answer) ?? works.find(work => work.required)!
+      this.runnerComposition().designateSource({ task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision, work_id: sealer.work_id, plan_revision: sealer.plan_revision })
+      for (const work of works) this.record(taskId, 'runner.plan.installed', { run_id: runId, request_id: requestId, intent_revision: goal.intent_revision, work_id: work.work_id, plan_revision: work.plan_revision, routed: true })
+      return
+    }
     const workId = id(), attemptId = id()
-    const work: LogicalWork = { work_id: workId, task_id: taskId, run_id: runId, plan_revision: 1, role: 'producer', required: true, requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), dependencies: [...(messageId ? [] : [{ kind: 'goal' as const, task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision }]), ...materials.map(resource => ({ kind: 'resource' as const, task_id: taskId, resource_id: resource.id })), ...chapterDependencies], state: 'planned', max_attempts: 2, ...origin, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision }
+    const work: LogicalWork = { ...source, work_id: workId, plan_revision: 1, role: 'producer', required: true, requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), state: 'planned', max_attempts: 2, purpose: 'production' }
     state.installPlan([work])
     state.createAttempt({ attempt_id: attemptId, task_id: taskId, run_id: runId, work_id: workId, runtime_epoch: this.epoch, attempt_number: 1, profile_id: 'producer-output-v1', model_config_id: main.id, model_config_revision: main.revision, input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], ...origin, purpose: 'production', request_id: requestId, intent_revision: goal.intent_revision })
     this.runnerComposition().designateSource({ task_id: taskId, request_id: requestId, intent_revision: goal.intent_revision, work_id: workId, plan_revision: work.plan_revision })
@@ -1480,6 +1577,7 @@ export class RuntimeStore {
         } while (cursor && this.task(task).state === 'active')
       } finally { this.recoveringRunnerInputs.delete(task) }
       if (this.task(task).state !== 'active') continue
+      this.reconcileRunnerDependencies(new RunnerWorkState(this.db, epoch), task)
       const runs = this.db.prepare("SELECT r.run_id FROM runner_runs r JOIN runs c ON c.id=r.run_id WHERE r.task_id=? AND r.purpose='production' AND c.state='interrupted' AND c.runtime_epoch!=? ORDER BY r.rowid").all(task, epoch) as Row[]
       for (const row of runs) {
         if (this.closed || this.closing || this.epoch !== epoch) return
@@ -1495,13 +1593,19 @@ export class RuntimeStore {
         if (unknownDiagnosis) { blocked('RUNNER_OPERATION_UNKNOWN'); continue }
         // Diagnosis opportunities remain historical evidence. Only their original
         // operation can resolve unknown usage; they never resume as content work.
-        const works = interruptedWorks.filter(work => work.role !== 'diagnostic' && ['planned', 'queued', 'running', 'waiting'].includes(work.state))
+        const waits = new Map(interruptedWorks.flatMap(work => {
+          const binding = recovery.waitingAssignmentRecovery(work)
+          return binding ? [[work.work_id, binding] as const] : []
+        }))
+        const retiringRouters = new Set([...waits.values()].flatMap(binding => binding.router ? [binding.router.work_id] : []))
+        const works = interruptedWorks.filter(work => work.role !== 'diagnostic' && !retiringRouters.has(work.work_id) && ['planned', 'queued', 'running', 'waiting'].includes(work.state))
         if (!works.length) continue
         const unavailable = works.map(work => {
           const attempt = work.current_attempt_id ? state.attempt(work.current_attempt_id) : undefined
-          if (!attempt) return 'RUNNER_RECOVERY_INELIGIBLE'
+          if (!attempt) return state.pendingAssignmentRecoveryFailure(work)
+          if (waits.has(work.work_id)) return attempt.attempt_number < work.max_attempts ? null : 'RUNNER_ATTEMPTS_EXHAUSTED'
           if (attempt.state === 'unknown' || attempt.dispatch_state !== 'not_dispatched') return 'RUNNER_OPERATION_UNKNOWN'
-          if (attempt.profile_id !== 'producer-output-v1') return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
+          if (!this.recoverableProductionProfile(work, attempt)) return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
           if (attempt.attempt_number >= work.max_attempts) return 'RUNNER_ATTEMPTS_EXHAUSTED'
           return attempt.state !== 'revoked' ? 'RUNNER_RECOVERY_INELIGIBLE' : null
         }).find(reason => reason !== null)
@@ -1512,7 +1616,9 @@ export class RuntimeStore {
           blocked(error instanceof ContractError ? error.code : 'RUNNER_RECOVERY_FAILED')
         }
       }
-      const batches = this.db.prepare("SELECT b.batch_id,b.payload_json FROM runner_batches b JOIN runs c ON c.id=json_extract(b.payload_json,'$.run_id') WHERE b.task_id=? AND c.state='interrupted' AND c.runtime_epoch!=? AND NOT EXISTS (SELECT 1 FROM runner_batches next WHERE next.task_id=b.task_id AND json_extract(next.payload_json,'$.previous_batch_id')=b.batch_id) ORDER BY b.rowid").all(task, epoch) as Row[]
+      const batches = this.db.prepare(`SELECT b.batch_id,b.payload_json FROM runner_batches b JOIN runs c ON c.id=json_extract(b.payload_json,'$.run_id') WHERE b.task_id=? AND c.state='interrupted' AND c.runtime_epoch!=?
+        AND NOT EXISTS (SELECT 1 FROM runner_batches next WHERE next.task_id=b.task_id AND json_extract(next.payload_json,'$.previous_batch_id')=b.batch_id)
+        AND NOT EXISTS (SELECT 1 FROM records f WHERE f.task_id=b.task_id AND f.kind='runner.composition.feedback' AND json_extract(f.payload_json,'$.run_id')=c.id) ORDER BY b.rowid`).all(task, epoch) as Row[]
       for (const row of batches) {
         const batch = JSON.parse(row.payload_json)
         void this.executeAutomaticComposition(task, batch.trigger_request_id, row.batch_id).catch(error => {
@@ -1522,10 +1628,11 @@ export class RuntimeStore {
       this.resumeContentRemainders(task)
       this.pumpRunnerWorkers(task)
       this.pumpRunnerGoals(task)
+      this.settleRunnerDeliveries(task)
     }
   }
   private async resumeRunnerProduction(task: string, previousRunId: string, works: LogicalWork[], epoch: string): Promise<void> {
-    const state = new RunnerWorkState(this.db, epoch), previous = state.run(previousRunId)
+    const state = new RunnerWorkState(this.db, epoch), previous = state.run(previousRunId), recovery = new RunnerHostRecovery(this.db, epoch)
     if (previous.purpose !== 'production') fail('RUNNER_RECOVERY_INELIGIBLE', 'Only undispatched production can resume')
     const request = previous.request_id, row = this.one('SELECT input_json,config_selection_json FROM requests WHERE task_id=? AND id=?', task, request)
     const input = JSON.parse(row.input_json), corrections = this.runnerCorrectionInputs(task, request, previous.intent_revision)
@@ -1552,14 +1659,30 @@ export class RuntimeStore {
         approval = this.models.acquire(selection.approval_id, 'approval')
         if (approval.revision !== selection.approval_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovery requires the original approval revision')
       }
-      const attempts: ExecutionAttempt[] = works.map(work => {
-        const original = state.attempt(work.current_attempt_id!)
+      const waits = new Set<string>()
+      const attempts: ExecutionAttempt[] = works.flatMap(work => {
+        if (!work.current_attempt_id) return []
+        const original = state.attempt(work.current_attempt_id)
         if (original.model_config_id !== main.id || original.model_config_revision !== main.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Recovered attempts retain their model binding')
+        if (recovery.waitingAssignmentRecovery(work)) { waits.add(work.work_id); return [] }
+        state.checkHandoffs(work, original.attempt_id)
         const { result_ref: _result, operation_id: _operation, ...binding } = original
-        return { ...binding, attempt_id: id(), previous_attempt_id: original.attempt_id, run_id: runId, runtime_epoch: epoch, attempt_number: original.attempt_number + 1, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }
+        return [{ ...binding, attempt_id: id(), previous_attempt_id: original.attempt_id, run_id: runId, runtime_epoch: epoch, attempt_number: original.attempt_number + 1, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] }]
       })
+      const repairs = new RunnerRepairState(this.db, state, this.runnerArtifacts(), this.runnerComposition())
+      const repairTargets = new Map<string, { repair: PendingRepair; target: ReturnType<RuntimeStore['repairTarget']> }>()
       this.db.transaction(() => {
-        new RunnerHostRecovery(this.db, epoch).resume({ run: { ...previous, run_id: runId, previous_run_id: previous.run_id, runtime_epoch: epoch, state: 'running', commit_valid: true }, attempts }, {
+        for (const work of works) {
+          const binding = artifactRepair(this.db, task, work.work_id)
+          const repairId = binding?.request_record_id ?? repairRequestId(this.db, task, work.work_id)
+          if (!repairId) continue
+          const repair = repairs.request(task, repairId)
+          if (!repairs.current(task, repair) || binding && binding.repair_run_id !== previousRunId) fail('REPAIR_OBSOLETE', 'Resumed feedback must still reference the current problem')
+          const target = this.repairTarget(state, task, repair)
+          repairTargets.set(work.work_id, { repair, target })
+          if (binding) this.record(task, 'runner.repair.rebound', { ...binding, repair_run_id: runId, previous_run_id: previousRunId })
+        }
+        recovery.resume({ run: { ...previous, run_id: runId, previous_run_id: previous.run_id, runtime_epoch: epoch, state: 'running', commit_valid: true }, attempts, planned_work_ids: works.filter(work => !work.current_attempt_id).map(work => work.work_id), waiting_work_ids: [...waits] }, {
           recheck: () => {
             this.acceptWork(); this.recovery.assertWrite()
             if (!this.runnerRunAvailable(task, request)) fail('RUN_BUSY', 'Recovery awaits production admission')
@@ -1572,9 +1695,17 @@ export class RuntimeStore {
         if (source && works.some(work => work.work_id === source.work_id)) this.runnerComposition().designateSource({ ...source, plan_revision: state.work(source.work_id).plan_revision }, { work_id: source.work_id, plan_revision: source.plan_revision })
         if (correction) this.db.prepare("UPDATE requests SET input_json=json_set(input_json,'$.correction_run_id',?) WHERE task_id=? AND id=?").run(runId, task, sourceRequest)
         this.record(task, 'runner.production.resumed', { run_id: runId, previous_run_id: previous.run_id, request_id: request, intent_revision: previous.intent_revision, work_ids: works.map(work => work.work_id), attempt_ids: attempts.map(attempt => attempt.attempt_id), budget_id: previous.budget_id })
+        for (const attempt of attempts) this.installAssignmentHandoffs(state, state.work(attempt.work_id), attempt)
       })()
       this.agents.set(runId, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
-      for (const attempt of attempts) void this.executeRunnerProduction(attempt.attempt_id).catch(() => {})
+      if (waits.size) this.aggregateWorkerRun(task, runId)
+      for (const attempt of attempts) {
+        const resumed = repairTargets.get(attempt.work_id)
+        const execution = attempt.profile_id === 'work-router-v1' && resumed
+          ? this.executeRepairRouter(state, task, repairs, resumed.repair, state.work(attempt.work_id) as AssignedWork, attempt, createWorkRouterProfile('feedback'), resumed.target.index, resumed.target.requirements)
+          : this.executeRunnerProduction(attempt.attempt_id)
+        void execution.catch(() => {})
+      }
     } catch (error) { main.release(); compact?.release(); approval?.release(); throw error }
   }
   private contentToolGrants(task: string, conversation: ConversationHistory): WorkerGrant[] {
@@ -1591,18 +1722,551 @@ export class RuntimeStore {
       ...capabilities.map(capability => ({ type: 'call' as const, capability }))
     ]
   }
+  private orchestrationSource(state: RunnerWorkState, task: string, binding: RouteWorkRunnerOutputBinding): Extract<LogicalWork, { purpose: 'production' }> {
+    if (!this.db.prepare('SELECT 1 FROM runner_work WHERE task_id=? AND work_id=?').get(task, binding.work_id)) fail('RUNNER_DEPENDENCY_INVALID', 'Output source is not available in this Task')
+    const work = state.work(binding.work_id)
+    if (work.purpose !== 'production' || work.plan_revision !== binding.plan_revision || !work.assignment?.outputs.some(output => output.output_key === binding.output_key)) fail('RUNNER_DEPENDENCY_INVALID', 'Output source no longer matches the selected plan')
+    return work
+  }
+  private routedOutputSource(state: RunnerWorkState, task: string, binding: RouteWorkRunnerOutputBinding): AssignedWork {
+    const work = this.orchestrationSource(state, task, binding), exact = bindOutput(task, work, binding)
+    if (work.state === 'succeeded') this.assignedOutput(work, exact)
+    else {
+      const run = state.run(work.run_id), goal = state.goal(work.request_id)
+      if (!run.commit_valid || run.runtime_epoch !== this.epoch || goal.state !== 'active' || goal.intent_revision !== work.intent_revision) fail('RUNNER_DEPENDENCY_INVALID', 'The selected work can no longer deliver its output')
+    }
+    return work
+  }
+  private routingRevision(task: string, run: string): number {
+    return (this.db.prepare(`SELECT COALESCE(MAX(json_extract(payload_json,'$.revision')),1) AS revision FROM records
+      WHERE task_id=? AND kind='runner.plan.revised' AND json_extract(payload_json,'$.run_id')=?`).get(task, run) as { revision: number }).revision
+  }
+  private *catalogOutputs(task: string): Iterable<CatalogOutput> {
+    const state = new RunnerWorkState(this.db, this.epoch)
+    const candidates = this.db.prepare(`SELECT work_id FROM runner_work WHERE task_id=? AND state IN ('planned','queued','running','waiting','succeeded')
+      AND json_type(payload_json,'$.assignment')='object' ORDER BY work_id`).all(task) as { work_id: string }[]
+    for (const { work_id } of candidates) {
+      const work = state.work(work_id)
+      if (work.purpose !== 'production' || !work.assignment) continue
+      const source = { work_id, request_id: work.request_id }
+      if (work.state !== 'succeeded') {
+        const run = state.run(work.run_id), goal = state.goal(work.request_id)
+        if (!run.commit_valid || run.runtime_epoch !== this.epoch || goal.state !== 'active' || goal.intent_revision !== work.intent_revision) continue
+      }
+      for (const output of work.assignment.outputs) {
+        const reference = { work_id, plan_revision: work.plan_revision, output_key: output.output_key }
+        if (work.state !== 'succeeded') { yield { kind: 'output', name: output.output_key, status: 'expected', reference, source }; continue }
+        try {
+          const exact = this.assignedOutput(work, reference)
+          const publication = exact.kind === 'artifact'
+            ? this.db.prepare(`SELECT m.view_id,m.view_revision FROM runner_view_mappings m JOIN views v ON v.id=m.view_id AND v.revision=m.view_revision
+                WHERE m.task_id=? AND m.artifact_id=? AND m.artifact_revision=? LIMIT 1`).get(task, exact.artifact_id, exact.artifact_revision) as object | undefined
+            : this.db.prepare(`SELECT id AS message_id FROM records WHERE task_id=? AND kind='runner.answer' AND json_extract(payload_json,'$.purpose')='final_answer'
+                AND json_extract(payload_json,'$.result_ref.id')=? LIMIT 1`).get(task, exact.record_id) as object | undefined
+          yield { kind: 'output', name: output.output_key, status: publication ? 'published' : 'accepted', reference: { ...reference, result_revision: exact.result_revision }, source: { ...source, ...publication } }
+        } catch (error) {
+          if (!(error instanceof ContractError) || !['RUNNER_DEPENDENCY_INVALID', 'RUNNER_OUTPUT_UNAVAILABLE'].includes(error.code)) throw error
+        }
+      }
+    }
+  }
+  private routingWorkTable(state: RunnerWorkState, task: string, model: Pick<ExecutionAttempt, 'model_config_id' | 'model_config_revision'>, run?: string) {
+    const rows = this.db.prepare(`SELECT work_id FROM runner_work WHERE task_id=? AND json_type(payload_json,'$.assignment')='object'
+      ORDER BY (run_id IS ?) DESC,rowid DESC LIMIT 16`).all(task, run ?? null) as { work_id: string }[]
+    let remainingBytes = 8192
+    return rows.map(({ work_id }) => state.work(work_id)).flatMap(work => {
+      if (work.purpose !== 'production' || !work.assignment) return []
+      const outputs = work.assignment.outputs.flatMap(output => {
+        const reference = { work_id: work.work_id, plan_revision: work.plan_revision, output_key: output.output_key }
+        try {
+          const source = this.routedOutputSource(state, task, reference)
+          return [{ ...output, ...reference, ...(source.state === 'succeeded' ? { result_revision: source.result_revision } : {}) }]
+        } catch (error) {
+          if (error instanceof ContractError) return []
+          throw error
+        }
+      })
+      const attempt = work.current_attempt_id ? state.attempt(work.current_attempt_id) : state.attempts(work.work_id).at(-1)
+      const checkpoints = attempt ? new WorkerContext(this.db, this.workerOwner({ task_id: task, runtime_epoch: attempt.runtime_epoch, work, attempt, run: state.run(attempt.run_id) })).checkpoints(model) : []
+      const entry = { work_id: work.work_id, request_id: work.request_id, plan_revision: work.plan_revision, state: work.state,
+        required: work.required, instructions: work.assignment.instructions.slice(0, 160), outputs, checkpoints }
+      const bytes = Buffer.byteLength(json(entry)) + 1
+      if (bytes > remainingBytes) return []
+      remainingBytes -= bytes
+      return [entry]
+    })
+  }
+  private applyWorkRouting(state: RunnerWorkState, owner: Extract<ExecutionScope, { purpose: 'production' }>, origin: AssignedWork, decision: RouteWork): unknown {
+    const task = owner.task_id, runId = owner.run_id, goal = state.goal(owner.request_id)
+    if (decision.base_revision !== this.routingRevision(task, runId) || goal.intent_revision !== owner.intent_revision) fail('RUNNER_PLAN_CONFLICT', 'This routing context is no longer current')
+    const works = state.taskWorks(task).filter((work): work is AssignedWork => work.purpose === 'production' && work.run_id === runId && !!work.assignment)
+    const lookup = (binding: RouteWorkRunnerOutputBinding) => this.routedOutputSource(state, task, binding)
+    const model = state.attempt(owner.attempt_id)
+    const checkpoint = (id: string) => { WorkerContext.checkpoint(this.db, task, id, model) }
+    const content = new AssignmentContent(this.db), scope = content.scope(task, owner.request_id)
+    const checkContent: Parameters<typeof assignmentRevisions>[4] = (binding, assignment) => content.checkNew(scope, binding, assignment)
+    const installed = decision.action === 'dispatch'
+      ? state.installPlan(installableAssignments(decision, goal, {
+          task_id: task, run_id: runId, request_id: owner.request_id, intent_revision: owner.intent_revision,
+          dependencies: origin.dependencies, ...(owner.message_id ? { message_id: owner.message_id } : {})
+        }, id, lookup, works, checkpoint, checkContent))
+      : state.installAssignmentRevisions(assignmentRevisions(decision, works, lookup, checkpoint, checkContent))
+    const inventorySource = this.runnerComposition().source(task, goal.request_id, goal.intent_revision)
+    const revisedSource = installed.find(work => work.work_id === inventorySource?.work_id)
+    if (inventorySource && revisedSource) this.runnerComposition().designateSource({ ...inventorySource, plan_revision: revisedSource.plan_revision }, inventorySource)
+    const revision = decision.base_revision + 1
+    const installedRefs = installed.map((work, index) => ({ work_id: work.work_id, plan_revision: work.plan_revision, ...(decision.action === 'dispatch' ? { assignment_key: decision.assignments[index]!.assignment_key } : {}) }))
+    this.record(task, 'runner.plan.revised', { owner, run_id: runId, request_id: goal.request_id, revision, works: installedRefs })
+    return { revision, works: installedRefs }
+  }
+  private reportAssignedInput(owner: Extract<ExecutionScope, { purpose: 'production' }>, work: AssignedWork, report: ReportMissingInput): string {
+    const task = owner.task_id
+    for (const reference of report.references ?? []) this.runnerArtifacts().checkProvenance(task, reference)
+    const payload: MissingInputEvent = { run_id: owner.run_id, request_id: owner.request_id, work_id: work.work_id, attempt_id: owner.attempt_id, plan_revision: work.plan_revision, report }
+    const previous = this.db.prepare(`SELECT id FROM records WHERE task_id=? AND kind='runner.input.reported' AND payload_json=? ORDER BY sequence LIMIT 1`).get(task, json(payload)) as { id: string } | undefined
+    return previous?.id ?? this.record(task, 'runner.input.reported', payload)
+  }
+  private pendingWorkerInputs(task: string, through: number): PendingWorkerInput[] {
+    return this.db.prepare(`SELECT q.id,substr(json_extract(q.payload_json,'$.text'),1,250) AS question,
+      r.request_id,r.id AS run_id,w.work_id,a.attempt_id,w.plan_revision AS previous_plan_revision
+      FROM records q JOIN records e ON e.id=json_extract(q.payload_json,'$.report_id') AND e.task_id=q.task_id AND e.kind='runner.input.reported'
+      JOIN runner_work w ON w.work_id=json_extract(e.payload_json,'$.work_id') AND w.task_id=q.task_id AND w.state='waiting' AND w.plan_revision=json_extract(e.payload_json,'$.plan_revision')
+      JOIN runner_attempts a ON a.attempt_id=json_extract(e.payload_json,'$.attempt_id') AND a.task_id=q.task_id AND a.work_id=w.work_id AND a.state='revoked'
+      JOIN runs r ON r.id=w.run_id AND r.task_id=q.task_id AND r.runtime_epoch=? AND r.commit_valid=1
+      WHERE q.task_id=? AND q.kind='runner.input.clarification' AND q.sequence<=? AND a.attempt_id=json_extract(w.payload_json,'$.current_attempt_id')
+      AND a.run_id=json_extract(e.payload_json,'$.run_id')
+      AND NOT EXISTS (SELECT 1 FROM records b WHERE b.task_id=q.task_id AND b.kind='runner.input.bound' AND json_extract(b.payload_json,'$.clarification_id')=q.id)
+      ORDER BY q.sequence DESC LIMIT 16`).all(this.epoch, task, through) as PendingWorkerInput[]
+  }
+  private bindAssignmentReply(task: string, row: Row, input: Row, target: PendingWorkerInput, checkpointId: string | undefined, materials: Row[]): void {
+    if (!this.pendingWorkerInputs(task, input.conversation.through_sequence).some(item => isDeepStrictEqual(item, target))) fail('CONVERSATION_REFERENCE_INVALID', 'Worker clarification is no longer pending')
+    const state = new RunnerWorkState(this.db, this.epoch), work = state.work(target.work_id), attempt = state.attempt(target.attempt_id)
+    if (work.purpose !== 'production' || !work.assignment || work.update_id || work.task_id !== task || target.request_id === row.id) fail('RUNNER_OWNERSHIP_INVALID', 'Reply does not target an eligible assignment')
+    this.qualify(task, target.run_id)
+    const selection = JSON.parse(row.config_selection_json)
+    const original = this.one('SELECT config_selection_json FROM requests WHERE task_id=? AND id=?', task, target.request_id)
+    if (attempt.model_config_id !== selection.id || attempt.model_config_revision !== selection.revision || row.config_selection_json !== original.config_selection_json) fail('REQUEST_CONFIGURATION_CHANGED', 'Confirm the original Worker configuration before supplying new input')
+    if (!this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND id=? AND kind='message.user' AND json_extract(payload_json,'$.request_id')=?").get(task, input.user_record_id, row.id)) fail('CONVERSATION_REFERENCE_INVALID', 'Supplement must use the saved user reply')
+    if (checkpointId) WorkerContext.checkpoint(this.db, task, checkpointId, attempt)
+    const { id: clarification_id, question: _question, ...origin } = target
+    const resource_ids = materials.map(material => material.id as string)
+    const supplement: AssignmentSupplement = { ...origin, clarification_id, source_request_id: row.id, message_id: input.user_record_id, resource_ids }
+    const supplementId = this.record(task, 'runner.input.bound', supplement)
+    const { current_attempt_id: _attempt, root_cause: _cause, result_revision: _result, ...source } = work
+    const dependencies = [...work.dependencies]
+    for (const resource_id of resource_ids) if (!dependencies.some(input => input.kind === 'resource' && input.resource_id === resource_id)) dependencies.push({ kind: 'resource', task_id: task, resource_id })
+    const revised = { ...source, state: 'planned' as const, dependencies, plan_revision: work.plan_revision + 1,
+      assignment: { ...work.assignment, ...(checkpointId ? { checkpoint_id: checkpointId } : {}), supplement_ids: [...work.assignment.supplement_ids ?? [], supplementId] } }
+    const works = state.taskWorks(task).filter((work): work is AssignedWork => work.purpose === 'production' && work.run_id === target.run_id && !!work.assignment)
+    const installed = state.installAssignmentRevisions(propagateAssignmentRevisions([revised], works), supplementId)
+    this.record(task, 'runner.plan.revised', { run_id: work.run_id, request_id: work.request_id, revision: this.routingRevision(task, work.run_id) + 1, supplement_id: supplementId, works: installed.map(item => ({ work_id: item.work_id, plan_revision: item.plan_revision })) })
+    const inventorySource = this.runnerComposition().source(task, work.request_id, work.intent_revision), revisedSource = installed.find(item => item.work_id === inventorySource?.work_id)
+    if (inventorySource && revisedSource) this.runnerComposition().designateSource({ ...inventorySource, plan_revision: revisedSource.plan_revision }, inventorySource)
+  }
+  private queueWorkRouting(state: RunnerWorkState, task: string): void {
+    const rows = this.db.prepare(`SELECT e.id,e.payload_json FROM records e
+      JOIN runner_work o ON o.task_id=e.task_id AND o.work_id=json_extract(e.payload_json,'$.work_id')
+      JOIN runs r ON r.task_id=e.task_id AND r.id=o.run_id
+      WHERE e.task_id=? AND e.kind='runner.input.reported' AND r.commit_valid=1 AND r.runtime_epoch=?
+      AND NOT EXISTS (SELECT 1 FROM records c WHERE c.task_id=e.task_id AND json_extract(c.payload_json,'$.report_id')=e.id
+        AND (c.kind IN ('runner.input.resolved','runner.input.blocked') OR c.kind='runner.input.routed' AND json_extract(c.payload_json,'$.run_id')=r.id))
+      AND (json_extract(e.payload_json,'$.report.wait')=0 AND json_extract(e.payload_json,'$.run_id')=r.id
+        OR o.state='waiting' AND EXISTS (SELECT 1 FROM records w WHERE w.task_id=e.task_id AND w.kind='runner.assignment.waiting' AND json_extract(w.payload_json,'$.report_id')=e.id)) ORDER BY e.sequence`).all(task, this.epoch) as { id: string; payload_json: string }[]
+    for (const row of rows) {
+      const source = JSON.parse(row.payload_json) as MissingInputEvent
+      const origin = state.work(source.work_id), agent = this.agents.get(origin.run_id)
+      if (!agent?.managed || origin.purpose !== 'production' || origin.plan_revision !== source.plan_revision || origin.current_attempt_id !== source.attempt_id || !['running', 'waiting'].includes(origin.state)) continue
+      const profile = createWorkRouterProfile()
+      const attempt = this.db.transaction(() => {
+        const work: AssignedWork = { task_id: task, request_id: origin.request_id, run_id: origin.run_id, intent_revision: origin.intent_revision,
+          ...(origin.message_id ? { message_id: origin.message_id } : {}), work_id: id(), purpose: 'production', role: 'router', plan_revision: 1,
+          state: 'planned', required: false, requirement_ids: [], dependencies: origin.dependencies.filter(dependency => dependency.kind !== 'work'), max_attempts: 1 }
+        state.installPlan([work])
+        const attempt = state.createAttempt({ task_id: task, run_id: work.run_id, work_id: work.work_id, attempt_id: id(), runtime_epoch: this.epoch,
+          purpose: 'production', request_id: work.request_id, intent_revision: work.intent_revision, ...(work.message_id ? { message_id: work.message_id } : {}),
+          attempt_number: 1, profile_id: profile.id, model_config_id: agent.main.id, model_config_revision: agent.main.revision,
+          input_versions: work.dependencies, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] })
+        this.record(task, 'runner.input.routed', { report_id: row.id, request_id: work.request_id, run_id: work.run_id, work_id: work.work_id, attempt_id: attempt.attempt_id })
+        return attempt
+      }).immediate()
+      const revision = () => this.routingRevision(task, origin.run_id)
+      const catalog = new RoutingInputCatalog(this.db, new AssignmentContent(this.db).scope(task, origin.request_id), () => this.catalogOutputs(task))
+      const stillWaiting = () => {
+        const current = state.work(origin.work_id)
+        return source.report.wait && current.run_id === origin.run_id && current.state === 'waiting' && current.plan_revision === source.plan_revision && current.current_attempt_id === source.attempt_id ? current : undefined
+      }
+      let affected: LogicalWork[] = []
+      void this.executeWorker(attempt.attempt_id, profile, {
+        text: this.runnerGoalText(task, origin.request_id, origin.intent_revision),
+        bound: { base_revision: revision(), report: source, work_table: this.routingWorkTable(state, task, attempt, origin.run_id) },
+        orchestration: {
+          get revision() { return revision() },
+          route: (decision, owner) => this.applyWorkRouting(state, owner, origin, decision),
+          catalog: query => catalog.page(query),
+          report: () => fail('WORKER_CAPABILITY_DENIED', 'Router cannot report on behalf of a Worker')
+        }
+      }, (result, owner) => {
+        this.record(task, 'runner.input.resolved', { report_id: row.id, owner, request_id: origin.request_id, run_id: origin.run_id, result })
+        const current = stillWaiting()
+        if (!current) return
+        if (result.kind === 'blocked') affected = state.revokeWork(current.work_id, { kind: 'failure', work_id: current.work_id, attempt_id: source.attempt_id })
+        if (result.kind === 'clarification') {
+          const attempt = state.attempt(source.attempt_id), sourceOwner = this.workerOwner({ task_id: task, runtime_epoch: attempt.runtime_epoch, work: current, run: state.run(attempt.run_id), attempt })
+          this.record(task, 'runner.input.clarification', { owner, report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, reply_to: origin.message_id, text: result.question })
+          this.record(task, 'worker.state', { owner: sourceOwner, run_id: origin.run_id, state: 'waiting', reason: 'input_required' })
+        }
+      }, undefined, undefined, result => {
+        const current = stillWaiting()
+        if (result.kind === 'clarification' && !current) return {
+          code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind, message: 'No assignment is waiting for a user reply. Return updated if a decision was installed, or blocked.'
+        }
+        if (!current || result.kind === 'blocked') return null
+        if (state.attempt(source.attempt_id).attempt_number >= current.max_attempts) return {
+          code: 'RUNNER_ATTEMPTS_EXHAUSTED', path: 'kind', value: result.kind, message: 'The waiting assignment has no attempts left. A user reply cannot resume it. Return blocked.'
+        }
+        return result.kind === 'updated' ? {
+          code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
+          message: 'The reporting assignment is still waiting. Bind or revise that assignment, ask for clarification, or return blocked.'
+        } : null
+      }).then(() => this.settleDependentRuns(task, affected, origin.run_id), error => {
+        if (this.closed || this.closing || !this.db.open || !state.run(origin.run_id).commit_valid) return
+        const router = state.attempt(attempt.attempt_id), current = stillWaiting()
+        if (!current || router.state === 'unknown' || router.dispatch_state === 'unknown') return
+        const code = error instanceof ContractError || error instanceof ModelError ? error.code : 'MODEL_EXECUTION_FAILED'
+        const affected = this.db.transaction(() => {
+          this.record(task, 'runner.input.blocked', { report_id: row.id, request_id: origin.request_id, run_id: origin.run_id, work_id: current.work_id, routing_attempt_id: router.attempt_id, code })
+          return state.revokeWork(current.work_id, { kind: 'failure', work_id: router.work_id, attempt_id: router.attempt_id, reason: code })
+        }).immediate()
+        this.settleDependentRuns(task, affected, origin.run_id)
+        this.aggregateWorkerRun(task, origin.run_id)
+      })
+    }
+  }
+  private assignedOutput(work: Extract<LogicalWork, { purpose: 'production' }>, binding: RouteWorkRunnerOutputBinding) {
+    const revision = work.result_revision
+    if (work.state !== 'succeeded' || revision === undefined || binding.result_revision !== undefined && binding.result_revision !== revision) fail('RUNNER_DEPENDENCY_INVALID', 'Output source has no matching successful result')
+    const output = (() => {
+      try { return this.runnerComposition().checkOutput(work.task_id, work.work_id, work.plan_revision, revision) }
+      catch (error) {
+        if (!(error instanceof ContractError) || !['RUNNER_OWNERSHIP_INVALID', 'RUNNER_DEPENDENCY_INVALID', 'RUNNER_OUTPUT_INCOMPLETE', 'RUNNER_NOT_FOUND'].includes(error.code)) throw error
+        fail('RUNNER_DEPENDENCY_INVALID', 'The assigned output is no longer current')
+      }
+    })()
+    if (!output) fail('RUNNER_OUTPUT_UNAVAILABLE', 'The assigned output was not accepted')
+    const exact = { ...binding, result_revision: revision }
+    if (work.assignment?.outputs.find(item => item.output_key === binding.output_key)?.kind === 'answer') {
+      if (!this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND id=? AND kind='worker.result' AND json_type(payload_json,'$.value.answer')='text'").get(work.task_id, output.result_ref.id)) fail('RUNNER_OUTPUT_UNAVAILABLE', 'The assigned answer was not delivered')
+      return { ...exact, kind: 'answer' as const, record_id: output.result_ref.id }
+    }
+    const slot = this.db.prepare('SELECT artifact_id FROM runner_artifact_slots WHERE task_id=? AND work_id=? AND output_key=?').get(work.task_id, work.work_id, binding.output_key) as { artifact_id: string } | undefined
+    const artifact = output.artifacts.find(item => item.artifact_id === (slot?.artifact_id ?? artifactRepair(this.db, work.task_id, work.work_id)?.previous.artifact_id))
+    const current = artifact ? this.runnerArtifacts().owner(work.task_id, artifact.artifact_id) : null
+    const index = artifact && current?.current_revision === artifact.artifact_revision ? this.runnerArtifacts().artifact(work.task_id, artifact.artifact_id, artifact.artifact_revision) : null
+    if (!index) fail('RUNNER_OUTPUT_UNAVAILABLE', 'The assigned artifact is not an accepted current version')
+    return { ...exact, kind: 'artifact' as const, artifact_id: index.artifact_id, artifact_revision: index.artifact_revision, bundle_resource_id: index.bundle_resource_id }
+  }
+  private boundAssignmentOutputs(state: RunnerWorkState, work: Extract<LogicalWork, { purpose: 'production' }>) {
+    return (work.assignment?.inputs ?? []).filter(binding => 'work_id' in binding).map(binding => {
+      const dependency = work.dependencies.find(item => item.kind === 'work' && item.work_id === binding.work_id)
+      if (dependency?.kind !== 'work' || dependency.task_id !== work.task_id) fail('RUNNER_DEPENDENCY_INVALID', 'Assignment input is not authorized by its exact dependency')
+      try { return this.assignedOutput(this.orchestrationSource(state, work.task_id, binding), binding) }
+      catch (error) {
+        if (!(error instanceof ContractError)) throw error
+        fail(error.code, `Output ${binding.work_id}/${binding.output_key}: ${error.message}`)
+      }
+    })
+  }
+  private publishDeliveryAnswer(state: RunnerWorkState, inventory: NonNullable<ReturnType<RunnerCompositionState['inventory']>>): void {
+    const goal = state.goal(inventory.request_id)
+    if (goal.intent_revision !== inventory.intent_revision || unresolvedDeliveryRequirements(this.db, inventory).length) return
+    const output = inventory.required_works.find(output => {
+      const work = state.work(output.work_id)
+      return work.purpose === 'production' && (work.assignment?.final_answer || this.features.runner?.conversationRouting && !work.assignment && output.artifacts.length > 0)
+    })
+    if (!output) return
+    try {
+      if (!this.runnerComposition().checkOutput(inventory.task_id, output.work_id, output.plan_revision, output.result_revision)) return
+    } catch (error) { if (error instanceof ContractError) return; throw error }
+    const work = state.work(output.work_id), attempt = state.attempt(output.attempt_id), run = state.run(output.run_id)
+    const owner = this.workerOwner({ task_id: inventory.task_id, runtime_epoch: run.runtime_epoch, work, attempt, run, goal })
+    const { text } = this.one("SELECT json_extract(payload_json,'$.value.answer') AS text FROM records WHERE task_id=? AND id=?", inventory.task_id, output.result_ref.id) as { text: string | null }
+    if (text !== null) this.recordRunnerAnswer(inventory.task_id, { owner, purpose: 'final_answer', text, request_id: goal.request_id, input_event_id: goal.input_event_id, run_id: run.run_id, intent_revision: goal.intent_revision, result_ref: output.result_ref })
+  }
+  private publishCompositionAnswers(state: RunnerWorkState, task: string): void {
+    const composition = this.runnerComposition(), scope = composition.scope(task)
+    if (!scope?.targets.some(target => target.contribution_inventory)) return
+    const ready = this.runnerHostComposition().completeness(task)
+    for (const target of scope.targets) {
+      const reference = target.contribution_inventory
+      if (!reference || ready.unresolved.some(item => item.request_id === target.request_id && item.intent_revision === target.intent_revision)) continue
+      const inventory = composition.checkInventory(task, target.request_id, target.intent_revision, reference.inventory_revision)
+      if (composition.currentArtifacts(inventory).every(index => ready.contributions.some(entry => entry.artifact_id === index.artifact_id && entry.artifact_revision === index.artifact_revision))) this.publishDeliveryAnswer(state, inventory)
+    }
+  }
+  private settleRunnerDeliveries(task: string, unavailableTrigger?: string): void {
+    if (!this.features.runner || this.closed || this.closing) return
+    const state = new RunnerWorkState(this.db, this.epoch), composition = this.runnerComposition()
+    const pending = new RunnerRepairState(this.db, state, this.runnerArtifacts(), composition).pending(task)
+    const goals = state.contentPlans(task)
+    if (!goals.some(goal => requestDelivery(this.db, task, goal.request_id, goal.intent_revision)?.state === 'open')) return
+    if (!composition.scope(task) && goals.some(goal => goal.requirements.some(requirement => requirement.kind !== 'answer'))) this.refreshRunnerScope(task)
+    const scope = composition.scope(task), host = this.runnerHostComposition()
+    const ready = scope ? host.completeness(task) : undefined
+    const active = this.task(task).state === 'active', modelFeedback = this.features.runner.collator === 'model' && active
+    const rebuildId = this.runnerCompositionWaiting.get(task)?.previousBatchId
+    const rebuild = rebuildId ? composition.batch(task, rebuildId) : null
+    const settling = [...this.runnerCompositionPublishing.values()].filter(batch => batch.task_id === task)
+    if (rebuild) settling.push(rebuild)
+    let feedback: ContentPlan | undefined, continuation: string | undefined
+    this.db.transaction(() => {
+      for (const goal of goals) {
+        const { request_id, intent_revision, input_event_id } = goal
+        if (requestDelivery(this.db, task, request_id, intent_revision)?.state !== 'open' || deliveryHasUnsettledExecution(this.db, task, request_id, intent_revision) || pending.some(repair => repair.request_id === request_id && repair.intent_revision === intent_revision)) continue
+        if (settling.some(batch => batch.targets.some(target => target.request_id === request_id && target.intent_revision === intent_revision))) continue
+        const works = state.taskWorks(task).filter((work): work is AssignedWork => work.purpose === 'production' && !work.update_id && work.request_id === request_id && work.intent_revision === intent_revision)
+        if (!works.length) continue
+        const content = goal.requirements.some(requirement => requirement.kind !== 'answer')
+        const planned = composition.inventory(task, request_id, intent_revision)
+        let inventory: typeof planned = null
+        if (planned) try { inventory = composition.checkInventory(task, request_id, intent_revision, planned.inventory_revision) }
+        catch (error) { if (!(error instanceof ContractError)) throw error }
+        const missing = new Set((inventory ? unresolvedDeliveryRequirements(this.db, inventory) : goal.requirements.filter(requirement => requirement.required)).map(item => item.requirement_id))
+        if (content) for (const item of ready?.unresolved ?? []) if (item.request_id === request_id && item.intent_revision === intent_revision) missing.add(item.requirement_id)
+        const fragments = this.db.prepare(`SELECT artifact_id,current_revision FROM runner_artifact_owners o JOIN runner_artifacts a USING(task_id,artifact_id)
+          WHERE o.task_id=? AND a.artifact_revision=o.current_revision AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=?`).all(task, request_id, intent_revision) as { artifact_id: string; current_revision: number }[]
+        const unattempted = active && request_id !== unavailableTrigger && fragments.some(fragment => {
+          const index = this.runnerArtifacts().artifact(task, fragment.artifact_id, fragment.current_revision)
+          return index && host.unattemptedFragment(index)
+        })
+        if (unattempted) { continuation ??= request_id; continue }
+        if (inventory && scope && modelFeedback && host.missingRequirements(scope, [goal]).length && !this.missingFeedbackAttempted(goal)) {
+          feedback ??= goal
+          continue
+        }
+        if (content && inventory && !ready?.targets.some(target => target.request_id === request_id && target.intent_revision === intent_revision)) {
+          for (const requirement of goal.requirements.filter(item => item.required && item.kind !== 'answer')) missing.add(requirement.requirement_id)
+        }
+        if (!missing.size && inventory) this.publishDeliveryAnswer(state, inventory)
+        const answer = this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.answer' AND json_extract(payload_json,'$.request_id')=?
+          AND json_extract(payload_json,'$.intent_revision')=? AND json_extract(payload_json,'$.input_event_id')=?`).get(task, request_id, intent_revision, input_event_id)
+        if (!answer) for (const requirement of goal.requirements.filter(item => item.required && item.kind === 'answer')) missing.add(requirement.requirement_id)
+        this.record(task, 'runner.delivery.settled', { request_id, intent_revision, input_event_id, state: missing.size ? 'incomplete' : 'complete', missing_requirement_ids: [...missing] })
+      }
+    }).immediate()
+    if (continuation && !this.runnerCompositionMerges.has(task) && !this.runnerCompositionWaiting.has(task)) this.scheduleRunnerComposition(task, continuation)
+    if (feedback) this.executeMissingCompositionFeedback(feedback)
+  }
+  private missingFeedbackAttempted(goal: ContentPlan): boolean {
+    const { task_id, request_id, intent_revision } = goal
+    return !!this.db.prepare(`SELECT 1 FROM runner_batches b,json_each(b.payload_json,'$.targets') t WHERE b.task_id=@task_id
+      AND json_array_length(b.payload_json,'$.indexes')=0 AND json_extract(t.value,'$.request_id')=@request_id AND json_extract(t.value,'$.intent_revision')=@intent_revision
+      UNION ALL SELECT 1 FROM records WHERE task_id=@task_id AND kind='runner.composition.feedback_blocked'
+      AND json_extract(payload_json,'$.request_id')=@request_id AND json_extract(payload_json,'$.intent_revision')=@intent_revision LIMIT 1`).get({ task_id, request_id, intent_revision })
+  }
+  private executeMissingCompositionFeedback(goal: ContentPlan): void {
+    const { task_id: task, request_id: request, intent_revision } = goal
+    let prepared: PreparedRunnerComposition
+    try { prepared = this.prepareRunnerComposition(task, request, { feedback_only: true }) }
+    catch (error) {
+      if (error instanceof ContractError && error.code === 'RUN_BUSY') return
+      this.record(task, 'runner.composition.feedback_blocked', { request_id: request, intent_revision, code: error instanceof ContractError ? error.code : 'COMPOSITION_PREPARATION_FAILED' })
+      queueMicrotask(() => this.settleRunnerDeliveries(task))
+      return
+    }
+    void this.executePreparedComposition(task, request, prepared).catch(() => {})
+  }
+  private queueAssignedWork(state: RunnerWorkState, task: string): void {
+    const settle = new Set<string>(), affected: LogicalWork[] = []
+    for (const work of state.taskWorks(task)) {
+      if (work.purpose !== 'production' || !work.assignment || work.state !== 'planned' || work.current_attempt_id) continue
+      const agent = this.agents.get(work.run_id), run = state.run(work.run_id)
+      if (!agent?.managed || !run.commit_valid) continue
+      if (work.dependencies.some(dependency => dependency.kind === 'work' && state.work(dependency.work_id).state !== 'succeeded')) continue
+      try {
+        const attempt = this.db.transaction(() => {
+          const previous = state.attempts(work.work_id).at(-1)
+          const current = state.pinAssignmentOutputs(work.work_id, this.boundAssignmentOutputs(state, work))
+          const contentInputs = boundContentInputs(current)
+          const attempt = state.createAttempt({ attempt_id: id(), task_id: task, work_id: work.work_id, run_id: work.run_id, runtime_epoch: this.epoch,
+            attempt_number: (previous?.attempt_number ?? 0) + 1, ...(previous ? { previous_attempt_id: previous.attempt_id } : {}), profile_id: 'producer-output-v1', model_config_id: agent.main.id, model_config_revision: agent.main.revision, input_versions: current.dependencies,
+            state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [], purpose: 'production', request_id: work.request_id, intent_revision: work.intent_revision,
+            ...(contentInputs.length ? { content_inputs: contentInputs } : {}), ...(work.message_id ? { message_id: work.message_id } : {}) })
+          this.installAssignmentHandoffs(state, current, attempt)
+          return attempt
+        }).immediate()
+        void this.executeRunnerProduction(attempt.attempt_id).catch(() => {})
+      } catch (error) {
+        if (!(error instanceof ContractError) || !['RUNNER_OUTPUT_UNAVAILABLE', 'RUNNER_DEPENDENCY_INVALID', 'RUNNER_ATTEMPT_CONFLICT'].includes(error.code)) throw error
+        affected.push(...state.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id }))
+        this.record(task, 'runner.assignment.blocked', { run_id: work.run_id, request_id: work.request_id, work_id: work.work_id, code: error.code, reason: error.message })
+        settle.add(work.run_id)
+      }
+    }
+    this.settleDependentRuns(task, affected)
+    for (const runId of settle) this.aggregateWorkerRun(task, runId)
+  }
+  private installAssignmentHandoffs(state: RunnerWorkState, work: LogicalWork, attempt: ExecutionAttempt): void {
+    if (work.purpose !== 'production' || !work.assignment?.inputs.length) return
+    for (const output of this.boundAssignmentOutputs(state, work)) this.record(work.task_id, 'runner.output.handoff', {
+      work_id: output.work_id, plan_revision: output.plan_revision, result_revision: output.result_revision, output_key: output.output_key,
+      ...(output.kind === 'artifact' ? { artifact_id: output.artifact_id, artifact_revision: output.artifact_revision } : {}),
+      consumer_work_id: work.work_id, consumer_attempt_id: attempt.attempt_id, request_id: work.request_id, run_id: work.run_id
+    })
+  }
+  private repairTarget(state: RunnerWorkState, task: string, repair: PendingRepair) {
+    const { issue, request_id, intent_revision } = repair, artifacts = this.runnerArtifacts(), direct = repair.recipient.kind === 'worker'
+    const index = issue.kind === 'missing_requirement' ? null : artifacts.artifact(task, issue.artifact.artifact_id, issue.artifact.artifact_revision)
+    const composition = this.runnerComposition(), designated = !index ? composition.source(task, request_id, intent_revision) : null
+    const sourceId = index?.work_id ?? designated?.work_id
+    if (!sourceId || issue.kind !== 'missing_requirement' && !index || direct && !index) fail('REPAIR_SOURCE_INELIGIBLE', 'The feedback source is unavailable')
+    const source = state.work(sourceId), originalId = index?.attempt_id ?? source.current_attempt_id
+    if (!originalId) fail('REPAIR_SOURCE_INELIGIBLE', 'The feedback source has no eligible attempt')
+    const original = state.attempt(originalId), previous = state.run(original.run_id)
+    if (source.purpose !== 'production' || previous.purpose !== 'production' || direct && source.role !== 'producer' || source.update_id || original.state !== 'succeeded') fail('REPAIR_SOURCE_INELIGIBLE', 'Feedback requires an eligible settled production source')
+    if (previous.state !== 'completed') {
+      const eligible = index ? ['interrupted', 'failed'].includes(previous.state) : previous.state === 'interrupted' && designated?.plan_revision === source.plan_revision
+      const output = eligible && source.result_revision !== undefined ? composition.checkOutput(task, source.work_id, source.plan_revision, source.result_revision) : null
+      if (!output || output.attempt_id !== originalId || index && !output.artifacts.some(ref => ref.artifact_id === index.artifact_id && ref.artifact_revision === index.artifact_revision)) fail('REPAIR_SOURCE_INELIGIBLE', 'Feedback requires an eligible settled production source')
+    }
+    if (this.db.prepare(`SELECT 1 FROM actions a JOIN approvals p ON p.action_id=a.id WHERE a.task_id=? AND p.decision='deny'
+      AND json_extract(a.source_json,'$.owner.attempt_id')=?`).get(task, original.attempt_id)) fail('APPROVAL_DENIED', 'Feedback cannot bypass an original denial')
+    const requirements = index ? artifacts.candidate(task, this.one('SELECT candidate_id FROM runner_artifacts WHERE task_id=? AND artifact_id=? AND artifact_revision=?', task, index.artifact_id, index.artifact_revision).candidate_id)!.candidate.requirement_ids : []
+    return { source, original, previous, index, requirements }
+  }
+  private queueRepairs(state: RunnerWorkState, task: string): void {
+    if (!this.features.runner || this.closed || this.closing || this.task(task).state !== 'active') return
+    const artifacts = this.runnerArtifacts(), repairs = new RunnerRepairState(this.db, state, artifacts, this.runnerComposition())
+    for (const repair of repairs.pending(task)) {
+      const { request_record_id, problem_key, request_id, intent_revision, issue } = repair
+      const blocked = (code: string) => this.record(task, 'runner.repair.blocked', { request_record_id, problem_key, request_id, intent_revision, code })
+      if (!repairs.current(task, repair)) { blocked('REPAIR_OBSOLETE'); continue }
+      if (!this.runnerRunAvailable(task, request_id)) continue
+      const direct = repair.recipient.kind === 'worker'
+      if (direct && this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.started'
+        AND json_extract(payload_json,'$.problem_key')=? AND json_type(payload_json,'$.previous')='object'`).get(task, problem_key)) { blocked('REPAIR_NO_PROGRESS'); continue }
+      const selection = JSON.parse(this.one('SELECT config_selection_json FROM requests WHERE task_id=? AND id=?', task, request_id).config_selection_json)
+      let main: ModelLease | undefined, compact: ModelLease | undefined, approval: ModelLease | undefined
+      try {
+        const { source, original, previous, index, requirements } = this.repairTarget(state, task, repair)
+        this.recovery.assertWrite()
+        main = this.models.acquire(selection.id, 'main')
+        if (main.id !== original.model_config_id || main.revision !== original.model_config_revision || main.revision !== selection.revision) fail('MODEL_CONFIGURATION_CHANGED', 'Repair retains the original Worker configuration')
+        compact = this.models.acquireCompaction(main)
+        if (selection.approval_mode === 'assisted') {
+          approval = this.models.acquire(selection.approval_id, 'approval')
+          if (approval.revision !== selection.approval_revision) fail('MODEL_CONFIGURATION_CHANGED', 'Repair retains the original approval configuration')
+        }
+        const model = main, runId = id(), workId = id(), attemptId = id()
+        const profile = direct ? undefined : createWorkRouterProfile('feedback')
+        const { work, attempt } = this.db.transaction(() => {
+          if (!repairs.current(task, repair) || !this.runnerRunAvailable(task, request_id)) fail('REPAIR_OBSOLETE', 'Repair eligibility changed before admission')
+          this.db.prepare("INSERT INTO runs(id,task_id,request_id,state,runtime_epoch,limits_json,budget_json,created_at) VALUES (?,?,?,'running',?,?,?,?)").run(runId, task, request_id, this.epoch, json({ ...defaults, run: model.config.limits ?? {} }), json({ model_requests: 0, tool_requests: 0, tokens: 0 }), now())
+          state.registerRun({ ...previous, run_id: runId, previous_run_id: previous.run_id, runtime_epoch: this.epoch, state: 'running', commit_valid: true })
+          const dependencies: LogicalWork['dependencies'] = [...source.dependencies, ...(index ? [{ kind: 'resource' as const, task_id: task, resource_id: index.bundle_resource_id }] : [])]
+          const unique = [...new Map(dependencies.map(input => [json(input), input])).values()]
+          const origin = { purpose: 'production' as const, task_id: task, request_id, intent_revision, run_id: runId, work_id: workId, ...(source.message_id ? { message_id: source.message_id } : {}) }
+          const work: AssignedWork = { ...origin, role: direct ? 'producer' : 'router', plan_revision: 1, required: true, requirement_ids: direct ? requirements : [], dependencies: unique, state: 'planned', max_attempts: 2,
+            ...(direct ? { assignment: { instructions: 'Address the bound structural issue within the exact artifact replacement scope.', inputs: [], outputs: [{ output_key: 'replacement', kind: 'artifact', exposure: 'publish' }] } } : {}) }
+          state.installPlan([work])
+          const attempt = state.createAttempt({ ...origin, attempt_id: attemptId, runtime_epoch: this.epoch, attempt_number: 1, profile_id: profile?.id ?? 'producer-output-v1', model_config_id: model.id, model_config_revision: model.revision, input_versions: unique, state: 'registered', dispatch_state: 'not_dispatched', usage_refs: [] })
+          if (direct && index && issue.kind !== 'missing_requirement') {
+            const binding: ArtifactRepair = { request_record_id, problem_key, request_id, intent_revision, issue, previous: index, repair_run_id: runId, repair_work_id: workId }
+            this.record(task, 'runner.repair.started', binding)
+          } else this.record(task, 'runner.repair.routed', { request_record_id, problem_key, request_id, intent_revision, run_id: runId, work_id: workId, attempt_id: attemptId })
+          return { work, attempt }
+        }).immediate()
+        this.agents.set(runId, { controller: new AbortController(), main, compact, approval, budget: new RunBudget(main.config), mode: selection.approval_mode === 'assisted' ? 'assisted' : 'manual', managed: true })
+        const execution = profile ? this.executeRepairRouter(state, task, repairs, repair, work, attempt, profile, index, requirements) : this.executeRunnerProduction(attemptId)
+        void execution.catch(error => {
+          if (this.closed || this.closing || !this.db.open) return
+          if (error instanceof ContractError && error.code === 'RUNNER_WAITING_INPUT') return
+          if (profile && installedRepairDispatch(this.db, task, attemptId)) return
+          const run = state.run(runId)
+          if (run.commit_valid && state.attempt(attemptId).state !== 'unknown') this.finish(task, runId, 'failed', error instanceof ContractError ? error.code : 'REPAIR_EXECUTION_FAILED')
+        })
+      } catch (error) {
+        main?.release(); compact?.release(); approval?.release()
+        if (!(error instanceof ContractError)) throw error
+        blocked(error.code)
+      }
+    }
+  }
+  private executeRepairRouter(state: RunnerWorkState, task: string, repairs: RunnerRepairState, repair: PendingRepair, work: AssignedWork, attempt: ExecutionAttempt, profile: ReturnType<typeof createWorkRouterProfile>, index: ReturnType<RunnerArtifactState['artifact']>, requirements: string[]) {
+    const { issue, request_record_id, request_id, intent_revision, problem_key } = repair, runId = work.run_id
+    const revision = () => this.routingRevision(task, runId)
+    const installedPlan = () => !!this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.request_record_id')=?").get(task, request_record_id)
+    const content = new AssignmentContent(this.db), scope = content.scope(task, request_id)
+    const catalog = new RoutingInputCatalog(this.db, scope, () => this.catalogOutputs(task))
+    return this.executeWorker(attempt.attempt_id, profile, {
+      text: this.runnerGoalText(task, request_id, intent_revision),
+      bound: { base_revision: revision(), feedback: { issue, request_record_id }, work_table: this.routingWorkTable(state, task, attempt, runId) },
+      orchestration: {
+        get revision() { return revision() },
+        catalog: query => catalog.page(query),
+        route: (decision, owner) => {
+          if (!repairs.current(task, repair)) fail('REPAIR_OBSOLETE', 'Feedback no longer refers to a current problem')
+          if (decision.action !== 'dispatch' || decision.final_answer !== undefined || installedPlan()) fail('RUNNER_PLAN_CONFLICT', 'Feedback installs one scoped dispatch without changing the original final answer source')
+          const requirementId = issue.kind === 'missing_requirement' ? issue.requirement.requirement_id : undefined
+          const allowed = requirementId ? [requirementId] : requirements
+          if (decision.assignments.some(assignment => assignment.requirement_ids.some(requirement => !allowed.includes(requirement)))) fail('REPAIR_SCOPE_INVALID', 'Feedback cannot add unrelated requirement work')
+          if (index && (decision.assignments.length !== 1 || decision.assignments[0]!.outputs.length !== 1 || decision.assignments[0]!.outputs[0]!.exposure !== 'publish')) fail('REPAIR_SCOPE_INVALID', 'An exact artifact replacement uses one publishing assignment')
+          const covering = decision.assignments.findIndex(assignment => assignment.required && allowed.every(requirement => assignment.requirement_ids.includes(requirement)) && assignment.outputs.some(output => output.exposure === 'publish'))
+          if (covering < 0) fail('REPAIR_SCOPE_INVALID', 'A repair must preserve its required publication coverage')
+          const signature = canonical(decision.assignments.map(assignment => ({ instructions: assignment.instructions.trim().replace(/\s+/g, ' '), requirements: assignment.requirement_ids, inputs: assignment.inputs?.map(input => 'assignment_key' in input ? input.output_key : 'work_id' in input ? [input.work_id, input.output_key] : input), outputs: assignment.outputs.map(output => [output.kind, output.exposure]) })))
+          if (this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.problem_key')=? AND json_extract(payload_json,'$.signature')=?`).get(task, problem_key, signature)) fail('REPAIR_NO_PROGRESS', 'This problem already received the same repair plan')
+          const goal = state.goal(request_id), oldSource = this.runnerComposition().source(task, request_id, intent_revision)
+          const existing = state.taskWorks(task).filter((item): item is AssignedWork => item.purpose === 'production' && item.request_id === request_id && item.intent_revision === intent_revision && item.state === 'succeeded')
+          const planned = installableAssignments(decision, goal, work, id, binding => {
+            const selected = this.routedOutputSource(state, task, binding)
+            if (index && selected.state === 'succeeded') {
+              const output = this.assignedOutput(selected, binding)
+              if (output.kind === 'artifact' && output.artifact_id === index.artifact_id) fail('REPAIR_SCOPE_INVALID', 'The replacement baseline is already bound; it cannot be its own live output dependency')
+            }
+            return selected
+          }, existing, checkpoint => { WorkerContext.checkpoint(this.db, task, checkpoint, attempt) }, (binding, assignment) => content.checkNew(scope, binding, assignment))
+          const installed = state.installPlan(planned)
+          if (index && issue.kind !== 'missing_requirement') {
+            const binding: ArtifactRepair = { request_record_id, problem_key, request_id, intent_revision, issue, previous: index, repair_run_id: runId, repair_work_id: installed[0]!.work_id }
+            this.record(task, 'runner.repair.started', binding)
+          } else {
+            const sealer = installed[covering]!
+            this.runnerComposition().designateSource({ task_id: task, request_id, intent_revision, work_id: sealer.work_id, plan_revision: sealer.plan_revision }, oldSource)
+          }
+          this.record(task, 'runner.repair.plan', { request_record_id, problem_key, request_id, intent_revision, run_id: runId, owner, requirement_id: requirementId ?? null, signature, work_ids: installed.map(item => item.work_id) })
+          const nextRevision = decision.base_revision + 1
+          this.record(task, 'runner.plan.revised', { owner, run_id: runId, request_id, revision: nextRevision, works: installed.map(item => ({ work_id: item.work_id, plan_revision: item.plan_revision })) })
+          return { revision: nextRevision, works: installed.map(item => ({ work_id: item.work_id, plan_revision: item.plan_revision })) }
+        },
+        report: () => fail('WORKER_CAPABILITY_DENIED', 'Router cannot report on behalf of an assigned Worker')
+      }
+    }, (result, owner) => this.record(task, 'runner.repair.response', { request_record_id, problem_key, request_id, intent_revision, run_id: runId, owner, kind: result.kind }), undefined, undefined, result => {
+      const installed = installedPlan()
+      if (result.kind === (installed ? 'updated' : 'blocked')) return null
+      return {
+        code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
+        message: installed ? 'A repair plan was installed. Return updated without dispatching again.' : 'No repair plan was installed. Install a scoped repair before returning updated, or return blocked.'
+      }
+    })
+  }
   async executeRunnerProduction(attemptId: string): Promise<ProducerResult> {
     const state = new RunnerWorkState(this.db, this.epoch), qualified = state.qualify(attemptId, 'dispatch'), { work, goal } = qualified
     if (!goal || work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role)) fail('RUNNER_OWNERSHIP_INVALID', 'Content execution requires current production work')
     const owner = this.workerOwner(qualified), sections = this.runnerArtifacts().outline(work.task_id)?.sections.filter(section => section.request_id === work.request_id && section.intent_revision === work.intent_revision) ?? []
     const integration = work.role === 'integrator' ? this.runnerComposition().integrationInputs(attemptId) : undefined
+    const repair = artifactRepair(this.db, work.task_id, work.work_id)
     const resources = integration?.resources ?? work.dependencies.flatMap(dependency => dependency.kind === 'resource' ? [dependency.resource_id] : dependency.kind === 'artifact' ? [this.runnerArtifacts().artifact(work.task_id, dependency.artifact_id, dependency.artifact_revision)?.bundle_resource_id].filter((value): value is string => !!value) : [])
     const conversation = this.runnerConversation(work.task_id, work.request_id, work.intent_revision)
-    const conversationResources = conversation.resource_ids.filter(resource => this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(work.task_id, resource))
+    const conversationResources = repair ? [] : conversation.resource_ids.filter(resource => this.db.prepare('SELECT 1 FROM task_resources WHERE task_id=? AND resource_id=?').get(work.task_id, resource))
     const materialIds = [...new Set([...resources, ...conversationResources])]
-    const materials = materialIds.map(resource => ({ ...this.one('SELECT r.id,r.display_name,r.byte_length,r.media_type FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', work.task_id, resource), provenance_ref: { task_id: work.task_id, kind: 'resource' as const, id: resource } }))
+    const outputs = this.boundAssignmentOutputs(state, work)
+    const boundInputs = this.boundContentReader.entries(new AssignmentContent(this.db), work, attemptId)
+    const materials = [...new Set([...materialIds, ...outputs.flatMap(output => output.kind === 'artifact' ? [output.bundle_resource_id] : [])])].map(resource => ({ ...this.one('SELECT r.id,r.display_name,r.byte_length,r.media_type FROM resources r JOIN task_resources t ON t.resource_id=r.id WHERE t.task_id=? AND r.id=?', work.task_id, resource), provenance_ref: { task_id: work.task_id, kind: 'resource' as const, id: resource } }))
     const host = new RunnerHostProduction(this.db, this.epoch)
-    const profile = createProducerProfile({ owner, work, goal, sections, grants: this.contentToolGrants(work.task_id, conversation), normalize: (draft, response) => host.normalize(draft, owner, response) })
+    const grants: WorkerGrant[] = repair ? [{ type: 'read', kind: 'resource', ids: materials.map(material => material.provenance_ref.id) }] : this.contentToolGrants(work.task_id, conversation)
+    if (outputs.some(output => output.kind === 'answer')) grants.push({ type: 'call', capability: READ_WORK_OUTPUT })
+    if (boundInputs.length) grants.push({ type: 'call', capability: READ_BOUND_INPUT })
+    if (work.assignment) grants.push({ type: 'call', capability: REPORT_MISSING_INPUT })
+    const profile = createProducerProfile({ owner, work, goal, sections, grants, repair: !!repair, normalize: (draft, response) => host.normalize(draft, owner, response) })
     const loadArtifact = (resourceId: string) => loadBundleSource(this.db, this.root, work.task_id, { type: 'resource', resource: { kind: 'resource', id: resourceId } }, row => this.journal.assertResource(row)).bundle
     const preflight = (value: ProducerResult): WorkerResultIssue | null => {
       const issue = host.preflight(value, owner, materials.map(material => material.provenance_ref))
@@ -1621,21 +2285,61 @@ export class RuntimeStore {
     let result: ProducerResult
     const text = this.runnerGoalText(work.task_id, work.request_id, work.intent_revision)
     const chapterQuery = JSON.parse(this.one('SELECT input_json FROM requests WHERE task_id=? AND id=?', work.task_id, work.request_id).input_json).chapter_query as { manifest: ChapterManifest; region_ids: string[] } | undefined
-    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation, bound: { materials, ...(chapterQuery ? chapterQuery.manifest.content_tree ? { content_query: { view_id: chapterQuery.manifest.view_id, node_ids: chapterQuery.region_ids } } : { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) } }
+    const workOutputs = outputs.map(output => {
+      if (output.kind === 'artifact') return output
+      const { record_id: _record, ...navigation } = output
+      return navigation
+    })
+    const supplementalInputs = (work.assignment?.supplement_ids ?? []).map(supplementId => {
+      const reply = state.assignmentSupplement(work.task_id, supplementId)
+      if (reply.work_id !== work.work_id || reply.request_id !== work.request_id || reply.previous_plan_revision >= work.plan_revision || reply.resource_ids.some(id => !qualified.attempt.input_versions.some(input => input.kind === 'resource' && input.resource_id === id))) fail('RUNNER_OWNERSHIP_INVALID', 'Supplement no longer matches this Worker assignment')
+      const message = this.one("SELECT json_extract(payload_json,'$.text') AS text FROM records WHERE task_id=? AND id=? AND kind='message.user' AND json_extract(payload_json,'$.request_id')=?", work.task_id, reply.message_id, reply.source_request_id)
+      return { message_id: reply.message_id, clarification_id: reply.clarification_id, text: message.text as string, resource_ids: reply.resource_ids }
+    })
+    let checkpoint: WorkerInput['checkpoint']
+    if (work.assignment?.checkpoint_id) {
+      try {
+        checkpoint = WorkerContext.checkpoint(this.db, work.task_id, work.assignment.checkpoint_id, qualified.attempt, {
+          dependencies: qualified.attempt.input_versions, resources: materials.map(material => material.provenance_ref.id), outputs, authorize: profile.authorize
+        })
+      } catch (error) {
+        if (!(error instanceof ContractError) || error.code !== 'RUNNER_CHECKPOINT_UNAVAILABLE') throw error
+      }
+    }
+    let waitReport: string | undefined
+    const input: WorkerInput = { text: integration ? `${text}\nBound integration sources (data): ${json(integration)}` : text, conversation: repair ? undefined : conversation, checkpoint, bound: { materials, ...(boundInputs.length ? { bound_inputs: boundInputs } : {}), ...(repair ? { repair: { instruction: 'Correct only the referenced artifact, use its exact base revision, preserve its coverage, and return no answer.', issue: repair.issue, previous: repair.previous } } : {}), ...(supplementalInputs.length ? { supplemental_inputs: supplementalInputs } : {}), ...(workOutputs.length ? { work_outputs: workOutputs } : {}), ...(chapterQuery ? chapterQuery.manifest.content_tree ? { content_query: { view_id: chapterQuery.manifest.view_id, node_ids: chapterQuery.region_ids } } : { chapter_context: chapterContext(this.bundle(chapterQuery.manifest.bundle_resource_id), chapterQuery.manifest, chapterQuery.region_ids), chapter_manifest: chapterQuery.manifest, region_ids: chapterQuery.region_ids } : {}) },
+      ...(work.assignment ? {
+        waitReport: () => waitReport,
+        orchestration: {
+          revision: work.plan_revision,
+          route: () => fail('WORKER_CAPABILITY_DENIED', 'An assigned Worker cannot route work'),
+          report: (report, owner) => {
+            const reportId = this.reportAssignedInput(owner, work, report)
+            if (report.wait) waitReport = reportId
+            return { report_id: reportId, waiting: report.wait }
+          }
+        }
+      } : {})
+    }
     try { result = await this.executeWorker(attemptId, profile, input, (result, source) => {
       this.checkContentReads(work.task_id, source)
       const accepted = host.accept(result, source, resourceId => {
         const bundle = loadArtifact(resourceId)
         validateProducerBundle(bundle); checkPersonalBindings(this.db, work.task_id, bundle, true); this.checkedBundle(work.task_id, bundle, source.attempt_id)
       })
-      if (result.answer !== null) this.recordRunnerAnswer(work.task_id, { owner: source, purpose: 'final_answer', text: result.answer, request_id: work.request_id, input_event_id: goal.input_event_id, run_id: work.run_id, intent_revision: work.intent_revision, result_ref: accepted.output.result_ref })
+      if (repair) this.record(work.task_id, 'runner.repair.applied', { ...repair, owner: source, artifact_revision: accepted.indexes[0]!.artifact_revision })
+      if (result.answer !== null && !work.assignment && !repair && (!this.features.runner?.conversationRouting || goal.requirements.every(requirement => requirement.kind === 'answer'))) this.recordRunnerAnswer(work.task_id, { owner: source, purpose: 'final_answer', text: result.answer, request_id: work.request_id, input_event_id: goal.input_event_id, run_id: work.run_id, intent_revision: work.intent_revision, result_ref: accepted.output.result_ref })
       this.record(work.task_id, 'runner.output.accepted', { owner: source, run_id: work.run_id, plan_revision: work.plan_revision, result_revision: accepted.output.result_revision, requirement_ids: accepted.output.requirement_ids, artifacts: accepted.output.artifacts, inventory_revision: accepted.inventory?.inventory_revision ?? null })
-      this.refreshRunnerScope(work.task_id)
+      if (sections.length || !work.assignment) this.refreshRunnerScope(work.task_id)
+      if (work.assignment && accepted.inventory && !repair) {
+        if (goal.requirements.every(requirement => requirement.kind === 'answer')) this.publishDeliveryAnswer(state, accepted.inventory)
+        else this.publishCompositionAnswers(state, work.task_id)
+      }
     }, undefined, undefined, preflight) } catch (error) {
       if (!this.closed && this.db.open) host.retainFailure(error)
       throw error
     }
-    if (result.artifacts.length) this.scheduleRunnerComposition(work.task_id, work.request_id)
+    if (result.artifacts.length || work.assignment && sections.length) this.scheduleRunnerComposition(work.task_id, work.request_id)
     return result
   }
   private scheduleRunnerComposition(task: string, trigger: string): void {
@@ -1656,31 +2360,63 @@ export class RuntimeStore {
   private async executeAutomaticComposition(task: string, trigger: string, previousBatchId?: string): Promise<void> {
     if (this.closing || this.closed || this.task(task).state !== 'active') return
     let prepared: PreparedRunnerComposition
-    try { prepared = this.prepareRunnerComposition(task, trigger, previousBatchId ? { previous_batch_id: previousBatchId } : {}) }
+    try { prepared = this.prepareRunnerComposition(task, trigger, previousBatchId ? { previous_batch_id: previousBatchId } : { unattempted_only: true }) }
     catch (error) {
-      if (error instanceof ContractError && error.code === 'COMPOSITION_NOT_READY') return
       if (error instanceof ContractError && error.code === 'RUN_BUSY') {
         const waiting = this.runnerCompositionWaiting.get(task)
         if (!waiting?.previousBatchId) this.runnerCompositionWaiting.set(task, { trigger, ...(previousBatchId ? { previousBatchId } : {}) })
         return
       }
+      if (!previousBatchId) this.settleRunnerDeliveries(task, trigger)
+      if (error instanceof ContractError && error.code === 'COMPOSITION_NOT_READY') return
       throw error
     }
-    let plan: PresentationPlan
+    await this.executePreparedComposition(task, trigger, prepared)
+  }
+  private async executePreparedComposition(task: string, trigger: string, prepared: PreparedRunnerComposition): Promise<void> {
+    let outcome: import('./runner/collator').CollatorResult
     try {
-      plan = this.features.runner?.collator === 'model'
-        ? await this.executeWorker(prepared.attempt_id, prepared.collator.profile, undefined, undefined, prepared.collator)
+      outcome = this.features.runner?.collator === 'model'
+        ? await this.executeWorker(prepared.attempt_id, prepared.collator.profile, undefined, (value, owner) => {
+          if (!('kind' in value)) return
+          if (owner.purpose !== 'composition') fail('RUNNER_OWNERSHIP_INVALID', 'Feedback requires a composition owner')
+          const state = new RunnerWorkState(this.db, this.epoch)
+          new RunnerRepairState(this.db, state, this.runnerArtifacts(), this.runnerComposition()).install(prepared.collator.feedback(value), owner, this.record.bind(this))
+          this.runnerHostComposition().setBatchState(task, prepared.batch.batch_id, 'failed')
+        }, prepared.collator, undefined, value => !prepared.batch.indexes.length && !('kind' in value) ? {
+          code: 'INVALID_COLLATOR_FEEDBACK', path: 'kind', value: null, message: 'This batch has no publishable indexes. Report the listed structural evidence as feedback.'
+        } : null)
         : prepared.collator.rulePlan()
     } catch (error) {
-      this.finish(task, prepared.run_id, 'failed', error instanceof ContractError ? error.code : 'COLLATOR_FAILED')
+      if (!this.closed && this.db.open) {
+        const state = new RunnerWorkState(this.db, this.epoch), run = state.run(prepared.run_id), attempt = state.attempt(prepared.attempt_id)
+        if (!this.closing && this.runnerComposition().batch(task, prepared.batch.batch_id)?.state === 'preparing' &&
+          attempt.state !== 'unknown' && attempt.dispatch_state !== 'unknown' && run.state !== 'interrupted') {
+          this.runnerHostComposition().setBatchState(task, prepared.batch.batch_id, run.state === 'cancelled' || attempt.state === 'cancelled' ? 'cancelled' : 'failed')
+        }
+        this.finish(task, prepared.run_id, 'failed', error instanceof ContractError || error instanceof ModelError ? error.code : 'COLLATOR_FAILED')
+        this.settleRunnerDeliveries(task)
+      }
       throw error
     }
-    const result = await this.publishRunnerComposition(task, prepared.batch.batch_id, plan)
-    if (result.state === 'published') {
-      this.refreshRunnerScope(task)
+    if ('kind' in outcome) {
+      this.finish(task, prepared.run_id, 'failed', 'COLLATOR_FEEDBACK_PENDING')
       this.scheduleRunnerComposition(task, trigger)
-    } else if (result.state === 'failure' && ['VERSION_CONFLICT', 'RESOURCE_CHANGED'].includes(result.code ?? '')) {
-      await this.executeAutomaticComposition(task, trigger, prepared.batch.batch_id)
+      return
+    }
+    const epoch = this.epoch, batchId = prepared.batch.batch_id
+    this.runnerCompositionPublishing.set(batchId, prepared.batch)
+    try {
+      const result = await this.publishRunnerComposition(task, batchId, outcome)
+      if (result.state === 'published') {
+        this.refreshRunnerScope(task)
+        this.scheduleRunnerComposition(task, trigger)
+      } else if (result.state === 'failure' && ['VERSION_CONFLICT', 'RESOURCE_CHANGED'].includes(result.code ?? '')) {
+        await this.executeAutomaticComposition(task, trigger, batchId)
+      }
+    } finally {
+      this.runnerCompositionPublishing.delete(batchId)
+      if (this.epoch === epoch) this.settleRunnerDeliveries(task)
     }
   }
   private accountLease(taskId: string, runId: string, lease: ModelLease): void {
@@ -1758,7 +2494,10 @@ export class RuntimeStore {
     this.pumpingWorkers.add(task)
     try {
       const state = new RunnerWorkState(this.db, this.epoch)
-      state.reconcileDependencies(task)
+      this.reconcileRunnerDependencies(state, task)
+      this.queueRepairs(state, task)
+      this.queueWorkRouting(state, task)
+      this.queueAssignedWork(state, task)
       for (;;) {
         const candidates = [...this.pendingWorkers].filter(([, pending]) => pending.task === task).map(([attempt_id, pending]) => ({ ...pending.work, attempt_id }))
         const ready = new Set<string>()
@@ -1789,7 +2528,7 @@ export class RuntimeStore {
         this.runnerCompositionWaiting.delete(task)
         void this.executeAutomaticComposition(task, waiting.trigger, waiting.previousBatchId).catch(error => {
           if (!this.closed && this.db.open) this.record(task, 'runner.composition.blocked', { trigger_request_id: waiting.trigger, code: error instanceof ContractError ? error.code : 'COMPOSITION_EXECUTION_FAILED' })
-        })
+        }).finally(() => this.settleRunnerDeliveries(task))
       }
     }
   }
@@ -1819,7 +2558,7 @@ export class RuntimeStore {
     agent.controller.signal.addEventListener('abort', cancel, { once: true })
     if (agent.controller.signal.aborted) cancel()
     const clone = (lease: ModelLease): ModelLease => ({ ...lease, owner: { ...owner }, release() {} })
-    const worker: WorkerAgent = { owner, controller, main: clone(agent.main), ...(agent.compact ? { compact: clone(agent.compact) } : {}), ...(agent.approval ? { approval: clone(agent.approval) } : {}), budget: agent.budget, mode: agent.mode, context: new WorkerContext(this.db, owner), profile, ...(collator ? { collator } : {}), ...(diagnostic ? { diagnostic } : {}), state: 'running' }
+    const worker: WorkerAgent = { owner, controller, main: clone(agent.main), ...(agent.compact ? { compact: clone(agent.compact) } : {}), ...(agent.approval ? { approval: clone(agent.approval) } : {}), budget: agent.budget.forAttempt(), mode: agent.mode, context: new WorkerContext(this.db, owner), profile, ...(collator ? { collator } : {}), ...(diagnostic ? { diagnostic } : {}), orchestration: input?.orchestration, state: 'running' }
     this.workers.set(attemptId, worker)
     let result!: Result, accepted = false
     try {
@@ -1848,7 +2587,12 @@ export class RuntimeStore {
         if (!collator && !diagnostic) for (const message of conversation?.messages ?? []) {
           this.record(taskId, 'worker.conversation', { message: message.message, conversation_source: message.source, run_id: runId, owner })
         }
-        this.record(taskId, 'worker.input', { ...body, run_id: runId, owner, plan_revision: work.plan_revision })
+        this.record(taskId, 'worker.input', { ...body, run_id: runId, owner, plan_revision: work.plan_revision,
+          ...(work.purpose === 'production' && work.assignment && !input?.checkpoint ? { checkpoint_source: true } : {}) })
+        if (input?.checkpoint && !worker.budget.plan([{ role: 'system', content: profile.system }, ...input.checkpoint.messages, ...worker.context.load({ role: 'system', content: profile.system }).slice(1)], profile.tools).needsCompaction) {
+          worker.prefix = input.checkpoint.messages
+          this.record(taskId, 'runner.checkpoint.reused', { owner, run_id: runId, request_id: owner.purpose === 'production' ? owner.request_id : undefined, checkpoint_id: input.checkpoint.checkpoint_id })
+        }
       })()
       await runAgent(this.models, worker.main, taskId, [], {
         context: (messages, recovery) => this.prepareWorkerContext(worker, messages, recovery),
@@ -1864,7 +2608,8 @@ export class RuntimeStore {
             if (payload.message) recordedMessage({ id: recordId, sequence: this.task(taskId).next_sequence - 1, kind, payload: body })
           })()
         },
-        toolsSettled: () => this.observeRunnerGoal(owner, true),
+        toolsSettled: () => { this.observeRunnerGoal(owner, true); if (worker.orchestration) this.pumpRunnerWorkers(taskId) },
+        ...(input?.waitReport ? { yieldAfterTools: () => input.waitReport!() !== undefined } : {}),
         tool: (request, signal) => this.workerTool(attemptId, request, signal)
       }, controller.signal, worker.budget, {
         profile,
@@ -1880,6 +2625,14 @@ export class RuntimeStore {
           })()
         }
       })
+      const wait = input?.waitReport?.()
+      if (wait) {
+        state.suspendAssignment(attemptId, wait, current => {
+          this.record(taskId, 'runner.assignment.waiting', { request_id: run.purpose === 'production' ? run.request_id : undefined, run_id: runId, work_id: work.work_id, attempt_id: attemptId, plan_revision: current.plan_revision, report_id: wait })
+          this.record(taskId, 'worker.state', { run_id: runId, owner, state: 'waiting', reason: 'missing_input' })
+        })
+        fail('RUNNER_WAITING_INPUT', 'Assignment is waiting for a missing input')
+      }
       this.db.transaction(() => {
         this.qualifyWorker(attemptId)
         if (!accepted) fail('INVALID_WORKER_RESULT', 'Worker completed without an accepted result')
@@ -1927,9 +2680,15 @@ export class RuntimeStore {
     if (worker.collator) return worker.collator.context(live, recovery)
     if (worker.diagnostic) return worker.diagnostic.context(live, recovery)
     this.observeRunnerGoal(worker.owner)
-    const old = context.summary(), messages = worker.messages ? live : context.load(live[0]!)
+    const old = context.summary()
+    const messages = worker.messages ? live : [live[0]!, ...worker.prefix ?? [], ...context.load(live[0]!).slice(1)]
     annotateReads(messages); worker.messages = messages
     if (!recovery && !worker.budget.plan(messages, worker.profile.tools).needsCompaction) return messages
+    if (worker.prefix) {
+      const prefix = new Set(worker.prefix)
+      worker.prefix = undefined
+      return this.prepareWorkerContext(worker, messages.filter(message => !prefix.has(message)))
+    }
     if (!recovery && !context.hasFresh(old?.through_sequence ?? 0)) {
       if (!worker.budget.fits(messages, worker.profile.tools)) throw worker.budget.rejection(messages, worker.profile.tools, 'protected-input', 'CONTEXT_MINIMUM_TOO_LARGE')
       return messages
@@ -1985,7 +2744,7 @@ export class RuntimeStore {
   private aggregateWorkerRun(taskId: string, runId: string): void {
     if (this.closed || !this.db.open || !this.db.prepare('SELECT 1 FROM runner_runs WHERE run_id=?').get(runId)) return
     const state = new RunnerWorkState(this.db, this.epoch)
-    state.reconcileDependencies(taskId)
+    this.reconcileRunnerDependencies(state, taskId, runId)
     const run = state.run(runId), works = state.taskWorks(taskId).filter(work => work.run_id === runId)
     const attempts = works.flatMap(work => state.attempts(work.work_id)), states: WorkRunState[] = []
     for (const work of works) {
@@ -1998,12 +2757,13 @@ export class RuntimeStore {
     }
     const cancelled = this.db.prepare("SELECT payload_json FROM records WHERE task_id=? AND kind='runner.cancelled' AND json_extract(payload_json,'$.run_id')=? ORDER BY sequence DESC LIMIT 1").get(taskId, runId) as Row | undefined
     const cancellation = cancelled ? JSON.parse(cancelled.payload_json).scope === 'task' ? 'task' as const : 'run' as const : undefined
-    const proposed = aggregateRunOutcome({ run, works, attempts, states, ...(cancellation ? { cancellation } : {}) })
+    const outcomeWorks = works.map(work => work.role === 'router' && work.state === 'failed' && work.current_attempt_id && installedRepairDispatch(this.db, taskId, work.current_attempt_id) ? { ...work, required: false } : work)
+    const proposed = aggregateRunOutcome({ run, works: outcomeWorks, attempts, states, ...(cancellation ? { cancellation } : {}) })
     const terminal = this.one('SELECT intended_terminal,primary_reason FROM runs WHERE id=?', runId)
     const interrupted = terminal.intended_terminal === 'interrupted'
     const outcome = interrupted && proposed.phase !== 'terminal' ? {
       phase: 'closing' as const, outcome: 'interrupted' as const,
-      cancel_work_ids: works.filter(work => ['planned', 'queued', 'running', 'waiting'].includes(work.state) && !(terminal.primary_reason === 'host_shutdown' && this.undispatchedShutdownWork(work))).map(work => work.work_id),
+      cancel_work_ids: works.filter(work => ['planned', 'queued', 'running', 'waiting'].includes(work.state) && !(terminal.primary_reason === 'host_shutdown' && this.preservedShutdownWork(work))).map(work => work.work_id),
       unknown_attempt_ids: attempts.filter(attempt => attempt.state === 'unknown' || attempt.dispatch_state === 'unknown').map(attempt => attempt.attempt_id)
     } : proposed
     if (outcome.phase === 'terminal') return
@@ -2012,26 +2772,43 @@ export class RuntimeStore {
       return
     }
     state.closeRun(runId)
-    for (const workId of outcome.cancel_work_ids) state.revokeWork(workId)
+    const affected = outcome.cancel_work_ids.flatMap(workId => state.revokeWork(workId))
     const cancelledAttempts = attempts.filter(attempt => outcome.cancel_work_ids.includes(attempt.work_id)).map(attempt => attempt.attempt_id)
     if (cancelledAttempts.length) this.revokeRunActions(runId, cancelledAttempts)
     for (const [attemptId, worker] of this.workers) if (worker.owner.run_id === runId && outcome.cancel_work_ids.includes(worker.owner.work_id)) {
       this.pluginCalls.cancelAttempt(attemptId); this.monty.cancelAttempt(attemptId); worker.controller.abort()
     }
-    this.pumpRunnerWorkers(taskId)
-    if (!outcome.outcome) return
+    this.settleDependentRuns(taskId, affected, runId)
+    if (!outcome.outcome) { this.pumpRunnerWorkers(taskId); return }
     // Missing token usage remains an accounting fact after the request ends.
     // Only execution ownership and unconfirmed effects keep a Run closing.
     const unresolved = this.workersForRun(runId) || this.pluginCalls.busyRun(runId) || this.runnerCleanupPending(runId) || this.monty.busyRun(runId) || outcome.unknown_attempt_ids.length > 0 || !!this.db.prepare("SELECT 1 FROM calls WHERE run_id=? AND (state!='ended' OR execution='unknown') LIMIT 1").get(runId)
-    const reason = (outcome.outcome === 'failed' ? runnerFailureReason(this.db, taskId, runId, terminal.primary_reason) : terminal.primary_reason) ?? (cancellation ? 'user_cancelled' : 'required_work_settled')
+    const dependencyInvalid = works.some(work => work.required && work.state === 'invalidated' && work.purpose === 'production' && work.assignment)
+    const reason = (outcome.outcome === 'failed' ? runnerFailureReason(this.db, taskId, runId, terminal.primary_reason) ?? (dependencyInvalid ? 'RUNNER_DEPENDENCY_INVALID' : null) : terminal.primary_reason) ?? (cancellation ? 'user_cancelled' : 'required_work_settled')
     this.db.prepare("UPDATE runs SET state='waiting',wait_reason=?,intended_terminal=?,primary_reason=CASE WHEN primary_reason IS NULL OR primary_reason='required_work_settled' THEN ? ELSE primary_reason END WHERE id=? AND state IN ('running','waiting')").run(unresolved ? 'ending_cleanup' : 'runner_closing', outcome.outcome, reason, runId)
-    if (unresolved) return
+    if (unresolved) { this.pumpRunnerWorkers(taskId); return }
     const agent = this.agents.get(runId)
     if (agent?.managed) {
       agent.main.release(); agent.compact?.release(); agent.approval?.release(); this.agents.delete(runId)
     }
     this.finish(taskId, runId, outcome.outcome, reason, true)
     this.pumpRunnerWorkers(taskId)
+  }
+  private reconcileRunnerDependencies(state: RunnerWorkState, task: string, currentRun?: string): void {
+    this.settleDependentRuns(task, state.reconcileDependencies(task), currentRun)
+  }
+  private settleDependentRuns(task: string, affected: LogicalWork[], currentRun?: string): void {
+    if (this.closed || !this.db.open) return
+    const runs = new Set<string>()
+    for (const work of affected) {
+      if (work.purpose !== 'production' || !work.assignment || !['invalidated', 'dependency_failed', 'dependency_cancelled'].includes(work.state)) continue
+      if (work.run_id !== currentRun) runs.add(work.run_id)
+      if (!work.current_attempt_id) continue
+      this.revokeRunActions(work.run_id, [work.current_attempt_id])
+      this.pluginCalls.cancelAttempt(work.current_attempt_id); this.monty.cancelAttempt(work.current_attempt_id)
+      this.workers.get(work.current_attempt_id)?.controller.abort()
+    }
+    for (const run of runs) this.aggregateWorkerRun(task, run)
   }
   private workersForRun(runId: string): boolean { return [...this.workers.values()].some(worker => worker.owner.run_id === runId) }
   private runnerCleanupPending(runId: string): boolean {
@@ -2575,6 +3352,7 @@ export class RuntimeStore {
   publishRunnerComposition(taskId: string, batchId: string, plan: PresentationPlan, options: PublishRunnerCompositionOptions = {}): Promise<PublicationResult> {
     const host = this.runnerHostComposition(), batch = this.runnerComposition().batch(taskId, batchId)
     if (!batch?.operation_id) return Promise.reject(new ContractError('RUNNER_NOT_FOUND', 'Composition publication is unavailable'))
+    if (!batch.indexes.length) return Promise.reject(new ContractError('COMPOSITION_NOT_READY', 'A feedback-only batch has no fragments to publish'))
     const original = host.operation(taskId, batch.operation_id)
     if (original?.result) return Promise.resolve(original.result)
     const pending = this.compositionPublications.get(batch.operation_id)
@@ -2642,6 +3420,7 @@ export class RuntimeStore {
       await this.replaceSurface(taskId, batch.run_id, publication.request, signal, context, publication.hooks)
       const result = host.operation(taskId, publication.operation_id)?.result
       if (!result || result.state !== 'published') fail('RUNNER_PUBLICATION_CONFLICT', 'Publication must be queried by its original operation identity')
+      this.db.transaction(() => this.publishCompositionAnswers(state, taskId)).immediate()
       accounting.tool(batch.operation_id!, 'completed')
       const recordId = this.record(taskId, 'runner.composition.ended', { run_id: batch.run_id, batch_id: batchId, operation_id: batch.operation_id, result })
       state.updateAttempt({ ...state.attempt(owner.attempt_id), state: 'succeeded', result_ref: { task_id: taskId, kind: 'record', id: recordId } })
@@ -2679,6 +3458,7 @@ export class RuntimeStore {
   private async assessRunnerComposition(taskId: string, runId: string, approvalId: string, input: unknown, context: ExecutionActionContext, signal: AbortSignal): Promise<void> {
     const agent = this.agents.get(runId), owner = context.owner!
     if (!agent?.approval) return
+    const budget = agent.budget.forAttempt()
     const run = new RunnerWorkState(this.db, this.epoch).run(runId)
     if (run.purpose !== 'composition' && !run.update_id) fail('RUNNER_OWNERSHIP_INVALID', 'Host publication requires its exact publisher Run')
     const accounting = new RunnerBudgetAccounting(new RunnerBudgetLedger(this.db), { task_id: taskId, budget_id: run.budget_id, attempt_id: owner.attempt_id })
@@ -2694,9 +3474,9 @@ export class RuntimeStore {
       const request = this.one('SELECT input_json FROM requests WHERE id=? AND task_id=?', run.purpose === 'composition' ? run.trigger_request_id : run.request_id, taskId)
       const chapter = run.purpose === 'production' && run.update_id ? this.chapters().state.update(taskId, run.update_id) : null
       const messages: ChatMessage[] = [{ role: 'system', content: approvalTemplate }, { role: 'user', content: json({ source: owner, action: input, permission: 'Only this exact compiled Surface action. Input discard requires separate explicit human confirmation.', user_request: chapter?.text ?? request.input_json }) }]
-      const reservation = agent.budget.reserve(messages, undefined, lease.config, 'approval-input')
+      const reservation = budget.reserve(messages, undefined, lease.config, 'approval-input')
       const response = await this.models.request(lease, taskId, messages, undefined, signal, undefined, lease.config.max_output_tokens, undefined, 'approval')
-      context.valid(); agent.budget.settle(reservation, response)
+      context.valid(); budget.settle(reservation, response)
       const evaluation: unknown = JSON.parse(response.text)
       assertContract<{ decision: 'approve' | 'deny' | 'escalate'; reason: string }>('approval_decision', evaluation)
       const approval = this.one('SELECT validity,decision FROM approvals WHERE id=?', approvalId)
@@ -2756,7 +3536,7 @@ export class RuntimeStore {
       this.db.prepare("UPDATE requests SET state='started',input_json=? WHERE task_id=? AND id=? AND state='queued'").run(json({ ...input, code: null, content_plan: true, bound_materials: inspected.map(item => this.requestMaterial(task, item.id)) }), task, request)
       const source = this.runner().receive({ input_event_id: `request:${request}`, task_id: task, request_id: request, record_id: message, kind: 'request', stage: 'received' })
       work.consume(source.input_event_id, 'routed', () => ({ route: 'direct', kind: 'request', request_id: request } as const))
-      work.consume(source.input_event_id, 'installed', () => work.installContentPlan(source))
+      work.consume(source.input_event_id, 'installed', () => work.installContentPlan(source, initialDeliveryRequirements('new', input.admission_dispatch?.plan)))
       return work.goal(request)
     }
     const goal = work.goal(named.request_id)
@@ -2768,7 +3548,7 @@ export class RuntimeStore {
   }
   private refreshRunnerScope(task: string): void {
     const composition = this.runnerComposition(), previous = composition.scope(task)
-    const goals = new RunnerWorkState(this.db, this.epoch).contentPlans(task)
+    const goals = new RunnerWorkState(this.db, this.epoch).contentPlans(task).filter(goal => !this.features.runner?.conversationRouting || goal.requirements.some(requirement => requirement.kind !== 'answer'))
     const inventories = new Map(goals.map(goal => {
       let inventory = composition.inventory(task, goal.request_id, goal.intent_revision)
       if (inventory) {
@@ -2784,7 +3564,10 @@ export class RuntimeStore {
       const inventory = inventories.get(goal.request_id)
       return { request_id: goal.request_id, intent_revision: goal.intent_revision, required: goal.requirements.some(requirement => requirement.required), requirement_ids: goal.requirements.map(requirement => requirement.requirement_id), ...(inventory ? { contribution_inventory: { task_id: task, request_id: goal.request_id, intent_revision: goal.intent_revision, inventory_revision: inventory.inventory_revision } } : {}) }
     })
-    const unresolved = goals.flatMap(goal => inventories.get(goal.request_id)?.unresolved ?? goal.requirements.filter(requirement => requirement.required).map(requirement => ({ task_id: task, request_id: goal.request_id, intent_revision: goal.intent_revision, requirement_id: requirement.requirement_id })))
+    const unresolved = goals.flatMap(goal => {
+      const inventory = inventories.get(goal.request_id)
+      return inventory ? unresolvedDeliveryRequirements(this.db, inventory) : goal.requirements.filter(requirement => requirement.required).map(requirement => ({ task_id: task, request_id: goal.request_id, intent_revision: goal.intent_revision, requirement_id: requirement.requirement_id }))
+    })
     if (previous && json(previous.targets) === json(targets) && json(previous.unresolved) === json(unresolved) && (previous.state !== 'complete' || this.runnerHostComposition().completeness(task).state === 'complete')) return
     composition.installScope({ task_id: task, composition_version: (previous?.composition_version ?? 0) + 1, ...(previous ? { previous_version: previous.composition_version } : {}), state: 'working', targets, unresolved })
   }
@@ -2983,6 +3766,44 @@ export class RuntimeStore {
     let value: unknown
     if (request.type === 'list' || request.type === 'read') value = await this.query(owner.task_id, request, attemptId)
     else if (request.type === 'call') {
+      if (request.input.capability === READ_BOUND_INPUT) {
+        if (owner.purpose !== 'production' || owner.update_id || request.input.references.length) fail('WORKER_CAPABILITY_DENIED', 'Read only entries assigned to this Worker attempt')
+        const data = await this.boundContentReader.read(this.db, qualified.work, attemptId, request.input.arguments, resource => this.bundle(resource), (read, source) => this.query(owner.task_id, read, source))
+        valid()
+        return { request_type: 'call', execution: 'success', delivery: 'delivered', data }
+      }
+      if (request.input.capability === READ_WORK_OUTPUT) {
+        if (qualified.work.purpose !== 'production' || request.input.references.length) fail('WORKER_CAPABILITY_DENIED', 'Only exact assigned work outputs can be read')
+        const args = request.input.arguments as Row | null
+        if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['work_id', 'plan_revision', 'result_revision', 'output_key', 'offset'].includes(key))) fail('INVALID_RUNNER_CONTRACT', 'Use input_json with work_id, plan_revision, result_revision, output_key and optional offset. Pass the returned next_offset value as offset; omit next_offset and kind.')
+        const output = this.boundAssignmentOutputs(new RunnerWorkState(this.db, this.epoch), qualified.work).find(output => output.kind === 'answer' && output.work_id === args.work_id && output.plan_revision === args.plan_revision && output.result_revision === args.result_revision && output.output_key === args.output_key)
+        if (!output || output.kind !== 'answer') fail('WORKER_CAPABILITY_DENIED', 'Use the exact work_id, output_key and revisions from work_outputs')
+        const { text } = this.one("SELECT json_extract(payload_json,'$.value.answer') AS text FROM records WHERE task_id=? AND id=?", owner.task_id, output.record_id) as { text: string }
+        const offset = args.offset === undefined ? 0 : args.offset
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length || /[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(text.slice(Math.max(0, offset - 1), offset + 1))) fail('INVALID_RUNNER_CONTRACT', 'Use the exact next_offset returned for this answer, or omit offset to start')
+        const { work_id, output_key, plan_revision, result_revision } = output
+        const page = (chunk: string, nextOffset: number | null) => ({
+          request_type: 'call', execution: 'success', delivery: 'delivered', truncated: nextOffset !== null,
+          data: { text: chunk, next_offset: nextOffset, ...(nextOffset === null ? {} : { next_call: { name: 'call', arguments: { capability: READ_WORK_OUTPUT, input_json: json({ work_id, output_key, plan_revision, result_revision, offset: nextOffset }) } } }) }
+        })
+        const provenance_ref = { task_id: owner.task_id, kind: 'record', id: output.record_id }
+        const deliveryBytes = (result: ReturnType<typeof page>) => Buffer.byteLength(json({ ...result, provenance_ref, notice: WORK_OUTPUT_REPEAT_NOTICE }))
+        const remaining = text.slice(offset)
+        const complete = page(remaining, null)
+        if (deliveryBytes(complete) <= defaults.read.text_bytes) return complete
+        const room = defaults.read.text_bytes - deliveryBytes(page('', text.length))
+        let end = offset, bytes = 0
+        for (const point of remaining) {
+          const size = Buffer.byteLength(json(point)) - 2
+          if (bytes + size > room) break
+          end += point.length; bytes += size
+        }
+        return page(text.slice(offset, end), end)
+      }
+      if (orchestrationCapability(request.input.capability)) return this.db.transaction(() => {
+        valid()
+        return { execution: 'success', delivery: 'delivered', data: dispatchOrchestrationTool(request.input, owner, worker.orchestration) }
+      }).immediate()
       if (request.input.capability === CONTENT_OPERATIONS) value = await this.submitContentOperations(owner.task_id, owner, request.input.arguments, signal, valid)
       else if (request.input.capability === MONTY_ID && this.monty.available) value = await this.monty.call(owner.task_id, owner.run_id, request.input.arguments, request.input.references, signal, { owner, valid, authorize: current => worker.profile.authorize(current) })
       else if (request.input.capability.startsWith('plugin:')) value = await this.invokePlugin(owner.task_id, owner.run_id, request.input, signal, worker)
@@ -3803,10 +4624,18 @@ export class RuntimeStore {
       throw error
     }
   }
-  private undispatchedShutdownWork(work: LogicalWork): boolean {
-    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state) || !work.current_attempt_id) return false
-    const attempt = new RunnerWorkState(this.db, this.epoch).attempt(work.current_attempt_id)
-    return attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
+  private recoverableProductionProfile(work: LogicalWork, attempt: ExecutionAttempt): boolean {
+    return attempt.profile_id === 'producer-output-v1' || attempt.profile_id === 'work-router-v1' && work.role === 'router' && repairRoutingWork(this.db, work.task_id, work.work_id)
+  }
+  private preservedShutdownWork(work: LogicalWork): boolean {
+    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator', 'router'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state)) return false
+    const state = new RunnerWorkState(this.db, this.epoch)
+    if (!work.current_attempt_id) return state.pendingAssignmentRecoveryFailure(work) === null
+    const attempt = state.attempt(work.current_attempt_id), recovery = new RunnerHostRecovery(this.db, this.epoch)
+    if (recovery.waitingAssignmentRecovery(work)) return true
+    if (!recovery.undispatchedAttempt(attempt.attempt_id)) return false
+    return this.recoverableProductionProfile(work, attempt) || work.role === 'router' &&
+      state.taskWorks(work.task_id).some(origin => origin.run_id === work.run_id && recovery.waitingAssignmentRecovery(origin)?.router?.attempt_id === attempt.attempt_id)
   }
   private finish(taskId: string, runId: string, state: string, reason: string, runnerFinal = false): void {
     if (!runnerFinal && state === 'cancelled') {
@@ -3820,22 +4649,23 @@ export class RuntimeStore {
       const core = this.one('SELECT state FROM runs WHERE id=? AND task_id=?', runId, taskId)
       if (!['running', 'waiting'].includes(core.state)) return
       const workState = new RunnerWorkState(this.db, this.epoch)
-      this.db.transaction(() => {
+      const affected = this.db.transaction(() => {
         if (state === 'cancelled') this.record(taskId, 'runner.cancelled', { run_id: runId, scope: this.task(taskId).state === 'stopping' ? 'task' : 'run', reason })
         if (state === 'interrupted') this.db.prepare('UPDATE runs SET intended_terminal=COALESCE(intended_terminal,?),primary_reason=COALESCE(primary_reason,?) WHERE id=?').run(state, reason, runId)
         workState.closeRun(runId)
         const works = workState.taskWorks(taskId).filter(work => work.run_id === runId)
         const terminal = this.one('SELECT intended_terminal,primary_reason FROM runs WHERE id=?', runId)
+        let affected: LogicalWork[] = []
         if (terminal.intended_terminal === 'interrupted' && terminal.primary_reason === 'host_shutdown') {
-          // Host exit revokes this Run, while definitely undispatched content
-          // remains eligible for a new Run and attempt after restart.
-          for (const work of works) if (!this.undispatchedShutdownWork(work)) workState.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id })
-        } else if (works.length) workState.revokeRun(runId, { kind: state === 'cancelled' ? 'cancellation' : 'failure', work_id: works[0]!.work_id })
+          affected = works.filter(work => !this.preservedShutdownWork(work)).flatMap(work => workState.revokeWork(work.work_id, { kind: 'failure', work_id: work.work_id }))
+        } else if (works.length) affected = workState.revokeRun(runId, { kind: state === 'cancelled' ? 'cancellation' : 'failure', work_id: works[0]!.work_id })
         this.revokeRunActions(runId)
+        return affected
       })()
       this.pluginCalls.cancelRun(runId); this.monty.cancelRun(runId)
       this.agents.get(runId)?.controller.abort()
       for (const worker of this.workers.values()) if (worker.owner.run_id === runId) worker.controller.abort()
+      this.settleDependentRuns(taskId, affected, runId)
       this.aggregateWorkerRun(taskId, runId)
       this.pumpRunnerWorkers(taskId)
       return
@@ -3860,6 +4690,7 @@ export class RuntimeStore {
         void this.recoverRunnerWork().catch(() => {})
         this.pumpRunnerGoals(taskId)
         this.pumpRunnerWorkers(taskId)
+        this.settleRunnerDeliveries(taskId)
       }
     })
   }

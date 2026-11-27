@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import type { ContentPlan } from '../../shared/contracts.generated'
 import { ContractError } from '../../shared/validation'
 import type { ChatMessage } from '../model/adapter'
 import { captureExecutionScope, type ConversationSource } from '../model/request-evidence'
@@ -106,6 +107,19 @@ function bindingValue(binding: ConversationBinding): void {
     || binding.reply_to_request_id !== null && (typeof binding.reply_to_request_id !== 'string' || !binding.reply_to_request_id)
     || binding.resource_ids !== undefined && (!Array.isArray(binding.resource_ids) || binding.resource_ids.length > recordCount
       || binding.resource_ids.some(id => typeof id !== 'string' || !id) || new Set(binding.resource_ids).size !== binding.resource_ids.length)) invalid()
+}
+export function precedingDelivery(db: Database.Database, task: string, binding: ConversationBinding) {
+  bindingValue(binding)
+  if (!binding.reply_to_request_id) return undefined
+  const row = db.prepare(`SELECT p.payload_json, json_extract(${payload},'$.state') AS state
+    FROM records r JOIN runner_content_plans p ON p.task_id=r.task_id
+      AND p.request_id=json_extract(${payload},'$.request_id') AND p.intent_revision=json_extract(${payload},'$.intent_revision')
+    WHERE r.task_id=? AND p.request_id=? AND r.sequence<=? AND r.kind IN ('runner.delivery.opened','runner.delivery.settled')
+    ORDER BY r.sequence DESC LIMIT 1`).get(task, binding.reply_to_request_id, binding.through_sequence) as { payload_json: string; state: string } | undefined
+  if (!row) return undefined
+  const { request_id, intent_revision, requirements } = JSON.parse(row.payload_json) as ContentPlan
+  const required_outputs = [...new Set(requirements.filter(item => item.required && item.kind !== 'content_check').map(item => item.kind))]
+  return { request_id, intent_revision, state: row.state, required_outputs }
 }
 function rows(db: Database.Database, task: string, through: number): ConversationRow[] {
   return db.prepare(`SELECT r.id,r.sequence,r.kind,length(CAST(r.payload_json AS BLOB)) AS bytes,

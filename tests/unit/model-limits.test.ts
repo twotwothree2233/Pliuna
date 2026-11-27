@@ -87,6 +87,31 @@ it('does not arm absent deadlines or overflow long configured timers', () => {
   const cancel = deadline(2147483648, expire); vi.advanceTimersByTime(2147483647); expect(expire).not.toHaveBeenCalled(); vi.advanceTimersByTime(1); expect(expire).toHaveBeenCalledOnce(); cancel()
 })
 
+it.each([
+  { terminal: true, cancel: false, code: 'MODEL_OUTPUT_TOKEN_LIMIT' },
+  { terminal: false, cancel: false, code: 'MODEL_TIMEOUT' },
+  { terminal: true, cancel: true, code: 'MODEL_CANCELLED' }
+])('reports $code when a stream stays open after its last frame', async ({ terminal, cancel, code }) => {
+  vi.useFakeTimers()
+  const cancelStream = vi.fn()
+  const adapter = new ChatAdapter(async () => new Response(new ReadableStream({
+    start(controller) {
+      if (terminal) setTimeout(() => controller.enqueue(new TextEncoder().encode(frame({}, 'length'))), 900)
+    },
+    cancel: cancelStream
+  }), { headers: { 'content-type': 'text/event-stream' } }))
+  const service = new ModelService(adapter), controller = new AbortController()
+  service.configure({ type: 'model.configure', configuration: { ...config, limits: { request_timeout_ms: 1000 } }, api_key: '', confirm_memory_only: true })
+  const lease = service.acquire(config.id, 'main')
+  try {
+    const result = service.request(lease, 'task', [], undefined, controller.signal).catch((error: unknown) => error)
+    if (cancel) setTimeout(() => controller.abort(), 950)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(await result).toMatchObject({ code, partial: terminal, retryable: false })
+    expect(cancelStream).toHaveBeenCalledOnce()
+  } finally { lease.release(); service.close() }
+})
+
 it('accepts valid capacities beyond the old arbitrary catalogue and configuration ceilings', async () => {
   const large = { ...config, context_tokens: 20000000, max_output_tokens: 2000000 }
   expect(() => assertContract('model_configuration', large)).not.toThrow()

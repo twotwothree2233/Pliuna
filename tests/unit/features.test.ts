@@ -5,12 +5,12 @@ it('retains single-production admission for compatibility launches', () => {
   expect(productionRunsPerTask).toBe(1)
 })
 
-it('enables dual production with the rule Collator in ordinary launches', () => {
-  expect(runtimeFeatures({})).toEqual({ viewReplacement: true, monty: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting: true } })
+it('enables dual production with the model Collator in ordinary launches', () => {
+  expect(runtimeFeatures({})).toEqual({ viewReplacement: true, monty: true, runner: { productionRuns: 2, collator: 'model', conversationRouting: true } })
 })
 it('allows explicit diagnostic disabling independently of data-directory selection', () => {
-  expect(runtimeFeatures({ PLIUNA_ENABLE_MONTY: '0' })).toEqual({ viewReplacement: true, monty: false, runner: { productionRuns: 2, collator: 'rule', conversationRouting: true } })
-  expect(runtimeFeatures({ PLIUNA_ENABLE_VIEW_REPLACEMENT: '0', PLIUNA_TEST_DATA: 'isolated', PLIUNA_TEST_VIEW_REPLACEMENT: '1' })).toEqual({ viewReplacement: false, monty: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting: true } })
+  expect(runtimeFeatures({ PLIUNA_ENABLE_MONTY: '0' })).toEqual({ viewReplacement: true, monty: false, runner: { productionRuns: 2, collator: 'model', conversationRouting: true } })
+  expect(runtimeFeatures({ PLIUNA_ENABLE_VIEW_REPLACEMENT: '0', PLIUNA_TEST_DATA: 'isolated', PLIUNA_TEST_VIEW_REPLACEMENT: '1' })).toEqual({ viewReplacement: false, monty: true, runner: { productionRuns: 2, collator: 'model', conversationRouting: true } })
 })
 it('does not mutate the environment or restore test-only feature gating', () => {
   const env = { PLIUNA_TEST_DATA: 'isolated' }
@@ -18,8 +18,8 @@ it('does not mutate the environment or restore test-only feature gating', () => 
   expect(env).toEqual({ PLIUNA_TEST_DATA: 'isolated' })
 })
 it('preserves legacy diagnostic disabling while preferring explicit current settings', () => {
-  expect(runtimeFeatures({ TRELLIS_ENABLE_MONTY: '0', TRELLIS_ENABLE_VIEW_REPLACEMENT: '0' })).toEqual({ viewReplacement: false, monty: false, runner: { productionRuns: 2, collator: 'rule', conversationRouting: true } })
-  expect(runtimeFeatures({ PLIUNA_ENABLE_MONTY: '1', TRELLIS_ENABLE_MONTY: '0' })).toEqual({ viewReplacement: true, monty: true, runner: { productionRuns: 2, collator: 'rule', conversationRouting: true } })
+  expect(runtimeFeatures({ TRELLIS_ENABLE_MONTY: '0', TRELLIS_ENABLE_VIEW_REPLACEMENT: '0' })).toEqual({ viewReplacement: false, monty: false, runner: { productionRuns: 2, collator: 'model', conversationRouting: true } })
+  expect(runtimeFeatures({ PLIUNA_ENABLE_MONTY: '1', TRELLIS_ENABLE_MONTY: '0' })).toEqual({ viewReplacement: true, monty: true, runner: { productionRuns: 2, collator: 'model', conversationRouting: true } })
 })
 
 it('allows explicit Runner limits and falls back to compatibility for legacy or invalid profiles', () => {
@@ -31,9 +31,9 @@ it('allows explicit Runner limits and falls back to compatibility for legacy or 
   expect(productionRunsPerTask).toBe(1)
 })
 
-it('requires an explicit Runner profile to select the model Collator', () => {
-  expect(runtimeFeatures({ PLIUNA_TEST_DATA: 'isolated', PLIUNA_TEST_RUNNER_COLLATOR: 'model' }).runner).toEqual({ productionRuns: 2, collator: 'rule', conversationRouting: true })
-  expect(runtimeFeatures({ TRELLIS_TEST_RUNNER_COLLATOR: 'model' }).runner).toEqual({ productionRuns: 2, collator: 'rule', conversationRouting: true })
+it('changes the Collator via test settings only for an explicit Runner profile', () => {
+  expect(runtimeFeatures({ PLIUNA_TEST_DATA: 'isolated', PLIUNA_TEST_RUNNER_COLLATOR: 'rule' }).runner).toEqual({ productionRuns: 2, collator: 'model', conversationRouting: true })
+  expect(runtimeFeatures({ TRELLIS_TEST_RUNNER_COLLATOR: 'rule' }).runner).toEqual({ productionRuns: 2, collator: 'model', conversationRouting: true })
   for (const [profile, productionRuns] of [['single', 1], ['dual', 2]] as const) {
     expect(runtimeFeatures({ PLIUNA_TEST_RUNNER: profile, PLIUNA_TEST_RUNNER_COLLATOR: 'model' }).runner).toEqual({ productionRuns, collator: 'model' })
   }

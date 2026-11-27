@@ -2,6 +2,7 @@ import type { ExecutionScope, ContentPlan, LogicalWork } from '../../shared/cont
 import { validateRunnerContract } from '../../shared/runner-validation'
 import { ContractError } from '../../shared/validation'
 import { assertRunnerId, progressObservationConfig, PROGRESS_OBSERVATION_BOUNDS, RUNNER_LIMITS, type ProgressObservationConfig } from './limits'
+import { READ_WORK_OUTPUT } from './orchestration-tool'
 
 export interface ProgressRecordRef {
   record_id: string
@@ -16,6 +17,13 @@ export interface ProgressCallFact extends ProgressRecordRef {
   outcome: 'success' | 'failure' | 'unknown' | 'not_executed'
   error_source?: string
   query_result_id?: number
+}
+export function isProgressQueryPattern(pattern: string | null): boolean {
+  return pattern === 'read' || pattern === 'list' || pattern === READ_WORK_OUTPUT
+}
+function rejectedWorkOutput(call: ProgressCallFact): boolean {
+  return call.outcome === 'not_executed' && call.pattern === READ_WORK_OUTPUT &&
+    (call.error_source === 'WORKER_CAPABILITY_DENIED' || call.error_source === 'INVALID_RUNNER_CONTRACT' || call.error_source === 'INVALID_REQUEST')
 }
 export interface EffectiveProgressFact extends ProgressRecordRef {
   kind: 'requirement_covered' | 'work_advanced' | 'artifact_accepted' | 'input_consumed'
@@ -145,7 +153,7 @@ function repeatedQueries(calls: ProgressCallFact[], attemptId: string | undefine
   const evidence = new Set<ProgressCallFact>()
   let repeats = 0
   for (const call of calls) {
-    if (call.owner.attempt_id !== attemptId) continue
+    if (call.owner.attempt_id !== attemptId || rejectedWorkOutput(call)) continue
     const key = call.query_result_id === undefined ? undefined : `${call.pattern}:${call.query_result_id}`
     const original = key === undefined ? undefined : seen.get(key)
     if (original) {
@@ -173,7 +181,7 @@ export function observeRunnerProgress(input: RunnerProgressInput, previous?: Run
     if (!['success', 'failure', 'unknown', 'not_executed'].includes(fact.outcome)) invalid()
     if (fact.error_source !== undefined) code(fact.error_source)
     if (fact.outcome === 'failure' && !fact.error_source) invalid()
-    if (fact.query_result_id !== undefined && (!integer(fact.query_result_id, 1) || fact.outcome !== 'success' || !['read', 'list'].includes(fact.pattern))) invalid()
+    if (fact.query_result_id !== undefined && (!integer(fact.query_result_id, 1) || fact.outcome !== 'success' || !isProgressQueryPattern(fact.pattern))) invalid()
   })
   const progress = records(input.progress, ['kind', 'requirement_ids'], input, config.evidence_max_calls, fact => {
     if (!['requirement_covered', 'work_advanced', 'artifact_accepted', 'input_consumed'].includes(fact.kind) || !Array.isArray(fact.requirement_ids) || fact.requirement_ids.length === 0 || fact.requirement_ids.length > config.evidence_max_calls || new Set(fact.requirement_ids).size !== fact.requirement_ids.length) invalid()
@@ -215,7 +223,7 @@ export function observeRunnerProgress(input: RunnerProgressInput, previous?: Run
 
     const groups = new Map<string, { reason: Reason; pattern: string; error_source?: string; calls: ProgressCallFact[] }>()
     for (const call of workCalls) {
-      if (call.outcome !== 'failure') continue
+      if (call.outcome !== 'failure' && !(call.owner.attempt_id === work.current_attempt_id && rejectedWorkOutput(call))) continue
       const key = JSON.stringify([call.pattern, call.error_source])
       const group = groups.get(key) ?? { reason: 'repeated_failure', pattern: call.pattern, error_source: call.error_source, calls: [] }
       group.calls.push(call); groups.set(key, group)

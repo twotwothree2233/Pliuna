@@ -10,14 +10,15 @@ const lanes = [
 const stateLabels: Record<LiveFlowState, string> = {
   queued: '排队中', running: '进行中', waiting: '等待中', approval: '待审批', input: '待确认', unknown: '结果待核对', closing: '收尾中', publishing: '发布中'
 }
-const workLabels: Record<string, string> = { producer: '内容生产', lightweight: '轻量工作', integrator: '整合', diagnostic: '诊断', collator: '排版' }
+const workLabels: Record<string, string> = { producer: '内容生产', lightweight: '轻量工作', integrator: '整合', diagnostic: '诊断', collator: '排版', router: '任务路由' }
 const reasons: Record<string, string> = {
   material_pending: '等待材料导入', material_preflight: '正在检查材料', CONVERSATION_WAITING_FOR_RESULT: '等待前序结果',
   CHAPTER_SCOPE_REQUIRED: '等待确认章节范围', approval_evaluating: '正在评估权限', model_queue: '等待模型名额',
   model_generating: '正在生成', composition_queue: '等待编排批次', context_compacting: '正在整理上下文',
-  ending_cleanup: '正在结束执行', surface_host: '正在检查内容更新'
+  ending_cleanup: '正在结束执行', surface_host: '正在检查内容更新',
+  dependency: '等待上游产物', missing_input: '等待补齐依赖', input_required: '等待用户补充'
 }
-const handoffLabels = { work: '任务指令', indexes: '成果索引', plan: '发布方案' }
+const handoffLabels = { work: '任务指令', indexes: '成果索引', plan: '发布方案', output: '产物交接', feedback: '结构反馈', missing_input: '缺项报告' }
 const short = (id: string) => id.slice(0, 8)
 const itemName = (item: LiveFlowItem) => item.kind === 'batch' ? item.role === 'Collator' ? '排版批次' : '批次发布'
   : item.kind === 'chapter' ? '章节更新' : item.kind === 'work' ? workLabels[item.work_role ?? ''] ?? '工作' : item.kind === 'request' ? '请求' : '执行'

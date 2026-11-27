@@ -1,7 +1,7 @@
 import type {
-  ArtifactCandidate, ArtifactIndex, ChapterDependency, ChapterInheritance, ChapterIntent, ChapterManifest, ChapterOwnership, ChapterProposal, ChapterPublication, ChapterRegion, ChapterReplacement, ChapterUpdate, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
+  ArtifactCandidate, ArtifactIndex, ChapterDependency, ChapterInheritance, ChapterIntent, ChapterManifest, ChapterOwnership, ChapterProposal, ChapterPublication, ChapterRegion, ChapterReplacement, ChapterUpdate, CollatorFeedback, CollatorIssue, CompositionBatch, CompositionScope, ConsumptionStage, ContributionInventory, ContributionInventoryRef, DeliveryQuery, DeliveryRecord,
   ExecutionAttempt, ExecutionScope, ContentPlan, InputEvent, LogicalWork, Outline, OutlineSection, OutcomeRequirement,
-  PresentationPlan, PublicationEntry, PublicationManifest, RunnerRun, WorkDependency, WorkOutputDeclaration
+  PresentationPlan, PublicationEntry, PublicationManifest, ReportMissingInput, RouteWork, RunnerRun, WorkDependency, WorkOutputDeclaration
 } from './contracts.generated'
 import { assertContract, ContractError } from './validation'
 import { assertIndexBytes, assertIndexTitle, assertRunnerId } from '../runtime/runner/limits'
@@ -15,6 +15,8 @@ export interface RunnerContractTypes {
   runner_work_dependency: WorkDependency
   runner_run: RunnerRun
   runner_logical_work: LogicalWork
+  runner_route_work: RouteWork
+  runner_report_missing_input: ReportMissingInput
   runner_execution_attempt: ExecutionAttempt
   runner_execution_scope: ExecutionScope
   runner_outline: Outline
@@ -25,6 +27,8 @@ export interface RunnerContractTypes {
   runner_contribution_inventory: ContributionInventory
   runner_contribution_inventory_ref: ContributionInventoryRef
   runner_presentation_plan: PresentationPlan
+  runner_collator_issue: CollatorIssue
+  runner_collator_feedback: CollatorFeedback
   runner_composition_scope: CompositionScope
   runner_composition_batch: CompositionBatch
   runner_delivery_record: DeliveryRecord
@@ -111,6 +115,14 @@ export function sameDependencies(left: WorkDependency[], right: WorkDependency[]
   return a.length === b.length && a.every((value, index) => value === b[index])
 }
 
+type AssignmentInput = NonNullable<Extract<RouteWork, { action: 'dispatch' }>['assignments'][number]['inputs']>[number]
+
+export function assignmentInputKey(input: AssignmentInput): string {
+  if ('assignment_key' in input) return JSON.stringify(['local', input.assignment_key, input.output_key])
+  if ('work_id' in input) return JSON.stringify(['output', input.work_id, input.output_key])
+  return JSON.stringify(input.kind === 'material' ? ['material', input.resource_id] : ['published', input.view_id, input.node_id])
+}
+
 export function validateRunnerContract<K extends keyof RunnerContractTypes>(definition: K, value: unknown): RunnerContractTypes[K] {
   // The generic Ajv error can include caller-controlled field names. Runner errors expose no content.
   try { assertContract<RunnerContractTypes[K]>(definition, value) } catch { invalid(`Invalid ${definition} structure`) }
@@ -131,6 +143,7 @@ export function validateRunnerContract<K extends keyof RunnerContractTypes>(defi
   }
   if (definition === 'runner_logical_work') {
     if (object.purpose === 'composition' && object.role !== 'collator' || object.purpose === 'production' && object.role === 'collator') invalid('Worker role does not match its execution purpose')
+    if (object.assignment) unique(object.assignment.inputs.map(assignmentInputKey), 'assignment inputs')
   }
   if (definition === 'runner_execution_attempt' && object.previous_attempt_id === object.attempt_id) invalid('A resumed attempt must retain a different predecessor')
   if (definition === 'runner_outline') unique(object.sections.map((item: OutlineSection) => item.section_id), 'outline sections')
