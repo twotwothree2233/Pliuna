@@ -227,8 +227,9 @@ it.each([['worker', false, 'new'], ['router', false, 'new'], ['worker', true, 'n
   expect(JSON.parse((s.records('runner.repair.requested').at(-1) as { payload_json: string }).payload_json)).toMatchObject({ disposition: 'obsolete', issue: { artifact: { artifact_revision: 2 } } })
 })
 
-it.each(['receipt', 'worker', 'router', 'cancelled', 'unknown'] as const)('recovers structural feedback at the %s boundary without repeating an installed decision', async boundary => {
+it.each(['receipt', 'worker', 'router', 'router shutdown', 'cancelled', 'unknown'] as const)('recovers structural feedback at the %s boundary without repeating an installed decision', async boundary => {
   const first = setup(true, true), original = first.source('affected')
+  const router = boundary === 'router' || boundary === 'router shutdown'
   first.record(first.task, 'runner.delivery.opened', { request_id: 'affected', intent_revision: 1, input_event_id: 'input-affected', state: 'open' })
   first.db.prepare('UPDATE resources SET byte_length=? WHERE id=?').run(262145, original.resourceId)
   const usage = { prompt_tokens: 20, completion_tokens: 15 }
@@ -240,7 +241,7 @@ it.each(['receipt', 'worker', 'router', 'cancelled', 'unknown'] as const)('recov
     if (!batch) return oldResult
     const { task_id, run_id, batch_id, composition_version } = batch
     return done({ kind: 'feedback', task_id, run_id, batch_id, composition_version, reports: [{ evidence_id: structural_issues[0].evidence_id,
-      recipient: boundary === 'router' ? { kind: 'router' } : { kind: 'worker', work_id: original.workId } }] })
+      recipient: router ? { kind: 'router' } : { kind: 'worker', work_id: original.workId } }] })
   })
   if (boundary === 'receipt') vi.spyOn(first.internal, 'runnerRunAvailable').mockReturnValue(false)
   else if (boundary !== 'unknown') {
@@ -256,22 +257,34 @@ it.each(['receipt', 'worker', 'router', 'cancelled', 'unknown'] as const)('recov
     expect(repair).toBeUndefined()
     first.db.prepare("UPDATE runs SET state='running',commit_valid=1,ended_at=NULL WHERE id=?").run(feedback.owner.run_id)
   } else expect(attempt).toMatchObject({ dispatch_state: boundary === 'unknown' ? 'dispatched' : 'not_dispatched' })
-  if (boundary === 'router') {
+  if (router) {
     const flow = first.store.handle({ type: 'host.runner.flow', task_id: first.task }) as LiveFlowSnapshot
     expect(flow.lanes.Router.items).toContainEqual(expect.objectContaining({ id: `work:${repair!.work_id}`, state: 'queued', handoff: { from: 'Collator', kind: 'feedback', sequence: expect.any(Number) } }))
   }
   if (boundary === 'cancelled') first.input('cancel_work', { work_id: repair!.work_id, run_id: repair!.run_id })
-  first.store.close()
+  if (boundary === 'router shutdown') await first.store.shutdown()
+  else first.store.close()
   const next = setup(true, false, first)
   const invoke = (name: string, args: unknown) => ({ text: '', finish: 'tool_calls' as const, usage, calls: [{ id: name, type: 'function' as const, function: { name: name === 'recover-route' ? 'call' : 'write', arguments: JSON.stringify(args) } }] })
+  let reportedPrematureUpdate = false, reportedFalseBlock = false
   const calls = vi.spyOn(next.models, 'request').mockImplementation(async (_lease, _task, messages) => {
     const { bound } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
     if (bound.feedback) {
       const result = messages.find(message => message.role === 'tool' && message.tool_call_id === 'recover-route')
       if (result) {
         expect(JSON.parse(result.content!)).toMatchObject({ execution: 'success' })
+        if (!reportedFalseBlock) {
+          reportedFalseBlock = true
+          return done({ kind: 'blocked' })
+        }
+        expect(messages[0]!.content).toContain('A repair plan was installed. Return updated without dispatching again.')
         return done({ kind: 'updated' })
       }
+      if (!reportedPrematureUpdate) {
+        reportedPrematureUpdate = true
+        return done({ kind: 'updated' })
+      }
+      expect(messages[0]!.content).toContain('No repair plan was installed.')
       return invoke('recover-route', { capability: ROUTE_WORK, input_json: JSON.stringify({ action: 'dispatch', base_revision: bound.base_revision, assignments: [
         { assignment_key: 'repair', instructions: 'Return the compact fragment.', required: true, requirement_ids: ['content'], outputs: [{ output_key: 'fixed', kind: 'artifact', exposure: 'publish' }] }
       ] }) })
@@ -298,6 +311,11 @@ it.each(['receipt', 'worker', 'router', 'cancelled', 'unknown'] as const)('recov
     await vi.waitFor(() => expect(next.artifacts.artifact(next.task, original.artifactId)?.artifact_revision,
       JSON.stringify(['runner.goal.waiting', 'runner.production.resumed', 'worker.tool.ended', 'worker.ended', 'runner.repair.response'].flatMap(next.records))).toBe(2))
     expect(next.records('runner.repair.applied')).toHaveLength(1)
+    if (router) {
+      expect(next.records('runner.repair.plan')).toHaveLength(1)
+      await vi.waitFor(() => expect((next.records('runner.repair.response') as { payload_json: string }[]).map(row => JSON.parse(row.payload_json).kind)).toEqual(['updated']))
+      expect((next.records('worker.result.rejected') as { payload_json: string }[]).map(row => JSON.parse(row.payload_json)).filter(row => row.code === 'RUNNER_PLAN_CONFLICT').map(row => row.value)).toEqual(['updated', 'blocked'])
+    }
     if (repair) {
       const current = next.state.work(repair.work_id)
       expect(next.state.attempt(current.current_attempt_id!)).toMatchObject({ previous_attempt_id: attempt!.attempt_id, runtime_epoch: next.epoch })

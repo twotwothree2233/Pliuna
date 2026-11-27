@@ -15,6 +15,8 @@ export function runActivity(db: Database.Database, task: string, run: string): R
     WITH requests AS MATERIALIZED (
       SELECT r.id,r.sequence,r.created_at,CAST(c.key AS INTEGER) position,
         json_extract(c.value,'$.id') call_id,
+        json_extract(r.payload_json,'$.request_link.request_id') request_id,
+        json_extract(r.payload_json,'$.owner.attempt_id') attempt_id,
         substr(json_extract(c.value,'$.function.name'),1,80) name,
         CASE WHEN json_valid(json_extract(c.value,'$.function.arguments')) THEN json_extract(c.value,'$.function.arguments') ELSE '{}' END args
       FROM records r,json_each(r.payload_json,'$.message.tool_calls') c
@@ -24,6 +26,8 @@ export function runActivity(db: Database.Database, task: string, run: string): R
       SELECT q.*,(SELECT CASE WHEN json_valid(json_extract(s.payload_json,'$.message.content')) THEN json_extract(s.payload_json,'$.message.content') ELSE '{}' END
         FROM records s WHERE s.task_id=? AND s.kind='model.tool_result' AND s.sequence>q.sequence
           AND json_extract(s.payload_json,'$.run_id')=? AND json_extract(s.payload_json,'$.message.tool_call_id')=q.call_id
+          AND json_extract(s.payload_json,'$.request_link.request_id') IS q.request_id
+          AND (q.request_id IS NOT NULL OR json_extract(s.payload_json,'$.owner.attempt_id') IS q.attempt_id)
         ORDER BY s.sequence LIMIT 1) result
       FROM requests q
     ), details AS MATERIALIZED (

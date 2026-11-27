@@ -6,7 +6,7 @@ import defaults from '../../shared/contracts/development-defaults.json'
 import { ChatAdapter, ModelError, endpoint, type ChatMessage, type Completion, type ToolDefinition } from './adapter'
 import { legacyMetadata, unknownCapabilities } from './metadata'
 import { modelProtocol } from './protocol'
-import { deadline } from './limits'
+import { deadline, modelRequestDeadline } from './limits'
 import { requestAccounting, type RequestAccounting, type RequestPurpose } from './accounting'
 import type { ChannelEntry, SavedChannel } from './channels'
 import type { ModelPersistence, SavedConnection } from './persistence'
@@ -372,10 +372,16 @@ export class ModelService {
     return this.scheduler.schedule(task, entry.channel, combined, async () => {
       const controller = new AbortController(), abort = () => controller.abort()
       combined.addEventListener('abort', abort, { once: true }); if (combined.aborted) controller.abort()
-      const clear = deadline(entry.config.limits?.request_timeout_ms, () => controller.abort())
+      const clear = deadline(entry.config.limits?.request_timeout_ms, () => controller.abort(modelRequestDeadline))
       this.allControllers.add(controller)
       try { return await run(controller.signal) }
-      catch (e) { if (controller.signal.aborted && !combined.aborted) throw new ModelError('MODEL_TIMEOUT', e instanceof ModelError && e.partial, false, e instanceof ModelError ? e.usage : undefined); throw e }
+      catch (error) {
+        if (controller.signal.reason !== modelRequestDeadline) throw error
+        const modelError = error instanceof ModelError ? error : undefined
+        if (combined.aborted) throw new ModelError('MODEL_CANCELLED', modelError?.partial, false, modelError?.usage)
+        if (modelError && modelError.code !== 'MODEL_CANCELLED') throw modelError
+        throw new ModelError('MODEL_TIMEOUT', modelError?.partial, false, modelError?.usage)
+      }
       finally { clear(); combined.removeEventListener('abort', abort); this.allControllers.delete(controller) }
     })
   }

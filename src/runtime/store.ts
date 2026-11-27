@@ -88,7 +88,7 @@ import { RunnerHostProduction } from './runner/host-production'
 import { RunnerHostRecovery } from './runner/host-recovery'
 import { RunnerHostProgress } from './runner/host-progress'
 import { deliveryHasUnsettledExecution, requestDelivery } from './runner/delivery-state'
-import { artifactRepair, repairRequestId, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
+import { artifactRepair, repairRequestId, repairRoutingWork, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
 import { createRunnerDiagnostic, type RunnerDiagnostic } from './runner/diagnostic'
 import type { ProgressDiagnosis } from './runner/progress-observer'
 import { RunnerHostStatus } from './runner/host-status'
@@ -1599,7 +1599,7 @@ export class RuntimeStore {
           if (!attempt) return state.pendingAssignmentRecoveryFailure(work)
           if (state.clarifiedAssignment(work)) return attempt.attempt_number < work.max_attempts ? null : 'RUNNER_ATTEMPTS_EXHAUSTED'
           if (attempt.state === 'unknown' || attempt.dispatch_state !== 'not_dispatched') return 'RUNNER_OPERATION_UNKNOWN'
-          if (attempt.profile_id !== 'producer-output-v1' && !(attempt.profile_id === 'work-router-v1' && repairRequestId(this.db, task, work.work_id))) return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
+          if (!this.recoverableProductionProfile(work, attempt)) return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
           if (attempt.attempt_number >= work.max_attempts) return 'RUNNER_ATTEMPTS_EXHAUSTED'
           return attempt.state !== 'revoked' ? 'RUNNER_RECOVERY_INELIGIBLE' : null
         }).find(reason => reason !== null)
@@ -2180,6 +2180,7 @@ export class RuntimeStore {
   private executeRepairRouter(state: RunnerWorkState, task: string, repairs: RunnerRepairState, repair: PendingRepair, work: AssignedWork, attempt: ExecutionAttempt, profile: ReturnType<typeof createWorkRouterProfile>, index: ReturnType<RunnerArtifactState['artifact']>, requirements: string[]) {
     const { issue, request_record_id, request_id, intent_revision, problem_key } = repair, runId = work.run_id
     const revision = () => this.routingRevision(task, runId)
+    const installedPlan = () => !!this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.request_record_id')=?").get(task, request_record_id)
     const content = new AssignmentContent(this.db), scope = content.scope(task, request_id)
     const catalog = new RoutingInputCatalog(this.db, scope, () => this.catalogOutputs(task))
     return this.executeWorker(attempt.attempt_id, profile, {
@@ -2190,7 +2191,7 @@ export class RuntimeStore {
         catalog: query => catalog.page(query),
         route: (decision, owner) => {
           if (!repairs.current(task, repair)) fail('REPAIR_OBSOLETE', 'Feedback no longer refers to a current problem')
-          if (decision.action !== 'dispatch' || decision.final_answer !== undefined || this.db.prepare("SELECT 1 FROM records WHERE task_id=? AND kind='runner.repair.plan' AND json_extract(payload_json,'$.request_record_id')=?").get(task, request_record_id)) fail('RUNNER_PLAN_CONFLICT', 'Feedback installs one scoped dispatch without changing the original final answer source')
+          if (decision.action !== 'dispatch' || decision.final_answer !== undefined || installedPlan()) fail('RUNNER_PLAN_CONFLICT', 'Feedback installs one scoped dispatch without changing the original final answer source')
           const requirementId = issue.kind === 'missing_requirement' ? issue.requirement.requirement_id : undefined
           const allowed = requirementId ? [requirementId] : requirements
           if (decision.assignments.some(assignment => assignment.requirement_ids.some(requirement => !allowed.includes(requirement)))) fail('REPAIR_SCOPE_INVALID', 'Feedback cannot add unrelated requirement work')
@@ -2220,7 +2221,14 @@ export class RuntimeStore {
         },
         report: () => fail('WORKER_CAPABILITY_DENIED', 'Router cannot report on behalf of an assigned Worker')
       }
-    }, (result, owner) => this.record(task, 'runner.repair.response', { request_record_id, problem_key, request_id, intent_revision, run_id: runId, owner, kind: result.kind }))
+    }, (result, owner) => this.record(task, 'runner.repair.response', { request_record_id, problem_key, request_id, intent_revision, run_id: runId, owner, kind: result.kind }), undefined, undefined, result => {
+      const installed = installedPlan()
+      if (result.kind === (installed ? 'updated' : 'blocked')) return null
+      return {
+        code: 'RUNNER_PLAN_CONFLICT', path: 'kind', value: result.kind,
+        message: installed ? 'A repair plan was installed. Return updated without dispatching again.' : 'No repair plan was installed. Install a scoped repair before returning updated, or return blocked.'
+      }
+    })
   }
   async executeRunnerProduction(attemptId: string): Promise<ProducerResult> {
     const state = new RunnerWorkState(this.db, this.epoch), qualified = state.qualify(attemptId, 'dispatch'), { work, goal } = qualified
@@ -4596,12 +4604,15 @@ export class RuntimeStore {
       throw error
     }
   }
+  private recoverableProductionProfile(work: LogicalWork, attempt: ExecutionAttempt): boolean {
+    return attempt.profile_id === 'producer-output-v1' || attempt.profile_id === 'work-router-v1' && work.role === 'router' && repairRoutingWork(this.db, work.task_id, work.work_id)
+  }
   private preservedShutdownWork(work: LogicalWork): boolean {
-    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state)) return false
+    if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator', 'router'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state)) return false
     const state = new RunnerWorkState(this.db, this.epoch)
     if (!work.current_attempt_id) return state.pendingAssignmentRecoveryFailure(work) === null
     const attempt = state.attempt(work.current_attempt_id)
-    return !!state.clarifiedAssignment(work) || attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
+    return !!state.clarifiedAssignment(work) || this.recoverableProductionProfile(work, attempt) && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
   }
   private finish(taskId: string, runId: string, state: string, reason: string, runnerFinal = false): void {
     if (!runnerFinal && state === 'cancelled') {

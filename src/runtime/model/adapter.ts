@@ -1,6 +1,7 @@
 import type { ModelConfiguration, ProviderTokenUsage } from '../../shared/contracts.generated'
 import defaults from '../../shared/contracts/development-defaults.json'
 import { jsonDiagnostic } from './json-diagnostic'
+import { modelRequestDeadline } from './limits'
 
 const terminalUsageWaitMs = 250
 
@@ -192,7 +193,8 @@ export class ChatAdapter {
       }
       return { text, calls: ordered.map(([, c]) => c), finish, usage }
     } catch (caught) {
-      const e = upstream && !signal.aborted ? upstream : caught
+      if (signal.aborted && signal.reason !== modelRequestDeadline) throw new ModelError('MODEL_CANCELLED', partial, false, usage)
+      const e = upstream ?? caught
       if (e instanceof ModelError) throw new ModelError(e.code, partial || e.partial, !partial && e.retryable, usage ?? e.usage, e.inputDiagnostic)
       throw new ModelError(signal.aborted ? 'MODEL_CANCELLED' : partial ? 'MODEL_STREAM_INTERRUPTED' : 'MODEL_NETWORK_ERROR', partial, !partial && !signal.aborted, usage)
     } finally { clearTimeout(terminalTimer) }

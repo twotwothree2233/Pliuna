@@ -1,3 +1,5 @@
+export const modelRequestDeadline = Symbol('model request deadline')
+
 // Long configured deadlines must not overflow Node's signed 32-bit timer delay.
 export function deadline(ms: number | undefined, expire: () => void): () => void {
   if (ms === undefined) return () => {}
