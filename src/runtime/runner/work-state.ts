@@ -476,7 +476,50 @@ export class RunnerWorkState {
 
   private assignmentWait(attempt: ExecutionAttempt, beforeRevision: number): boolean {
     return !!this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND kind='runner.assignment.waiting'
-      AND json_extract(payload_json,'$.attempt_id')=? AND json_extract(payload_json,'$.plan_revision')<? LIMIT 1`).get(attempt.task_id, attempt.attempt_id, beforeRevision)
+      AND json_extract(payload_json,'$.attempt_id')=? AND json_extract(payload_json,'$.work_id')=?
+      AND json_extract(payload_json,'$.run_id')=? AND json_extract(payload_json,'$.plan_revision')<? LIMIT 1`).get(attempt.task_id, attempt.attempt_id, attempt.work_id, attempt.run_id, beforeRevision)
+  }
+
+  private assignmentOperationUnsettled(attempt: ExecutionAttempt): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM actions WHERE run_id=@run AND json_extract(source_json,'$.owner.attempt_id')=@attempt AND (state!='ended' OR result='unknown')
+      UNION ALL SELECT 1 FROM calls WHERE run_id=@run AND json_extract(limits_json,'$.owner.attempt_id')=@attempt AND (state!='ended' OR execution='unknown') LIMIT 1`)
+      .get({ run: attempt.run_id, attempt: attempt.attempt_id })
+  }
+
+  pendingAssignmentRecoveryFailure(work: LogicalWork): 'RUNNER_RECOVERY_INELIGIBLE' | 'RUNNER_ATTEMPTS_EXHAUSTED' | null {
+    if (work.purpose !== 'production' || !work.assignment || work.update_id || work.state !== 'planned' || work.current_attempt_id) return 'RUNNER_RECOVERY_INELIGIBLE'
+    const previous = this.attempts(work.work_id).at(-1)
+    if (!previous) return null
+    if (!sameSource(work, previous) || previous.profile_id !== 'producer-output-v1' || previous.state !== 'revoked' || previous.dispatch_state !== 'dispatched' ||
+      !this.assignmentWait(previous, work.plan_revision) || this.assignmentOperationUnsettled(previous)) return 'RUNNER_RECOVERY_INELIGIBLE'
+    return previous.attempt_number >= work.max_attempts ? 'RUNNER_ATTEMPTS_EXHAUSTED' : null
+  }
+
+  rebindRecoveredOutputInputs(run: RunnerRun, originals: LogicalWork[]): void {
+    if (!this.db.inTransaction || !run.previous_run_id) fail('RUNNER_PLAN_CONFLICT', 'Output rebinding requires an installed recovery')
+    const predecessor = this.run(run.previous_run_id)
+    if (predecessor.state !== 'interrupted' || predecessor.commit_valid || !sameSource(predecessor, run)) fail('RUNNER_PLAN_CONFLICT', 'Output rebinding requires an interrupted predecessor')
+    this.sourceCurrent(run)
+    const recovered = new Map(originals.flatMap(original => {
+      if (original.purpose !== 'production' || !original.assignment) return []
+      const next = this.work(original.work_id)
+      if (original.run_id !== predecessor.run_id || next.run_id !== run.run_id || !sameSource(original, next) || next.plan_revision !== original.plan_revision + 1 ||
+        next.purpose !== 'production' || !next.assignment || !equivalent(original.assignment.outputs, next.assignment.outputs)) fail('RUNNER_PLAN_CONFLICT', 'Recovery must preserve the exact output declaration')
+      return [[original.work_id, { before: original.plan_revision, after: next.plan_revision, outputs: next.assignment.outputs }] as const]
+    }))
+    if (!recovered.size) return
+    for (const work of this.taskWorks(run.task_id)) {
+      if (work.purpose !== 'production' || work.state !== 'planned' || !work.assignment || work.current_attempt_id) continue
+      const inputs = work.assignment.inputs.map(input => {
+        const source = 'work_id' in input && input.result_revision === undefined ? recovered.get(input.work_id) : undefined
+        if (!source || !('work_id' in input) || input.plan_revision !== source.before || !source.outputs.some(output => output.output_key === input.output_key)) return input
+        return { ...input, plan_revision: source.after }
+      })
+      if (equivalent(inputs, work.assignment.inputs)) continue
+      const owner = this.run(work.run_id)
+      if (owner.state !== 'interrupted' && (terminalRun.has(owner.state) || !owner.commit_valid || owner.runtime_epoch !== this.epoch)) continue
+      this.saveWork({ ...work, assignment: { ...work.assignment, inputs } })
+    }
   }
 
   clarifiedAssignment(work: LogicalWork): ExecutionAttempt | undefined {
@@ -491,9 +534,7 @@ export class RunnerWorkState {
       AND json_extract(w.payload_json,'$.work_id')=@work AND json_extract(w.payload_json,'$.plan_revision')=@revision
       AND NOT EXISTS (SELECT 1 FROM records b WHERE b.task_id=q.task_id AND b.kind='runner.input.bound' AND json_extract(b.payload_json,'$.clarification_id')=q.id)
       LIMIT 1`).get({ task: work.task_id, run: attempt.run_id, attempt: attempt.attempt_id, work: work.work_id, revision: work.plan_revision })) return
-    if (this.db.prepare(`SELECT 1 FROM actions WHERE run_id=@run AND json_extract(source_json,'$.owner.attempt_id')=@attempt AND (state!='ended' OR result='unknown')
-      UNION ALL SELECT 1 FROM calls WHERE run_id=@run AND json_extract(limits_json,'$.owner.attempt_id')=@attempt AND (state!='ended' OR execution='unknown') LIMIT 1`)
-      .get({ run: attempt.run_id, attempt: attempt.attempt_id })) return
+    if (this.assignmentOperationUnsettled(attempt)) return
     return attempt
   }
 
@@ -514,8 +555,7 @@ export class RunnerWorkState {
       if (work.purpose !== 'production' || !work.assignment || !['running', 'waiting'].includes(attempt.state) || attempt.dispatch_state !== 'dispatched') fail('RUNNER_ATTEMPT_CONFLICT', 'Only an executing assignment can wait for missing input')
       if (!this.db.prepare(`SELECT 1 FROM records WHERE task_id=? AND id=? AND kind='runner.input.reported'
         AND json_extract(payload_json,'$.attempt_id')=? AND json_extract(payload_json,'$.report.wait')=1`).get(work.task_id, reportId, attemptId)) fail('RUNNER_PLAN_CONFLICT', 'Missing input must belong to the current attempt')
-      if (this.db.prepare(`SELECT 1 FROM actions WHERE run_id=? AND json_extract(source_json,'$.owner.attempt_id')=? AND (state!='ended' OR result='unknown')
-        UNION ALL SELECT 1 FROM calls WHERE run_id=? AND json_extract(limits_json,'$.owner.attempt_id')=? AND (state!='ended' OR execution='unknown') LIMIT 1`).get(work.run_id, attemptId, work.run_id, attemptId)) fail('RUNNER_ATTEMPT_CONFLICT', 'Wait cannot replace an unsettled operation')
+      if (this.assignmentOperationUnsettled(attempt)) fail('RUNNER_ATTEMPT_CONFLICT', 'Wait cannot replace an unsettled operation')
       this.saveWork({ ...work, state: 'waiting' })
       this.db.prepare('UPDATE runner_attempts SET state=?,payload_json=? WHERE attempt_id=?').run('revoked', json({ ...attempt, state: 'revoked' }), attemptId)
       recordWait(work)

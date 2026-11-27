@@ -21,7 +21,7 @@ type Row = Record<string, any>
 const id = () => randomUUID()
 const json = JSON.stringify
 const fail = (code: string, message: string): never => { throw new ContractError(code, message) }
-export interface PrepareRunnerCompositionOptions { artifact_ids?: string[]; previous_batch_id?: string; feedback_only?: boolean }
+export interface PrepareRunnerCompositionOptions { artifact_ids?: string[]; previous_batch_id?: string; feedback_only?: boolean; unattempted_only?: boolean }
 export interface PreparedRunnerComposition { batch: CompositionBatch; run_id: string; attempt_id: string; publisher_attempt_id: string; collator: Collator }
 export interface PublishRunnerCompositionOptions { signal?: AbortSignal; reset_artifact_ids?: string[] }
 export interface CompositionSurfacePrepared { op: PresentationSurfaceWrite['input']['operations'][number]; viewId: string; resourceId: string }
@@ -53,6 +53,14 @@ export class RunnerHostComposition {
       if (error instanceof ContractError && ['RUNNER_DEPENDENCY_INVALID', 'RUNNER_OWNERSHIP_INVALID'].includes(error.code)) return false
       throw error
     }
+  }
+  unattemptedFragment(index: ArtifactIndex): boolean {
+    const { task_id, artifact_id, artifact_revision } = index
+    if (fragmentHasFeedback(this.db, task_id, artifact_id, artifact_revision) || this.publications.mapping(task_id, artifact_id)?.artifact_revision === artifact_revision || !this.publishable(index)) return false
+    return !this.db.prepare(`SELECT 1 FROM runner_batches b,json_each(b.payload_json,'$.indexes') i
+      WHERE b.task_id=@task_id AND json_extract(i.value,'$.artifact_id')=@artifact_id AND json_extract(i.value,'$.artifact_revision')=@artifact_revision
+      AND NOT EXISTS(SELECT 1 FROM records r WHERE r.task_id=b.task_id AND r.kind='runner.composition.feedback'
+        AND json_extract(r.payload_json,'$.run_id')=json_extract(b.payload_json,'$.run_id')) LIMIT 1`).get({ task_id, artifact_id, artifact_revision })
   }
   private mappings(task: string): PublicationEntry[] {
     return this.publications.mappings(task)
@@ -124,9 +132,15 @@ export class RunnerHostComposition {
     const occupied = new Set((this.db.prepare("SELECT b.payload_json FROM runner_batches b JOIN runs r ON r.id=json_extract(b.payload_json,'$.run_id') WHERE b.task_id=? AND r.state IN ('running','waiting')").all(task) as Row[]).flatMap(row => (JSON.parse(row.payload_json) as CompositionBatch).indexes.map(item => item.artifact_id)))
     const candidates = all.filter(index => requested ? requested.includes(index.artifact_id) : !occupied.has(index.artifact_id) && this.publications.mapping(task, index.artifact_id)?.artifact_revision !== index.artifact_revision)
     if (requested && candidates.some(index => fragmentHasFeedback(this.db, task, index.artifact_id, index.artifact_revision))) fail('COMPOSITION_FEEDBACK_PENDING', 'Requested fragment has an unresolved structural defect')
-    const eligible = candidates.filter(index => !fragmentHasFeedback(this.db, task, index.artifact_id, index.artifact_revision))
-    const indexes = (requested ? eligible.filter(index => this.composition.publicationArtifact(index)) : eligible.filter(index => this.publishable(index))).slice(0, RUNNER_LIMITS.composition.batch_fragments)
-    if (requested && requested.some(artifact => !candidates.some(index => index.artifact_id === artifact && this.composition.publicationArtifact(index)))) fail('RUNNER_DEPENDENCY_INVALID', 'Requested fragment is not designated for publication')
+    const eligible = candidates.filter(index => {
+      if (requested) return this.composition.publicationArtifact(index)
+      if (!options.unattempted_only) return !fragmentHasFeedback(this.db, task, index.artifact_id, index.artifact_revision) && this.publishable(index)
+      if (!this.unattemptedFragment(index)) return false
+      try { this.checkInputs(task, trigger, [index], lease); return true }
+      catch (error) { if (error instanceof ContractError && error.code === 'COMPOSITION_INPUT_CONFIRMATION_REQUIRED') return false; throw error }
+    })
+    const indexes = eligible.slice(0, RUNNER_LIMITS.composition.batch_fragments)
+    if (requested && requested.some(artifact => !eligible.some(index => index.artifact_id === artifact))) fail('RUNNER_DEPENDENCY_INVALID', 'Requested fragment is not designated for publication')
     if (!indexes.length && !feedbackOnly) fail('COMPOSITION_NOT_READY', 'No new accepted fragment is ready for composition')
     this.checkInputs(task, trigger, indexes, lease)
     const outline = this.outline(task), sections = outline.sections.filter(section => indexes.some(index => index.section_id === section.section_id))

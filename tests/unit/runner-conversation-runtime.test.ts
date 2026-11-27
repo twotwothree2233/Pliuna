@@ -420,6 +420,60 @@ it.each(['planned', 'bound'] as const)('recovers a %s handoff without duplicatin
   expect(next.complete).toHaveBeenCalledTimes(boundary === 'bound' ? 1 : 2)
 })
 
+it.each(['shutdown', 'restart'] as const)('recovers a revised Worker waiting for a newer request after %s', async boundary => {
+  const first = setup({ conversationRouting: true }), state = new RunnerWorkState(first.db, first.store.epoch)
+  const admission = (first.store as unknown as { runnerAdmission: RunnerAdmission }).runnerAdmission, select = admission.next.bind(admission)
+  vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => select(task, candidates.filter(candidate => {
+    const work = state.work(candidate.work_id)
+    return work.purpose !== 'production' || work.assignment?.instructions !== 'Produce the upstream value'
+  }), active, ready))
+  const dispatch = (instructions: string) => invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
+    { assignment_key: 'reply', instructions, required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'text' }] }
+  ] })
+  const router = deferred<Completion>()
+  first.complete.mockResolvedValueOnce(dispatch('Use the upstream value')).mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+    .mockResolvedValueOnce(invoke(REPORT_MISSING_INPUT, { missing: 'Value', impact: 'Cannot answer without it', wait: true }))
+    .mockImplementationOnce(() => router.promise)
+  const consumer = first.submit('Use the value from a separate request.')
+  await vi.waitFor(() => expect(first.complete).toHaveBeenCalledTimes(4))
+  const wait = first.records('runner.assignment.waiting')[0]!.payload
+  first.complete.mockResolvedValueOnce(dispatch('Produce the upstream value')).mockResolvedValueOnce(answer('{"kind":"delegate"}'))
+  const source = first.submit('Produce that value.')
+  await vi.waitFor(() => expect(first.records('runner.plan.installed')).toHaveLength(2))
+  const upstream = first.records('runner.plan.installed').find(({ payload }) => payload.request_id === source.request_id)!.payload
+  await vi.waitFor(() => expect(state.work(upstream.work_id).state).toBe('queued'))
+  first.complete.mockResolvedValueOnce(answer('{"kind":"updated"}'))
+  router.resolve(invoke(ROUTE_WORK, { action: 'bind', base_revision: 1, work_id: wait.work_id,
+    input: { work_id: upstream.work_id, plan_revision: 1, output_key: 'text' } }))
+  await vi.waitFor(() => expect(first.records('runner.input.resolved')).toHaveLength(1))
+  expect(state.work(wait.work_id)).toMatchObject({ plan_revision: 2, state: 'planned' })
+  expect(state.work(wait.work_id).current_attempt_id).toBeUndefined()
+  expect(state.attempts(wait.work_id)).toMatchObject([{ state: 'revoked', dispatch_state: 'dispatched' }])
+  if (boundary === 'shutdown') await first.store.shutdown()
+  first.close()
+
+  const next = setup({ directory: first.directory, task: first.task, conversationRouting: true })
+  const recovered = new RunnerWorkState(next.db, next.store.epoch), upstreamResult = deferred<Completion>()
+  next.complete.mockImplementation(async (_config, _key, messages) => {
+    if (messages[0]?.content?.includes('Produce the upstream value')) return upstreamResult.promise
+    expect(messages[0]?.content).toContain('Use the upstream value')
+    const { bound } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    expect(bound.work_outputs).toEqual([expect.objectContaining({ work_id: upstream.work_id, plan_revision: 2, result_revision: 1 })])
+    return answer('The recovered consumer got the value.')
+  })
+  await next.store.recoverRunnerWork()
+  expect(next.records('runner.production.resumed').map(({ payload }) => payload.request_id)).toEqual([consumer.request_id, source.request_id])
+  expect(recovered.work(wait.work_id)).toMatchObject({ state: 'planned', plan_revision: 3, assignment: { inputs: [{ work_id: upstream.work_id, plan_revision: 2, output_key: 'text' }] } })
+  expect(next.complete).toHaveBeenCalledTimes(1)
+  upstreamResult.resolve(answer('The exact upstream value.'))
+  await vi.waitFor(() => expect(next.store.handle({ type: 'request.status', task_id: next.task, request_id: consumer.request_id })).toMatchObject({ run_state: 'completed', delivery_state: 'complete' }))
+  expect(recovered.attempts(wait.work_id)).toMatchObject([
+    { attempt_id: wait.attempt_id, state: 'revoked' }, { attempt_number: 2, previous_attempt_id: wait.attempt_id, state: 'succeeded' }
+  ])
+  expect(next.records('runner.output.handoff')).toHaveLength(1)
+  expect(next.complete).toHaveBeenCalledTimes(2)
+})
+
 it('lets the Router correct an invalid completed output reference before installing its draft', async () => {
   const s = setup({ conversationRouting: true })
   const assign = (instructions: string, inputs: unknown[] = []) => ({ action: 'dispatch', base_revision: 0, final_answer: 'answerer', assignments: [
@@ -484,34 +538,58 @@ it.each(['failed', 'cancelled'] as const)('settles a dependent Run with no attem
   expect(state.attempts(downstream.work_id)).toEqual([])
 })
 
-it('seals the recovered request with the accepted answer from the interrupted Run', async () => {
+it.each(['pending', 'clarification'] as const)('seals the recovered request with the accepted answer after a restart boundary at %s', async boundary => {
   const first = setup({ conversationRouting: true }), state = new RunnerWorkState(first.db, first.store.epoch)
   const admission = (first.store as unknown as { runnerAdmission: RunnerAdmission }).runnerAdmission, select = admission.next.bind(admission)
   vi.spyOn(admission, 'next').mockImplementation((task, candidates, active, ready) => select(task, candidates.filter(candidate => {
     const work = state.work(candidate.work_id)
-    return work.purpose === 'production' && !!work.assignment?.final_answer
+    return boundary === 'clarification' || work.purpose === 'production' && !!work.assignment?.final_answer
   }), active, ready))
   first.complete.mockResolvedValueOnce(invoke(ROUTE_WORK, { action: 'dispatch', base_revision: 0, final_answer: 'reply', assignments: [
     { assignment_key: 'reply', instructions: 'Write the final answer', required: true, requirement_ids: ['answer'], outputs: [{ kind: 'answer', output_key: 'reply' }] },
     { assignment_key: 'check', instructions: 'Complete the independent check', required: true, requirement_ids: [], outputs: [{ kind: 'answer', output_key: 'check' }] }
-  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockResolvedValueOnce(answer('The original accepted answer.'))
+  ] })).mockResolvedValueOnce(answer('{"kind":"delegate"}')).mockImplementation(async (_config, _key, messages) => {
+    const system = messages[0]?.content
+    if (system?.includes('Complete the independent check')) return invoke(REPORT_MISSING_INPUT, { missing: 'Date', impact: 'The check needs a date', wait: true })
+    if (system?.includes('reported missing input')) return answer('{"kind":"clarification","question":"Which date should I check?"}')
+    expect(system).toContain('Write the final answer')
+    return answer('The original accepted answer.')
+  })
   const request = first.submit('Answer and complete a separate check.')
   await vi.waitFor(() => expect(first.records('runner.output.accepted')).toHaveLength(1))
+  if (boundary === 'clarification') await vi.waitFor(() => {
+    expect(first.records('runner.input.clarification')).toHaveLength(1)
+    expect(first.store.handle({ type: 'request.status', task_id: first.task, request_id: request.request_id })).toMatchObject({ run_state: 'waiting' })
+  })
   const accepted = first.records('runner.output.accepted')[0]!.payload.owner
+  const question = first.records('runner.input.clarification')[0]?.id
   expect(first.records('runner.answer')).toHaveLength(0)
   await first.store.shutdown()
   first.close()
 
-  const next = setup({ directory: first.directory, task: first.task, conversationRouting: true })
+  let next = setup({ directory: first.directory, task: first.task, conversationRouting: true })
+  if (boundary === 'clarification') {
+    await next.store.recoverRunnerWork()
+    expect(next.complete).not.toHaveBeenCalled()
+    const middleRun = next.records('runner.production.resumed')[0]!.payload.run_id
+    next.close()
+    next = setup({ directory: first.directory, task: first.task, conversationRouting: true })
+    await next.store.recoverRunnerWork()
+    expect(next.complete).not.toHaveBeenCalled()
+    expect(next.records('runner.production.resumed').at(-1)!.payload.previous_run_id).toBe(middleRun)
+    expect(() => new RunnerWorkState(next.db, next.store.epoch).qualify(accepted.attempt_id)).toThrow()
+    next.complete.mockResolvedValueOnce(answer(JSON.stringify({ kind: 'supply_input', message_id: question })))
+  }
   next.complete.mockImplementation(async (_config, _key, messages) => {
     expect(messages[0]?.content).toContain('Complete the independent check')
     return answer('Independent check done.')
   })
+  if (boundary === 'clarification') next.submit('Check October 5.')
   await next.store.recoverRunnerWork()
   await vi.waitFor(() => expect(next.store.handle({ type: 'request.status', task_id: next.task, request_id: request.request_id })).toMatchObject({ run_state: 'completed', delivery_state: 'complete' }))
   expect(next.records('runner.answer').map(({ payload }) => payload)).toEqual([expect.objectContaining({ owner: accepted, text: 'The original accepted answer.' })])
   expect(next.messages().map(message => message.text)).toContain('The original accepted answer.')
-  expect(next.complete).toHaveBeenCalledTimes(1)
+  expect(next.complete).toHaveBeenCalledTimes(boundary === 'clarification' ? 2 : 1)
 })
 
 it('discovers and delivers existing materials with a pinned chapter and an in-flight result', async () => {

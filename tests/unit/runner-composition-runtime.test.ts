@@ -11,6 +11,7 @@ import { RunnerArtifactState } from '../../src/runtime/runner/artifact-state'
 import { RunnerCompositionState } from '../../src/runtime/runner/composition-state'
 import { RunnerBudgetLedger } from '../../src/runtime/runner/budget'
 import { RunnerHostRecovery } from '../../src/runtime/runner/host-recovery'
+import { createCollator } from '../../src/runtime/runner/collator'
 import type { RunnerAdmission } from '../../src/runtime/runner/admission'
 import { RunnerHostComposition, type PreparedRunnerComposition } from '../../src/runtime/runner/host-composition'
 import { RunnerRepairState } from '../../src/runtime/runner/repair-state'
@@ -537,6 +538,28 @@ it('rebuilds in the grown scope with the original budget without losing either V
   expect(manifest.contributions.map((entry: { artifact_id: string }) => entry.artifact_id).sort()).toEqual([alpha.artifactId, beta.artifactId])
 })
 
+it('keeps delivery open while an automatic publication rebuilds after a version conflict', async () => {
+  const first = setup(), alpha = first.source('alpha'), beta = first.source('beta')
+  first.record(first.task, 'runner.delivery.opened', { request_id: 'alpha', intent_revision: 1, input_event_id: 'input-alpha', state: 'open' })
+  first.store.close()
+
+  const s = setup(true, false, first)
+  const original = s.store.prepareRunnerComposition(s.task, 'alpha', { artifact_ids: [alpha.artifactId] })
+  const rebuilding = s.executePrepared('alpha', original)
+  const other = s.store.prepareRunnerComposition(s.task, 'beta', { artifact_ids: [beta.artifactId] })
+  const independent = s.store.publishRunnerComposition(s.task, other.batch.batch_id, other.collator.rulePlan())
+  await approveAndConfirm(s, other.batch.action_id)
+  expect(await independent).toMatchObject({ state: 'published' })
+  const approval = s.store.snapshot(s.task).approvals.find(item => item.action_id === original.batch.action_id)!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'approve' })
+  await vi.waitFor(() => expect(s.store.snapshot(s.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true))
+  expect(s.store.runnerPublicationOperation(s.task, original.batch.operation_id!)?.result).toMatchObject({ state: 'failure', code: 'VERSION_CONFLICT' })
+  expect(requestDelivery(s.db, s.task, 'alpha')).toMatchObject({ state: 'open' })
+  await approveAndConfirm(s)
+  await rebuilding
+  expect(requestDelivery(s.db, s.task, 'alpha')).toMatchObject({ state: 'complete' })
+})
+
 it.each(['cleanup', 'usage-unknown', 'legacy-budget-exceeded'] as const)('rebuilds a conflicted composition after real cleanup while preserving %s evidence', async blocker => {
   const s = setup(), alpha = s.source('alpha'), beta = s.source('beta'), ledger = new RunnerBudgetLedger(s.db)
   const original = s.store.prepareRunnerComposition(s.task, 'alpha', { artifact_ids: [alpha.artifactId] })
@@ -651,6 +674,57 @@ it('checks every sealed fragment across batches before marking a single goal com
   expect(manifest.targets).toEqual([{ task_id: s.task, request_id: 'goal', intent_revision: 1 }])
   expect(manifest.contributions.map((entry: { artifact_id: string }) => entry.artifact_id).sort()).toEqual(source.indexes.map(index => index.artifact_id).sort())
   expect(s.db.prepare('SELECT count(*) count FROM views').get()).toEqual({ count: 17 })
+})
+
+it('automatically publishes the unbatched fragment after the first batch is denied', async () => {
+  const s = setup(true, true), source = s.source('goal', bundle(), true, true, 'model', 17)
+  s.record(s.task, 'runner.delivery.opened', { request_id: 'goal', intent_revision: 1, input_event_id: 'input-goal', state: 'open' })
+  vi.spyOn(s.models, 'request').mockImplementation(async (_lease, _task, messages) => {
+    const { batch } = JSON.parse(messages.find(message => message.role === 'user')!.content!)
+    const stored = s.composition.batch(s.task, batch.batch_id)!
+    expect(stored.indexes).toHaveLength(1)
+    const plan = createCollator({ batch: stored, outline: s.artifacts.outline(s.task)!, indexes: stored.indexes.map(index => s.artifacts.artifact(s.task, index.artifact_id, index.artifact_revision)!), currentLayout: null }).rulePlan()
+    return { text: JSON.stringify(plan),
+      calls: [], finish: 'stop', usage: { prompt_tokens: 20, completion_tokens: 15 } }
+  })
+  const first = s.store.prepareRunnerComposition(s.task, 'goal')
+  expect(first.batch.indexes).toHaveLength(16)
+  const initial = s.store.publishRunnerComposition(s.task, first.batch.batch_id, first.collator.rulePlan())
+  await tick()
+  const approval = s.store.snapshot(s.task).approvals.find(item => item.action_id === first.batch.action_id)!
+  s.store.handle({ type: 'approval.decide', task_id: s.task, approval_id: approval.id, decision: 'deny' })
+  expect(await initial).toMatchObject({ state: 'failure', code: 'APPROVAL_INVALID' })
+  expect(requestDelivery(s.db, s.task, 'goal')).toMatchObject({ state: 'open' })
+  await vi.waitFor(() => expect(s.store.snapshot(s.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true))
+  await approveAndConfirm(s)
+  await vi.waitFor(() => expect(requestDelivery(s.db, s.task, 'goal')).toMatchObject({ state: 'incomplete', missing_requirement_ids: ['content'] }))
+  const remaining = source.indexes.find(index => !first.batch.indexes.some(item => item.artifact_id === index.artifact_id))!
+  expect(s.store.snapshot(s.task).views).toHaveLength(1)
+  expect(new RunnerHostComposition(s.db, s.state, s.artifacts, s.composition).publications.mapping(s.task, remaining.artifact_id)).toMatchObject({ artifact_revision: 1 })
+  await s.store.recoverRunnerWork()
+  expect(s.records('runner.composition.prepared')).toHaveLength(2)
+})
+
+it.each(['ready', 'unavailable'] as const)('settles a %s composition opportunity recovered before its first batch', async configuration => {
+  const first = setup(), source = first.source()
+  first.record(first.task, 'runner.delivery.opened', { request_id: 'goal', intent_revision: 1, input_event_id: 'input-goal', state: 'open' })
+  expect(first.records('runner.composition.prepared')).toHaveLength(0)
+  first.store.close()
+
+  const next = setup(true, false, first)
+  if (configuration === 'unavailable') next.db.prepare("UPDATE requests SET config_selection_json=json_set(config_selection_json,'$.revision',2) WHERE id='goal'").run()
+  await next.store.recoverRunnerWork()
+  if (configuration === 'ready') {
+    await vi.waitFor(() => expect(next.store.snapshot(next.task).approvals.some(item => item.decision === 'pending' && item.validity === 'valid')).toBe(true))
+    await approveAndConfirm(next)
+    await vi.waitFor(() => expect(requestDelivery(next.db, next.task, 'goal')).toMatchObject({ state: 'complete' }))
+    expect(new RunnerHostComposition(next.db, next.state, next.artifacts, next.composition).publications.mapping(next.task, source.artifactId)).toMatchObject({ artifact_revision: 1 })
+    expect(next.records('runner.composition.prepared')).toHaveLength(1)
+  } else {
+    await vi.waitFor(() => expect(requestDelivery(next.db, next.task, 'goal')).toMatchObject({ state: 'incomplete', missing_requirement_ids: ['content'] }))
+    await next.store.recoverRunnerWork()
+    expect(next.records('runner.composition.prepared')).toHaveLength(0)
+  }
 })
 
 it('keeps an old valid batch publishable when another goal grows the necessary scope', async () => {

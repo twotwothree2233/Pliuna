@@ -83,13 +83,19 @@ export class RunnerCompositionState {
     if (!['interrupted', 'closing'].includes(run.state) || work.state !== 'succeeded' || !work.current_attempt_id) return false
     const settled = attempt ?? this.work.attempt(work.current_attempt_id)
     if (settled.attempt_id !== work.current_attempt_id || settled.work_id !== work.work_id || settled.run_id !== run.run_id || settled.task_id !== run.task_id || settled.runtime_epoch !== run.runtime_epoch || settled.state !== 'succeeded' || settled.dispatch_state !== 'dispatched' || !settled.result_ref || work.result_revision === undefined) return false
-    if (run.state === 'interrupted' && run.purpose === 'production') return !!this.db.prepare(`SELECT 1 FROM records r
+    if (run.state === 'interrupted' && run.purpose === 'production') return !!this.db.prepare(`WITH RECURSIVE lineage(run_id) AS (
+      SELECT @original
+      UNION
+      SELECT successor.run_id FROM lineage
+      JOIN runs prior ON prior.id=lineage.run_id AND prior.task_id=@task AND prior.request_id=@request AND prior.state='interrupted' AND prior.commit_valid=0
+      JOIN records r ON r.task_id=prior.task_id AND r.kind='runner.production.resumed' AND json_extract(r.payload_json,'$.previous_run_id')=prior.id
       JOIN runner_runs successor ON successor.task_id=r.task_id AND successor.run_id=json_extract(r.payload_json,'$.run_id')
-      JOIN runs c ON c.task_id=successor.task_id AND c.id=successor.run_id
-      WHERE r.task_id=? AND r.kind='runner.production.resumed' AND json_extract(r.payload_json,'$.previous_run_id')=?
-        AND successor.purpose='production' AND successor.request_id=? AND successor.intent_revision=?
-        AND (c.state='completed' OR c.state IN ('running','waiting') AND c.commit_valid=1 AND c.runtime_epoch=?) LIMIT 1`)
-      .get(run.task_id, run.run_id, run.request_id, run.intent_revision, this.work.epoch)
+      WHERE successor.purpose='production' AND successor.request_id=@request AND successor.intent_revision=@intent AND successor.budget_id=@budget
+        AND json_extract(successor.payload_json,'$.previous_run_id')=prior.id
+        AND json_extract(r.payload_json,'$.request_id')=@request AND json_extract(r.payload_json,'$.intent_revision')=@intent
+      ) SELECT 1 FROM lineage JOIN runs c ON c.id=lineage.run_id AND c.task_id=@task AND c.request_id=@request
+      WHERE c.state='completed' OR c.state IN ('running','waiting') AND c.commit_valid=1 AND c.runtime_epoch=@epoch LIMIT 1`)
+      .get({ original: run.run_id, task: run.task_id, request: run.request_id, intent: run.intent_revision, budget: run.budget_id, epoch: this.work.epoch })
     if (run.state !== 'closing' || run.runtime_epoch !== this.work.epoch) return false
     // Closing revokes new commits before cleanup drains. Settled results remain
     // readable only while this Run is still closing toward successful completion.

@@ -88,7 +88,7 @@ import { RunnerHostProduction } from './runner/host-production'
 import { RunnerHostRecovery } from './runner/host-recovery'
 import { RunnerHostProgress } from './runner/host-progress'
 import { deliveryHasUnsettledExecution, requestDelivery } from './runner/delivery-state'
-import { artifactRepair, fragmentHasFeedback, repairRequestId, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
+import { artifactRepair, repairRequestId, RunnerRepairState, unresolvedDeliveryRequirements, type ArtifactRepair, type PendingRepair } from './runner/repair-state'
 import { createRunnerDiagnostic, type RunnerDiagnostic } from './runner/diagnostic'
 import type { ProgressDiagnosis } from './runner/progress-observer'
 import { RunnerHostStatus } from './runner/host-status'
@@ -183,6 +183,7 @@ export class RuntimeStore {
   private runnerProgressObservedAt = new Map<string, number>()
   private runnerCompositionMerges = new Map<string, { first: number; latest: number; trigger: string; timer: ReturnType<typeof setTimeout> }>()
   private runnerCompositionWaiting = new Map<string, { trigger: string; previousBatchId?: string }>()
+  private runnerCompositionPublishing = new Map<string, PreparedRunnerComposition['batch']>()
   private approvalMode: 'manual' | 'assisted' = 'manual'
   private approvalModel = ''
   private approvalWaiters = new Map<string, { resolve: () => void; timer: ReturnType<typeof setTimeout> }>()
@@ -914,7 +915,7 @@ export class RuntimeStore {
     void this.exportChecks.stop().catch(() => {})
     if(this.monty?.busy()) fail('MONTY_CLEANUP_ACTIVE','Calculation cleanup must end before database switch')
     for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
-    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
+    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear(); this.runnerCompositionPublishing.clear()
     for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Database changed before dispatch'))
     this.pendingWorkers.clear(); this.preparingRunnerGoals.clear(); this.recoveringRunnerInputs.clear(); this.runnerProgressObservedAt.clear()
     this.runnerRecoveryFlight = undefined
@@ -1004,7 +1005,7 @@ export class RuntimeStore {
     for (const { controller } of this.chapterRoutes.values()) controller.abort()
     this.chapterRoutes.clear()
     for (const merge of this.runnerCompositionMerges.values()) clearTimeout(merge.timer)
-    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear()
+    this.runnerCompositionMerges.clear(); this.runnerCompositionWaiting.clear(); this.runnerCompositionPublishing.clear()
     for (const pending of this.pendingWorkers.values()) pending.reject(new ContractError('SOURCE_INVALID', 'Runtime closed before worker dispatch'))
     this.pendingWorkers.clear()
     void this.exportChecks.stop().catch(() => {})
@@ -1595,7 +1596,7 @@ export class RuntimeStore {
         if (!works.length) continue
         const unavailable = works.map(work => {
           const attempt = work.current_attempt_id ? state.attempt(work.current_attempt_id) : undefined
-          if (!attempt) return work.purpose === 'production' && work.assignment && work.state === 'planned' && !state.attempts(work.work_id).length ? null : 'RUNNER_RECOVERY_INELIGIBLE'
+          if (!attempt) return state.pendingAssignmentRecoveryFailure(work)
           if (state.clarifiedAssignment(work)) return attempt.attempt_number < work.max_attempts ? null : 'RUNNER_ATTEMPTS_EXHAUSTED'
           if (attempt.state === 'unknown' || attempt.dispatch_state !== 'not_dispatched') return 'RUNNER_OPERATION_UNKNOWN'
           if (attempt.profile_id !== 'producer-output-v1' && !(attempt.profile_id === 'work-router-v1' && repairRequestId(this.db, task, work.work_id))) return 'RUNNER_RECOVERY_PROFILE_UNAVAILABLE'
@@ -1618,27 +1619,10 @@ export class RuntimeStore {
           if (!this.closed && this.epoch === epoch) this.record(task, 'runner.recovery.blocked', { batch_id: row.batch_id, operation_id: batch.operation_id, reason: error instanceof ContractError ? error.code : 'COMPOSITION_RECOVERY_FAILED' })
         })
       }
-      this.resumeFeedbackComposition(task, epoch)
       this.resumeContentRemainders(task)
       this.pumpRunnerWorkers(task)
       this.pumpRunnerGoals(task)
       this.settleRunnerDeliveries(task)
-    }
-  }
-  private resumeFeedbackComposition(task: string, epoch: string): void {
-    if (this.runnerCompositionMerges.has(task) || this.runnerCompositionWaiting.has(task)) return
-    const composition = this.runnerComposition(), scope = composition.scope(task)
-    if (!scope) return
-    const batches = this.db.prepare(`SELECT b.batch_id FROM runner_batches b JOIN runs c ON c.task_id=b.task_id AND c.id=json_extract(b.payload_json,'$.run_id')
-      WHERE b.task_id=? AND c.runtime_epoch!=? AND EXISTS (SELECT 1 FROM records f WHERE f.task_id=b.task_id AND f.kind='runner.composition.feedback'
-      AND json_extract(f.payload_json,'$.run_id')=c.id) ORDER BY b.rowid`).all(task, epoch) as { batch_id: string }[]
-    for (const row of batches) {
-      const batch = composition.batch(task, row.batch_id)!
-      const remaining = batch.indexes.find(index => this.hasUnattemptedDeliveryFragment(task, index.artifact_id, index.artifact_revision))
-      if (!remaining) continue
-      const source = this.runnerArtifacts().artifact(task, remaining.artifact_id, remaining.artifact_revision)
-      const trigger = scope.targets.some(target => target.request_id === batch.trigger_request_id) ? batch.trigger_request_id : source?.request_id
-      if (trigger) { this.scheduleRunnerComposition(task, trigger); return }
     }
   }
   private async resumeRunnerProduction(task: string, previousRunId: string, works: LogicalWork[], epoch: string): Promise<void> {
@@ -2005,22 +1989,26 @@ export class RuntimeStore {
       if (composition.currentArtifacts(inventory).every(index => ready.contributions.some(entry => entry.artifact_id === index.artifact_id && entry.artifact_revision === index.artifact_revision))) this.publishDeliveryAnswer(state, inventory)
     }
   }
-  private settleRunnerDeliveries(task: string): void {
+  private settleRunnerDeliveries(task: string, unavailableTrigger?: string): void {
     if (!this.features.runner || this.closed || this.closing) return
     const state = new RunnerWorkState(this.db, this.epoch), composition = this.runnerComposition()
     const pending = new RunnerRepairState(this.db, state, this.runnerArtifacts(), composition).pending(task)
     const goals = state.contentPlans(task)
     if (!goals.some(goal => requestDelivery(this.db, task, goal.request_id, goal.intent_revision)?.state === 'open')) return
+    if (!composition.scope(task) && goals.some(goal => goal.requirements.some(requirement => requirement.kind !== 'answer'))) this.refreshRunnerScope(task)
     const scope = composition.scope(task), host = this.runnerHostComposition()
     const ready = scope ? host.completeness(task) : undefined
-    const modelFeedback = this.features.runner.collator === 'model' && this.task(task).state === 'active'
-    const rebuildId = modelFeedback ? this.runnerCompositionWaiting.get(task)?.previousBatchId : undefined
+    const active = this.task(task).state === 'active', modelFeedback = this.features.runner.collator === 'model' && active
+    const rebuildId = this.runnerCompositionWaiting.get(task)?.previousBatchId
     const rebuild = rebuildId ? composition.batch(task, rebuildId) : null
-    let feedback: ContentPlan | undefined
+    const settling = [...this.runnerCompositionPublishing.values()].filter(batch => batch.task_id === task)
+    if (rebuild) settling.push(rebuild)
+    let feedback: ContentPlan | undefined, continuation: string | undefined
     this.db.transaction(() => {
       for (const goal of goals) {
         const { request_id, intent_revision, input_event_id } = goal
         if (requestDelivery(this.db, task, request_id, intent_revision)?.state !== 'open' || deliveryHasUnsettledExecution(this.db, task, request_id, intent_revision) || pending.some(repair => repair.request_id === request_id && repair.intent_revision === intent_revision)) continue
+        if (settling.some(batch => batch.targets.some(target => target.request_id === request_id && target.intent_revision === intent_revision))) continue
         const works = state.taskWorks(task).filter((work): work is AssignedWork => work.purpose === 'production' && !work.update_id && work.request_id === request_id && work.intent_revision === intent_revision)
         if (!works.length) continue
         const content = goal.requirements.some(requirement => requirement.kind !== 'answer')
@@ -2032,9 +2020,11 @@ export class RuntimeStore {
         if (content) for (const item of ready?.unresolved ?? []) if (item.request_id === request_id && item.intent_revision === intent_revision) missing.add(item.requirement_id)
         const fragments = this.db.prepare(`SELECT artifact_id,current_revision FROM runner_artifact_owners o JOIN runner_artifacts a USING(task_id,artifact_id)
           WHERE o.task_id=? AND a.artifact_revision=o.current_revision AND json_extract(a.payload_json,'$.request_id')=? AND json_extract(a.payload_json,'$.intent_revision')=?`).all(task, request_id, intent_revision) as { artifact_id: string; current_revision: number }[]
-        const unheard = fragments.some(fragment => this.hasUnattemptedDeliveryFragment(task, fragment.artifact_id, fragment.current_revision))
-        if (unheard) continue
-        if (rebuild?.indexes.length === 0 && rebuild.targets.some(target => target.request_id === request_id && target.intent_revision === intent_revision)) continue
+        const unattempted = active && request_id !== unavailableTrigger && fragments.some(fragment => {
+          const index = this.runnerArtifacts().artifact(task, fragment.artifact_id, fragment.current_revision)
+          return index && host.unattemptedFragment(index)
+        })
+        if (unattempted) { continuation ??= request_id; continue }
         if (inventory && scope && modelFeedback && host.missingRequirements(scope, [goal]).length && !this.missingFeedbackAttempted(goal)) {
           feedback ??= goal
           continue
@@ -2049,6 +2039,7 @@ export class RuntimeStore {
         this.record(task, 'runner.delivery.settled', { request_id, intent_revision, input_event_id, state: missing.size ? 'incomplete' : 'complete', missing_requirement_ids: [...missing] })
       }
     }).immediate()
+    if (continuation && !this.runnerCompositionMerges.has(task) && !this.runnerCompositionWaiting.has(task)) this.scheduleRunnerComposition(task, continuation)
     if (feedback) this.executeMissingCompositionFeedback(feedback)
   }
   private missingFeedbackAttempted(goal: ContentPlan): boolean {
@@ -2069,18 +2060,6 @@ export class RuntimeStore {
       return
     }
     void this.executePreparedComposition(task, request, prepared).catch(() => {})
-  }
-  private hasUnattemptedDeliveryFragment(task: string, artifact: string, revision: number): boolean {
-    if (fragmentHasFeedback(this.db, task, artifact, revision) || this.runnerHostComposition().publications.mapping(task, artifact)?.artifact_revision === revision) return false
-    try {
-      const composition = this.runnerComposition()
-      if (!composition.publicationArtifact(composition.checkArtifact(task, artifact, revision))) return false
-    } catch (error) { if (error instanceof ContractError) return false; throw error }
-    return !this.db.prepare(`SELECT 1 FROM runner_batches b JOIN runs c ON c.id=json_extract(b.payload_json,'$.run_id')
-      WHERE b.task_id=? AND json_extract(b.payload_json,'$.state') IN ('cancelled','failed','invalidated')
-      AND NOT EXISTS(SELECT 1 FROM runner_publications p WHERE p.task_id=b.task_id AND p.batch_id=b.batch_id AND json_extract(p.result_json,'$.code') IN ('VERSION_CONFLICT','RESOURCE_CHANGED'))
-      AND EXISTS(SELECT 1 FROM json_each(b.payload_json,'$.indexes') i WHERE json_extract(i.value,'$.artifact_id')=? AND json_extract(i.value,'$.artifact_revision')=?)
-      AND NOT EXISTS(SELECT 1 FROM records r WHERE r.task_id=b.task_id AND r.kind='runner.composition.feedback' AND json_extract(r.payload_json,'$.run_id')=c.id)`).get(task, artifact, revision)
   }
   private queueAssignedWork(state: RunnerWorkState, task: string): void {
     const settle = new Set<string>(), affected: LogicalWork[] = []
@@ -2351,14 +2330,15 @@ export class RuntimeStore {
   private async executeAutomaticComposition(task: string, trigger: string, previousBatchId?: string): Promise<void> {
     if (this.closing || this.closed || this.task(task).state !== 'active') return
     let prepared: PreparedRunnerComposition
-    try { prepared = this.prepareRunnerComposition(task, trigger, previousBatchId ? { previous_batch_id: previousBatchId } : {}) }
+    try { prepared = this.prepareRunnerComposition(task, trigger, previousBatchId ? { previous_batch_id: previousBatchId } : { unattempted_only: true }) }
     catch (error) {
-      if (error instanceof ContractError && error.code === 'COMPOSITION_NOT_READY') return
       if (error instanceof ContractError && error.code === 'RUN_BUSY') {
         const waiting = this.runnerCompositionWaiting.get(task)
         if (!waiting?.previousBatchId) this.runnerCompositionWaiting.set(task, { trigger, ...(previousBatchId ? { previousBatchId } : {}) })
         return
       }
+      if (!previousBatchId) this.settleRunnerDeliveries(task, trigger)
+      if (error instanceof ContractError && error.code === 'COMPOSITION_NOT_READY') return
       throw error
     }
     await this.executePreparedComposition(task, trigger, prepared)
@@ -2394,12 +2374,19 @@ export class RuntimeStore {
       this.scheduleRunnerComposition(task, trigger)
       return
     }
-    const result = await this.publishRunnerComposition(task, prepared.batch.batch_id, outcome)
-    if (result.state === 'published') {
-      this.refreshRunnerScope(task)
-      this.scheduleRunnerComposition(task, trigger)
-    } else if (result.state === 'failure' && ['VERSION_CONFLICT', 'RESOURCE_CHANGED'].includes(result.code ?? '')) {
-      await this.executeAutomaticComposition(task, trigger, prepared.batch.batch_id)
+    const epoch = this.epoch, batchId = prepared.batch.batch_id
+    this.runnerCompositionPublishing.set(batchId, prepared.batch)
+    try {
+      const result = await this.publishRunnerComposition(task, batchId, outcome)
+      if (result.state === 'published') {
+        this.refreshRunnerScope(task)
+        this.scheduleRunnerComposition(task, trigger)
+      } else if (result.state === 'failure' && ['VERSION_CONFLICT', 'RESOURCE_CHANGED'].includes(result.code ?? '')) {
+        await this.executeAutomaticComposition(task, trigger, batchId)
+      }
+    } finally {
+      this.runnerCompositionPublishing.delete(batchId)
+      if (this.epoch === epoch) this.settleRunnerDeliveries(task)
     }
   }
   private accountLease(taskId: string, runId: string, lease: ModelLease): void {
@@ -4608,7 +4595,7 @@ export class RuntimeStore {
   private preservedShutdownWork(work: LogicalWork): boolean {
     if (work.purpose !== 'production' || !['producer', 'lightweight', 'integrator'].includes(work.role) || !['planned', 'queued', 'running', 'waiting'].includes(work.state)) return false
     const state = new RunnerWorkState(this.db, this.epoch)
-    if (!work.current_attempt_id) return work.state === 'planned' && !!work.assignment && !state.attempts(work.work_id).length
+    if (!work.current_attempt_id) return state.pendingAssignmentRecoveryFailure(work) === null
     const attempt = state.attempt(work.current_attempt_id)
     return !!state.clarifiedAssignment(work) || attempt.profile_id === 'producer-output-v1' && new RunnerHostRecovery(this.db, this.epoch).undispatchedAttempt(attempt.attempt_id)
   }
